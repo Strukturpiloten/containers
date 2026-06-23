@@ -1,0 +1,16 @@
+.env
+.env.*
+.git
+.github
+.venv
+.vscode
+*.log
+*.md
+*.spdx.json
+*.tar
+build-plan.json
+docs
+LICENSE
+pyproject.toml
+scripts
+uv.lock

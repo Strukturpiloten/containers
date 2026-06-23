@@ -1,0 +1,28 @@
+name: Set up uv
+description: Install a pinned uv release from GitHub release assets.
+
+inputs:
+  version:
+    description: uv version without leading v.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install uv from release asset
+      shell: bash
+      env:
+        UV_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+
+        archive="uv-x86_64-unknown-linux-gnu.tar.gz"
+        base_url="https://github.com/astral-sh/uv/releases/download/${UV_VERSION}"
+        install_dir="${RUNNER_TEMP}/uv-bin"
+
+        mkdir -p "${install_dir}"
+        curl -sSfL "${base_url}/${archive}" -o "${RUNNER_TEMP}/${archive}"
+        curl -sSfL "${base_url}/${archive}.sha256" -o "${RUNNER_TEMP}/${archive}.sha256"
+        (cd "${RUNNER_TEMP}" && sha256sum -c "${archive}.sha256")
+        tar -xzf "${RUNNER_TEMP}/${archive}" -C "${install_dir}" --strip-components=1
+        echo "${install_dir}" >> "${GITHUB_PATH}"

@@ -1,0 +1,189 @@
+{
+    "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+    "extends": [
+        "config:recommended",
+        "helpers:pinGitHubActionDigests"
+    ],
+    "baseBranchPatterns": [
+        "$default"
+    ],
+    "customManagers": [
+        {
+            "customType": "regex",
+            "description": "Track external pinned container image tags and digests in container metadata",
+            "managerFilePatterns": [
+                "/^images\/.+\/container\\.yaml$/"
+            ],
+            "matchStrings": [
+                "value:\\s*(?<depName>[^:@\\s]+(?:\\/[^:@\\s]+)*):(?<currentValue>[^@\\s]+)(?:@(?<currentDigest>sha256:[a-f0-9]+))?"
+            ],
+            "datasourceTemplate": "docker"
+        },
+        {
+            "customType": "regex",
+            "description": "Track pinned uv version in GitHub workflows and composite actions",
+            "managerFilePatterns": [
+                "/^\\.github\/(?:workflows\/[^\/]+|actions\/[^\/]+\/action)\\.yml$/"
+            ],
+            "matchStrings": [
+                "UV_VERSION:\\s*(?<currentValue>v?\\d+\\.\\d+\\.\\d+)"
+            ],
+            "depNameTemplate": "astral-sh/uv",
+            "packageNameTemplate": "astral-sh/uv",
+            "datasourceTemplate": "github-releases",
+            "versioningTemplate": "semver-coerced"
+        },
+        {
+            "customType": "regex",
+            "description": "Track install-php-extensions release version in Containerfiles",
+            "managerFilePatterns": [
+                "/^images\/.+\/Containerfile$/"
+            ],
+            "matchStrings": [
+                "ARG INSTALL_PHP_EXTENSIONS_VERSION=(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+            ],
+            "depNameTemplate": "mlocati/docker-php-extension-installer",
+            "packageNameTemplate": "mlocati/docker-php-extension-installer",
+            "datasourceTemplate": "github-releases",
+            "versioningTemplate": "semver-coerced"
+        },
+        {
+            "customType": "regex",
+            "description": "Track pinned cosign binary releases in GitHub workflows",
+            "managerFilePatterns": [
+                "/^\\.github\/(?:workflows\/[^\/]+|actions\/[^\/]+\/action)\\.yml$/"
+            ],
+            "matchStrings": [
+                "cosign-release:\\s*(?<currentValue>v?\\d+\\.\\d+\\.\\d+)"
+            ],
+            "depNameTemplate": "sigstore/cosign",
+            "packageNameTemplate": "sigstore/cosign",
+            "datasourceTemplate": "github-releases",
+            "versioningTemplate": "semver-coerced"
+        },
+        {
+            "customType": "regex",
+            "description": "Track pinned Syft binary releases in GitHub workflows",
+            "managerFilePatterns": [
+                "/^\\.github\/workflows\/[^\/]+\\.yml$/"
+            ],
+            "matchStrings": [
+                "SYFT_VERSION:\\s*(?<currentValue>v?\\d+\\.\\d+\\.\\d+)"
+            ],
+            "depNameTemplate": "anchore/syft",
+            "packageNameTemplate": "anchore/syft",
+            "datasourceTemplate": "github-releases",
+            "versioningTemplate": "semver-coerced"
+        }
+    ],
+    "packageRules": [
+        {
+            "description": "Keep GitHub Actions pinned to immutable commits while allowing Renovate updates",
+            "matchManagers": [
+                "github-actions"
+            ],
+            "pinDigests": true
+        },
+        {
+            "description": "Use a readable topic for uv updates",
+            "matchManagers": [
+                "custom.regex"
+            ],
+            "matchPackageNames": [
+                "astral-sh/uv"
+            ],
+            "commitMessageTopic": "uv"
+        },
+        {
+            "description": "Use a readable topic for install-php-extensions updates",
+            "matchManagers": [
+                "custom.regex"
+            ],
+            "matchPackageNames": [
+                "mlocati/docker-php-extension-installer"
+            ],
+            "commitMessageTopic": "install-php-extensions"
+        },
+        {
+            "description": "Use a readable topic for Cosign updates",
+            "matchManagers": [
+                "custom.regex"
+            ],
+            "matchPackageNames": [
+                "sigstore/cosign"
+            ],
+            "commitMessageTopic": "cosign"
+        },
+        {
+            "description": "Use a readable topic for Syft updates",
+            "matchManagers": [
+                "custom.regex"
+            ],
+            "matchPackageNames": [
+                "anchore/syft"
+            ],
+            "commitMessageTopic": "syft"
+        },
+        {
+            "description": "Automerge pinned container digest updates",
+            "matchManagers": [
+                "custom.regex"
+            ],
+            "matchDatasources": [
+                "docker"
+            ],
+            "matchUpdateTypes": [
+                "digest"
+            ],
+            "automerge": true,
+            "automergeType": "pr",
+            "platformAutomerge": true
+        },
+        {
+            "description": "Automerge patch updates for pinned container base images",
+            "matchManagers": [
+                "custom.regex"
+            ],
+            "matchDatasources": [
+                "docker"
+            ],
+            "matchUpdateTypes": [
+                "minor",
+                "patch"
+            ],
+            "automerge": true,
+            "automergeType": "pr",
+            "platformAutomerge": true
+        },
+        {
+            "description": "Automerge patch updates for pinned GitHub Actions",
+            "matchManagers": [
+                "github-actions"
+            ],
+            "matchUpdateTypes": [
+                "minor",
+                "patch"
+            ],
+            "automerge": true,
+            "automergeType": "pr",
+            "platformAutomerge": true
+        },
+        {
+            "description": "Automerge selected patch updates for OCI tooling dependencies",
+            "matchManagers": [
+                "custom.regex"
+            ],
+            "matchPackageNames": [
+                "anchore/syft",
+                "sigstore/cosign"
+            ],
+            "matchUpdateTypes": [
+                "minor",
+                "patch"
+            ],
+            "automerge": true,
+            "automergeType": "pr",
+            "platformAutomerge": true
+        }
+    ]
+}
