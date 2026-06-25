@@ -43,9 +43,11 @@ jobs:
         runs-on: ubuntu-24.04
         outputs:
             has_builds: ${{ steps.outputs.outputs.has_builds }}
-            stage_0_has_builds: ${{ steps.outputs.outputs.stage_0_has_builds }}
-            stage_0_build_matrix: ${{ steps.outputs.outputs.stage_0_build_matrix }}
-            stage_0_publish_matrix: ${{ steps.outputs.outputs.stage_0_publish_matrix }}
+[% for stage in stages %]
+            stage_[[ stage ]]_has_builds: ${{ steps.outputs.outputs.stage_[[ stage ]]_has_builds }}
+            stage_[[ stage ]]_build_matrix: ${{ steps.outputs.outputs.stage_[[ stage ]]_build_matrix }}
+            stage_[[ stage ]]_publish_matrix: ${{ steps.outputs.outputs.stage_[[ stage ]]_publish_matrix }}
+[% endfor %]
 
         steps:
             - name: Check out repository
@@ -108,14 +110,21 @@ jobs:
                   path: build-plan.json
                   if-no-files-found: error
 
-    build-stage-0:
-        name: Build stage 0 ${{ matrix.name }} ${{ matrix.arch }}
+[% for stage in stages %]
+    build-stage-[[ stage ]]:
+        name: Build stage [[ stage ]] ${{ matrix.name }} ${{ matrix.arch }}
+[% if stage == 0 %]
         needs: plan
-        if: needs.plan.outputs.stage_0_has_builds == 'true'
+[% else %]
+        needs:
+            - plan
+            - publish-stage-[[ stage - 1 ]]
+[% endif %]
+        if: needs.plan.outputs.stage_[[ stage ]]_has_builds == 'true'
         runs-on: ${{ matrix.runner }}
         strategy:
             fail-fast: false
-            matrix: ${{ fromJSON(needs.plan.outputs.stage_0_build_matrix) }}
+            matrix: ${{ fromJSON(needs.plan.outputs.stage_[[ stage ]]_build_matrix) }}
         steps:
             - name: Check out repository
               uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -124,16 +133,16 @@ jobs:
               with:
                   entry: ${{ toJSON(matrix) }}
 
-    publish-stage-0:
-        name: Publish stage 0 ${{ matrix.name }}
+    publish-stage-[[ stage ]]:
+        name: Publish stage [[ stage ]] ${{ matrix.name }}
         needs:
             - plan
-            - build-stage-0
-        if: needs.plan.outputs.stage_0_has_builds == 'true'
+            - build-stage-[[ stage ]]
+        if: needs.plan.outputs.stage_[[ stage ]]_has_builds == 'true'
         runs-on: ubuntu-24.04
         strategy:
             fail-fast: false
-            matrix: ${{ fromJSON(needs.plan.outputs.stage_0_publish_matrix) }}
+            matrix: ${{ fromJSON(needs.plan.outputs.stage_[[ stage ]]_publish_matrix) }}
         steps:
             - name: Check out repository
               uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -145,3 +154,4 @@ jobs:
                   default-branch: ${{ github.event.repository.default_branch }}
                   entry: ${{ toJSON(matrix) }}
                   syft-version: ${{ env.SYFT_VERSION }}
+[% endfor %]

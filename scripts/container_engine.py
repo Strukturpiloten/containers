@@ -14,9 +14,10 @@ import sys
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 import yaml
+from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -26,9 +27,12 @@ RUNNERS = {
     "arm64": "ubuntu-24.04-arm",
 }
 
-MAX_DEFAULT_STAGES = 4
+PUBLISH_WORKFLOW_PATH = Path(".github/workflows/publish-images.yml")
+PUBLISH_WORKFLOW_TEMPLATE_PATH = Path(".github/workflow-templates/publish-images.yml.j2")
+OCI_LABELS_ENV_PATH = Path("shared/oci-labels.env")
 
 type JsonMap = dict[str, Any]
+type JsonList = list[Any]
 
 
 @dataclass(frozen=True)
@@ -40,7 +44,7 @@ class PlanOptions:
     default_branch: str
     before: str | None
     sha: str
-    max_stages: int
+    max_stages: int | None
 
 
 @dataclass(frozen=True)
@@ -76,6 +80,28 @@ def _repo_root() -> Path:
 
 def _repo_relative_path(path: Path) -> str:
     return path.relative_to(_repo_root()).as_posix()
+
+
+def _oci_labels() -> dict[str, str]:
+    """Load static OCI label values from shared/oci-labels.env."""
+    env_path = _repo_root() / OCI_LABELS_ENV_PATH
+    if not env_path.is_file():
+        _fail(f"OCI labels env file not found: {OCI_LABELS_ENV_PATH}")
+
+    labels: dict[str, str] = {}
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if "=" not in stripped:
+            _fail(f"Invalid line in {OCI_LABELS_ENV_PATH}: {line}")
+        key, value = stripped.split("=", 1)
+        labels[key.strip()] = value.strip()
+
+    for required in ("OCI_LICENSES", "OCI_SOURCE", "OCI_VENDOR"):
+        if required not in labels:
+            _fail(f"{OCI_LABELS_ENV_PATH} must define {required}.")
+    return labels
 
 
 def _fail(message: str) -> NoReturn:
@@ -149,7 +175,29 @@ def _load_json(path: Path) -> JsonMap:
         value = json.load(handle)
     if not isinstance(value, dict):
         _fail(f"{path} must contain a JSON object.")
-    return value
+    return cast("JsonMap", value)
+
+
+def _json_map(value: object) -> JsonMap | None:
+    return cast("JsonMap", value) if isinstance(value, dict) else None
+
+
+def _json_list(value: object) -> JsonList | None:
+    return cast("JsonList", value) if isinstance(value, list) else None
+
+
+def _string_list(value: object) -> list[str] | None:
+    if not isinstance(value, list):
+        return None
+
+    values = cast("list[object]", value)
+    if not all(isinstance(item, str) for item in values):
+        return None
+    return cast("list[str]", values)
+
+
+def _json_map_items(mapping: JsonMap) -> list[tuple[str, object]]:
+    return [(key, value) for key, value in mapping.items()]
 
 
 def _entry(entry_json: str, *, require_arch: bool) -> tuple[str, str | None]:
@@ -158,14 +206,15 @@ def _entry(entry_json: str, *, require_arch: bool) -> tuple[str, str | None]:
     except json.JSONDecodeError as error:
         _fail(f"Matrix entry is not valid JSON: {error}")
 
-    if not isinstance(value, dict):
+    entry = _json_map(value)
+    if entry is None:
         _fail("Matrix entry must be a JSON object.")
 
-    image_name = value.get("name")
+    image_name = entry.get("name")
     if not isinstance(image_name, str) or not image_name:
         _fail("Matrix entry must define a non-empty image name.")
 
-    architecture = value.get("arch")
+    architecture = entry.get("arch")
     if require_arch and (not isinstance(architecture, str) or not architecture):
         _fail("Matrix entry must define a non-empty architecture.")
 
@@ -173,56 +222,62 @@ def _entry(entry_json: str, *, require_arch: bool) -> tuple[str, str | None]:
 
 
 def _plan_image(plan: JsonMap, image_name: str) -> JsonMap:
-    images = plan.get("images")
-    if not isinstance(images, list):
+    images = _json_list(plan.get("images"))
+    if images is None:
         _fail("Build plan must define images as a list.")
 
     for image in images:
-        if isinstance(image, dict) and image.get("name") == image_name:
-            return image
+        image_metadata = _json_map(image)
+        if image_metadata is not None and image_metadata.get("name") == image_name:
+            return image_metadata
 
     _fail(f"Image {image_name} is not part of the build plan.")
 
 
 def _optional_plan_image(plan: JsonMap, image_name: str) -> JsonMap | None:
-    images = plan.get("images", [])
-    if not isinstance(images, list):
+    images = _json_list(plan.get("images", []))
+    if images is None:
         return None
     for image in images:
-        if isinstance(image, dict) and image.get("name") == image_name:
-            return image
+        image_metadata = _json_map(image)
+        if image_metadata is not None and image_metadata.get("name") == image_name:
+            return image_metadata
     return None
 
 
 def _image_build(image: JsonMap) -> JsonMap:
     build = image.get("build")
-    if not isinstance(build, dict):
+    build_metadata = _json_map(build)
+    if build_metadata is None:
         _fail(f"Image {image.get('name', '<unknown>')} is missing build metadata.")
-    return build
+    return build_metadata
 
 
 def _image_architectures(image: JsonMap) -> list[str]:
     architectures = _image_build(image).get("architectures")
-    if not isinstance(architectures, list) or not all(isinstance(architecture, str) for architecture in architectures):
+    architecture_list = _string_list(architectures)
+    if architecture_list is None:
         _fail(f"Image {image.get('name', '<unknown>')} has invalid build architectures.")
-    return architectures
+    return architecture_list
 
 
 def _image_build_args(image: JsonMap) -> JsonMap:
     build_args = _image_build(image).get("args", {})
-    if not isinstance(build_args, dict):
+    build_args_map = _json_map(build_args)
+    if build_args_map is None:
         _fail(f"Image {image.get('name', '<unknown>')} has invalid build args.")
-    return build_args
+    return build_args_map
 
 
 def _internal_dependencies(image: JsonMap) -> list[JsonMap]:
     dependencies = image.get("dependencies", {})
-    if not isinstance(dependencies, dict):
+    dependencies_map = _json_map(dependencies)
+    if dependencies_map is None:
         return []
-    internal_dependencies = dependencies.get("internal", [])
-    if not isinstance(internal_dependencies, list):
+    internal_dependencies = _json_list(dependencies_map.get("internal", []))
+    if internal_dependencies is None:
         return []
-    return [dependency for dependency in internal_dependencies if isinstance(dependency, dict)]
+    return [dependency for dependency in (_json_map(item) for item in internal_dependencies) if dependency is not None]
 
 
 def _split_image_digest(reference: str) -> tuple[str, str]:
@@ -251,11 +306,12 @@ def _load_images() -> list[JsonMap]:
         with path.open("r", encoding="utf-8") as handle:
             metadata = yaml.safe_load(handle)
 
-        if not isinstance(metadata, dict):
+        metadata_map = _json_map(metadata)
+        if metadata_map is None:
             _fail(f"{_repo_relative_path(path)} must contain a YAML mapping.")
 
-        metadata["metadataFile"] = _repo_relative_path(path)
-        images.append(metadata)
+        metadata_map["metadataFile"] = _repo_relative_path(path)
+        images.append(metadata_map)
 
     names = [str(image.get("name", "")) for image in images]
     duplicate_names = sorted(name for name in set(names) if names.count(name) > 1)
@@ -276,8 +332,9 @@ def _require_string(metadata: JsonMap, key: str) -> str:
 
 def _require_mapping(metadata: JsonMap, key: str) -> JsonMap:
     value = metadata.get(key)
-    if isinstance(value, dict):
-        return value
+    mapping = _json_map(value)
+    if mapping is not None:
+        return mapping
 
     metadata_file = metadata.get("metadataFile", "container metadata")
     _fail(f"{metadata_file} must define {key} as a mapping.")
@@ -285,8 +342,9 @@ def _require_mapping(metadata: JsonMap, key: str) -> JsonMap:
 
 def _require_array(metadata: JsonMap, key: str) -> list[Any]:
     value = metadata.get(key)
-    if isinstance(value, list):
-        return value
+    array = _json_list(value)
+    if array is not None:
+        return array
 
     metadata_file = metadata.get("metadataFile", "container metadata")
     _fail(f"{metadata_file} must define {key} as a list.")
@@ -311,49 +369,52 @@ def _validate_build_paths(metadata_file: str, build: JsonMap) -> None:
 
 def _validate_architectures(metadata_file: str, build: JsonMap) -> None:
     architectures = build.get("architectures")
-    if not isinstance(architectures, list) or not architectures:
+    architecture_list = _string_list(architectures)
+    if not architecture_list:
         _fail(f"{metadata_file} must define at least one build.architectures entry.")
 
-    unsupported_architectures = [architecture for architecture in architectures if architecture not in RUNNERS]
+    unsupported_architectures = [architecture for architecture in architecture_list if architecture not in RUNNERS]
     if unsupported_architectures:
         _fail(f"{metadata_file} uses unsupported architectures: {', '.join(unsupported_architectures)}.")
 
 
 def _validate_build_args(metadata_file: str, build: JsonMap) -> None:
-    build_args = build.get("args", {})
-    if not isinstance(build_args, dict):
+    build_args = _json_map(build.get("args", {}))
+    if build_args is None:
         _fail(f"{metadata_file} build.args must be a mapping.")
 
-    for arg_name, arg_definition in build_args.items():
-        if not isinstance(arg_definition, dict):
+    for arg_name, arg_definition in _json_map_items(build_args):
+        arg_definition_map = _json_map(arg_definition)
+        if arg_definition_map is None:
             _fail(f"{metadata_file} build arg {arg_name} must be a mapping.")
 
-        arg_type = arg_definition.get("type")
+        arg_type = arg_definition_map.get("type")
         if not isinstance(arg_type, str) or not arg_type:
             _fail(f"{metadata_file} build arg {arg_name} must define type.")
 
-        arg_value = arg_definition.get("value")
+        arg_value = arg_definition_map.get("value")
         if not isinstance(arg_value, str) or not arg_value:
             _fail(f"{metadata_file} build arg {arg_name} must define value.")
 
 
 def _validate_dependencies(metadata_file: str, image: JsonMap, image_names: set[str]) -> None:
-    dependencies = image.get("dependencies", {})
-    if not isinstance(dependencies, dict):
+    dependencies = _json_map(image.get("dependencies", {}))
+    if dependencies is None:
         _fail(f"{metadata_file} dependencies must be a mapping.")
 
-    internal_dependencies = dependencies.get("internal", [])
-    external_dependencies = dependencies.get("external", [])
+    internal_dependencies = _json_list(dependencies.get("internal", []))
+    external_dependencies = _json_list(dependencies.get("external", []))
 
-    if not isinstance(internal_dependencies, list):
+    if internal_dependencies is None:
         _fail(f"{metadata_file} dependencies.internal must be a list.")
 
-    if not isinstance(external_dependencies, list):
+    if external_dependencies is None:
         _fail(f"{metadata_file} dependencies.external must be a list.")
 
-    for dependency in internal_dependencies:
+    for dependency_candidate in internal_dependencies:
+        dependency = _json_map(dependency_candidate)
         if (
-            not isinstance(dependency, dict)
+            dependency is None
             or not isinstance(dependency.get("image"), str)
             or not isinstance(
                 dependency.get("arg"),
@@ -372,15 +433,9 @@ def _validate_inputs(metadata_file: str, image: JsonMap) -> None:
         _fail(f"{metadata_file} inputs must be non-empty strings.")
 
 
-def _validate_release(metadata_file: str, image: JsonMap) -> None:
-    release = image.get("release", {})
-    if not isinstance(release, dict):
-        _fail(f"{metadata_file} release must be a mapping.")
-
-
 def _validate_image(image: JsonMap, image_names: set[str]) -> None:
     metadata_file = image["metadataFile"]
-    for key in ("name", "image", "title", "description", "license", "vendor"):
+    for key in ("name", "image", "title", "description"):
         _require_string(image, key)
 
     build = _require_mapping(image, "build")
@@ -389,7 +444,6 @@ def _validate_image(image: JsonMap, image_names: set[str]) -> None:
     _validate_build_args(metadata_file, build)
     _validate_dependencies(metadata_file, image, image_names)
     _validate_inputs(metadata_file, image)
-    _validate_release(metadata_file, image)
 
 
 def _validate_images(images: list[JsonMap]) -> None:
@@ -404,15 +458,20 @@ def _validate_images(images: list[JsonMap]) -> None:
 
 
 def _dependency_names(image: JsonMap) -> list[str]:
-    dependencies = image.get("dependencies", {})
-    if not isinstance(dependencies, dict):
+    dependencies = _json_map(image.get("dependencies", {}))
+    if dependencies is None:
         return []
 
-    internal_dependencies = dependencies.get("internal", [])
-    if not isinstance(internal_dependencies, list):
+    internal_dependencies = _json_list(dependencies.get("internal", []))
+    if internal_dependencies is None:
         return []
 
-    return [dependency["image"] for dependency in internal_dependencies]
+    names: list[str] = []
+    for dependency_candidate in internal_dependencies:
+        dependency = _json_map(dependency_candidate)
+        if dependency is not None and isinstance(dependency.get("image"), str):
+            names.append(dependency["image"])
+    return names
 
 
 def _topological_levels(images: list[JsonMap], selected_names: set[str] | None = None) -> list[list[str]]:
@@ -523,8 +582,6 @@ def _normalize_image(image: JsonMap, level: int) -> JsonMap:
         "image": image["image"],
         "title": image["title"],
         "description": image["description"],
-        "license": image["license"],
-        "vendor": image["vendor"],
         "metadataFile": image["metadataFile"],
         "level": level,
         "build": {
@@ -534,27 +591,30 @@ def _normalize_image(image: JsonMap, level: int) -> JsonMap:
             "args": build.get("args", {}),
         },
         "dependencies": image.get("dependencies", {"internal": [], "external": []}),
-        "release": image.get("release", {}),
     }
 
 
 def _stage_build_matrix(selected_images: list[JsonMap], stage: int) -> JsonMap:
-    entries = [
-        {
-            "name": image["name"],
-            "arch": architecture,
-            "runner": RUNNERS[architecture],
-            "stage": stage,
-        }
-        for image in selected_images
-        if image["level"] == stage
-        for architecture in image["build"]["architectures"]
-    ]
+    entries: list[JsonMap] = []
+    for image in selected_images:
+        if image["level"] != stage:
+            continue
+        entries.extend(
+            {
+                "name": image["name"],
+                "arch": architecture,
+                "runner": RUNNERS[architecture],
+                "stage": stage,
+            }
+            for architecture in _image_architectures(image)
+        )
     return {"include": entries}
 
 
 def _stage_publish_matrix(selected_images: list[JsonMap], stage: int) -> JsonMap:
-    entries = [{"name": image["name"], "stage": stage} for image in selected_images if image["level"] == stage]
+    entries: list[JsonMap] = [
+        {"name": image["name"], "stage": stage} for image in selected_images if image["level"] == stage
+    ]
     return {"include": entries}
 
 
@@ -562,9 +622,10 @@ def _build_plan(images: list[JsonMap], options: PlanOptions) -> JsonMap:
     selected_names = _selected_image_names(images, options)
     selected_names = _expand_reverse_dependencies(images, selected_names)
     levels = _topological_levels(images, selected_names) if selected_names else []
+    max_stages = options.max_stages or _stage_count(images)
 
-    if len(levels) > options.max_stages:
-        _fail(f"Build plan needs {len(levels)} dependency stages, but workflow supports {options.max_stages}.")
+    if len(levels) > max_stages:
+        _fail(f"Build plan needs {len(levels)} dependency stages, but workflow supports {max_stages}.")
 
     level_by_name = {name: level_index for level_index, level in enumerate(levels) for name in level}
     selected_images = [
@@ -580,7 +641,7 @@ def _build_plan(images: list[JsonMap], options: PlanOptions) -> JsonMap:
             "buildMatrix": _stage_build_matrix(selected_images, stage),
             "publishMatrix": _stage_publish_matrix(selected_images, stage),
         }
-        for stage in range(options.max_stages)
+        for stage in range(max_stages)
     ]
 
     return {
@@ -613,16 +674,57 @@ def _write_json(path: Path, value: JsonMap) -> None:
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 
 
+def _stage_count(images: list[JsonMap]) -> int:
+    return max(1, len(_topological_levels(images)))
+
+
+def _publish_workflow(stage_count: int) -> str:
+    environment = Environment(
+        loader=FileSystemLoader(_repo_root() / PUBLISH_WORKFLOW_TEMPLATE_PATH.parent),
+        keep_trailing_newline=True,
+        trim_blocks=True,
+        lstrip_blocks=True,
+        variable_start_string="[[",
+        variable_end_string="]]",
+        block_start_string="[%",
+        block_end_string="%]",
+        autoescape=True,
+        undefined=StrictUndefined,
+    )
+    template = environment.get_template(PUBLISH_WORKFLOW_TEMPLATE_PATH.name)
+    return template.render(stages=list(range(stage_count)))
+
+
+def _command_generate_workflow(args: argparse.Namespace) -> None:
+    images = _load_images()
+    _validate_images(images)
+    stage_count = _stage_count(images)
+    workflow = _publish_workflow(stage_count)
+    workflow_path = _repo_root() / PUBLISH_WORKFLOW_PATH
+
+    if args.check:
+        current = workflow_path.read_text(encoding="utf-8") if workflow_path.exists() else ""
+        if current != workflow:
+            _fail(f"{PUBLISH_WORKFLOW_PATH} is stale. Run generate-workflow without --check.")
+        _write_stdout(f"{PUBLISH_WORKFLOW_PATH} is up to date with {stage_count} dependency stage(s).")
+        return
+
+    workflow_path.parent.mkdir(parents=True, exist_ok=True)
+    workflow_path.write_text(workflow, encoding="utf-8")
+    _write_stdout(f"Wrote {PUBLISH_WORKFLOW_PATH} with {stage_count} dependency stage(s).")
+
+
 def _build_base_args(plan: JsonMap, image: JsonMap, context: _GitHubContext) -> tuple[list[str], str, str]:
     build_args: list[str] = []
     base_name = ""
     base_digest = ""
 
-    for arg_name, arg_definition in _image_build_args(image).items():
-        if not isinstance(arg_definition, dict):
+    for arg_name, arg_definition in _json_map_items(_image_build_args(image)):
+        arg_definition_map = _json_map(arg_definition)
+        if arg_definition_map is None:
             continue
-        arg_value = arg_definition.get("value", "")
-        arg_type = arg_definition.get("type", "")
+        arg_value = arg_definition_map.get("value", "")
+        arg_type = arg_definition_map.get("type", "")
         if not isinstance(arg_value, str) or not arg_value:
             continue
 
@@ -640,8 +742,8 @@ def _build_base_args(plan: JsonMap, image: JsonMap, context: _GitHubContext) -> 
         if dependency_image is not None:
             dependency_ref = f"{dependency_image['image']}:sha-{context.sha}"
         else:
-            fallback = _image_build_args(image).get(dependency_arg, {})
-            dependency_ref = fallback.get("value", "") if isinstance(fallback, dict) else ""
+            fallback = _json_map(_image_build_args(image).get(dependency_arg, {}))
+            dependency_ref = fallback.get("value", "") if fallback is not None else ""
 
         if not isinstance(dependency_ref, str) or not dependency_ref:
             _fail(f"Missing pinned fallback value for internal dependency {dependency_name} ({dependency_arg}).")
@@ -671,6 +773,7 @@ def _command_build_arch_image(args: argparse.Namespace) -> None:
     local_image = f"localhost/{image_name}:{context.run_id}-{context.run_attempt}-{architecture}"
     created = dt.datetime.now(tz=dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     build_args, base_name, base_digest = _build_base_args(plan, image, context)
+    oci_labels = _oci_labels()
 
     command = [
         _tool("sudo"),
@@ -696,12 +799,12 @@ def _command_build_arch_image(args: argparse.Namespace) -> None:
             "OCI_DOCUMENTATION", f"{context.server_url}/{context.repository}/tree/{context.sha}/images/{image_name}"
         )
     )
-    command.extend(_build_arg("OCI_LICENSES", str(image["license"])))
+    command.extend(_build_arg("OCI_LICENSES", oci_labels["OCI_LICENSES"]))
     command.extend(_build_arg("OCI_REVISION", context.sha))
-    command.extend(_build_arg("OCI_SOURCE", f"{context.server_url}/{context.repository}"))
+    command.extend(_build_arg("OCI_SOURCE", oci_labels["OCI_SOURCE"]))
     command.extend(_build_arg("OCI_TITLE", str(image["title"])))
     command.extend(_build_arg("OCI_URL", f"{context.server_url}/{context.repository}/pkgs/container/{image_name}"))
-    command.extend(_build_arg("OCI_VENDOR", str(image["vendor"])))
+    command.extend(_build_arg("OCI_VENDOR", oci_labels["OCI_VENDOR"]))
     command.extend(_build_arg("OCI_VERSION", f"sha-{context.sha}"))
     command.extend(["--tag", local_image, "--file", str(build["containerfile"]), str(build["context"])])
 
@@ -721,19 +824,21 @@ def _unique_tags(tags: Sequence[str]) -> list[str]:
 
 def _architecture_digests(raw_manifest: str, architectures: Sequence[str]) -> dict[str, str]:
     manifest = json.loads(raw_manifest)
-    manifests = manifest.get("manifests") if isinstance(manifest, dict) else None
-    if not isinstance(manifests, list):
+    manifest_map = _json_map(manifest)
+    manifests = _json_list(manifest_map.get("manifests")) if manifest_map is not None else None
+    if manifests is None:
         _fail("Published image manifest does not contain an OCI manifest list.")
 
     digests: dict[str, str] = {}
     for architecture in architectures:
-        for entry in manifests:
-            if not isinstance(entry, dict):
+        for entry_candidate in manifests:
+            entry = _json_map(entry_candidate)
+            if entry is None:
                 continue
-            platform = entry.get("platform", {})
+            platform = _json_map(entry.get("platform", {}))
             digest = entry.get("digest")
             if (
-                isinstance(platform, dict)
+                platform is not None
                 and platform.get("os") == "linux"
                 and platform.get("architecture") == architecture
                 and isinstance(digest, str)
@@ -758,7 +863,6 @@ def _write_build_result(output_dir: Path, result: _BuildResult) -> Path:
             "architectureDigests": result.architecture_digests,
             "tags": list(result.tags),
             "rebuilt": True,
-            "releaseEligible": True,
         },
     )
     return build_result
@@ -926,7 +1030,7 @@ def _parser() -> argparse.ArgumentParser:
     plan_parser.add_argument("--default-branch", default=os.environ.get("GITHUB_DEFAULT_BRANCH", "main"))
     plan_parser.add_argument("--before", default=os.environ.get("GITHUB_EVENT_BEFORE"))
     plan_parser.add_argument("--sha", default=os.environ.get("GITHUB_SHA", ""))
-    plan_parser.add_argument("--max-stages", type=int, default=MAX_DEFAULT_STAGES)
+    plan_parser.add_argument("--max-stages", type=int)
     plan_parser.add_argument("--output", default="build-plan.json")
     plan_parser.set_defaults(func=_command_plan)
 
@@ -946,6 +1050,10 @@ def _parser() -> argparse.ArgumentParser:
     publish_parser.add_argument("--archives-dir", required=True)
     publish_parser.add_argument("--output-dir", required=True)
     publish_parser.set_defaults(func=_command_publish_image)
+
+    generate_workflow_parser = subparsers.add_parser("generate-workflow")
+    generate_workflow_parser.add_argument("--check", action="store_true")
+    generate_workflow_parser.set_defaults(func=_command_generate_workflow)
 
     return root_parser
 

@@ -11,9 +11,7 @@ The first image to move into this repository is `typo3-phpfpm` from `typo3-conta
 - Publish images to GitHub Container Registry under `ghcr.io/strukturpiloten/<image>`.
 - Support internal image dependencies, for example one image based on PHP and another image based on the previously built PHP image.
 - Build images in dependency order and pass freshly built internal image digests to dependent builds.
-- Release only images that were actually rebuilt and whose release candidate digest differs from the last released digest.
-- Keep independent version and release lines per image.
-- Keep Renovate updates working for base images, GitHub Actions, build tooling, and release branches.
+- Keep Renovate updates working for base images, GitHub Actions, and build tooling.
 
 ## Existing workflow in `typo3-container`
 
@@ -25,11 +23,9 @@ The current `typo3-container` repository already has a good baseline for secure 
 - Syft generates per-architecture SBOMs.
 - Cosign signs the image digest.
 - GitHub artifact attestations record provenance and attach SBOM attestations.
-- `release.yml` prepares a SemVer release line branch, builds a release candidate image, pins the candidate digest into `.env.tmpl`, writes `.release.env`, and opens a release PR.
-- `finalize-release.yml` runs after the release PR is merged into a `v<major>.<minor>` branch. It validates the metadata, promotes the candidate digest to final tags, creates the Git tag, and creates the GitHub Release.
-- Renovate tracks pinned image tags and digests in `.env.tmpl`, TYPO3 package versions, `install-php-extensions`, Syft, Cosign, `container-setup`, GitHub Actions, and selected release branches.
+- Renovate tracks pinned image tags and digests in `.env.tmpl`, TYPO3 package versions, `install-php-extensions`, Syft, Cosign, `container-setup`, and GitHub Actions.
 
-The monorepo should keep the secure build pieces, but replace single-image assumptions with image metadata, change detection, dependency graph planning, and per-image releases.
+The monorepo should keep the secure build pieces, but replace single-image assumptions with image metadata, change detection, dependency graph planning, and per-image builds.
 
 ## Repository layout
 
@@ -62,15 +58,10 @@ containers/
   pyproject.toml
   uv.lock
   .containerignore
-  release-state/
-    typo3-phpfpm.json
   .github/
     renovate.json
     workflows/
-      validate.yml
       publish-images.yml
-      prepare-releases.yml
-      finalize-releases.yml
 ```
 
 `images/<family>/<name>` owns one public image. Its `Containerfile`, image-specific documentation, tests, fixtures, and optional root filesystem files live together.
@@ -81,11 +72,11 @@ containers/
 
 `.containerignore` keeps the build context small and prevents development files, workflow files, documentation, logs, and generated artifacts from being sent to the builder.
 
-`release-state/` contains small generated JSON files with the latest released version, digest, source revision, and input fingerprint per image. These files make release PRs explicit and reviewable.
-
 ## Image metadata
 
-Every image should have an `images/<family>/<name>/container.yaml` file. The workflows use this file to validate the image, plan builds, determine dependency order, and create releases.
+Every image should have an `images/<family>/<name>/container.yaml` file. The workflows use this file to validate the image, plan builds, and determine dependency order.
+
+Static OCI label values that are shared across all images (`OCI_LICENSES`, `OCI_VENDOR`, `OCI_SOURCE`) are defined once in `shared/oci-labels.env` and loaded by the build script for every image. Per-image metadata only needs to define `title` and `description`.
 
 Example for the first migrated image:
 
@@ -94,8 +85,6 @@ name: typo3-phpfpm
 image: ghcr.io/strukturpiloten/typo3-phpfpm
 title: TYPO3 PHP-FPM
 description: TYPO3 PHP-FPM runtime image with TYPO3 extensions and container utilities
-license: AGPL-3.0-only
-vendor: Strukturpiloten
 
 build:
   context: ../..
@@ -123,20 +112,6 @@ inputs:
   - shared/container-utilities/**
   - scripts/container_engine.py
   - .github/workflows/publish-images.yml
-
-release:
-  enabled: true
-  versioning: semver
-  defaultBump: patch
-  stableTags:
-    - v{{ version }}
-    - "{{ version }}"
-    - "{{ major }}.{{ minor }}"
-    - "{{ major }}"
-    - latest
-  prereleaseTags:
-    - v{{ version }}
-    - "{{ version }}"
 ```
 
 For images based on another image from the same repository, use `dependencies.internal`:
@@ -171,40 +146,35 @@ After the move, `typo3-container` should become a consumer of `ghcr.io/strukturp
 
 ## Build process
 
-The `publish-images.yml` workflow should be responsible for non-release image publishing on `main`, manual dispatch, and scheduled rebuilds.
+The generated `publish-images.yml` workflow is responsible for image publishing on `main`, manual dispatch, and scheduled rebuilds. Its dependency stage jobs are generated from the current `dependencies.internal` graph, so the repository does not maintain a separate hard-coded stage count.
 
-Recommended jobs:
+Jobs:
 
-1. `validate`
+1. `plan`
 
-   - Parse all `images/**/container.yaml` files.
-   - Check required fields, image names, paths, architectures, tag templates, and dependency references.
-   - Fail on dependency cycles.
-
-2. `plan`
-
-   - Determine changed files with `git diff` for pull requests and pushes.
+   - Parse and validate all `images/**/container.yaml` files.
+   - Determine changed files with `git diff` for pushes.
    - Match changed files against each image's `inputs` list.
-   - On scheduled rebuilds, select images with `release.enabled: true` or an explicit `build.scheduled: true` flag.
+   - On scheduled rebuilds, select all images.
    - Expand the selected set to include reverse internal dependencies when an internal base image is selected.
    - Topologically sort selected images by `dependencies.internal`.
-   - Emit a JSON build plan with stages, images, architectures, build args, candidate tags, and release eligibility.
+   - Emit a JSON build plan with stages, images, architectures, and build args.
 
-3. `build-arch-image`
+2. `build-arch-image`
 
    - Build each selected image for each architecture with Buildah.
    - Use `--pull-always` for all builds.
-   - Use `--no-cache` for scheduled builds, manual forced rebuilds, and release candidate builds.
+   - Use `--no-cache` for scheduled builds and manual forced rebuilds.
    - Export per-architecture OCI archives as artifacts.
 
-4. `publish-manifest`
+3. `publish-image`
 
    - Download architecture archives.
    - Create a multi-arch manifest with Podman.
-   - Publish temporary immutable tags, for example `sha-<commit>` and `build-<run-id>-<attempt>`.
-   - For `main`, also publish a moving development tag such as `main` or `latest-build`. Avoid using release tags here.
+   - Publish immutable tags, for example `sha-<commit>` and the current branch name.
+   - For `main`, also publish the `latest` tag.
 
-5. `inspect-sign-attest`
+4. `inspect-sign-attest`
 
    - Resolve the index digest and per-architecture digests with Skopeo.
    - Generate per-architecture SBOMs with Syft.
@@ -212,12 +182,14 @@ Recommended jobs:
    - Attach provenance and SBOM attestations.
    - Write one result entry per image to a `build-results.json` artifact.
 
-6. `release-plan`
+The important part is that the build planner owns dependency order. GitHub Actions matrices can build independent images in parallel, but images in later dependency stages must wait for earlier stages so they can consume exact internal digests. Because GitHub Actions `needs` relationships are static YAML, the workflow file is generated and checked in. The generator computes the required number of dependency stages from image metadata and renders `.github/workflow-templates/publish-images.yml.j2` with Jinja2.
 
-   - Compare the new digest and input fingerprint with `release-state/<image>.json` and the latest released GHCR digest.
-   - Mark only changed, release-enabled images as release candidates.
+Regenerate and check the workflow with:
 
-The important part is that the build planner owns dependency order. GitHub Actions matrices can build independent images in parallel, but images in later dependency stages must wait for earlier stages so they can consume exact internal digests.
+```sh
+uv run --frozen --python 3.14 python -m scripts.container_engine generate-workflow
+uv run --frozen --python 3.14 python -m scripts.container_engine generate-workflow --check
+```
 
 ## Build order and dependency graph
 
@@ -231,7 +203,7 @@ php-base
       -> typo3-cli
 ```
 
-The planner should produce stages like this:
+The planner produces stages like this:
 
 ```json
 [
@@ -245,95 +217,7 @@ Images in the same stage can build in parallel. The next stage starts only after
 
 When `php-base` is rebuilt, `typo3-phpfpm` and `typo3-cli` should also be selected because their effective base image changed. When only `typo3-cli` changes, `php-base` and `typo3-phpfpm` do not need to rebuild.
 
-If a cycle is configured, for example `a -> b -> a`, validation must fail before any build starts.
-
-## Release model
-
-Git tags and GitHub Releases are repository-wide, so the monorepo needs image-prefixed release tags.
-
-Recommended tag format:
-
-```text
-<image>/v<major>.<minor>.<patch>
-```
-
-Examples:
-
-```text
-typo3-phpfpm/v1.0.0
-php-base/v2.3.1
-```
-
-Recommended release branch format:
-
-```text
-release/<image>/v<major>.<minor>
-```
-
-Examples:
-
-```text
-release/typo3-phpfpm/v1.0
-release/php-base/v2.3
-```
-
-Container image tags stay simple inside each GHCR package:
-
-```text
-ghcr.io/strukturpiloten/typo3-phpfpm:v1.0.0
-ghcr.io/strukturpiloten/typo3-phpfpm:1.0.0
-ghcr.io/strukturpiloten/typo3-phpfpm:1.0
-ghcr.io/strukturpiloten/typo3-phpfpm:1
-ghcr.io/strukturpiloten/typo3-phpfpm:latest
-```
-
-Pre-releases should only receive exact version tags:
-
-```text
-ghcr.io/strukturpiloten/typo3-phpfpm:v1.1.0-rc.1
-ghcr.io/strukturpiloten/typo3-phpfpm:1.1.0-rc.1
-```
-
-Recommended release flow:
-
-1. A build on `main` or a release branch produces candidate images and records digests in `build-results.json`.
-2. `release-plan` selects only images where the new digest or input fingerprint differs from the last released state.
-3. For each selected image, the workflow calculates the next SemVer version. Dependency-only rebuilds default to `patch`; explicit labels or manifest fields can request `minor` or `major`.
-4. The workflow opens one release PR that updates `release-state/<image>.json` files for the selected images only.
-5. The release PR body lists every image, candidate digest, previous release, next version, and tag plan.
-6. After the PR is merged with a merge commit, `finalize-releases.yml` validates the metadata, promotes each candidate digest to final GHCR tags, creates image-prefixed Git tags, and creates one GitHub Release per image.
-
-This keeps the safety properties of the current `typo3-container` release process, but it allows a single monorepo run to release `typo3-phpfpm` while skipping every unchanged image.
-
-The release PR can be automerged after required checks pass if fully automatic releases are desired. The core rule should still be: no changed candidate digest, no release entry, no tag promotion.
-
-## Release state
-
-Each image should have a generated state file:
-
-```json
-{
-  "image": "typo3-phpfpm",
-  "version": "1.0.0",
-  "gitTag": "typo3-phpfpm/v1.0.0",
-  "containerImage": "ghcr.io/strukturpiloten/typo3-phpfpm",
-  "digest": "sha256:...",
-  "sourceRevision": "...",
-  "inputFingerprint": "sha256:...",
-  "releasedAt": "2026-06-21T00:00:00Z"
-}
-```
-
-The input fingerprint should be generated from:
-
-- The image's `container.yaml`.
-- The image's `Containerfile` and files matched by `inputs`.
-- Shared files used by the image.
-- Exact external dependency references, including digests.
-- Exact internal dependency image digests used as build args.
-- Relevant build scripts and workflow versions.
-
-The fingerprint should also be written as an OCI label or annotation, for example `org.strukturpiloten.container.input-fingerprint`.
+If a cycle is configured, for example `a -> b -> a`, validation fails before any build starts.
 
 ## Renovate in the monorepo
 
@@ -349,21 +233,6 @@ Recommended Renovate behavior:
 - Automerge digest updates for external container images.
 - Automerge patch and minor updates for selected tooling, matching the current policy.
 - Do not use Renovate to update internal image dependencies during the same monorepo build. The build planner should inject internal digests.
-- Maintain `baseBranchPatterns` for active release branches from the release workflow, because Renovate reads repository configuration from the default branch.
-
-For release branches, the current `typo3-container` pattern can be generalized: after a new image release line is created, a workflow opens a PR against `main` to update Renovate's `baseBranchPatterns` with selected `release/<image>/v<major>.<minor>` branches. The number of tracked branches can be controlled globally or per image.
-
-## Pull request validation
-
-Pull requests should run validation without publishing final release tags:
-
-- Validate all metadata files.
-- Detect changed images and dependency expansion.
-- Build changed images when feasible.
-- Run image-specific tests from `images/<family>/<name>/tests`.
-- Generate an unpublished or temporary build result for inspection.
-
-PR builds should not promote SemVer tags and should not create GitHub Releases.
 
 ## Local development
 
@@ -381,7 +250,5 @@ Local builds can tag images as `localhost/<image>:dev` and should not sign, atte
 
 ## Open implementation decisions
 
-- Whether release PRs should always require human review or can be automerged for Renovate-only patch rebuilds.
-- Whether scheduled rebuilds should select all release-enabled images or only images with an explicit `build.scheduled: true` flag.
+- Whether scheduled rebuilds should select all images or only images with an explicit `build.scheduled: true` flag.
 - Whether shared utilities should be copied into this monorepo or kept as a submodule under `shared/container-utilities`.
-- Whether version bumps should be driven only by manifest policy and labels, or by conventional commits scoped to image names.

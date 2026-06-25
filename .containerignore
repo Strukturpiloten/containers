@@ -2,10 +2,13 @@
 .env.*
 .git
 .github
+.gitignore
+.gitmodules
+.ruff_cache
 .venv
 .vscode
 *.log
-*.md
+**/*.md
 *.spdx.json
 *.tar
 build-plan.json

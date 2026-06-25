@@ -3,8 +3,6 @@ name: typo3-phpfpm
 image: ghcr.io/strukturpiloten/typo3-phpfpm
 title: TYPO3 PHP-FPM
 description: TYPO3 PHP-FPM runtime image with TYPO3 extensions and container utilities
-license: AGPL-3.0-only
-vendor: Strukturpiloten OHG
 
 build:
   context: .
@@ -13,7 +11,7 @@ build:
     - amd64
     - arm64
   args:
-    PODMAN_TYPO3PHPFPM_BASE_IMAGE:
+    BASE_IMAGE:
       value: docker.io/php:8.5.7-fpm-alpine3.22@sha256:95588bfaf1b890e3fc1f308a0a23539c4f03ce28a4fc770473ae3899d6669777
       type: external-image
     PODMAN_TYPO3_DATA_DIR_CONTAINER:
@@ -25,23 +23,11 @@ dependencies:
   external:
     - name: php
       image: docker.io/php
-      arg: PODMAN_TYPO3PHPFPM_BASE_IMAGE
+      arg: BASE_IMAGE
 
 inputs:
+  - .github/renovate.json
+  - .github/workflows/publish-images.yml
   - images/typo3/typo3-phpfpm/**
   - shared/container-utilities/**
-  - .github/workflows/publish-images.yml
-  - .github/renovate.json
-
-release:
-  enabled: true
-  versioning: semver
-  stableTags:
-    - v{{ version }}
-    - "{{ version }}"
-    - "{{ major }}.{{ minor }}"
-    - "{{ major }}"
-    - latest
-  prereleaseTags:
-    - v{{ version }}
-    - "{{ version }}"
+  - shared/oci-labels.env

@@ -669,3 +669,8 @@ __marimo__/
 
 # Built Visual Studio Code Extensions
 *.vsix
+
+##############################
+# Project specific additions
+
+!shared/oci-labels.env
