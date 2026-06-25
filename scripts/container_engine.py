@@ -296,7 +296,7 @@ def _safe_ref_tag(ref_name: str) -> str:
 
 
 def _image_metadata_paths() -> list[Path]:
-    return sorted(_repo_root().glob("images/**/container.yaml"))
+    return sorted(path for path in _repo_root().glob("images/**/container.yaml") if "_example" not in path.parts)
 
 
 def _load_images() -> list[JsonMap]:

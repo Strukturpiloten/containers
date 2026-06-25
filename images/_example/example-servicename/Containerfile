@@ -1,0 +1,56 @@
+# Example Containerfile for a new image in this monorepo.
+#
+# This file is not built. It demonstrates the expected structure.
+# Static OCI label values (OCI_LICENSES, OCI_VENDOR, OCI_SOURCE) are injected
+# from shared/oci-labels.env by the build script and must not be hardcoded here.
+#
+# Consider this documentation:
+# https://github.com/github/awesome-copilot/blob/main/instructions/containerization-docker-best-practices.instructions.md
+
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+# OCI label arguments. All are injected at build time.
+# Do not set static defaults for OCI_LICENSES, OCI_SOURCE, or OCI_VENDOR here.
+ARG OCI_BASE_DIGEST=""
+ARG OCI_CREATED=""
+ARG OCI_DESCRIPTION=""
+ARG OCI_DOCUMENTATION=""
+ARG OCI_LICENSES=""
+ARG OCI_REVISION=""
+ARG OCI_SOURCE=""
+ARG OCI_TITLE=""
+ARG OCI_URL=""
+ARG OCI_VENDOR=""
+ARG OCI_VERSION=""
+
+LABEL org.opencontainers.image.base.digest="${OCI_BASE_DIGEST}" \
+    org.opencontainers.image.base.name="${BASE_IMAGE}" \
+    org.opencontainers.image.created="${OCI_CREATED}" \
+    org.opencontainers.image.description="${OCI_DESCRIPTION}" \
+    org.opencontainers.image.documentation="${OCI_DOCUMENTATION}" \
+    org.opencontainers.image.licenses="${OCI_LICENSES}" \
+    org.opencontainers.image.revision="${OCI_REVISION}" \
+    org.opencontainers.image.source="${OCI_SOURCE}" \
+    org.opencontainers.image.title="${OCI_TITLE}" \
+    org.opencontainers.image.url="${OCI_URL}" \
+    org.opencontainers.image.vendor="${OCI_VENDOR}" \
+    org.opencontainers.image.version="${OCI_VERSION}"
+
+# Combine package installation, tool setup, and cleanup in a single layer.
+RUN set -eux; \
+    apk upgrade --no-cache && \
+    apk add --no-cache \
+    ca-certificates \
+    tzdata; \
+    rm -rf /var/cache/apk/*
+
+# Copy shared utilities from the repository root build context.
+COPY --chmod=0755 shared/container-utilities/shell/check_variables_and_directories.sh /opt/container-utilities/shell/check_variables_and_directories.sh
+
+# Document the port the service listens on.
+EXPOSE 8080
+
+# Verify the container is healthy.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+    CMD echo "ok" || exit 1
