@@ -30,6 +30,8 @@ RUNNERS = {
 PUBLISH_WORKFLOW_PATH = Path(".github/workflows/publish-images.yml")
 PUBLISH_WORKFLOW_TEMPLATE_PATH = Path(".github/workflow-templates/publish-images.yml.j2")
 OCI_LABELS_ENV_PATH = Path("shared/oci-labels.env")
+IMAGES_GLOB = "images/**/container.yaml"
+EXCLUDED_IMAGE_DIR = "_example"
 
 type JsonMap = dict[str, Any]
 type JsonList = list[Any]
@@ -296,7 +298,7 @@ def _safe_ref_tag(ref_name: str) -> str:
 
 
 def _image_metadata_paths() -> list[Path]:
-    return sorted(path for path in _repo_root().glob("images/**/container.yaml") if "_example" not in path.parts)
+    return sorted(path for path in _repo_root().glob(IMAGES_GLOB) if EXCLUDED_IMAGE_DIR not in path.parts)
 
 
 def _load_images() -> list[JsonMap]:
@@ -448,7 +450,7 @@ def _validate_image(image: JsonMap, image_names: set[str]) -> None:
 
 def _validate_images(images: list[JsonMap]) -> None:
     if not images:
-        _fail("No image metadata files found in images/**/container.yaml.")
+        _fail(f"No image metadata files found in {IMAGES_GLOB}.")
 
     image_names = {_require_string(image, "name") for image in images}
     for image in images:
