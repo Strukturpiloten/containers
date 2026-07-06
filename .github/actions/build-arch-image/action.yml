@@ -1,0 +1,48 @@
+name: Build architecture image
+description: Build one image for one architecture and upload its OCI archive.
+
+inputs:
+  entry:
+    description: JSON matrix entry with image name and architecture.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install OCI tooling
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        sudo apt-get update
+        sudo apt-get install --yes --no-install-recommends buildah podman skopeo
+
+    - name: Download build plan
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      with:
+        name: container-build-plan
+        path: ${{ runner.temp }}/container-build-plan
+
+    - name: Install uv
+      uses: ./.github/actions/setup-uv
+      with:
+        version: ${{ env.UV_VERSION }}
+
+    - name: Build image archive
+      id: build
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        mkdir -p "${RUNNER_TEMP}/oci-archives"
+        uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine build-arch-image \
+          --plan "${RUNNER_TEMP}/container-build-plan/build-plan.json" \
+          --entry-json '${{ inputs.entry }}' \
+          --output-dir "${RUNNER_TEMP}/oci-archives"
+
+    - name: Upload architecture image archive
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ steps.build.outputs.image_name }}-${{ steps.build.outputs.arch }}-oci-archive
+        path: ${{ steps.build.outputs.archive_path }}
+        if-no-files-found: error

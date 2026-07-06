@@ -1,0 +1,75 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+ARG OCI_BASE_DIGEST=""
+ARG OCI_CREATED=""
+ARG OCI_DESCRIPTION="TYPO3 PHP-FPM runtime image with TYPO3 extensions and container utilities"
+ARG OCI_DOCUMENTATION=""
+ARG OCI_LICENSES=""
+ARG OCI_REVISION=""
+ARG OCI_SOURCE=""
+ARG OCI_TITLE="TYPO3 PHP-FPM"
+ARG OCI_URL=""
+ARG OCI_VENDOR=""
+ARG OCI_VERSION=""
+ARG INSTALL_PHP_EXTENSIONS_VERSION=2.11.12
+ARG INSTALL_PHP_EXTENSIONS_SHA256=7c133ae4b9490d912287188c62ea570729cfa74f0ea357e4be672ce696b4aa29
+
+LABEL org.opencontainers.image.base.digest="${OCI_BASE_DIGEST}" \
+    org.opencontainers.image.base.name="${BASE_IMAGE}" \
+    org.opencontainers.image.created="${OCI_CREATED}" \
+    org.opencontainers.image.description="${OCI_DESCRIPTION}" \
+    org.opencontainers.image.documentation="${OCI_DOCUMENTATION}" \
+    org.opencontainers.image.licenses="${OCI_LICENSES}" \
+    org.opencontainers.image.revision="${OCI_REVISION}" \
+    org.opencontainers.image.source="${OCI_SOURCE}" \
+    org.opencontainers.image.title="${OCI_TITLE}" \
+    org.opencontainers.image.url="${OCI_URL}" \
+    org.opencontainers.image.vendor="${OCI_VENDOR}" \
+    org.opencontainers.image.version="${OCI_VERSION}"
+
+RUN set -eux; \
+    apk upgrade --no-cache && \
+    apk add --no-cache \
+    ca-certificates \
+    git \
+    supercronic \
+    tzdata; \
+    wget -O /usr/local/bin/install-php-extensions "https://github.com/mlocati/docker-php-extension-installer/releases/download/${INSTALL_PHP_EXTENSIONS_VERSION}/install-php-extensions"; \
+    echo "${INSTALL_PHP_EXTENSIONS_SHA256}  /usr/local/bin/install-php-extensions" | sha256sum -c -; \
+    chmod 0755 /usr/local/bin/install-php-extensions; \
+    install-php-extensions \
+    @composer \
+    apcu \
+    exif \
+    gd \
+    gmp \
+    imagick \
+    intl \
+    pcntl \
+    pdo_mysql \
+    pdo_pgsql \
+    pgsql \
+    phar \
+    redis \
+    sodium \
+    sysvsem \
+    zip; \
+    mv "${PHP_INI_DIR}/php.ini-production" "${PHP_INI_DIR}/php.ini"; \
+    rm -rf /var/cache/apk/*
+
+ARG PODMAN_TYPO3_DATA_DIR_CONTAINER
+RUN mkdir -p /opt/container-utilities/shell ${PODMAN_TYPO3_DATA_DIR_CONTAINER}
+COPY --chmod=0755 shared/container-utilities/shell/check_variables_and_directories.sh /opt/container-utilities/shell/check_variables_and_directories.sh
+
+WORKDIR /var/www/typo3
+
+ENV HOME=/home/www-data
+RUN install -d -m 0777 /home/www-data
+
+EXPOSE 9000
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+    CMD php-fpm -t || exit 1
+
+STOPSIGNAL SIGKILL

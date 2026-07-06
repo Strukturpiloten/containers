@@ -1,0 +1,72 @@
+# Example container.yaml for a new image in this monorepo.
+#
+# Copy this directory to images/<family>/<name>/ and fill in the values.
+# The images/_example directory is excluded from validation and builds.
+#
+# All fields below are required unless marked optional.
+
+# Metadata schema version. Must be 1.
+schemaVersion: 1
+
+# Unique image name. Used as the GHCR package name and in build matrices.
+# Must be lowercase and unique across the repository.
+name: example-servicename
+
+# Full registry reference for the published image.
+image: ghcr.io/strukturpiloten/example-servicename
+
+# Human-readable title shown as OCI label org.opencontainers.image.title.
+title: Example Service
+
+# Short description shown as OCI label org.opencontainers.image.description.
+description: Example service image for the Strukturpiloten container monorepo
+
+# Build configuration.
+build:
+  # Build context path relative to the repository root.
+  # Use "." to keep the repository root as context so shared/ files are accessible.
+  context: .
+  # Path to the Containerfile relative to the repository root.
+  containerfile: images/_example/example-servicename/Containerfile
+  # Target architectures. Must be from the supported set: amd64, arm64.
+  architectures:
+    - amd64
+    - arm64
+  # Build arguments passed to the Containerfile via --build-arg.
+  # Each arg must define "value" and "type".
+  # Supported types:
+  #   external-image: Pinned external base image reference with digest.
+  #                    Tracked by Renovate. Used to resolve base name and digest.
+  #   static:         Fixed string value that never changes between builds.
+  args:
+    BASE_IMAGE:
+      value: docker.io/library/example:1.2.3@sha256:0000000000000000000000000000000000000000000000000000000000000000
+      type: external-image
+    DATA_DIR:
+      value: /var/lib/example
+      type: static
+
+# Dependency graph. Used by the build planner for topological sorting.
+dependencies:
+  # Internal dependencies are other images in this repository.
+  # The planner builds them first, then passes their pinned digest as a build arg.
+  # The referenced "image" must match the "name" of another image in this repo.
+  internal:
+    - image: php-base
+      arg: BASE_IMAGE
+  # External dependencies are tracked by Renovate for version and digest updates.
+  # "arg" must match a build.args key with type: external-image.
+  external:
+    - name: example
+      image: docker.io/library/example
+      arg: BASE_IMAGE
+
+# Files that trigger a rebuild of this image when changed.
+# Glob patterns are matched against the repository root.
+# Include the image directory, shared files used, and relevant workflow files.
+inputs:
+  - images/_example/example-servicename/**
+  - shared/container-utilities/**
+  - shared/oci-labels.env
+  - .github/workflows/publish-images.yml
+  - .github/renovate.json

@@ -1,0 +1,33 @@
+schemaVersion: 1
+name: typo3-phpfpm
+image: ghcr.io/strukturpiloten/typo3-phpfpm
+title: TYPO3 PHP-FPM
+description: TYPO3 PHP-FPM runtime image with TYPO3 extensions and container utilities
+
+build:
+  context: .
+  containerfile: images/typo3/typo3-phpfpm/Containerfile
+  architectures:
+    - amd64
+    - arm64
+  args:
+    BASE_IMAGE:
+      value: docker.io/php:8.5.7-fpm-alpine3.22@sha256:95588bfaf1b890e3fc1f308a0a23539c4f03ce28a4fc770473ae3899d6669777
+      type: external-image
+    PODMAN_TYPO3_DATA_DIR_CONTAINER:
+      value: /var/www/typo3
+      type: static
+
+dependencies:
+  internal: []
+  external:
+    - name: php
+      image: docker.io/php
+      arg: BASE_IMAGE
+
+inputs:
+  - .github/renovate.json
+  - .github/workflows/publish-images.yml
+  - images/typo3/typo3-phpfpm/**
+  - shared/container-utilities/**
+  - shared/oci-labels.env

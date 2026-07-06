@@ -1,0 +1,29 @@
+[project]
+name = "strukturpiloten-containers"
+version = "0.1.0"
+description = "Metadata-driven container monorepo tooling for Strukturpiloten OCI images"
+requires-python = ">=3.14,<3.15"
+dependencies = [
+  "Jinja2==3.1.6",
+  "PyYAML==6.0.3",
+]
+
+[dependency-groups]
+dev = [
+  "ruff==0.15.18",
+]
+
+[tool.ruff]
+fix = true
+line-length = 120
+target-version = "py314"
+
+[tool.ruff.lint]
+ignore = [
+  "COM812",
+  "D203",
+  "D213",
+]
+select = [
+  "ALL",
+]

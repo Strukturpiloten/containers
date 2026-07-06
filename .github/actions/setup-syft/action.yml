@@ -1,0 +1,28 @@
+name: Set up Syft
+description: Install a pinned Syft release from GitHub release assets.
+
+inputs:
+  version:
+    description: Syft version with leading v.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install Syft from release asset
+      shell: bash
+      env:
+        SYFT_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+
+        version_without_prefix="${SYFT_VERSION#v}"
+        archive="syft_${version_without_prefix}_linux_amd64.tar.gz"
+        checksums="syft_${version_without_prefix}_checksums.txt"
+        base_url="https://github.com/anchore/syft/releases/download/${SYFT_VERSION}"
+
+        curl -sSfL "${base_url}/${archive}" -o "${archive}"
+        curl -sSfL "${base_url}/${checksums}" -o "${checksums}"
+        grep "  ${archive}$" "${checksums}" | sha256sum -c -
+        tar -xzf "${archive}" syft
+        sudo install -m 0755 syft /usr/local/bin/syft
