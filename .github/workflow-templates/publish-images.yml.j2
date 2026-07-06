@@ -52,6 +52,8 @@ jobs:
         steps:
             - name: Check out repository
               uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+              with:
+                  submodules: true
 
             - name: Install uv
               uses: ./.github/actions/setup-uv
@@ -128,6 +130,8 @@ jobs:
         steps:
             - name: Check out repository
               uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+              with:
+                  submodules: true
             - name: Build architecture image
               uses: ./.github/actions/build-arch-image
               with:
@@ -146,6 +150,8 @@ jobs:
         steps:
             - name: Check out repository
               uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+              with:
+                  submodules: true
             - name: Publish image
               uses: ./.github/actions/publish-image
               env:
