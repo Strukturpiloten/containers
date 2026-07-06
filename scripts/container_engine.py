@@ -890,6 +890,7 @@ def _command_publish_image(args: argparse.Namespace) -> None:
     sudo = _tool("sudo")
     podman = _tool("podman")
     skopeo = _tool("skopeo")
+    credentials = f"{context.actor}:{context.token}"
 
     _run([sudo, podman, "manifest", "create", manifest_name])
     try:
@@ -922,12 +923,13 @@ def _command_publish_image(args: argparse.Namespace) -> None:
                     "--all",
                     "--format",
                     "oci",
+                    "--creds",
+                    credentials,
                     manifest_name,
                     f"docker://{image_ref}:{tag}",
                 ]
             )
 
-        credentials = f"{context.actor}:{context.token}"
         raw_manifest = _run(
             [sudo, skopeo, "inspect", "--raw", "--creds", credentials, f"docker://{image_ref}:{sha_tag}"],
             capture_stdout=True,
