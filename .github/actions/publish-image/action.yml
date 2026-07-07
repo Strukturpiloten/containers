@@ -75,7 +75,7 @@ runs:
           --output-dir "${RUNNER_TEMP}/image-results"
 
     - name: Attest build provenance
-      uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+      uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
       with:
         subject-digest: ${{ steps.publish.outputs.index_digest }}
         subject-name: ${{ steps.publish.outputs.image }}
@@ -83,7 +83,7 @@ runs:
 
     - name: Attest amd64 SBOM
       if: steps.publish.outputs.amd64_digest != ''
-      uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+      uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
       with:
         subject-digest: ${{ steps.publish.outputs.amd64_digest }}
         subject-name: ${{ steps.publish.outputs.image }}
@@ -93,7 +93,7 @@ runs:
 
     - name: Attest arm64 SBOM
       if: steps.publish.outputs.arm64_digest != ''
-      uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+      uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
       with:
         subject-digest: ${{ steps.publish.outputs.arm64_digest }}
         subject-name: ${{ steps.publish.outputs.image }}
