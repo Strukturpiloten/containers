@@ -12,7 +12,7 @@
             "customType": "regex",
             "description": "Track external pinned container image tags and digests in container metadata",
             "managerFilePatterns": [
-                "/^images\/(?!_example\/).+\/container\\.yaml$/"
+                "/^images\/(?!_example).+\/container\\.yaml$/"
             ],
             "matchStrings": [
                 "value:\\s*(?<depName>[^:@\\s]+(?:\\/[^:@\\s]+)*):(?<currentValue>[^@\\s]+)(?:@(?<currentDigest>sha256:[a-f0-9]+))?"
@@ -37,7 +37,7 @@
             "customType": "regex",
             "description": "Track install-php-extensions release version in Containerfiles",
             "managerFilePatterns": [
-                "/^images\/(?!_example\/).+\/Containerfile$/"
+                "/^images\/(?!_example).+\/Containerfile$/"
             ],
             "matchStrings": [
                 "ARG INSTALL_PHP_EXTENSIONS_VERSION=(?<currentValue>\\d+\\.\\d+\\.\\d+)"
