@@ -24,9 +24,9 @@
         },
         {
             "customType": "regex",
-            "description": "Track pinned uv version in GitHub workflows and composite actions",
+            "description": "Track pinned uv version in GitHub workflows, composite actions and workflow templates",
             "managerFilePatterns": [
-                "/^\\.github\/(?:workflows\/[^\/]+|actions\/[^\/]+\/action)\\.yml$/"
+                "/^\\.github\/(?:workflows\/[^\/]+|actions\/[^\/]+\/action|workflow-templates\/.+)\\.ya?ml(?:\\.j2)?$/"
             ],
             "matchStrings": [
                 "UV_VERSION:\\s*(?<currentValue>v?\\d+\\.\\d+\\.\\d+)"
@@ -52,9 +52,9 @@
         },
         {
             "customType": "regex",
-            "description": "Track pinned cosign binary releases in GitHub workflows",
+            "description": "Track pinned cosign binary releases in GitHub workflows, composite actions and workflow templates",
             "managerFilePatterns": [
-                "/^\\.github\/(?:workflows\/[^\/]+|actions\/[^\/]+\/action)\\.yml$/"
+                "/^\\.github\/(?:workflows\/[^\/]+|actions\/[^\/]+\/action|workflow-templates\\/.+)\\.ya?ml(?:\\.j2)?$/"
             ],
             "matchStrings": [
                 "cosign-release:\\s*(?<currentValue>v?\\d+\\.\\d+\\.\\d+)"
@@ -66,9 +66,9 @@
         },
         {
             "customType": "regex",
-            "description": "Track pinned Syft binary releases in GitHub workflows",
+            "description": "Track pinned Syft binary releases in GitHub workflows and workflow templates",
             "managerFilePatterns": [
-                "/^\\.github\/workflows\/[^\/]+\\.yml$/"
+                "/^\\.github\/(?:workflows\/[^\/]+|workflow-templates\/.+)\\.ya?ml(?:\\.j2)?$/"
             ],
             "matchStrings": [
                 "SYFT_VERSION:\\s*(?<currentValue>v?\\d+\\.\\d+\\.\\d+)"
@@ -79,6 +79,13 @@
             "versioningTemplate": "semver-coerced"
         }
     ],
+    "github-actions": {
+        "managerFilePatterns": [
+            "/(^|/)(workflow-templates|\\.(?:github|gitea|forgejo)/(?:workflows|actions))/.+\\.ya?ml$/",
+            "/(^|/)action\\.ya?ml$/",
+            "/^\\.github/workflow-templates/.+\\.ya?ml\\.j2$/"
+        ]
+    },
     "packageRules": [
         {
             "description": "Keep GitHub Actions pinned to immutable commits while allowing Renovate updates",
