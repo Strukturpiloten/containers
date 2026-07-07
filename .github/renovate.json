@@ -128,7 +128,7 @@
             "commitMessageTopic": "syft"
         },
         {
-            "description": "Automerge pinned container digest updates",
+            "description": "Squash-merge pinned container digest updates",
             "matchManagers": [
                 "custom.regex"
             ],
@@ -140,52 +140,18 @@
             ],
             "automerge": true,
             "automergeType": "pr",
+            "automergeStrategy": "squash",
             "platformAutomerge": true
         },
         {
-            "description": "Automerge patch updates for pinned container base images",
-            "matchManagers": [
-                "custom.regex"
-            ],
-            "matchDatasources": [
-                "docker"
-            ],
+            "description": "Squash-merge minor and patch updates for all dependencies",
             "matchUpdateTypes": [
                 "minor",
                 "patch"
             ],
             "automerge": true,
             "automergeType": "pr",
-            "platformAutomerge": true
-        },
-        {
-            "description": "Automerge patch updates for pinned GitHub Actions",
-            "matchManagers": [
-                "github-actions"
-            ],
-            "matchUpdateTypes": [
-                "minor",
-                "patch"
-            ],
-            "automerge": true,
-            "automergeType": "pr",
-            "platformAutomerge": true
-        },
-        {
-            "description": "Automerge selected patch updates for OCI tooling dependencies",
-            "matchManagers": [
-                "custom.regex"
-            ],
-            "matchPackageNames": [
-                "anchore/syft",
-                "sigstore/cosign"
-            ],
-            "matchUpdateTypes": [
-                "minor",
-                "patch"
-            ],
-            "automerge": true,
-            "automergeType": "pr",
+            "automergeStrategy": "squash",
             "platformAutomerge": true
         }
     ]
