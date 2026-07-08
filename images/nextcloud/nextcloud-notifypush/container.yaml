@@ -21,7 +21,7 @@ build:
       value: https://github.com/nextcloud/notify_push.git
       type: static
     NOTIFYPUSH_VERSION:
-      value: v1.3.0
+      value: v1.3.3
       type: static
 
 dependencies:
