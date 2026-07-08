@@ -1,0 +1,164 @@
+name: Release image
+
+on:
+    workflow_dispatch:
+        inputs:
+            image:
+                description: Image name, for example nextcloud-notifypush
+                required: true
+                type: string
+            version:
+                description: SemVer version with optional leading v and prerelease, for example 1.2.3 or v1.2.3-rc.1
+                required: true
+                type: string
+
+concurrency:
+    group: release-${{ inputs.image }}-${{ inputs.version }}
+    cancel-in-progress: false
+
+permissions:
+    contents: write
+    packages: write
+
+env:
+    PYTHON_VERSION: "3.14"
+    UV_VERSION: 0.11.28
+
+jobs:
+    release:
+        name: Release ${{ inputs.image }} ${{ inputs.version }}
+        runs-on: ubuntu-24.04
+        steps:
+            - name: Check out repository
+              uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+            - name: Install uv
+              uses: ./.github/actions/setup-uv
+              with:
+                  version: ${{ env.UV_VERSION }}
+
+            - name: Validate image metadata
+              shell: bash
+              run: |
+                  set -euo pipefail
+
+                  uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine validate
+
+            - name: Ensure release does not already exist
+              shell: bash
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  IMAGE_NAME: ${{ inputs.image }}
+                  VERSION: ${{ inputs.version }}
+              run: |
+                  set -euo pipefail
+
+                  version="${VERSION#v}"
+                  tag="${IMAGE_NAME}/v${version}"
+
+                  if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+                    echo "Release ${tag} already exists." >&2
+                    exit 1
+                  fi
+
+                  if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+                    echo "Git tag ${tag} already exists." >&2
+                    exit 1
+                  fi
+
+            - name: Install OCI tooling
+              shell: bash
+              run: |
+                  set -euo pipefail
+
+                  sudo apt-get update
+                  sudo apt-get install --yes --no-install-recommends skopeo
+
+            - name: Push SemVer tags
+              shell: bash
+              env:
+                  GITHUB_TOKEN: ${{ github.token }}
+                  GITHUB_ACTOR: ${{ github.actor }}
+              run: |
+                  set -euo pipefail
+
+                  uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine release-image \
+                    --image "${{ inputs.image }}" \
+                    --version "${{ inputs.version }}"
+
+            - name: Update version in container.yaml
+              shell: bash
+              env:
+                  IMAGE_NAME: ${{ inputs.image }}
+                  VERSION: ${{ inputs.version }}
+              run: |
+                  set -euo pipefail
+
+                  version="${VERSION#v}"
+                  metadata_file=$(find images -name container.yaml | while IFS= read -r f; do
+                    name=$(grep -m1 "^name:" "$f" | awk "{print \$2}")
+                    if [ "$name" = "$IMAGE_NAME" ]; then
+                      echo "$f"
+                      break
+                    fi
+                  done)
+
+                  if [ -z "${metadata_file}" ]; then
+                    echo "Could not find container.yaml for image ${IMAGE_NAME}." >&2
+                    exit 1
+                  fi
+
+                  sed -i "s/^version:.*/version: ${version}/" "${metadata_file}"
+                  grep -q "^version: ${version}$" "${metadata_file}"
+
+            - name: Commit version bump and create tag
+              shell: bash
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  IMAGE_NAME: ${{ inputs.image }}
+                  VERSION: ${{ inputs.version }}
+              run: |
+                  set -euo pipefail
+
+                  version="${VERSION#v}"
+                  tag="${IMAGE_NAME}/v${version}"
+
+                  git config user.name "github-actions[bot]"
+                  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+                  git add -A
+                  if git diff --cached --quiet; then
+                    echo "No changes to commit." >&2
+                    exit 1
+                  fi
+
+                  git commit -m "chore(release): ${IMAGE_NAME} v${version}"
+                  git push origin "HEAD:${GITHUB_REF_NAME}"
+
+                  git tag -a "${tag}" -m "Release ${IMAGE_NAME} v${version}"
+                  git push origin "refs/tags/${tag}"
+
+            - name: Create GitHub release
+              shell: bash
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  IMAGE_NAME: ${{ inputs.image }}
+                  VERSION: ${{ inputs.version }}
+              run: |
+                  set -euo pipefail
+
+                  version="${VERSION#v}"
+                  tag="${IMAGE_NAME}/v${version}"
+
+                  release_args=(
+                    --repo "${GITHUB_REPOSITORY}"
+                    --target "${GITHUB_REF_NAME}"
+                    --generate-notes
+                    --title "${tag}"
+                  )
+
+                  if printf '%s' "${version}" | grep -q '-'; then
+                    release_args+=(--prerelease)
+                  fi
+
+                  gh release create "${tag}" "${release_args[@]}"

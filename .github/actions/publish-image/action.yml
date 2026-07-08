@@ -72,7 +72,8 @@ runs:
           --plan "${RUNNER_TEMP}/container-build-plan/build-plan.json" \
           --entry-json '${{ inputs.entry }}' \
           --archives-dir "${RUNNER_TEMP}/oci-archives" \
-          --output-dir "${RUNNER_TEMP}/image-results"
+          --output-dir "${RUNNER_TEMP}/image-results" \
+          --default-branch "${{ inputs.default-branch }}"
 
     - name: Attest build provenance
       uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1

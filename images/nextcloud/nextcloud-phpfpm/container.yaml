@@ -1,5 +1,6 @@
 schemaVersion: 1
 name: nextcloud-phpfpm
+version: v1.0.0
 image: ghcr.io/strukturpiloten/nextcloud-phpfpm
 title: Nextcloud PHP-FPM
 description: Nextcloud PHP-FPM runtime image with PHP extensions, ffmpeg and container utilities

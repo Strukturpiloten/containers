@@ -32,6 +32,9 @@ PUBLISH_WORKFLOW_TEMPLATE_PATH = Path(".github/workflow-templates/publish-images
 OCI_LABELS_ENV_PATH = Path("shared/oci-labels.env")
 IMAGES_GLOB = "images/**/container.yaml"
 EXCLUDED_IMAGE_DIR = "_example"
+DEFAULT_BRANCH_TAGS = ["latest"]
+VERSION_PATTERN = r"^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$"
+SEMVER_PART_COUNT = 3
 
 type JsonMap = dict[str, Any]
 type JsonList = list[Any]
@@ -435,11 +438,18 @@ def _validate_inputs(metadata_file: str, image: JsonMap) -> None:
         _fail(f"{metadata_file} inputs must be non-empty strings.")
 
 
+def _validate_version(metadata_file: str, image: JsonMap) -> None:
+    version = _require_string(image, "version")
+    if not re.fullmatch(VERSION_PATTERN, version):
+        _fail(f"{metadata_file} version must match SemVer major.minor.patch with an optional prerelease: {version}.")
+
+
 def _validate_image(image: JsonMap, image_names: set[str]) -> None:
     metadata_file = image["metadataFile"]
-    for key in ("name", "image", "title", "description"):
+    for key in ("name", "image", "title", "description", "version"):
         _require_string(image, key)
 
+    _validate_version(metadata_file, image)
     build = _require_mapping(image, "build")
     _validate_build_paths(metadata_file, build)
     _validate_architectures(metadata_file, build)
@@ -581,6 +591,7 @@ def _normalize_image(image: JsonMap, level: int) -> JsonMap:
     build = image["build"]
     return {
         "name": image["name"],
+        "version": image["version"],
         "image": image["image"],
         "title": image["title"],
         "description": image["description"],
@@ -807,7 +818,7 @@ def _command_build_arch_image(args: argparse.Namespace) -> None:
     command.extend(_build_arg("OCI_TITLE", str(image["title"])))
     command.extend(_build_arg("OCI_URL", f"{context.server_url}/{context.repository}/pkgs/container/{image_name}"))
     command.extend(_build_arg("OCI_VENDOR", oci_labels["OCI_VENDOR"]))
-    command.extend(_build_arg("OCI_VERSION", f"sha-{context.sha}"))
+    command.extend(_build_arg("OCI_VERSION", str(image["version"])))
     command.extend(["--tag", local_image, "--file", str(build["containerfile"]), str(build["context"])])
 
     _write_stdout(f"Building {image_name} for {architecture}.")
@@ -885,7 +896,10 @@ def _command_publish_image(args: argparse.Namespace) -> None:
 
     image_ref = str(image["image"])
     sha_tag = f"sha-{context.sha}"
-    tags = _unique_tags([sha_tag, _safe_ref_tag(context.ref_name)])
+    tags = [sha_tag, _safe_ref_tag(context.ref_name)]
+    if context.ref_name == args.default_branch:
+        tags.extend(DEFAULT_BRANCH_TAGS)
+    tags = _unique_tags(tags)
     manifest_name = f"{image_name}-{context.run_id}-{context.run_attempt}"
     sudo = _tool("sudo")
     podman = _tool("podman")
@@ -999,6 +1013,71 @@ def _command_validate(_args: argparse.Namespace) -> None:
     _write_stdout(f"Validated {len(images)} image metadata file(s).")
 
 
+def _semver_tags(version: str) -> list[str]:
+    """Expand a SemVer version into v<major.minor.patch>, v<major.minor>, and v<major> tags."""
+    stable = version.split("-", maxsplit=1)[0]
+    parts = stable.split(".")
+    if len(parts) != SEMVER_PART_COUNT or not all(part.isdigit() for part in parts):
+        _fail(f"Invalid SemVer version: {version}")
+
+    return [f"v{version}", f"v{parts[0]}.{parts[1]}", f"v{parts[0]}"]
+
+
+def _command_release_image(args: argparse.Namespace) -> None:
+    image_name = args.image
+    version = args.version.lstrip("v")
+    if not re.fullmatch(VERSION_PATTERN, version):
+        _fail(f"Version must match SemVer major.minor.patch with an optional prerelease: {version}.")
+
+    context = _github_context(require_token=True)
+    if context.token is None:
+        _fail("GITHUB_TOKEN is required to release images.")
+
+    images = _load_images()
+    image = next((img for img in images if img.get("name") == image_name), None)
+    if image is None:
+        _fail(f"Image {image_name} not found in repository metadata.")
+
+    image_ref = str(image["image"])
+    skopeo = _tool("skopeo")
+    credentials = f"{context.actor}:{context.token}"
+
+    source_tag = "latest"
+    index_digest = _run(
+        [skopeo, "inspect", "--creds", credentials, "--format", "{{.Digest}}", f"docker://{image_ref}:{source_tag}"],
+        capture_stdout=True,
+    ).strip()
+
+    if not index_digest.startswith("sha256:"):
+        _fail(f"Could not resolve digest for {image_ref}:{source_tag}.")
+
+    release_tags = _semver_tags(version)
+    for tag in release_tags:
+        _write_stdout(f"Tagging {image_ref}:{tag} -> {index_digest}")
+        _run(
+            [
+                skopeo,
+                "copy",
+                "--all",
+                "--creds",
+                credentials,
+                f"docker://{image_ref}@{index_digest}",
+                f"docker://{image_ref}:{tag}",
+            ]
+        )
+
+    _write_stdout(f"Released {image_name} version {version}: {', '.join(release_tags)} -> {image_ref}@{index_digest}")
+    _write_github_outputs(
+        {
+            "image_name": image_name,
+            "image": image_ref,
+            "version": version,
+            "index_digest": index_digest,
+            "tags": ",".join(release_tags),
+        }
+    )
+
+
 def _command_plan(args: argparse.Namespace) -> None:
     images = _load_images()
     _validate_images(images)
@@ -1053,11 +1132,17 @@ def _parser() -> argparse.ArgumentParser:
     publish_parser.add_argument("--entry-json", required=True)
     publish_parser.add_argument("--archives-dir", required=True)
     publish_parser.add_argument("--output-dir", required=True)
+    publish_parser.add_argument("--default-branch", required=True)
     publish_parser.set_defaults(func=_command_publish_image)
 
     generate_workflow_parser = subparsers.add_parser("generate-workflow")
     generate_workflow_parser.add_argument("--check", action="store_true")
     generate_workflow_parser.set_defaults(func=_command_generate_workflow)
+
+    release_parser = subparsers.add_parser("release-image")
+    release_parser.add_argument("--image", required=True)
+    release_parser.add_argument("--version", required=True)
+    release_parser.set_defaults(func=_command_release_image)
 
     return root_parser
 

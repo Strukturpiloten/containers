@@ -252,3 +252,52 @@ Local builds can tag images as `localhost/<image>:dev` and should not sign, atte
 
 - Whether scheduled rebuilds should select all images or only images with an explicit `build.scheduled: true` flag.
 - Whether shared utilities should be copied into this monorepo or kept as a submodule under `shared/container-utilities`.
+
+## Per-image versioning and releases
+
+Each image has its own independent SemVer version, tracked in the `version` field of its `container.yaml`. This allows releasing one image without affecting others, for example bumping `nextcloud-notifypush` from `0.1.0` to `0.2.0` after a Rust base image update without releasing new `nextcloud-phpfpm` or `typo3-phpfpm` versions.
+
+### Tag strategy
+
+| Tag type | Example | Mutability | When pushed |
+|----------|---------|------------|-------------|
+| `sha-<commit>` | `sha-a1b2c3...` | immutable | Every build on `main` |
+| `<branch>` | `main` | mutable | Every build on `main` |
+| `latest` | `latest` | mutable | Every build on default branch |
+| `v<major>.<minor>.<patch>` | `v1.2.3` | immutable | Release workflow |
+| `v<major>.<minor>` | `v1.2` | mutable | Release workflow |
+| `v<major>` | `v1` | mutable | Release workflow |
+
+### Release workflow
+
+The `release-image.yml` workflow is triggered manually with `image` and `version` inputs:
+
+1. Validates image metadata.
+2. Resolves the current `:latest` digest from GHCR.
+3. Pushes `v<x.y.z>`, `v<x.y>`, and `v<x>` tags pointing to that digest via `skopeo copy`.
+4. Updates the `version` field in the image's `container.yaml`.
+5. Commits the version bump and creates a git tag `<image>/v<x.y.z>`.
+6. Creates a GitHub Release with auto-generated notes.
+
+Git tags are prefixed with the image name (`<image>/v<x.y.z>`) to avoid collisions between independent image release lines.
+
+### Consumer pinning
+
+Consumer repositories (for example `typo3-container`, `nextcloud`) should always reference images with both a version tag and a digest:
+
+```text
+ghcr.io/strukturpiloten/typo3-phpfpm:v1.2.3@sha256:<digest>
+```
+
+The version tag provides readability, the digest guarantees immutability.
+
+### Renovate interaction
+
+Renovate manages dependency updates (base images, GitHub Actions, tooling), not image versions. When Renovate updates a base image in `container.yaml`:
+
+1. Renovate creates a PR with the updated base image reference.
+2. Digest and minor/patch updates are automerged per the existing Renovate rules.
+3. After merge, `publish-images.yml` rebuilds the affected image and its reverse dependencies, pushing `sha-<commit>`, `main`, and `latest`.
+4. A human decides when to create a SemVer release via the `release-image.yml` workflow.
+
+Renovate does not create issues or PRs for image version bumps. Version bumps are a manual, deliberate decision.

@@ -12,6 +12,11 @@ schemaVersion: 1
 # Must be lowercase and unique across the repository.
 name: example-servicename
 
+# Semantic version for this image. Independent per image.
+# Must match ^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$
+# Updated by the release workflow when a new version is published.
+version: v0.1.0
+
 # Full registry reference for the published image.
 image: ghcr.io/strukturpiloten/example-servicename
 

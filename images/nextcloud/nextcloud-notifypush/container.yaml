@@ -1,5 +1,6 @@
 schemaVersion: 1
 name: nextcloud-notifypush
+version: v1.0.0
 image: ghcr.io/strukturpiloten/nextcloud-notifypush
 title: Nextcloud notify_push
 description: Nextcloud notify_push binary built from source with a minimal Alpine runtime
