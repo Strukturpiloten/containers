@@ -1,0 +1,33 @@
+schemaVersion: 1
+name: nextcloud-phpfpm
+image: ghcr.io/strukturpiloten/nextcloud-phpfpm
+title: Nextcloud PHP-FPM
+description: Nextcloud PHP-FPM runtime image with PHP extensions, ffmpeg and container utilities
+
+build:
+  context: .
+  containerfile: images/nextcloud/nextcloud-phpfpm/Containerfile
+  architectures:
+    - amd64
+    - arm64
+  args:
+    BASE_IMAGE:
+      value: docker.io/php:8.4.23-fpm-alpine3.24@sha256:913ddd6934a805429618a16aa36da47cd8a8aec8b2f111c294936ba4003fded6
+      type: external-image
+    PODMAN_NEXTCLOUD_DATA_DIR_CONTAINER:
+      value: /var/www/nextcloud
+      type: static
+
+dependencies:
+  internal: []
+  external:
+    - name: php
+      image: docker.io/php
+      arg: BASE_IMAGE
+
+inputs:
+  - .github/renovate.json
+  - .github/workflows/publish-images.yml
+  - images/nextcloud/nextcloud-phpfpm/**
+  - shared/container-utilities/**
+  - shared/oci-labels.env
