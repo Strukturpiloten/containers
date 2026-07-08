@@ -3,161 +3,161 @@
 name: Publish images
 
 on:
-    push:
-        branches:
-            - main
-        paths:
-            - ".containerignore"
-            - ".github/actions/**"
-            - ".github/renovate.json"
-            - ".github/workflow-templates/**"
-            - ".github/workflows/publish-images.yml"
-            - "images/**"
-            - "pyproject.toml"
-            - "scripts/**"
-            - "shared/**"
-            - "uv.lock"
-    schedule:
-        - cron: "47 3 * * *"
-    workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".containerignore"
+      - ".github/actions/**"
+      - ".github/renovate.json"
+      - ".github/workflow-templates/**"
+      - ".github/workflows/publish-images.yml"
+      - "images/**"
+      - "pyproject.toml"
+      - "scripts/**"
+      - "shared/**"
+      - "uv.lock"
+  schedule:
+    - cron: "47 3 * * *"
+  workflow_dispatch:
 
 concurrency:
-    group: publish-images-${{ github.ref }}
-    cancel-in-progress: true
+  group: publish-images-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
-    attestations: write
-    artifact-metadata: write
-    contents: read
-    id-token: write
-    packages: write
+  attestations: write
+  artifact-metadata: write
+  contents: read
+  id-token: write
+  packages: write
 
 env:
-    PYTHON_VERSION: "3.14"
-    SYFT_VERSION: v1.46.0
-    UV_VERSION: 0.11.28
+  PYTHON_VERSION: "3.14"
+  SYFT_VERSION: v1.46.0
+  UV_VERSION: 0.11.28
 
 jobs:
-    plan:
-        name: Plan image builds
-        runs-on: ubuntu-24.04
-        outputs:
-            has_builds: ${{ steps.outputs.outputs.has_builds }}
+  plan:
+    name: Plan image builds
+    runs-on: ubuntu-24.04
+    outputs:
+      has_builds: ${{ steps.outputs.outputs.has_builds }}
 [% for stage in stages %]
-            stage_[[ stage ]]_has_builds: ${{ steps.outputs.outputs.stage_[[ stage ]]_has_builds }}
-            stage_[[ stage ]]_build_matrix: ${{ steps.outputs.outputs.stage_[[ stage ]]_build_matrix }}
-            stage_[[ stage ]]_publish_matrix: ${{ steps.outputs.outputs.stage_[[ stage ]]_publish_matrix }}
+      stage_[[ stage ]]_has_builds: ${{ steps.outputs.outputs.stage_[[ stage ]]_has_builds }}
+      stage_[[ stage ]]_build_matrix: ${{ steps.outputs.outputs.stage_[[ stage ]]_build_matrix }}
+      stage_[[ stage ]]_publish_matrix: ${{ steps.outputs.outputs.stage_[[ stage ]]_publish_matrix }}
 [% endfor %]
 
-        steps:
-            - name: Check out repository
-              uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-              with:
-                  submodules: true
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          submodules: true
 
-            - name: Install uv
-              uses: ./.github/actions/setup-uv
-              with:
-                  version: ${{ env.UV_VERSION }}
+      - name: Install uv
+        uses: ./.github/actions/setup-uv
+        with:
+          version: ${{ env.UV_VERSION }}
 
-            - name: Check generated workflow
-              shell: bash
-              run: |
-                  set -euo pipefail
+      - name: Check generated workflow
+        shell: bash
+        run: |
+          set -euo pipefail
 
-                  uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine generate-workflow --check
+          uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine generate-workflow --check
 
-            - name: Check Python formatting and linting
-              shell: bash
-              run: |
-                  set -euo pipefail
+      - name: Check Python formatting and linting
+        shell: bash
+        run: |
+          set -euo pipefail
 
-                  uv run --frozen --python "${PYTHON_VERSION}" ruff format --check .
-                  uv run --frozen --python "${PYTHON_VERSION}" ruff check --fix --exit-non-zero-on-fix .
+          uv run --frozen --python "${PYTHON_VERSION}" ruff format --check .
+          uv run --frozen --python "${PYTHON_VERSION}" ruff check --fix --exit-non-zero-on-fix .
 
-            - name: Validate container metadata
-              shell: bash
-              run: |
-                  set -euo pipefail
+      - name: Validate container metadata
+        shell: bash
+        run: |
+          set -euo pipefail
 
-                  uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine validate
+          uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine validate
 
-            - name: Create build plan
-              shell: bash
-              env:
-                  BEFORE: ${{ github.event.before || '' }}
-              run: |
-                  set -euo pipefail
+      - name: Create build plan
+        shell: bash
+        env:
+          BEFORE: ${{ github.event.before || '' }}
+        run: |
+          set -euo pipefail
 
-                  uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine plan \
-                    --event-name "${GITHUB_EVENT_NAME}" \
-                    --ref-name "${GITHUB_REF_NAME}" \
-                    --default-branch "${{ github.event.repository.default_branch }}" \
-                    --before "${BEFORE}" \
-                    --sha "${GITHUB_SHA}" \
-                    --output build-plan.json
+          uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine plan \
+            --event-name "${GITHUB_EVENT_NAME}" \
+            --ref-name "${GITHUB_REF_NAME}" \
+            --default-branch "${{ github.event.repository.default_branch }}" \
+            --before "${BEFORE}" \
+            --sha "${GITHUB_SHA}" \
+            --output build-plan.json
 
-            - name: Write workflow outputs
-              id: outputs
-              shell: bash
-              run: |
-                  set -euo pipefail
+      - name: Write workflow outputs
+        id: outputs
+        shell: bash
+        run: |
+          set -euo pipefail
 
-                  uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine github-outputs build-plan.json >> "$GITHUB_OUTPUT"
+          uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine github-outputs build-plan.json >> "$GITHUB_OUTPUT"
 
-            - name: Upload build plan
-              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-              with:
-                  name: container-build-plan
-                  path: build-plan.json
-                  if-no-files-found: error
+      - name: Upload build plan
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: container-build-plan
+          path: build-plan.json
+          if-no-files-found: error
 
 [% for stage in stages %]
-    build-stage-[[ stage ]]:
-        name: Build stage [[ stage ]] ${{ matrix.name }} ${{ matrix.arch }}
+  build-stage-[[ stage ]]:
+    name: Build stage [[ stage ]] ${{ matrix.name }} ${{ matrix.arch }}
 [% if stage == 0 %]
-        needs: plan
+    needs: plan
 [% else %]
-        needs:
-            - plan
-            - publish-stage-[[ stage - 1 ]]
+    needs:
+      - plan
+      - publish-stage-[[ stage - 1 ]]
 [% endif %]
-        if: needs.plan.outputs.stage_[[ stage ]]_has_builds == 'true'
-        runs-on: ${{ matrix.runner }}
-        strategy:
-            fail-fast: false
-            matrix: ${{ fromJSON(needs.plan.outputs.stage_[[ stage ]]_build_matrix) }}
-        steps:
-            - name: Check out repository
-              uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-              with:
-                  submodules: true
-            - name: Build architecture image
-              uses: ./.github/actions/build-arch-image
-              with:
-                  entry: ${{ toJSON(matrix) }}
+    if: needs.plan.outputs.stage_[[ stage ]]_has_builds == 'true'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.stage_[[ stage ]]_build_matrix) }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          submodules: true
+      - name: Build architecture image
+        uses: ./.github/actions/build-arch-image
+        with:
+          entry: ${{ toJSON(matrix) }}
 
-    publish-stage-[[ stage ]]:
-        name: Publish stage [[ stage ]] ${{ matrix.name }}
-        needs:
-            - plan
-            - build-stage-[[ stage ]]
-        if: needs.plan.outputs.stage_[[ stage ]]_has_builds == 'true'
-        runs-on: ubuntu-24.04
-        strategy:
-            fail-fast: false
-            matrix: ${{ fromJSON(needs.plan.outputs.stage_[[ stage ]]_publish_matrix) }}
-        steps:
-            - name: Check out repository
-              uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-              with:
-                  submodules: true
-            - name: Publish image
-              uses: ./.github/actions/publish-image
-              env:
-                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-              with:
-                  default-branch: ${{ github.event.repository.default_branch }}
-                  entry: ${{ toJSON(matrix) }}
-                  syft-version: ${{ env.SYFT_VERSION }}
+  publish-stage-[[ stage ]]:
+    name: Publish stage [[ stage ]] ${{ matrix.name }}
+    needs:
+      - plan
+      - build-stage-[[ stage ]]
+    if: needs.plan.outputs.stage_[[ stage ]]_has_builds == 'true'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.stage_[[ stage ]]_publish_matrix) }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          submodules: true
+      - name: Publish image
+        uses: ./.github/actions/publish-image
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          default-branch: ${{ github.event.repository.default_branch }}
+          entry: ${{ toJSON(matrix) }}
+          syft-version: ${{ env.SYFT_VERSION }}
 [% endfor %]

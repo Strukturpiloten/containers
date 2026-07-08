@@ -33,7 +33,7 @@ OCI_LABELS_ENV_PATH = Path("shared/oci-labels.env")
 IMAGES_GLOB = "images/**/container.yaml"
 EXCLUDED_IMAGE_DIR = "_example"
 DEFAULT_BRANCH_TAGS = ["latest"]
-VERSION_PATTERN = r"^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$"
+VERSION_PATTERN = r"^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$"
 SEMVER_PART_COUNT = 3
 
 type JsonMap = dict[str, Any]
@@ -438,6 +438,11 @@ def _validate_inputs(metadata_file: str, image: JsonMap) -> None:
         _fail(f"{metadata_file} inputs must be non-empty strings.")
 
 
+def _normalize_version(version: str) -> str:
+    """Strip an optional leading v from a SemVer version string."""
+    return version.removeprefix("v")
+
+
 def _validate_version(metadata_file: str, image: JsonMap) -> None:
     version = _require_string(image, "version")
     if not re.fullmatch(VERSION_PATTERN, version):
@@ -591,7 +596,7 @@ def _normalize_image(image: JsonMap, level: int) -> JsonMap:
     build = image["build"]
     return {
         "name": image["name"],
-        "version": image["version"],
+        "version": _normalize_version(image["version"]),
         "image": image["image"],
         "title": image["title"],
         "description": image["description"],
@@ -1015,17 +1020,18 @@ def _command_validate(_args: argparse.Namespace) -> None:
 
 def _semver_tags(version: str) -> list[str]:
     """Expand a SemVer version into v<major.minor.patch>, v<major.minor>, and v<major> tags."""
-    stable = version.split("-", maxsplit=1)[0]
+    normalized = _normalize_version(version)
+    stable = normalized.split("-", maxsplit=1)[0]
     parts = stable.split(".")
     if len(parts) != SEMVER_PART_COUNT or not all(part.isdigit() for part in parts):
         _fail(f"Invalid SemVer version: {version}")
 
-    return [f"v{version}", f"v{parts[0]}.{parts[1]}", f"v{parts[0]}"]
+    return [f"v{normalized}", f"v{parts[0]}.{parts[1]}", f"v{parts[0]}"]
 
 
 def _command_release_image(args: argparse.Namespace) -> None:
     image_name = args.image
-    version = args.version.lstrip("v")
+    version = _normalize_version(args.version)
     if not re.fullmatch(VERSION_PATTERN, version):
         _fail(f"Version must match SemVer major.minor.patch with an optional prerelease: {version}.")
 

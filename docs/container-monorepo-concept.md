@@ -259,14 +259,14 @@ Each image has its own independent SemVer version, tracked in the `version` fiel
 
 ### Tag strategy
 
-| Tag type | Example | Mutability | When pushed |
-|----------|---------|------------|-------------|
-| `sha-<commit>` | `sha-a1b2c3...` | immutable | Every build on `main` |
-| `<branch>` | `main` | mutable | Every build on `main` |
-| `latest` | `latest` | mutable | Every build on default branch |
-| `v<major>.<minor>.<patch>` | `v1.2.3` | immutable | Release workflow |
-| `v<major>.<minor>` | `v1.2` | mutable | Release workflow |
-| `v<major>` | `v1` | mutable | Release workflow |
+| Tag type                   | Example         | Mutability | When pushed                   |
+| -------------------------- | --------------- | ---------- | ----------------------------- |
+| `sha-<commit>`             | `sha-a1b2c3...` | immutable  | Every build on `main`         |
+| `<branch>`                 | `main`          | mutable    | Every build on `main`         |
+| `latest`                   | `latest`        | mutable    | Every build on default branch |
+| `v<major>.<minor>.<patch>` | `v1.2.3`        | immutable  | Release workflow              |
+| `v<major>.<minor>`         | `v1.2`          | mutable    | Release workflow              |
+| `v<major>`                 | `v1`            | mutable    | Release workflow              |
 
 ### Release workflow
 
