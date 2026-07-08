@@ -1,0 +1,41 @@
+schemaVersion: 1
+name: nextcloud-notifypush
+image: ghcr.io/strukturpiloten/nextcloud-notifypush
+title: Nextcloud notify_push
+description: Nextcloud notify_push binary built from source with a minimal Alpine runtime
+
+build:
+  context: .
+  containerfile: images/nextcloud/nextcloud-notifypush/Containerfile
+  architectures:
+    - amd64
+    - arm64
+  args:
+    BASE_IMAGE:
+      value: docker.io/rust:1.93.1-alpine3.23@sha256:4fec02de605563c297c78a31064c8335bc004fa2b0bf406b1b99441da64e2d2d
+      type: external-image
+    RUNTIME_IMAGE:
+      value: docker.io/alpine:3.23.4@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
+      type: external-image
+    NOTIFYPUSH_REPOSITORY:
+      value: https://github.com/nextcloud/notify_push.git
+      type: static
+    NOTIFYPUSH_VERSION:
+      value: v1.3.0
+      type: static
+
+dependencies:
+  internal: []
+  external:
+    - name: rust
+      image: docker.io/rust
+      arg: BASE_IMAGE
+    - name: alpine
+      image: docker.io/alpine
+      arg: RUNTIME_IMAGE
+
+inputs:
+  - .github/renovate.json
+  - .github/workflows/publish-images.yml
+  - images/nextcloud/nextcloud-notifypush/**
+  - shared/oci-labels.env

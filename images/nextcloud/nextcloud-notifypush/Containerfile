@@ -1,0 +1,80 @@
+ARG BASE_IMAGE
+ARG RUNTIME_IMAGE
+
+FROM ${BASE_IMAGE} AS build
+
+ARG OCI_BASE_DIGEST=""
+ARG OCI_CREATED=""
+ARG OCI_DESCRIPTION="Nextcloud notify_push binary built from source with a minimal Alpine runtime"
+ARG OCI_DOCUMENTATION=""
+ARG OCI_LICENSES=""
+ARG OCI_REVISION=""
+ARG OCI_SOURCE=""
+ARG OCI_TITLE="Nextcloud notify_push"
+ARG OCI_URL=""
+ARG OCI_VENDOR=""
+ARG OCI_VERSION=""
+ARG NOTIFYPUSH_REPOSITORY
+ARG NOTIFYPUSH_VERSION
+ARG TARGETARCH
+
+WORKDIR /notify_push
+
+RUN set -eux; \
+    apk update && \
+    apk upgrade && \
+    apk add --no-cache \
+    git; \
+    case "${TARGETARCH}" in \
+    amd64) rust_target="x86_64-unknown-linux-musl" ;; \
+    arm64) rust_target="aarch64-unknown-linux-musl" ;; \
+    *) echo "Unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    rustup target add "${rust_target}"; \
+    git clone --branch "${NOTIFYPUSH_VERSION}" "${NOTIFYPUSH_REPOSITORY}" .; \
+    cargo build --release --target="${rust_target}"
+
+FROM ${RUNTIME_IMAGE} AS final
+
+ARG OCI_BASE_DIGEST=""
+ARG OCI_CREATED=""
+ARG OCI_DESCRIPTION="Nextcloud notify_push binary built from source with a minimal Alpine runtime"
+ARG OCI_DOCUMENTATION=""
+ARG OCI_LICENSES=""
+ARG OCI_REVISION=""
+ARG OCI_SOURCE=""
+ARG OCI_TITLE="Nextcloud notify_push"
+ARG OCI_URL=""
+ARG OCI_VENDOR=""
+ARG OCI_VERSION=""
+ARG TARGETARCH
+
+LABEL org.opencontainers.image.base.digest="${OCI_BASE_DIGEST}" \
+    org.opencontainers.image.base.name="${RUNTIME_IMAGE}" \
+    org.opencontainers.image.created="${OCI_CREATED}" \
+    org.opencontainers.image.description="${OCI_DESCRIPTION}" \
+    org.opencontainers.image.documentation="${OCI_DOCUMENTATION}" \
+    org.opencontainers.image.licenses="${OCI_LICENSES}" \
+    org.opencontainers.image.revision="${OCI_REVISION}" \
+    org.opencontainers.image.source="${OCI_SOURCE}" \
+    org.opencontainers.image.title="${OCI_TITLE}" \
+    org.opencontainers.image.url="${OCI_URL}" \
+    org.opencontainers.image.vendor="${OCI_VENDOR}" \
+    org.opencontainers.image.version="${OCI_VERSION}"
+
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+    amd64) rust_target="x86_64-unknown-linux-musl" ;; \
+    arm64) rust_target="aarch64-unknown-linux-musl" ;; \
+    *) echo "Unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    mkdir -p /notify_push/target
+
+COPY --from=build /notify_push/target/*/release/notify_push /notify_push
+
+# Alpine guest user
+USER 405
+
+EXPOSE 7867
+
+CMD ["/notify_push", "/nextcloud/config/config.php"]

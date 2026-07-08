@@ -52,6 +52,20 @@
         },
         {
             "customType": "regex",
+            "description": "Track NOTIFYPUSH_VERSION in container metadata",
+            "managerFilePatterns": [
+                "/^images\/nextcloud\/nextcloud-notifypush\/container\\.yaml$/"
+            ],
+            "matchStrings": [
+                "NOTIFYPUSH_VERSION:\\s*\\n\\s*value:\\s*(?<currentValue>v?\\d+\\.\\d+\\.\\d+)"
+            ],
+            "depNameTemplate": "nextcloud/notify_push",
+            "packageNameTemplate": "nextcloud/notify_push",
+            "datasourceTemplate": "github-releases",
+            "versioningTemplate": "semver-coerced"
+        },
+        {
+            "customType": "regex",
             "description": "Track pinned cosign binary releases in GitHub workflows, composite actions and workflow templates",
             "managerFilePatterns": [
                 "/^\\.github\/(?:workflows\/[^\/]+|actions\/[^\/]+\/action|workflow-templates\\/.+)\\.ya?ml(?:\\.j2)?$/"
