@@ -32,6 +32,7 @@ PUBLISH_WORKFLOW_TEMPLATE_PATH = Path(".github/workflow-templates/publish-images
 OCI_LABELS_ENV_PATH = Path("shared/oci-labels.env")
 IMAGES_GLOB = "images/**/container.yaml"
 EXCLUDED_IMAGE_DIR = "_example"
+DEFAULT_BRANCH_TAGS = ["latest"]
 
 type JsonMap = dict[str, Any]
 type JsonList = list[Any]
@@ -885,7 +886,10 @@ def _command_publish_image(args: argparse.Namespace) -> None:
 
     image_ref = str(image["image"])
     sha_tag = f"sha-{context.sha}"
-    tags = _unique_tags([sha_tag, _safe_ref_tag(context.ref_name)])
+    tags = [sha_tag, _safe_ref_tag(context.ref_name)]
+    if context.ref_name == args.default_branch:
+        tags.extend(DEFAULT_BRANCH_TAGS)
+    tags = _unique_tags(tags)
     manifest_name = f"{image_name}-{context.run_id}-{context.run_attempt}"
     sudo = _tool("sudo")
     podman = _tool("podman")
@@ -1053,6 +1057,7 @@ def _parser() -> argparse.ArgumentParser:
     publish_parser.add_argument("--entry-json", required=True)
     publish_parser.add_argument("--archives-dir", required=True)
     publish_parser.add_argument("--output-dir", required=True)
+    publish_parser.add_argument("--default-branch", required=True)
     publish_parser.set_defaults(func=_command_publish_image)
 
     generate_workflow_parser = subparsers.add_parser("generate-workflow")
