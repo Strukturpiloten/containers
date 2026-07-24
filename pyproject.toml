@@ -21,6 +21,7 @@ target-version = "py314"
 [tool.ruff.lint]
 ignore = [
   "COM812",
+  "CPY",
   "D203",
   "D213",
 ]
