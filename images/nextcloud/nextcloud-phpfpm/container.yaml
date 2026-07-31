@@ -13,7 +13,7 @@ build:
     - arm64
   args:
     BASE_IMAGE:
-      value: docker.io/php:8.5.9-fpm-alpine3.24@sha256:c665ef7b26d2bf5fe94a1b3fcfc8243741b11c765de592114c27268e2cc9017e
+      value: docker.io/php:8.5.9-fpm-alpine3.24@sha256:9dc81f4086ea5402227a6bcc489b04b4baba12394624d9621faa92ed812fb8ee
       type: external-image
     PODMAN_NEXTCLOUD_DATA_DIR_CONTAINER:
       value: /var/www/nextcloud
