@@ -61,6 +61,9 @@ containers/
   .containerignore
   .github/
     renovate.json
+    workflow-templates/
+      publish-images.yml.j2
+      release-image.yml.j2
     workflows/
       ci.yml
       publish-images.yml
@@ -201,7 +204,7 @@ Jobs:
    - Refuse to overwrite an existing SHA tag. Every rebuild retains its immutable unique run tag and digest for audit and rollback.
    - Write one result artifact per image containing its exact index and architecture digests. Later dependency stages consume these results as `image@sha256:...` references.
 
-The important part is that the build planner owns dependency order. GitHub Actions matrices can build independent images in parallel, but images in later dependency stages must wait for earlier stages so they can consume exact internal digests. Because GitHub Actions `needs` relationships are static YAML, the workflow file is generated and checked in. The generator computes the required number of dependency stages from image metadata and renders `.github/workflow-templates/publish-images.yml.j2` with Jinja2.
+The important part is that the build planner owns dependency order. GitHub Actions matrices can build independent images in parallel, but images in later dependency stages must wait for earlier stages so they can consume exact internal digests. Because GitHub Actions `needs` relationships and manual choice options are static YAML, the publish and release workflow files are generated and checked in. The generator computes the required number of dependency stages and release image choices from metadata, then renders the templates under `.github/workflow-templates` with Jinja2.
 
 Regenerate and check the workflow with:
 
@@ -295,8 +298,8 @@ Releases use a two-phase process so the registry image, OCI labels, Git commit, 
 
 1. Change the image's `version` in `container.yaml` through a pull request and merge it to the default branch.
 2. `publish-images.yml` builds that commit, verifies it, and promotes its immutable `sha-<commit>` snapshot with matching revision and version labels.
-3. Trigger `release-image.yml` from the default branch with the image name, already-merged version, and full source commit SHA. The source commit must be part of the default branch.
-4. The workflow resolves only `sha-<source-commit>`, verifies its digest and OCI revision/version labels, and establishes the initial SemVer tags without replacing another release.
+3. Trigger `release-image.yml` from the default branch, select the image from the metadata-generated dropdown, and enter the full source commit SHA. The source commit must be part of the default branch.
+4. The workflow reads the version from that commit's `container.yaml`, resolves only `sha-<source-commit>`, verifies its digest and OCI revision/version labels, and establishes the initial SemVer tags without replacing another release.
 5. Stable releases promote `v<x.y.z>`, `v<x.y>`, and `v<x>`; prereleases promote only their exact prerelease tag.
 6. GitHub creates `<image>/v<x.y.z>` at the same commit together with the GitHub Release.
 

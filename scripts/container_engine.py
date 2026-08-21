@@ -42,6 +42,8 @@ RUNNERS = {
 
 PUBLISH_WORKFLOW_PATH = Path(".github/workflows/publish-images.yml")
 PUBLISH_WORKFLOW_TEMPLATE_PATH = Path(".github/workflow-templates/publish-images.yml.j2")
+RELEASE_WORKFLOW_PATH = Path(".github/workflows/release-image.yml")
+RELEASE_WORKFLOW_TEMPLATE_PATH = Path(".github/workflow-templates/release-image.yml.j2")
 OCI_LABELS_ENV_PATH = Path("shared/oci-labels.env")
 CONTAINER_SCHEMA_PATH = Path("container.schema.json")
 IMAGES_GLOB = "images/**/container.yaml"
@@ -958,8 +960,8 @@ def _stage_count(images: list[JsonMap]) -> int:
     return max(1, len(_topological_levels(images)))
 
 
-def _publish_workflow(stage_count: int) -> str:
-    environment = Environment(
+def _workflow_environment() -> Environment:
+    return Environment(
         loader=FileSystemLoader(_repo_root() / PUBLISH_WORKFLOW_TEMPLATE_PATH.parent),
         keep_trailing_newline=True,
         trim_blocks=True,
@@ -971,27 +973,50 @@ def _publish_workflow(stage_count: int) -> str:
         autoescape=True,
         undefined=StrictUndefined,
     )
+
+
+def _publish_workflow(stage_count: int) -> str:
+    environment = _workflow_environment()
     template = environment.get_template(PUBLISH_WORKFLOW_TEMPLATE_PATH.name)
     return template.render(stages=list(range(stage_count)), single_stage=stage_count == 1)
+
+
+def _release_workflow(images: list[JsonMap]) -> str:
+    environment = _workflow_environment()
+    template = environment.get_template(RELEASE_WORKFLOW_TEMPLATE_PATH.name)
+    return template.render(image_names=sorted(str(image["name"]) for image in images))
 
 
 def _command_generate_workflow(args: argparse.Namespace) -> None:
     images = _load_images()
     _validate_images(images)
     stage_count = _stage_count(images)
-    workflow = _publish_workflow(stage_count)
-    workflow_path = _repo_root() / PUBLISH_WORKFLOW_PATH
+    workflows = (
+        (PUBLISH_WORKFLOW_PATH, _publish_workflow(stage_count)),
+        (RELEASE_WORKFLOW_PATH, _release_workflow(images)),
+    )
 
     if args.check:
-        current = workflow_path.read_text(encoding="utf-8") if workflow_path.exists() else ""
-        if current != workflow:
-            _fail(f"{PUBLISH_WORKFLOW_PATH} is stale. Run generate-workflow without --check.")
-        _write_stdout(f"{PUBLISH_WORKFLOW_PATH} is up to date with {stage_count} dependency stage(s).")
+        stale_paths = [
+            path
+            for path, workflow in workflows
+            if not (_repo_root() / path).exists() or (_repo_root() / path).read_text(encoding="utf-8") != workflow
+        ]
+        if stale_paths:
+            _fail(f"{', '.join(str(path) for path in stale_paths)} is stale. Run generate-workflow without --check.")
+        _write_stdout(
+            f"Generated workflows are up to date with {stage_count} dependency stage(s) "
+            f"and {len(images)} image choice(s)."
+        )
         return
 
-    workflow_path.parent.mkdir(parents=True, exist_ok=True)
-    workflow_path.write_text(workflow, encoding="utf-8")
-    _write_stdout(f"Wrote {PUBLISH_WORKFLOW_PATH} with {stage_count} dependency stage(s).")
+    for path, workflow in workflows:
+        workflow_path = _repo_root() / path
+        workflow_path.parent.mkdir(parents=True, exist_ok=True)
+        workflow_path.write_text(workflow, encoding="utf-8")
+    _write_stdout(
+        f"Wrote generated workflows with {stage_count} dependency stage(s) and {len(images)} image choice(s)."
+    )
 
 
 def _dependency_result_reference(
@@ -1447,30 +1472,39 @@ def _command_validate(_args: argparse.Namespace) -> None:
     _write_stdout(f"Validated {len(images)} image metadata file(s).")
 
 
-def _command_release_image(args: argparse.Namespace) -> None:
-    image_name = args.image
-    version = normalize_version(args.version)
+def _release_metadata(image_name: str) -> tuple[JsonMap, str, list[str]]:
+    images = _load_images()
+    _validate_images(images)
+    image = next((candidate for candidate in images if candidate.get("name") == image_name), None)
+    if image is None:
+        _fail(f"Image {image_name} not found in repository metadata.")
+
+    version = normalize_version(str(image["version"]))
     try:
         release_tags = semver_tags(version)
     except ValueError as error:
         _fail(str(error))
+    return image, version, release_tags
+
+
+def _command_release_info(args: argparse.Namespace) -> None:
+    image, version, release_tags = _release_metadata(args.image)
+    _write_github_outputs(
+        {
+            "image_name": str(image["name"]),
+            "version": version,
+            "release_tag": release_tags[0],
+        }
+    )
+
+
+def _command_release_image(args: argparse.Namespace) -> None:
+    image_name = args.image
+    image, version, release_tags = _release_metadata(image_name)
 
     context = _github_context(require_token=False)
     if context.ref_name != args.default_branch:
         _fail(f"Releases must run from the default branch {args.default_branch}, not {context.ref_name}.")
-
-    images = _load_images()
-    _validate_images(images)
-    image = next((img for img in images if img.get("name") == image_name), None)
-    if image is None:
-        _fail(f"Image {image_name} not found in repository metadata.")
-
-    metadata_version = normalize_version(str(image["version"]))
-    if metadata_version != version:
-        _fail(
-            f"Requested version {version} does not match {image['metadataFile']} version {metadata_version}; "
-            "merge the version change before releasing."
-        )
 
     image_ref = str(image["image"])
     skopeo = _tool("skopeo")
@@ -1636,9 +1670,12 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     generate_workflow_parser.add_argument("--check", action="store_true")
     generate_workflow_parser.set_defaults(func=_command_generate_workflow)
 
+    release_info_parser = subparsers.add_parser("release-info")
+    release_info_parser.add_argument("--image", required=True)
+    release_info_parser.set_defaults(func=_command_release_info)
+
     release_parser = subparsers.add_parser("release-image")
     release_parser.add_argument("--image", required=True)
-    release_parser.add_argument("--version", required=True)
     release_parser.add_argument("--source-sha", required=True)
     release_parser.add_argument("--default-branch", required=True)
     release_parser.set_defaults(func=_command_release_image)
