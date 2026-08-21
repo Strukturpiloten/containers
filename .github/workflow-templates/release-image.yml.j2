@@ -10,9 +10,9 @@ on:
         required: true
         type: choice
         options:
-          - nextcloud-notifypush
-          - nextcloud-phpfpm
-          - typo3-phpfpm
+[% for image_name in image_names %]
+          - [[ image_name ]]
+[% endfor %]
       source-sha:
         description: Full commit SHA of the verified immutable image snapshot
         required: true

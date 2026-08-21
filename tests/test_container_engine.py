@@ -264,6 +264,37 @@ class InternalDependencyTests(unittest.TestCase):
 
 
 class ReleaseValidationTests(unittest.TestCase):
+    def test_release_metadata_is_derived_from_selected_image(self) -> None:
+        image, version, release_tags = engine._release_metadata("nextcloud-phpfpm")
+        self.assertEqual(image["name"], "nextcloud-phpfpm")
+        self.assertEqual(version, "1.0.0")
+        self.assertEqual(release_tags, ["v1.0.0", "v1.0", "v1"])
+        with self.assertRaisesRegex(engine.ContainerEngineError, "not found in repository metadata"):
+            engine._release_metadata("missing")
+
+    def test_release_info_writes_derived_version(self) -> None:
+        with patch.object(engine, "_write_github_outputs") as outputs:
+            engine._command_release_info(SimpleNamespace(image="nextcloud-notifypush"))
+        outputs.assert_called_once_with(
+            {
+                "image_name": "nextcloud-notifypush",
+                "version": "1.0.0",
+                "release_tag": "v1.0.0",
+            }
+        )
+
+    def test_release_workflow_choices_are_generated_from_metadata(self) -> None:
+        workflow = engine._release_workflow(engine._load_images())
+        self.assertIn("type: choice", workflow)
+        self.assertIn("          - nextcloud-notifypush", workflow)
+        self.assertIn("          - nextcloud-phpfpm", workflow)
+        self.assertIn("          - typo3-phpfpm", workflow)
+        self.assertEqual(workflow.count("          - nextcloud-notifypush\n"), 1)
+        self.assertEqual(workflow.count("          - nextcloud-phpfpm\n"), 1)
+        self.assertEqual(workflow.count("          - typo3-phpfpm\n"), 1)
+        self.assertNotIn("example-servicename", workflow)
+        self.assertNotIn("inputs.version", workflow)
+
     def test_release_candidate_must_match_revision_and_version(self) -> None:
         inspection = {
             "Digest": DIGEST,
