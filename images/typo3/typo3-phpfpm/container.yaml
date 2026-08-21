@@ -35,8 +35,6 @@ dependencies:
       arg: PHP_EXTENSION_INSTALLER_IMAGE
 
 inputs:
-  - .github/renovate.json
-  - .github/workflows/publish-images.yml
   - images/typo3/typo3-phpfpm/**
   - shared/container-utilities/**
   - shared/oci-labels.env

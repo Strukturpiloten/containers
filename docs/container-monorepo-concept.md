@@ -167,18 +167,21 @@ Jobs:
 1. `plan`
 
    - Parse and validate all `images/**/container.yaml` files.
-   - Determine changed files with `git diff` for pushes.
+   - Determine changed files with `git diff` for pushes and pull requests.
    - Match changed files against each image's `inputs` list.
-   - On scheduled rebuilds, select all images.
+   - On daily scheduled rebuilds, select all scheduled images.
+   - On manual rebuilds, select all images, one exact image, or one directory-derived image family.
    - Expand the selected set to include reverse internal dependencies when an internal base image is selected.
    - Topologically sort selected images by `dependencies.internal`.
    - Emit a JSON build plan with stages, images, architectures, and build args.
+   - Write a job summary explaining the selection reason, cache policy, dependency expansion, and planned tags.
 
 2. `build-arch-image`
 
    - Build each selected image for each architecture with Buildah.
    - Use `--pull-always` for all builds.
    - Use `--no-cache` for scheduled builds and manual forced rebuilds.
+   - Derive OCI and Buildah timestamps from the source commit so unchanged builds do not differ only because of wall-clock time.
    - Export per-architecture OCI archives as short-lived artifacts.
 
 3. `publish-image`
@@ -194,7 +197,8 @@ Jobs:
    - Sign the index digest with Cosign.
    - Attach provenance and SBOM attestations.
    - Only after verification succeeds, promote the immutable `sha-<commit>` tag and mutable branch tag. For `main`, also promote `latest`.
-   - Refuse to overwrite an existing SHA tag. Scheduled and manual rebuilds only move mutable branch/default tags and retain their unique run tag.
+   - Scheduled and manual maintenance builds also promote stable `vX.Y.Z`, `vX.Y`, and `vX` tags when the matching image-prefixed GitHub Release already exists.
+   - Refuse to overwrite an existing SHA tag. Every rebuild retains its immutable unique run tag and digest for audit and rollback.
    - Write one result artifact per image containing its exact index and architecture digests. Later dependency stages consume these results as `image@sha256:...` references.
 
 The important part is that the build planner owns dependency order. GitHub Actions matrices can build independent images in parallel, but images in later dependency stages must wait for earlier stages so they can consume exact internal digests. Because GitHub Actions `needs` relationships are static YAML, the workflow file is generated and checked in. The generator computes the required number of dependency stages from image metadata and renders `.github/workflow-templates/publish-images.yml.j2` with Jinja2.
@@ -244,9 +248,9 @@ Recommended Renovate behavior:
 - Keep GitHub Actions pinned to commit digests and allow Renovate to update them.
 - Track external image references in `images/**/container.yaml` and optionally in `images/**/Containerfile`.
 - Track the digest-pinned `php-extension-installer` build image in `container.yaml` so the helper version and integrity update together.
-- Track Syft and Cosign versions in workflows.
-- Automerge digest updates for external container images.
-- Automerge patch and minor updates for selected tooling, matching the current policy.
+- Track Syft and Cosign versions in workflows without managing the Cosign installer input twice.
+- Automerge digest and patch updates for external container images only after required CI succeeds.
+- Automerge tested automation dependencies and selected tooling according to narrow package rules; incompatible and major updates remain manual.
 - Do not use Renovate to update internal image dependencies during the same monorepo build. The build planner should inject internal digests.
 
 ## Local development
@@ -264,10 +268,9 @@ uv run --frozen --python 3.14 python -m scripts.container_engine build-arch-imag
 
 Local builds can tag images as `localhost/<image>:dev` and should not sign, attest, or publish unless explicit flags are passed.
 
-## Open implementation decisions
+## Pull-request gate
 
-- Whether scheduled rebuilds should select all images or only images with an explicit `build.scheduled: true` flag.
-- Whether shared utilities should be copied into this monorepo or kept as a submodule under `shared/container-utilities`.
+Pull requests first validate formatting, tests, metadata, and generated-workflow drift. The planner then smoke-builds every affected architecture without registry write permissions. Selected internal dependencies use their metadata-pinned published fallback during this non-publishing check. A final, stable `Required CI` job succeeds only when validation, planning, and every selected build succeeded. Repository rules should require this check, and Renovate must not bypass it.
 
 ## Per-image versioning and releases
 
@@ -281,9 +284,10 @@ Each image has its own independent SemVer version, tracked in the `version` fiel
 | `sha-<commit>`                        | `sha-a1b2c3...`               | immutable  | Verified push build; never overwritten |
 | `<branch>`                            | `main`                        | mutable    | Verified builds for that branch        |
 | `latest`                              | `latest`                      | mutable    | Verified default-branch builds         |
-| `v<major>.<minor>.<patch>[-<suffix>]` | `v1.2.3` or `v1.2.3-rc.1`    | immutable  | Release workflow                       |
-| `v<major>.<minor>`                    | `v1.2`                        | mutable    | Stable release workflow only           |
-| `v<major>`                            | `v1`                          | mutable    | Stable release workflow only           |
+| `v<major>.<minor>.<patch>`            | `v1.2.3`                      | maintained | Stable release and scheduled/manual maintenance |
+| `v<major>.<minor>.<patch>-<suffix>`   | `v1.2.3-rc.1`                 | release-only | Prerelease workflow only               |
+| `v<major>.<minor>`                    | `v1.2`                        | maintained | Stable release and scheduled/manual maintenance |
+| `v<major>`                            | `v1`                          | maintained | Stable release and scheduled/manual maintenance |
 
 ### Release workflow
 
@@ -292,9 +296,11 @@ Releases use a two-phase process so the registry image, OCI labels, Git commit, 
 1. Change the image's `version` in `container.yaml` through a pull request and merge it to the default branch.
 2. `publish-images.yml` builds that commit, verifies it, and promotes its immutable `sha-<commit>` snapshot with matching revision and version labels.
 3. Trigger `release-image.yml` from the default branch with the image name, already-merged version, and full source commit SHA. The source commit must be part of the default branch.
-4. The workflow resolves only `sha-<source-commit>`, verifies its digest and OCI revision/version labels, and refuses to overwrite an existing exact SemVer tag.
+4. The workflow resolves only `sha-<source-commit>`, verifies its digest and OCI revision/version labels, and establishes the initial SemVer tags without replacing another release.
 5. Stable releases promote `v<x.y.z>`, `v<x.y>`, and `v<x>`; prereleases promote only their exact prerelease tag.
 6. GitHub creates `<image>/v<x.y.z>` at the same commit together with the GitHub Release.
+
+Afterward, successful scheduled or manual maintenance builds may move the stable container tags for that version. Promotion first confirms that the matching GitHub Release exists. The Git tag and release commit remain immutable; registry SemVer tags are maintained pointers. Digests, `run-*`, and `sha-*` references remain immutable artifact identities.
 
 Git tags are prefixed with the image name (`<image>/v<x.y.z>`) to avoid collisions between independent image release lines.
 
@@ -306,15 +312,15 @@ Consumer repositories (for example `typo3-container`, `nextcloud`) should always
 ghcr.io/strukturpiloten/typo3-phpfpm:v1.2.3@sha256:<digest>
 ```
 
-The version tag provides readability, the digest guarantees immutability.
+The version tag provides readability and selects a maintained compatibility line; the digest guarantees immutability. Renovate in the consuming repository should update the digest when the maintained tag moves. Deployments still need an explicit pull/redeploy or Podman auto-update configuration.
 
 ### Renovate interaction
 
 Renovate manages dependency updates (base images, GitHub Actions, tooling), not image versions. When Renovate updates a base image in `container.yaml`:
 
 1. Renovate creates a PR with the updated base image reference.
-2. Digest and minor/patch updates are automerged per the existing Renovate rules.
-3. Pull-request CI validates the update before merge.
+2. Eligible digest and patch updates request automerge according to the narrow Renovate rules.
+3. Pull-request CI validates and smoke-builds affected architectures before the required gate permits merge.
 4. After merge, `publish-images.yml` rebuilds the affected image and its reverse dependencies, then promotes verified snapshot and mutable tags.
 5. A human changes `container.yaml` through a pull request when a new company image version should be released, waits for its immutable snapshot, and then invokes `release-image.yml`.
 

@@ -5,11 +5,15 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import fnmatch
+import http
 import json
 import os
 import shutil
 import subprocess
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +25,7 @@ from jinja2 import Environment, FileSystemLoader, StrictUndefined
 from scripts.metadata_schema import MetadataSchemaError, validate_metadata_schema
 from scripts.policy import (
     canonical_build_tag,
+    maintained_semver_tags,
     normalize_version,
     promotion_tags,
     semver_tags,
@@ -41,19 +46,17 @@ OCI_LABELS_ENV_PATH = Path("shared/oci-labels.env")
 CONTAINER_SCHEMA_PATH = Path("container.schema.json")
 IMAGES_GLOB = "images/**/container.yaml"
 EXCLUDED_IMAGE_DIR = "_example"
-GLOBAL_BUILD_INPUTS = (
+GLOBAL_IMAGE_INPUTS = (
     ".containerignore",
-    ".github/actions/**",
-    ".github/workflow-templates/**",
-    ".github/workflows/publish-images.yml",
-    "container.schema.json",
-    "pyproject.toml",
-    "scripts/**",
-    "uv.lock",
+    ".github/actions/build-arch-image/**",
+    ".github/actions/publish-image/**",
+    "scripts/container_engine.py",
+    "scripts/policy.py",
 )
 SHA256_DIGEST_LENGTH = 71
 GIT_SHA_LENGTH = 40
 LOWERCASE_HEX_DIGITS = frozenset("0123456789abcdef")
+IMAGE_METADATA_PART_COUNT = 4
 
 type JsonMap = dict[str, Any]
 type JsonList = list[Any]
@@ -69,6 +72,8 @@ class PlanOptions:
     before: str | None
     sha: str
     max_stages: int | None
+    scope: str = "all"
+    target: str | None = None
 
 
 @dataclass(frozen=True)
@@ -644,7 +649,7 @@ def _topological_levels(images: list[JsonMap], selected_names: set[str] | None =
 
 
 def _changed_files(before: str | None, sha: str, event_name: str) -> list[str] | None:
-    if event_name != "push" or not before or not sha or set(before) == {"0"}:
+    if event_name not in {"pull_request", "push"} or not before or not sha or set(before) == {"0"}:
         return None
 
     git = shutil.which("git")
@@ -675,22 +680,69 @@ def _input_matches(pattern: str, file_path: str) -> bool:
     return fnmatch.fnmatchcase(file_path, pattern)
 
 
-def _selected_image_names(images: list[JsonMap], options: PlanOptions) -> set[str]:
-    if options.event_name in {"schedule", "workflow_dispatch"}:
-        return {image["name"] for image in images if image.get("build", {}).get("scheduled", True) is not False}
+def _image_family(image: JsonMap) -> str:
+    metadata_file = image.get("metadataFile")
+    if not isinstance(metadata_file, str):
+        return ""
+    parts = Path(metadata_file).parts
+    return parts[1] if len(parts) >= IMAGE_METADATA_PART_COUNT and parts[0] == "images" else ""
+
+
+def _manual_image_names(images: list[JsonMap], options: PlanOptions) -> tuple[set[str], str]:
+    scope = options.scope or "all"
+    target = (options.target or "").strip()
+    if scope == "all":
+        return (
+            {image["name"] for image in images},
+            "manual all-image rebuild",
+        )
+
+    if scope == "image":
+        selected = {image["name"] for image in images if image.get("name") == target}
+        if not selected:
+            _fail(f"Manual image target does not exist: {target or '<empty>'}.")
+        return selected, f"manual image rebuild: {target}"
+
+    if scope == "family":
+        selected = {image["name"] for image in images if _image_family(image) == target}
+        if not selected:
+            _fail(f"Manual image family does not exist: {target or '<empty>'}.")
+        return selected, f"manual family rebuild: {target}"
+
+    _fail(f"Unsupported manual build scope: {scope}.")
+
+
+def _selected_images(images: list[JsonMap], options: PlanOptions) -> tuple[set[str], list[str] | None, str]:
+    if options.event_name == "schedule":
+        return (
+            {image["name"] for image in images if image.get("build", {}).get("scheduled", True) is not False},
+            None,
+            "daily scheduled security rebuild",
+        )
+
+    if options.event_name == "workflow_dispatch":
+        selected, reason = _manual_image_names(images, options)
+        return selected, None, reason
 
     files = _changed_files(before=options.before, sha=options.sha, event_name=options.event_name)
     if files is None:
-        return {image["name"] for image in images}
+        return {image["name"] for image in images}, None, "changed-file diff unavailable; safe full rebuild"
 
-    if any(_input_matches(pattern, changed_file) for pattern in GLOBAL_BUILD_INPUTS for changed_file in files):
-        return {image["name"] for image in images}
+    if any(_input_matches(pattern, changed_file) for pattern in GLOBAL_IMAGE_INPUTS for changed_file in files):
+        return {image["name"] for image in images}, files, "global image-build input changed"
 
-    return {
+    selected = {
         image["name"]
         for image in images
         if any(_input_matches(pattern, changed_file) for pattern in image["inputs"] for changed_file in files)
     }
+    reason = "image-specific or shared runtime input changed" if selected else "validation-only changes"
+    return selected, files, reason
+
+
+def _selected_image_names(images: list[JsonMap], options: PlanOptions) -> set[str]:
+    selected, _files, _reason = _selected_images(images, options)
+    return selected
 
 
 def _expand_reverse_dependencies(images: list[JsonMap], selected_names: set[str]) -> set[str]:
@@ -722,6 +774,7 @@ def _normalize_image(image: JsonMap, level: int) -> JsonMap:
         "title": image["title"],
         "description": image["description"],
         "metadataFile": image["metadataFile"],
+        "family": _image_family(image),
         "level": level,
         "build": {
             "context": build["context"],
@@ -758,9 +811,26 @@ def _stage_publish_matrix(selected_images: list[JsonMap], stage: int) -> JsonMap
     return {"include": entries}
 
 
+def _smoke_build_matrix(selected_images: list[JsonMap]) -> JsonMap:
+    entries: list[JsonMap] = []
+    for image in selected_images:
+        entries.extend(
+            {
+                "name": image["name"],
+                "arch": architecture,
+                "runner": RUNNERS[architecture],
+                "stage": image["level"],
+            }
+            for architecture in _image_architectures(image)
+        )
+    return {"include": entries}
+
+
 def _build_plan(images: list[JsonMap], options: PlanOptions) -> JsonMap:
-    selected_names = _selected_image_names(images, options)
+    direct_names, changed_files, selection_reason = _selected_images(images, options)
+    selected_names = set(direct_names)
     selected_names = _expand_reverse_dependencies(images, selected_names)
+    reverse_dependency_names = selected_names - direct_names
     levels = _topological_levels(images, selected_names) if selected_names else []
     max_stages = options.max_stages or _stage_count(images)
 
@@ -793,12 +863,25 @@ def _build_plan(images: list[JsonMap], options: PlanOptions) -> JsonMap:
         "hasImages": bool(selected_images),
         "levels": levels,
         "images": selected_images,
+        "smokeBuildMatrix": _smoke_build_matrix(selected_images),
         "stageMatrices": stage_matrices,
+        "selection": {
+            "scope": options.scope,
+            "target": options.target or "",
+            "reason": selection_reason,
+            "changedFiles": changed_files or [],
+            "directImages": sorted(direct_names),
+            "reverseDependencies": sorted(reverse_dependency_names),
+            "noCache": options.event_name in {"schedule", "workflow_dispatch"},
+        },
     }
 
 
 def _github_outputs(plan: JsonMap) -> str:
-    outputs = [f"has_builds={'true' if plan['hasImages'] else 'false'}"]
+    outputs = [
+        f"has_builds={'true' if plan['hasImages'] else 'false'}",
+        f"smoke_build_matrix={json.dumps(plan['smokeBuildMatrix'], separators=(',', ':'))}",
+    ]
     for index, stage in enumerate(plan["stageMatrices"]):
         build_matrix = stage["buildMatrix"]
         publish_matrix = stage["publishMatrix"]
@@ -808,6 +891,63 @@ def _github_outputs(plan: JsonMap) -> str:
         outputs.append(f"stage_{index}_publish_matrix={json.dumps(publish_matrix, separators=(',', ':'))}")
 
     return "\n".join(outputs)
+
+
+def _plan_summary(plan: JsonMap) -> str:
+    selection = _json_map(plan.get("selection", {})) or {}
+    lines = [
+        "## Container build plan",
+        "",
+        f"- Event: `{plan.get('eventName', '')}`",
+        f"- Selection: {selection.get('reason', 'unknown')}",
+        f"- Cache disabled: `{'yes' if selection.get('noCache') else 'no'}`",
+    ]
+    changed_files = _string_list(selection.get("changedFiles", [])) or []
+    if changed_files:
+        lines.append(f"- Changed files: {len(changed_files)}")
+    reverse_dependencies = _string_list(selection.get("reverseDependencies", [])) or []
+    if reverse_dependencies:
+        lines.append(f"- Added reverse dependencies: `{', '.join(reverse_dependencies)}`")
+
+    images = _json_list(plan.get("images", [])) or []
+    if not images:
+        lines.extend(["", "No container images need to be built."])
+        return "\n".join(lines)
+
+    maintenance_event = plan.get("eventName") == "schedule" or (
+        plan.get("eventName") == "workflow_dispatch" and plan.get("refName") == plan.get("defaultBranch")
+    )
+    publishing_event = plan.get("eventName") in {"push", "schedule", "workflow_dispatch"}
+    lines.extend(
+        [
+            "",
+            "| Image | Family | Architectures | Dependency stage | Planned promotion tags |",
+            "| --- | --- | --- | ---: | --- |",
+        ]
+    )
+    for image_candidate in images:
+        image = _json_map(image_candidate) or {}
+        architectures = _image_architectures(image)
+        version = str(image.get("version", ""))
+        planned_tags = []
+        if publishing_event:
+            planned_tags = promotion_tags(
+                event_name=str(plan.get("eventName", "")),
+                ref_name=str(plan.get("refName", "")),
+                default_branch=str(plan.get("defaultBranch", "")),
+                sha=str(plan.get("sourceRevision", "")),
+            )
+        if maintenance_event:
+            planned_tags.extend(maintained_semver_tags(version))
+        displayed_tags = ", ".join(unique_tags(planned_tags)) or "none (non-publishing)"
+        lines.append(
+            f"| `{image.get('name', '')}` | `{image.get('family', '')}` | "
+            f"`{', '.join(architectures)}` | {image.get('level', 0)} | `{displayed_tags}` |"
+        )
+
+    if maintenance_event:
+        lines.extend(["", "SemVer tags are promoted only when the matching stable GitHub Release already exists."])
+    return "\n".join(lines)
 
 
 def _write_json(path: Path, value: JsonMap) -> None:
@@ -832,7 +972,7 @@ def _publish_workflow(stage_count: int) -> str:
         undefined=StrictUndefined,
     )
     template = environment.get_template(PUBLISH_WORKFLOW_TEMPLATE_PATH.name)
-    return template.render(stages=list(range(stage_count)))
+    return template.render(stages=list(range(stage_count)), single_stage=stage_count == 1)
 
 
 def _command_generate_workflow(args: argparse.Namespace) -> None:
@@ -886,6 +1026,8 @@ def _build_base_args(
     image: JsonMap,
     context: _GitHubContext,
     dependency_results_dir: Path | None,
+    *,
+    use_published_dependency_fallback: bool = False,
 ) -> tuple[list[str], str, str]:
     build_args: list[str] = []
     effective_values: dict[str, str] = {}
@@ -908,12 +1050,12 @@ def _build_base_args(
             continue
 
         dependency_image = _optional_plan_image(plan, dependency_name)
-        if dependency_image is not None:
+        if dependency_image is not None and not use_published_dependency_fallback:
             dependency_ref = _dependency_result_reference(
                 dependency_name=dependency_name,
                 dependency_image=dependency_image,
                 dependency_results_dir=dependency_results_dir,
-                source_revision=context.sha,
+                source_revision=str(plan.get("sourceRevision", context.sha)),
             )
         else:
             fallback = _json_map(_image_build_args(image).get(dependency_arg, {}))
@@ -934,6 +1076,23 @@ def _build_base_args(
     return build_args, base_name, base_digest
 
 
+def _source_timestamp(source_revision: str) -> tuple[int, str]:
+    if len(source_revision) != GIT_SHA_LENGTH or not set(source_revision.lower()) <= LOWERCASE_HEX_DIGITS:
+        _fail(f"Build source must be a full Git commit SHA: {source_revision}.")
+    raw_timestamp = _run(
+        [_tool("git"), "-C", str(_repo_root()), "show", "-s", "--format=%ct", source_revision],
+        capture_stdout=True,
+    ).strip()
+    try:
+        timestamp = int(raw_timestamp)
+    except ValueError:
+        _fail(f"Git returned an invalid source timestamp for {source_revision}: {raw_timestamp}.")
+    if timestamp <= 0:
+        _fail(f"Git returned a non-positive source timestamp for {source_revision}.")
+    created = dt.datetime.fromtimestamp(timestamp, tz=dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return timestamp, created
+
+
 def _command_build_arch_image(args: argparse.Namespace) -> None:
     image_name, architecture = _entry(args.entry_json, require_arch=True)
     if architecture is None:
@@ -942,6 +1101,8 @@ def _command_build_arch_image(args: argparse.Namespace) -> None:
     context = _github_context(require_token=False)
     plan = _load_json(Path(args.plan))
     image = _plan_image(plan, image_name)
+    source_revision = str(plan.get("sourceRevision", ""))
+    source_timestamp, created = _source_timestamp(source_revision)
     architectures = _image_architectures(image)
     if architecture not in architectures:
         _fail(f"Image {image_name} does not support architecture {architecture}.")
@@ -950,9 +1111,14 @@ def _command_build_arch_image(args: argparse.Namespace) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     archive_path = output_dir / f"{image_name}-{architecture}.tar"
     local_image = f"localhost/{image_name}:{context.run_id}-{context.run_attempt}-{architecture}"
-    created = dt.datetime.now(tz=dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     dependency_results_dir = Path(args.dependency_results_dir) if args.dependency_results_dir else None
-    build_args, base_name, base_digest = _build_base_args(plan, image, context, dependency_results_dir)
+    build_args, base_name, base_digest = _build_base_args(
+        plan,
+        image,
+        context,
+        dependency_results_dir,
+        use_published_dependency_fallback=args.use_published_dependency_fallback,
+    )
     oci_labels = _oci_labels()
 
     command = [
@@ -964,6 +1130,8 @@ def _command_build_arch_image(args: argparse.Namespace) -> None:
         "--format",
         "oci",
         "--pull-always",
+        "--timestamp",
+        str(source_timestamp),
     ]
     if context.event_name in {"schedule", "workflow_dispatch"}:
         command.append("--no-cache")
@@ -976,16 +1144,18 @@ def _command_build_arch_image(args: argparse.Namespace) -> None:
     command.extend(_build_arg("OCI_DESCRIPTION", str(image["description"])))
     command.extend(
         _build_arg(
-            "OCI_DOCUMENTATION", f"{context.server_url}/{context.repository}/tree/{context.sha}/images/{image_name}"
+            "OCI_DOCUMENTATION",
+            f"{context.server_url}/{context.repository}/tree/{source_revision}/images/{image_name}",
         )
     )
     command.extend(_build_arg("OCI_LICENSES", oci_labels["OCI_LICENSES"]))
-    command.extend(_build_arg("OCI_REVISION", context.sha))
+    command.extend(_build_arg("OCI_REVISION", source_revision))
     command.extend(_build_arg("OCI_SOURCE", oci_labels["OCI_SOURCE"]))
     command.extend(_build_arg("OCI_TITLE", str(image["title"])))
     command.extend(_build_arg("OCI_URL", f"{context.server_url}/{context.repository}/pkgs/container/{image_name}"))
     command.extend(_build_arg("OCI_VENDOR", oci_labels["OCI_VENDOR"]))
     command.extend(_build_arg("OCI_VERSION", str(image["version"])))
+    command.extend(_build_arg("SOURCE_DATE_EPOCH", str(source_timestamp)))
     command.extend(["--tag", local_image, "--file", str(build["containerfile"]), str(build["context"])])
 
     _write_stdout(f"Building {image_name} for {architecture}.")
@@ -1148,7 +1318,7 @@ def _command_publish_image(args: argparse.Namespace) -> None:
             _BuildResult(
                 image_name=image_name,
                 image_ref=image_ref,
-                source_revision=context.sha,
+                source_revision=str(plan.get("sourceRevision", context.sha)),
                 index_digest=index_digest,
                 architecture_digests=architecture_digests,
                 tags=tags,
@@ -1158,6 +1328,7 @@ def _command_publish_image(args: argparse.Namespace) -> None:
             {
                 "image_name": image_name,
                 "image": image_ref,
+                "version": str(image["version"]),
                 "index_digest": index_digest,
                 "canonical_tag": canonical_tag,
                 "amd64_digest": architecture_digests.get("amd64", ""),
@@ -1186,6 +1357,33 @@ def _remote_digest(command_prefix: Sequence[str], reference: str) -> str | None:
     _fail(f"Could not inspect registry reference {reference}.")
 
 
+def _github_release_exists(context: _GitHubContext, image_name: str, version: str) -> bool:
+    if not context.token:
+        _fail("GITHUB_TOKEN is required to verify maintained SemVer releases.")
+    release_tag = f"{image_name}/v{normalize_version(version)}"
+    api_root = (
+        "https://api.github.com" if context.server_url == "https://github.com" else f"{context.server_url}/api/v3"
+    )
+    encoded_tag = urllib.parse.quote(release_tag, safe="")
+    request = urllib.request.Request(  # noqa: S310
+        f"{api_root}/repos/{context.repository}/releases/tags/{encoded_tag}",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {context.token}",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310
+            return response.status == http.HTTPStatus.OK
+    except urllib.error.HTTPError as error:
+        if error.code == http.HTTPStatus.NOT_FOUND:
+            return False
+        _fail(f"GitHub release lookup failed for {release_tag}: HTTP {error.code}.")
+    except urllib.error.URLError as error:
+        _fail(f"GitHub release lookup failed for {release_tag}: {error.reason}.")
+
+
 def _command_promote_image(args: argparse.Namespace) -> None:
     context = _github_context(require_token=False)
     digest = args.digest
@@ -1198,6 +1396,19 @@ def _command_promote_image(args: argparse.Namespace) -> None:
         default_branch=args.default_branch,
         sha=context.sha,
     )
+    maintenance_tags = maintained_semver_tags(args.version)
+    maintenance_event = context.event_name == "schedule" or (
+        context.event_name == "workflow_dispatch" and context.ref_name == args.default_branch
+    )
+    if maintenance_event and maintenance_tags:
+        if _github_release_exists(context, args.image_name, args.version):
+            tags = unique_tags([*tags, *maintenance_tags])
+        else:
+            message = (
+                f"Skipping maintained SemVer tags for {args.image_name} {args.version}: "
+                "matching GitHub Release not found."
+            )
+            _write_stdout(message)
     command_prefix = [_tool("sudo"), _tool("skopeo")]
     immutable_tag = f"sha-{context.sha}" if context.event_name == "push" else None
 
@@ -1221,6 +1432,12 @@ def _command_promote_image(args: argparse.Namespace) -> None:
         )
         _write_stdout(f"Promoted {target} to {digest}.")
 
+    if args.build_result:
+        build_result_path = Path(args.build_result)
+        build_result = _load_json(build_result_path)
+        recorded_tags = _string_list(build_result.get("tags", [])) or []
+        build_result["tags"] = unique_tags([*recorded_tags, *tags])
+        _write_json(build_result_path, build_result)
     _write_github_outputs({"promoted_tags": ",".join(tags)})
 
 
@@ -1284,11 +1501,11 @@ def _command_release_image(args: argparse.Namespace) -> None:
     exact_reference = f"{image_ref}:{release_tags[0]}"
     existing_exact_digest = _remote_digest(command_prefix, exact_reference)
     if existing_exact_digest is not None and existing_exact_digest != index_digest:
-        _fail(f"Refusing to overwrite immutable release tag {exact_reference} ({existing_exact_digest}).")
+        _fail(f"Refusing to replace existing release tag {exact_reference} ({existing_exact_digest}).")
 
     for tag in release_tags:
         if tag == release_tags[0] and existing_exact_digest == index_digest:
-            _write_stdout(f"Immutable release tag {exact_reference} already points to {index_digest}.")
+            _write_stdout(f"Release tag {exact_reference} already points to {index_digest}.")
             continue
         _write_stdout(f"Tagging {image_ref}:{tag} -> {index_digest}")
         _run(
@@ -1344,6 +1561,8 @@ def _command_plan(args: argparse.Namespace) -> None:
         before=args.before,
         sha=args.sha,
         max_stages=args.max_stages,
+        scope=args.scope,
+        target=args.target,
     )
     plan = _build_plan(images, options)
     _write_json(Path(args.output), plan)
@@ -1356,7 +1575,12 @@ def _command_github_outputs(args: argparse.Namespace) -> None:
     _write_stdout(_github_outputs(plan))
 
 
-def _parser() -> argparse.ArgumentParser:
+def _command_plan_summary(args: argparse.Namespace) -> None:
+    plan = _load_json(Path(args.build_plan))
+    _write_stdout(_plan_summary(plan))
+
+
+def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     root_parser = argparse.ArgumentParser(description="Plan and validate container monorepo builds.")
     subparsers = root_parser.add_subparsers(dest="command", required=True)
 
@@ -1370,6 +1594,8 @@ def _parser() -> argparse.ArgumentParser:
     plan_parser.add_argument("--before", default=os.environ.get("GITHUB_EVENT_BEFORE"))
     plan_parser.add_argument("--sha", default=os.environ.get("GITHUB_SHA", ""))
     plan_parser.add_argument("--max-stages", type=int)
+    plan_parser.add_argument("--scope", default=os.environ.get("BUILD_SCOPE", "all"))
+    plan_parser.add_argument("--target", default=os.environ.get("BUILD_TARGET"))
     plan_parser.add_argument("--output", default="build-plan.json")
     plan_parser.set_defaults(func=_command_plan)
 
@@ -1377,11 +1603,16 @@ def _parser() -> argparse.ArgumentParser:
     outputs_parser.add_argument("build_plan")
     outputs_parser.set_defaults(func=_command_github_outputs)
 
+    summary_parser = subparsers.add_parser("plan-summary")
+    summary_parser.add_argument("build_plan")
+    summary_parser.set_defaults(func=_command_plan_summary)
+
     build_arch_parser = subparsers.add_parser("build-arch-image")
     build_arch_parser.add_argument("--plan", required=True)
     build_arch_parser.add_argument("--entry-json", required=True)
     build_arch_parser.add_argument("--output-dir", required=True)
     build_arch_parser.add_argument("--dependency-results-dir")
+    build_arch_parser.add_argument("--use-published-dependency-fallback", action="store_true")
     build_arch_parser.set_defaults(func=_command_build_arch_image)
 
     publish_parser = subparsers.add_parser("publish-image")
@@ -1393,9 +1624,12 @@ def _parser() -> argparse.ArgumentParser:
     publish_parser.set_defaults(func=_command_publish_image)
 
     promote_parser = subparsers.add_parser("promote-image")
+    promote_parser.add_argument("--image-name", required=True)
     promote_parser.add_argument("--image", required=True)
+    promote_parser.add_argument("--version", required=True)
     promote_parser.add_argument("--digest", required=True)
     promote_parser.add_argument("--default-branch", required=True)
+    promote_parser.add_argument("--build-result")
     promote_parser.set_defaults(func=_command_promote_image)
 
     generate_workflow_parser = subparsers.add_parser("generate-workflow")

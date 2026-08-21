@@ -5,6 +5,14 @@ inputs:
   entry:
     description: JSON matrix entry with image name and architecture.
     required: true
+  upload-archive:
+    description: Upload the OCI archive for a later publish job.
+    required: false
+    default: "true"
+  use-published-dependency-fallback:
+    description: Use metadata-pinned internal dependency digests instead of current-run publish artifacts.
+    required: false
+    default: "false"
 
 runs:
   using: composite
@@ -29,7 +37,7 @@ runs:
         version: ${{ env.UV_VERSION }}
 
     - name: Download internal dependency build results
-      if: fromJSON(inputs.entry).stage > 0
+      if: fromJSON(inputs.entry).stage > 0 && inputs.use-published-dependency-fallback != 'true'
       uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
       with:
         pattern: "*-build-result"
@@ -39,17 +47,25 @@ runs:
     - name: Build image archive
       id: build
       shell: bash
+      env:
+        USE_PUBLISHED_DEPENDENCY_FALLBACK: ${{ inputs.use-published-dependency-fallback }}
       run: |
         set -euo pipefail
 
         mkdir -p "${RUNNER_TEMP}/oci-archives"
+        fallback_args=()
+        if [ "${USE_PUBLISHED_DEPENDENCY_FALLBACK}" = "true" ]; then
+          fallback_args+=(--use-published-dependency-fallback)
+        fi
         uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine build-arch-image \
           --plan "${RUNNER_TEMP}/container-build-plan/build-plan.json" \
           --entry-json '${{ inputs.entry }}' \
           --dependency-results-dir "${RUNNER_TEMP}/dependency-results" \
+          "${fallback_args[@]}" \
           --output-dir "${RUNNER_TEMP}/oci-archives"
 
     - name: Upload architecture image archive
+      if: inputs.upload-archive == 'true'
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
         name: ${{ steps.build.outputs.image_name }}-${{ steps.build.outputs.arch }}-oci-archive

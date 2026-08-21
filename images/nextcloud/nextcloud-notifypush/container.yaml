@@ -38,7 +38,5 @@ dependencies:
       arg: RUNTIME_IMAGE
 
 inputs:
-  - .github/renovate.json
-  - .github/workflows/publish-images.yml
   - images/nextcloud/nextcloud-notifypush/**
   - shared/oci-labels.env

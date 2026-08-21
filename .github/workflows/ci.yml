@@ -8,8 +8,7 @@ concurrency:
   group: validate-containers-${{ github.ref }}
   cancel-in-progress: true
 
-permissions:
-  contents: read
+permissions: {}
 
 env:
   PYTHON_VERSION: "3.14"
@@ -20,18 +19,19 @@ jobs:
     name: Validate metadata and automation
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
           submodules: true
-
       - name: Install uv
         uses: ./.github/actions/setup-uv
         with:
           version: ${{ env.UV_VERSION }}
-
       - name: Validate repository
         shell: bash
         run: |
@@ -42,3 +42,126 @@ jobs:
           uv run --frozen --python "${PYTHON_VERSION}" python -m unittest discover -s tests
           uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine validate
           uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine generate-workflow --check
+
+  plan:
+    name: Plan pull-request builds
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      has_builds: ${{ steps.outputs.outputs.has_builds }}
+      smoke_build_matrix: ${{ steps.outputs.outputs.smoke_build_matrix }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: true
+      - name: Install uv
+        uses: ./.github/actions/setup-uv
+        with:
+          version: ${{ env.UV_VERSION }}
+      - name: Create build plan
+        shell: bash
+        env:
+          BEFORE: ${{ github.event.pull_request.base.sha || '' }}
+          BUILD_SCOPE: all
+          BUILD_TARGET: ""
+          REF_NAME: ${{ github.head_ref || github.ref_name }}
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+
+          uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine plan \
+            --event-name "${GITHUB_EVENT_NAME}" \
+            --ref-name "${REF_NAME}" \
+            --default-branch "${{ github.event.repository.default_branch }}" \
+            --before "${BEFORE}" \
+            --sha "${SOURCE_SHA}" \
+            --scope "${BUILD_SCOPE}" \
+            --target "${BUILD_TARGET}" \
+            --output build-plan.json
+      - name: Write workflow outputs
+        id: outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine github-outputs build-plan.json >> "$GITHUB_OUTPUT"
+      - name: Summarize build plan
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine plan-summary build-plan.json >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload build plan
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: container-build-plan
+          path: build-plan.json
+          if-no-files-found: error
+          retention-days: 1
+
+  smoke-build:
+    name: Smoke build ${{ matrix.name }} ${{ matrix.arch }}
+    needs: plan
+    if: needs.plan.outputs.has_builds == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.smoke_build_matrix) }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: true
+      - name: Build affected architecture
+        uses: ./.github/actions/build-arch-image
+        with:
+          entry: ${{ toJSON(matrix) }}
+          upload-archive: "false"
+          use-published-dependency-fallback: "true"
+
+  required-ci:
+    name: Required CI
+    if: ${{ always() }}
+    needs:
+      - validate
+      - plan
+      - smoke-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Require validation, planning, and selected builds
+        shell: bash
+        env:
+          HAS_BUILDS: ${{ needs.plan.outputs.has_builds }}
+          PLAN_RESULT: ${{ needs.plan.result }}
+          SMOKE_RESULT: ${{ needs.smoke-build.result }}
+          VALIDATE_RESULT: ${{ needs.validate.result }}
+        run: |
+          set -euo pipefail
+
+          if [ "${VALIDATE_RESULT}" != "success" ] || [ "${PLAN_RESULT}" != "success" ]; then
+            echo "Validation or build planning did not succeed." >&2
+            exit 1
+          fi
+          if [ "${HAS_BUILDS}" = "true" ] && [ "${SMOKE_RESULT}" != "success" ]; then
+            echo "One or more affected container builds did not succeed." >&2
+            exit 1
+          fi
+          if [ "${HAS_BUILDS}" != "true" ] && [ "${SMOKE_RESULT}" != "skipped" ]; then
+            echo "Unexpected smoke-build result: ${SMOKE_RESULT}." >&2
+            exit 1
+          fi
+          echo "Required repository checks passed."

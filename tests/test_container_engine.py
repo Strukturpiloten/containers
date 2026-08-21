@@ -28,9 +28,16 @@ def _options() -> engine.PlanOptions:
 class PlanningTests(unittest.TestCase):
     def setUp(self) -> None:
         self.images = [
-            {"name": "base", "build": {}, "dependencies": {"internal": []}, "inputs": ["images/base/**"]},
+            {
+                "name": "base",
+                "metadataFile": "images/runtime/base/container.yaml",
+                "build": {},
+                "dependencies": {"internal": []},
+                "inputs": ["images/base/**"],
+            },
             {
                 "name": "app",
+                "metadataFile": "images/apps/app/container.yaml",
                 "build": {},
                 "dependencies": {"internal": [{"image": "base", "arg": "BASE_IMAGE"}]},
                 "inputs": ["images/app/**"],
@@ -49,6 +56,14 @@ class PlanningTests(unittest.TestCase):
         with patch.object(engine, "_changed_files", return_value=["scripts/container_engine.py"]):
             self.assertEqual(engine._selected_image_names(self.images, _options()), {"base", "app"})
 
+    def test_validation_only_change_selects_no_images(self) -> None:
+        for changed_file in (".github/renovate.json", "container.schema.json", "pyproject.toml", "uv.lock"):
+            with (
+                self.subTest(changed_file=changed_file),
+                patch.object(engine, "_changed_files", return_value=[changed_file]),
+            ):
+                self.assertEqual(engine._selected_image_names(self.images, _options()), set())
+
     def test_unavailable_diff_uses_safe_full_rebuild(self) -> None:
         with patch.object(engine, "_changed_files", return_value=None):
             self.assertEqual(engine._selected_image_names(self.images, _options()), {"base", "app"})
@@ -56,6 +71,86 @@ class PlanningTests(unittest.TestCase):
     def test_reliable_empty_diff_selects_nothing(self) -> None:
         with patch.object(engine, "_changed_files", return_value=[]):
             self.assertEqual(engine._selected_image_names(self.images, _options()), set())
+
+    def test_manual_image_and_family_selection(self) -> None:
+        image_options = engine.PlanOptions(
+            event_name="workflow_dispatch",
+            ref_name="main",
+            default_branch="main",
+            before=None,
+            sha="c" * 40,
+            max_stages=None,
+            scope="image",
+            target="app",
+        )
+        family_options = engine.PlanOptions(
+            event_name="workflow_dispatch",
+            ref_name="main",
+            default_branch="main",
+            before=None,
+            sha="c" * 40,
+            max_stages=None,
+            scope="family",
+            target="runtime",
+        )
+        self.assertEqual(engine._selected_image_names(self.images, image_options), {"app"})
+        self.assertEqual(engine._selected_image_names(self.images, family_options), {"base"})
+
+    def test_manual_all_includes_images_excluded_from_schedule(self) -> None:
+        images = [*self.images, {"name": "manual-only", "build": {"scheduled": False}}]
+        options = engine.PlanOptions(
+            event_name="workflow_dispatch",
+            ref_name="main",
+            default_branch="main",
+            before=None,
+            sha="c" * 40,
+            max_stages=None,
+        )
+        self.assertEqual(engine._selected_image_names(images, options), {"base", "app", "manual-only"})
+
+    def test_invalid_manual_target_fails(self) -> None:
+        options = engine.PlanOptions(
+            event_name="workflow_dispatch",
+            ref_name="main",
+            default_branch="main",
+            before=None,
+            sha="c" * 40,
+            max_stages=None,
+            scope="family",
+            target="missing",
+        )
+        with self.assertRaisesRegex(engine.ContainerEngineError, "does not exist"):
+            engine._selected_image_names(self.images, options)
+
+    def test_pull_request_diff_uses_base_and_head(self) -> None:
+        with patch.object(engine, "_changed_files", return_value=["images/app/Containerfile"]) as changed_files:
+            options = engine.PlanOptions(
+                event_name="pull_request",
+                ref_name="feature",
+                default_branch="main",
+                before="b" * 40,
+                sha="c" * 40,
+                max_stages=None,
+            )
+            self.assertEqual(engine._selected_image_names(self.images, options), {"app"})
+        changed_files.assert_called_once_with(before="b" * 40, sha="c" * 40, event_name="pull_request")
+
+    def test_build_plan_exposes_smoke_matrix_and_selection_reason(self) -> None:
+        images = engine._load_images()
+        with patch.object(
+            engine,
+            "_changed_files",
+            return_value=["images/nextcloud/nextcloud-notifypush/Containerfile"],
+        ):
+            plan = engine._build_plan(images, _options())
+        self.assertEqual([image["name"] for image in plan["images"]], ["nextcloud-notifypush"])
+        self.assertEqual(
+            {entry["arch"] for entry in plan["smokeBuildMatrix"]["include"]},
+            {"amd64", "arm64"},
+        )
+        self.assertEqual(plan["selection"]["reason"], "image-specific or shared runtime input changed")
+        plan["eventName"] = "pull_request"
+        self.assertIn("none (non-publishing)", engine._plan_summary(plan))
 
 
 class InternalDependencyTests(unittest.TestCase):
@@ -133,6 +228,28 @@ class InternalDependencyTests(unittest.TestCase):
                     source_revision="expected",
                 )
 
+    def test_pr_smoke_build_uses_pinned_internal_fallback(self) -> None:
+        context = self._context(event_name="pull_request")
+        dependency = {"name": "base", "image": "ghcr.io/strukturpiloten/base"}
+        image = {
+            "name": "app",
+            "build": {
+                "runtimeBaseArg": "BASE_IMAGE",
+                "args": {"BASE_IMAGE": {"type": "internal-image", "value": f"ghcr.io/strukturpiloten/base@{DIGEST}"}},
+            },
+            "dependencies": {"internal": [{"image": "base", "arg": "BASE_IMAGE"}]},
+        }
+        build_args, base_name, base_digest = engine._build_base_args(
+            {"sourceRevision": context.sha, "images": [dependency, image]},
+            image,
+            context,
+            None,
+            use_published_dependency_fallback=True,
+        )
+        self.assertIn(f"BASE_IMAGE=ghcr.io/strukturpiloten/base@{DIGEST}", build_args)
+        self.assertEqual(base_name, "ghcr.io/strukturpiloten/base")
+        self.assertEqual(base_digest, DIGEST)
+
     def test_runtime_base_comes_from_explicit_runtime_argument(self) -> None:
         images = engine._load_images()
         image = next(candidate for candidate in images if candidate["name"] == "nextcloud-notifypush")
@@ -173,6 +290,15 @@ class ReleaseValidationTests(unittest.TestCase):
                 version="2.0.0",
             )
 
+    def test_source_timestamp_is_derived_from_git_commit(self) -> None:
+        with (
+            patch.object(engine, "_tool", return_value="git"),
+            patch.object(engine, "_run", return_value="1700000000\n"),
+        ):
+            timestamp, created = engine._source_timestamp("c" * 40)
+        self.assertEqual(timestamp, 1700000000)
+        self.assertEqual(created, "2023-11-14T22:13:20Z")
+
 
 class PromotionTests(unittest.TestCase):
     def test_existing_sha_tag_cannot_be_overwritten(self) -> None:
@@ -187,7 +313,14 @@ class PromotionTests(unittest.TestCase):
             sha="c" * 40,
             token=None,
         )
-        args = SimpleNamespace(image="ghcr.io/strukturpiloten/example", digest=DIGEST, default_branch="main")
+        args = SimpleNamespace(
+            image_name="example",
+            image="ghcr.io/strukturpiloten/example",
+            version="1.2.3",
+            digest=DIGEST,
+            default_branch="main",
+            build_result=None,
+        )
         with (
             patch.object(engine, "_github_context", return_value=context),
             patch.object(engine, "_tool", side_effect=lambda name: name),
@@ -197,6 +330,118 @@ class PromotionTests(unittest.TestCase):
         ):
             engine._command_promote_image(args)
         run.assert_not_called()
+
+    def test_scheduled_rebuild_moves_released_semver_tags(self) -> None:
+        context = engine._GitHubContext(
+            actor="actor",
+            event_name="schedule",
+            ref_name="main",
+            repository="Strukturpiloten/containers",
+            run_attempt="1",
+            run_id="100",
+            server_url="https://github.com",
+            sha="c" * 40,
+            token="token",  # noqa: S106
+        )
+        args = SimpleNamespace(
+            image_name="example",
+            image="ghcr.io/strukturpiloten/example",
+            version="1.2.3",
+            digest=DIGEST,
+            default_branch="main",
+            build_result=None,
+        )
+        with (
+            patch.object(engine, "_github_context", return_value=context),
+            patch.object(engine, "_github_release_exists", return_value=True),
+            patch.object(engine, "_tool", side_effect=lambda name: name),
+            patch.object(engine, "_remote_digest", return_value=None),
+            patch.object(engine, "_write_github_outputs") as outputs,
+            patch.object(engine, "_run") as run,
+        ):
+            engine._command_promote_image(args)
+
+        promoted_targets = [call.args[0][-1] for call in run.call_args_list]
+        self.assertEqual(
+            promoted_targets,
+            [
+                "docker://ghcr.io/strukturpiloten/example:main",
+                "docker://ghcr.io/strukturpiloten/example:latest",
+                "docker://ghcr.io/strukturpiloten/example:v1.2.3",
+                "docker://ghcr.io/strukturpiloten/example:v1.2",
+                "docker://ghcr.io/strukturpiloten/example:v1",
+            ],
+        )
+        outputs.assert_called_once_with({"promoted_tags": "main,latest,v1.2.3,v1.2,v1"})
+
+    def test_scheduled_rebuild_skips_semver_without_release(self) -> None:
+        context = engine._GitHubContext(
+            actor="actor",
+            event_name="schedule",
+            ref_name="main",
+            repository="Strukturpiloten/containers",
+            run_attempt="1",
+            run_id="100",
+            server_url="https://github.com",
+            sha="c" * 40,
+            token="token",  # noqa: S106
+        )
+        args = SimpleNamespace(
+            image_name="example",
+            image="ghcr.io/strukturpiloten/example",
+            version="1.2.3",
+            digest=DIGEST,
+            default_branch="main",
+            build_result=None,
+        )
+        with (
+            patch.object(engine, "_github_context", return_value=context),
+            patch.object(engine, "_github_release_exists", return_value=False),
+            patch.object(engine, "_tool", side_effect=lambda name: name),
+            patch.object(engine, "_remote_digest", return_value=None),
+            patch.object(engine, "_write_github_outputs") as outputs,
+            patch.object(engine, "_run") as run,
+        ):
+            engine._command_promote_image(args)
+        self.assertEqual(len(run.call_args_list), 2)
+        outputs.assert_called_once_with({"promoted_tags": "main,latest"})
+
+    def test_scheduled_rebuild_records_promoted_tags_in_build_result(self) -> None:
+        context = engine._GitHubContext(
+            actor="actor",
+            event_name="schedule",
+            ref_name="main",
+            repository="Strukturpiloten/containers",
+            run_attempt="1",
+            run_id="100",
+            server_url="https://github.com",
+            sha="c" * 40,
+            token="token",  # noqa: S106
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            build_result_path = Path(temporary_directory) / "example-build-result.json"
+            build_result_path.write_text(json.dumps({"tags": ["run-100-1"]}), encoding="utf-8")
+            args = SimpleNamespace(
+                image_name="example",
+                image="ghcr.io/strukturpiloten/example",
+                version="1.2.3",
+                digest=DIGEST,
+                default_branch="main",
+                build_result=str(build_result_path),
+            )
+            with (
+                patch.object(engine, "_github_context", return_value=context),
+                patch.object(engine, "_github_release_exists", return_value=True),
+                patch.object(engine, "_tool", side_effect=lambda name: name),
+                patch.object(engine, "_remote_digest", return_value=None),
+                patch.object(engine, "_write_github_outputs"),
+                patch.object(engine, "_run"),
+            ):
+                engine._command_promote_image(args)
+
+            result = json.loads(build_result_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(result["tags"], ["run-100-1", "main", "latest", "v1.2.3", "v1.2", "v1"])
 
 
 class RepositoryValidationTests(unittest.TestCase):

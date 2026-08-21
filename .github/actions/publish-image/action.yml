@@ -9,7 +9,7 @@ inputs:
     description: JSON matrix entry with image name.
     required: true
   github-token:
-    description: Short-lived token used only for registry and SBOM authentication.
+    description: Short-lived token used for registry, SBOM, and release lookup authentication.
     required: true
   syft-version:
     description: Syft version to install.
@@ -107,12 +107,17 @@ runs:
 
     - name: Promote verified image tags
       shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
       run: |
         set -euo pipefail
 
         uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine promote-image \
+          --image-name "${{ steps.publish.outputs.image_name }}" \
           --image "${{ steps.publish.outputs.image }}" \
+          --version "${{ steps.publish.outputs.version }}" \
           --digest "${{ steps.publish.outputs.index_digest }}" \
+          --build-result "${{ steps.publish.outputs.build_result }}" \
           --default-branch "${{ inputs.default-branch }}"
 
     - name: Upload build result

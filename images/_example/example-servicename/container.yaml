@@ -76,5 +76,3 @@ inputs:
   - images/_example/example-servicename/**
   - shared/container-utilities/**
   - shared/oci-labels.env
-  - .github/workflows/publish-images.yml
-  - .github/renovate.json
