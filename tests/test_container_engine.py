@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from scripts import container_engine as engine
 
@@ -272,28 +272,12 @@ class ReleaseValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(engine.ContainerEngineError, "not found in repository metadata"):
             engine._release_metadata("missing")
 
-    def test_release_info_writes_derived_version(self) -> None:
-        with patch.object(engine, "_write_github_outputs") as outputs:
-            engine._command_release_info(SimpleNamespace(image="nextcloud-notifypush"))
-        outputs.assert_called_once_with(
-            {
-                "image_name": "nextcloud-notifypush",
-                "version": "1.0.0",
-                "release_tag": "v1.0.0",
-            }
-        )
-
-    def test_release_workflow_choices_are_generated_from_metadata(self) -> None:
-        workflow = engine._release_workflow(engine._load_images())
-        self.assertIn("type: choice", workflow)
-        self.assertIn("          - nextcloud-notifypush", workflow)
-        self.assertIn("          - nextcloud-phpfpm", workflow)
-        self.assertIn("          - typo3-phpfpm", workflow)
-        self.assertEqual(workflow.count("          - nextcloud-notifypush\n"), 1)
-        self.assertEqual(workflow.count("          - nextcloud-phpfpm\n"), 1)
-        self.assertEqual(workflow.count("          - typo3-phpfpm\n"), 1)
-        self.assertNotIn("example-servicename", workflow)
-        self.assertNotIn("inputs.version", workflow)
+    def test_publish_workflow_finalizes_releases_automatically(self) -> None:
+        workflow = engine._publish_workflow(1)
+        self.assertIn("finalize-stage-0:", workflow)
+        self.assertIn("uses: ./.github/actions/finalize-release", workflow)
+        self.assertIn("contents: write", workflow)
+        self.assertNotIn("source-sha", workflow)
 
     def test_release_candidate_must_match_revision_and_version(self) -> None:
         inspection = {
@@ -331,6 +315,31 @@ class ReleaseValidationTests(unittest.TestCase):
         self.assertEqual(created, "2023-11-14T22:13:20Z")
 
 
+class VersionProgressionTests(unittest.TestCase):
+    def test_forward_version_change_is_valid(self) -> None:
+        current = [{"name": "example", "version": "v2.0.0"}]
+        previous = {"example": {"name": "example", "version": "v1.9.9"}}
+        with (
+            patch.object(engine, "_load_images", return_value=current),
+            patch.object(engine, "_validate_images"),
+            patch.object(engine, "_images_at_revision", return_value=previous),
+            patch.object(engine, "_write_stdout") as stdout,
+        ):
+            engine._command_validate_versions(SimpleNamespace(before="b" * 40))
+        stdout.assert_called_once_with("Validated version progression: example: 1.9.9 -> 2.0.0.")
+
+    def test_version_downgrade_is_rejected(self) -> None:
+        current = [{"name": "example", "version": "v1.0.0"}]
+        previous = {"example": {"name": "example", "version": "v2.0.0"}}
+        with (
+            patch.object(engine, "_load_images", return_value=current),
+            patch.object(engine, "_validate_images"),
+            patch.object(engine, "_images_at_revision", return_value=previous),
+            self.assertRaisesRegex(engine.ContainerEngineError, "version must move forward"),
+        ):
+            engine._command_validate_versions(SimpleNamespace(before="b" * 40))
+
+
 class PromotionTests(unittest.TestCase):
     def test_existing_sha_tag_cannot_be_overwritten(self) -> None:
         context = engine._GitHubContext(
@@ -345,9 +354,7 @@ class PromotionTests(unittest.TestCase):
             token=None,
         )
         args = SimpleNamespace(
-            image_name="example",
             image="ghcr.io/strukturpiloten/example",
-            version="1.2.3",
             digest=DIGEST,
             default_branch="main",
             build_result=None,
@@ -362,7 +369,7 @@ class PromotionTests(unittest.TestCase):
             engine._command_promote_image(args)
         run.assert_not_called()
 
-    def test_scheduled_rebuild_moves_released_semver_tags(self) -> None:
+    def test_scheduled_rebuild_promotes_branch_and_latest_before_finalization(self) -> None:
         context = engine._GitHubContext(
             actor="actor",
             event_name="schedule",
@@ -375,16 +382,13 @@ class PromotionTests(unittest.TestCase):
             token="token",  # noqa: S106
         )
         args = SimpleNamespace(
-            image_name="example",
             image="ghcr.io/strukturpiloten/example",
-            version="1.2.3",
             digest=DIGEST,
             default_branch="main",
             build_result=None,
         )
         with (
             patch.object(engine, "_github_context", return_value=context),
-            patch.object(engine, "_github_release_exists", return_value=True),
             patch.object(engine, "_tool", side_effect=lambda name: name),
             patch.object(engine, "_remote_digest", return_value=None),
             patch.object(engine, "_write_github_outputs") as outputs,
@@ -398,43 +402,8 @@ class PromotionTests(unittest.TestCase):
             [
                 "docker://ghcr.io/strukturpiloten/example:main",
                 "docker://ghcr.io/strukturpiloten/example:latest",
-                "docker://ghcr.io/strukturpiloten/example:v1.2.3",
-                "docker://ghcr.io/strukturpiloten/example:v1.2",
-                "docker://ghcr.io/strukturpiloten/example:v1",
             ],
         )
-        outputs.assert_called_once_with({"promoted_tags": "main,latest,v1.2.3,v1.2,v1"})
-
-    def test_scheduled_rebuild_skips_semver_without_release(self) -> None:
-        context = engine._GitHubContext(
-            actor="actor",
-            event_name="schedule",
-            ref_name="main",
-            repository="Strukturpiloten/containers",
-            run_attempt="1",
-            run_id="100",
-            server_url="https://github.com",
-            sha="c" * 40,
-            token="token",  # noqa: S106
-        )
-        args = SimpleNamespace(
-            image_name="example",
-            image="ghcr.io/strukturpiloten/example",
-            version="1.2.3",
-            digest=DIGEST,
-            default_branch="main",
-            build_result=None,
-        )
-        with (
-            patch.object(engine, "_github_context", return_value=context),
-            patch.object(engine, "_github_release_exists", return_value=False),
-            patch.object(engine, "_tool", side_effect=lambda name: name),
-            patch.object(engine, "_remote_digest", return_value=None),
-            patch.object(engine, "_write_github_outputs") as outputs,
-            patch.object(engine, "_run") as run,
-        ):
-            engine._command_promote_image(args)
-        self.assertEqual(len(run.call_args_list), 2)
         outputs.assert_called_once_with({"promoted_tags": "main,latest"})
 
     def test_scheduled_rebuild_records_promoted_tags_in_build_result(self) -> None:
@@ -453,16 +422,13 @@ class PromotionTests(unittest.TestCase):
             build_result_path = Path(temporary_directory) / "example-build-result.json"
             build_result_path.write_text(json.dumps({"tags": ["run-100-1"]}), encoding="utf-8")
             args = SimpleNamespace(
-                image_name="example",
                 image="ghcr.io/strukturpiloten/example",
-                version="1.2.3",
                 digest=DIGEST,
                 default_branch="main",
                 build_result=str(build_result_path),
             )
             with (
                 patch.object(engine, "_github_context", return_value=context),
-                patch.object(engine, "_github_release_exists", return_value=True),
                 patch.object(engine, "_tool", side_effect=lambda name: name),
                 patch.object(engine, "_remote_digest", return_value=None),
                 patch.object(engine, "_write_github_outputs"),
@@ -472,7 +438,160 @@ class PromotionTests(unittest.TestCase):
 
             result = json.loads(build_result_path.read_text(encoding="utf-8"))
 
-        self.assertEqual(result["tags"], ["run-100-1", "main", "latest", "v1.2.3", "v1.2", "v1"])
+        self.assertEqual(result["tags"], ["run-100-1", "main", "latest"])
+
+
+class AutomaticReleaseTests(unittest.TestCase):
+    @staticmethod
+    def _context() -> engine._GitHubContext:
+        return engine._GitHubContext(
+            actor="actor",
+            event_name="push",
+            ref_name="main",
+            repository="Strukturpiloten/containers",
+            run_attempt="1",
+            run_id="100",
+            server_url="https://github.com",
+            sha="c" * 40,
+            token="token",  # noqa: S106
+        )
+
+    @staticmethod
+    def _run(command: list[str], **_kwargs: object) -> str:
+        if "--config" in command:
+            return json.dumps(
+                {
+                    "config": {
+                        "Labels": {
+                            "org.opencontainers.image.revision": "c" * 40,
+                            "org.opencontainers.image.version": "1.0.0",
+                        }
+                    }
+                }
+            )
+        return ""
+
+    @staticmethod
+    def _build_result(path: Path) -> None:
+        path.write_text(
+            json.dumps(
+                {
+                    "imageName": "nextcloud-phpfpm",
+                    "image": "ghcr.io/strukturpiloten/nextcloud-phpfpm",
+                    "version": "1.0.0",
+                    "sourceRevision": "c" * 40,
+                    "indexDigest": DIGEST,
+                    "tags": ["run-100-1-sha-source", "main", "latest"],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def test_github_release_payload_is_automatic_and_image_scoped(self) -> None:
+        response = MagicMock()
+        response.status = 201
+        response.read.return_value = b'{"id": 1}'
+        response.__enter__.return_value = response
+        with patch.object(engine.urllib.request, "urlopen", return_value=response) as urlopen:
+            release = engine._create_github_release(
+                self._context(),
+                image_name="nextcloud-phpfpm",
+                version="1.0.0",
+                source_revision="c" * 40,
+            )
+
+        request = urlopen.call_args.args[0]
+        payload = json.loads(request.data)
+        self.assertEqual(release, {"id": 1})
+        self.assertEqual(payload["tag_name"], "nextcloud-phpfpm/v1.0.0")
+        self.assertEqual(payload["target_commitish"], "c" * 40)
+        self.assertFalse(payload["prerelease"])
+        self.assertEqual(payload["make_latest"], "false")
+
+    def test_missing_release_is_created_and_semver_tags_are_promoted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            result_path = Path(temporary_directory) / "nextcloud-phpfpm-build-result.json"
+            self._build_result(result_path)
+            args = SimpleNamespace(image="nextcloud-phpfpm", build_result=str(result_path), default_branch="main")
+            with (
+                patch.object(engine, "_github_context", return_value=self._context()),
+                patch.object(engine, "_github_release", return_value=None),
+                patch.object(engine, "_create_github_release", return_value={"id": 1}) as create_release,
+                patch.object(engine, "_git_tag_revision", return_value=None),
+                patch.object(engine, "_tool", side_effect=lambda name: name),
+                patch.object(engine, "_remote_digest", return_value=None),
+                patch.object(engine, "_run", side_effect=self._run) as run,
+                patch.object(engine, "_write_github_outputs") as outputs,
+            ):
+                engine._command_finalize_release(args)
+
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+
+        create_release.assert_called_once_with(
+            self._context(),
+            image_name="nextcloud-phpfpm",
+            version="1.0.0",
+            source_revision="c" * 40,
+        )
+        copy_targets = [call.args[0][-1] for call in run.call_args_list if "copy" in call.args[0]]
+        self.assertEqual(
+            copy_targets,
+            [
+                "docker://ghcr.io/strukturpiloten/nextcloud-phpfpm:v1.0.0",
+                "docker://ghcr.io/strukturpiloten/nextcloud-phpfpm:v1.0",
+                "docker://ghcr.io/strukturpiloten/nextcloud-phpfpm:v1",
+            ],
+        )
+        self.assertEqual(result["releaseTag"], "nextcloud-phpfpm/v1.0.0")
+        self.assertEqual(result["tags"][-3:], ["v1.0.0", "v1.0", "v1"])
+        outputs.assert_called_once_with(
+            {
+                "image_name": "nextcloud-phpfpm",
+                "image": "ghcr.io/strukturpiloten/nextcloud-phpfpm",
+                "version": "1.0.0",
+                "index_digest": DIGEST,
+                "tags": "v1.0.0,v1.0,v1",
+                "release_tag": "nextcloud-phpfpm/v1.0.0",
+            }
+        )
+
+    def test_existing_release_allows_maintenance_update(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            result_path = Path(temporary_directory) / "nextcloud-phpfpm-build-result.json"
+            self._build_result(result_path)
+            args = SimpleNamespace(image="nextcloud-phpfpm", build_result=str(result_path), default_branch="main")
+            with (
+                patch.object(engine, "_github_context", return_value=self._context()),
+                patch.object(engine, "_github_release", return_value={"id": 1}),
+                patch.object(engine, "_create_github_release") as create_release,
+                patch.object(engine, "_tool", side_effect=lambda name: name),
+                patch.object(engine, "_remote_digest", return_value=f"sha256:{'b' * 64}"),
+                patch.object(engine, "_run", side_effect=self._run) as run,
+                patch.object(engine, "_write_github_outputs"),
+            ):
+                engine._command_finalize_release(args)
+
+        create_release.assert_not_called()
+        self.assertEqual(len([call for call in run.call_args_list if "copy" in call.args[0]]), 3)
+
+    def test_unowned_exact_tag_collision_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            result_path = Path(temporary_directory) / "nextcloud-phpfpm-build-result.json"
+            self._build_result(result_path)
+            args = SimpleNamespace(image="nextcloud-phpfpm", build_result=str(result_path), default_branch="main")
+            with (
+                patch.object(engine, "_github_context", return_value=self._context()),
+                patch.object(engine, "_github_release", return_value=None),
+                patch.object(engine, "_create_github_release") as create_release,
+                patch.object(engine, "_git_tag_revision", return_value=None),
+                patch.object(engine, "_tool", side_effect=lambda name: name),
+                patch.object(engine, "_remote_digest", return_value=f"sha256:{'b' * 64}"),
+                patch.object(engine, "_run", side_effect=self._run),
+                self.assertRaisesRegex(engine.ContainerEngineError, "Refusing to claim existing registry tag"),
+            ):
+                engine._command_finalize_release(args)
+
+        create_release.assert_not_called()
 
 
 class RepositoryValidationTests(unittest.TestCase):

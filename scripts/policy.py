@@ -34,6 +34,46 @@ def semver_tags(version: str) -> list[str]:
     return [f"v{normalized}", f"v{parts[0]}.{parts[1]}", f"v{parts[0]}"]
 
 
+def _comparison(left: object, right: object) -> int:
+    return (left > right) - (left < right)  # type: ignore[operator]
+
+
+def _semver_parts(version: str) -> tuple[tuple[int, int, int], list[str] | None]:
+    normalized = normalize_version(version)
+    if not re.fullmatch(VERSION_PATTERN, normalized):
+        msg = f"Invalid SemVer version: {version}"
+        raise ValueError(msg)
+    core, separator, prerelease = normalized.partition("-")
+    major, minor, patch = (int(part) for part in core.split("."))
+    return (major, minor, patch), prerelease.split(".") if separator else None
+
+
+def _compare_prerelease(left: list[str], right: list[str]) -> int:
+    for left_identifier, right_identifier in zip(left, right, strict=False):
+        if left_identifier == right_identifier:
+            continue
+        left_numeric = left_identifier.isdigit()
+        right_numeric = right_identifier.isdigit()
+        if left_numeric and right_numeric:
+            return _comparison(int(left_identifier), int(right_identifier))
+        if left_numeric != right_numeric:
+            return -1 if left_numeric else 1
+        return _comparison(left_identifier, right_identifier)
+    return _comparison(len(left), len(right))
+
+
+def compare_semver(left: str, right: str) -> int:
+    """Compare two supported SemVer values using SemVer precedence rules."""
+    left_core, left_prerelease = _semver_parts(left)
+    right_core, right_prerelease = _semver_parts(right)
+    core_comparison = _comparison(left_core, right_core)
+    if core_comparison:
+        return core_comparison
+    if left_prerelease is None or right_prerelease is None:
+        return _comparison(right_prerelease is not None, left_prerelease is not None)
+    return _compare_prerelease(left_prerelease, right_prerelease)
+
+
 def safe_ref_tag(ref_name: str) -> str:
     """Convert a Git ref name into a portable OCI tag."""
     return re.sub(r"[^a-z0-9._-]+", "-", ref_name.lower()).strip("-")
@@ -61,9 +101,3 @@ def promotion_tags(*, event_name: str, ref_name: str, default_branch: str, sha: 
     if ref_name == default_branch:
         tags.append("latest")
     return unique_tags(tags)
-
-
-def maintained_semver_tags(version: str) -> list[str]:
-    """Return mutable maintenance tags only for stable SemVer releases."""
-    tags = semver_tags(version)
-    return tags if "-" not in normalize_version(version) else []

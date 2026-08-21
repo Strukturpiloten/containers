@@ -103,6 +103,16 @@ jobs:
 
           uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine validate
 
+      - name: Validate version progression
+        shell: bash
+        env:
+          BEFORE: ${{ github.event.before || '' }}
+        run: |
+          set -euo pipefail
+
+          uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine validate-versions \
+            --before "${BEFORE}"
+
       - name: Create build plan
         shell: bash
         env:
@@ -199,3 +209,34 @@ jobs:
           entry: ${{ toJSON(matrix) }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           syft-version: ${{ env.SYFT_VERSION }}
+
+  finalize-stage-0:
+    name: Finalize release ${{ matrix.name }}
+    needs:
+      - plan
+      - publish-stage-0
+    if: >-
+      needs.plan.outputs.stage_0_has_builds == 'true' &&
+      github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.stage_0_publish_matrix) }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+          submodules: true
+      - name: Finalize release
+        uses: ./.github/actions/finalize-release
+        with:
+          default-branch: ${{ github.event.repository.default_branch }}
+          entry: ${{ toJSON(matrix) }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}

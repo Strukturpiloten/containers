@@ -34,6 +34,8 @@ jobs:
           version: ${{ env.UV_VERSION }}
       - name: Validate repository
         shell: bash
+        env:
+          BEFORE: ${{ github.event.pull_request.base.sha || '' }}
         run: |
           set -euo pipefail
 
@@ -41,6 +43,8 @@ jobs:
           uv run --frozen --python "${PYTHON_VERSION}" ruff check .
           uv run --frozen --python "${PYTHON_VERSION}" python -m unittest discover -s tests
           uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine validate
+          uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine validate-versions \
+            --before "${BEFORE}"
           uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine generate-workflow --check
 
   plan:
