@@ -8,12 +8,16 @@ on:
         required: true
         type: string
       version:
-        description: SemVer version with optional leading v and prerelease, for example 1.2.3 or v1.2.3-rc.1
+        description: Version already merged in container.yaml, for example 1.2.3 or v1.2.3-rc.1
+        required: true
+        type: string
+      source-sha:
+        description: Full commit SHA of the verified immutable image snapshot
         required: true
         type: string
 
 concurrency:
-  group: release-${{ inputs.image }}-${{ inputs.version }}
+  group: release-${{ inputs.image }}
   cancel-in-progress: false
 
 permissions:
@@ -28,42 +32,63 @@ jobs:
   release:
     name: Release ${{ inputs.image }} ${{ inputs.version }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.source-sha }}
 
       - name: Install uv
         uses: ./.github/actions/setup-uv
         with:
           version: ${{ env.UV_VERSION }}
 
-      - name: Validate image metadata
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine validate
-
-      - name: Ensure release does not already exist
+      - name: Validate release source
         shell: bash
         env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           GH_TOKEN: ${{ github.token }}
           IMAGE_NAME: ${{ inputs.image }}
+          SOURCE_SHA: ${{ inputs.source-sha }}
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
 
+          if [ "${GITHUB_REF_NAME}" != "${DEFAULT_BRANCH}" ]; then
+            echo "Releases must run from ${DEFAULT_BRANCH}, not ${GITHUB_REF_NAME}." >&2
+            exit 1
+          fi
+
+          uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine validate
+
+          if ! printf '%s' "${SOURCE_SHA}" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "source-sha must be a full lowercase Git commit SHA." >&2
+            exit 1
+          fi
+          if [ "$(git rev-parse HEAD)" != "${SOURCE_SHA}" ]; then
+            echo "Checked-out release source does not match ${SOURCE_SHA}." >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "${SOURCE_SHA}" "origin/${DEFAULT_BRANCH}"; then
+            echo "Release source ${SOURCE_SHA} is not part of ${DEFAULT_BRANCH}." >&2
+            exit 1
+          fi
+
           version="${VERSION#v}"
           tag="${IMAGE_NAME}/v${version}"
-
           if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             echo "Release ${tag} already exists." >&2
             exit 1
           fi
 
-          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
-            echo "Git tag ${tag} already exists." >&2
-            exit 1
+          if git rev-parse --verify --quiet "refs/tags/${tag}^{commit}" >/dev/null; then
+            tag_revision=$(git rev-list -n 1 "${tag}")
+            if [ "${tag_revision}" != "${SOURCE_SHA}" ]; then
+              echo "Git tag ${tag} already points to ${tag_revision}, not ${SOURCE_SHA}." >&2
+              exit 1
+            fi
           fi
 
       - name: Install OCI tooling
@@ -74,85 +99,42 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends skopeo
 
-      - name: Push SemVer tags
+      - name: Log in to GitHub Container Registry
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          GITHUB_ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+
+          printf '%s' "${GITHUB_TOKEN}" | skopeo login --username "${GITHUB_ACTOR}" --password-stdin ghcr.io
+
+      - name: Promote verified digest to SemVer tags
+        id: release
+        shell: bash
         run: |
           set -euo pipefail
 
           uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine release-image \
             --image "${{ inputs.image }}" \
-            --version "${{ inputs.version }}"
-
-      - name: Update version in container.yaml
-        shell: bash
-        env:
-          IMAGE_NAME: ${{ inputs.image }}
-          VERSION: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-
-          version="${VERSION#v}"
-          metadata_file=$(find images -name container.yaml | while IFS= read -r f; do
-            name=$(grep -m1 "^name:" "$f" | awk "{print \$2}")
-            if [ "$name" = "$IMAGE_NAME" ]; then
-              echo "$f"
-              break
-            fi
-          done)
-
-          if [ -z "${metadata_file}" ]; then
-            echo "Could not find container.yaml for image ${IMAGE_NAME}." >&2
-            exit 1
-          fi
-
-          sed -i "s/^version:.*/version: v${version}/" "${metadata_file}"
-          grep -q "^version: v${version}$" "${metadata_file}"
-
-      - name: Commit version bump and create tag
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          IMAGE_NAME: ${{ inputs.image }}
-          VERSION: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-
-          version="${VERSION#v}"
-          tag="${IMAGE_NAME}/v${version}"
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add -A
-          if git diff --cached --quiet; then
-            echo "No changes to commit." >&2
-            exit 1
-          fi
-
-          git commit -m "chore(release): ${IMAGE_NAME} v${version}"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
-
-          git tag -a "${tag}" -m "Release ${IMAGE_NAME} v${version}"
-          git push origin "refs/tags/${tag}"
+            --version "${{ inputs.version }}" \
+            --source-sha "${{ inputs.source-sha }}" \
+            --default-branch "${{ github.event.repository.default_branch }}"
 
       - name: Create GitHub release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           IMAGE_NAME: ${{ inputs.image }}
+          SOURCE_SHA: ${{ inputs.source-sha }}
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
 
           version="${VERSION#v}"
           tag="${IMAGE_NAME}/v${version}"
-
           release_args=(
             --repo "${GITHUB_REPOSITORY}"
-            --target "${GITHUB_REF_NAME}"
+            --target "${SOURCE_SHA}"
             --generate-notes
             --title "${tag}"
           )

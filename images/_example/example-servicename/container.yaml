@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=../../../container.schema.json
 # Example container.yaml for a new image in this monorepo.
 #
 # Copy this directory to images/<family>/<name>/ and fill in the values.
@@ -37,11 +38,15 @@ build:
   architectures:
     - amd64
     - arm64
+  # Build argument that identifies the final runtime image for OCI base labels.
+  runtimeBaseArg: BASE_IMAGE
   # Build arguments passed to the Containerfile via --build-arg.
   # Each arg must define "value" and "type".
   # Supported types:
   #   external-image: Pinned external base image reference with digest.
   #                    Tracked by Renovate. Used to resolve base name and digest.
+  #   internal-image: Pinned released fallback for an internal dependency.
+  #                   Replaced by the current workflow's published digest when rebuilt together.
   #   static:         Fixed string value that never changes between builds.
   args:
     BASE_IMAGE:
@@ -56,9 +61,7 @@ dependencies:
   # Internal dependencies are other images in this repository.
   # The planner builds them first, then passes their pinned digest as a build arg.
   # The referenced "image" must match the "name" of another image in this repo.
-  internal:
-    - image: php-base
-      arg: BASE_IMAGE
+  internal: []
   # External dependencies are tracked by Renovate for version and digest updates.
   # "arg" must match a build.args key with type: external-image.
   external:

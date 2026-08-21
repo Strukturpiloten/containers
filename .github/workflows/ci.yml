@@ -1,0 +1,44 @@
+name: Validate containers
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: validate-containers-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.14"
+  UV_VERSION: 0.12.5
+
+jobs:
+  validate:
+    name: Validate metadata and automation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: true
+
+      - name: Install uv
+        uses: ./.github/actions/setup-uv
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Validate repository
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          uv run --frozen --python "${PYTHON_VERSION}" ruff format --check .
+          uv run --frozen --python "${PYTHON_VERSION}" ruff check .
+          uv run --frozen --python "${PYTHON_VERSION}" python -m unittest discover -s tests
+          uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine validate
+          uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine generate-workflow --check

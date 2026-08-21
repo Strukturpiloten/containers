@@ -7,7 +7,6 @@ import datetime as dt
 import fnmatch
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -18,6 +17,15 @@ from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 import yaml
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
+
+from scripts.metadata_schema import MetadataSchemaError, validate_metadata_schema
+from scripts.policy import (
+    canonical_build_tag,
+    normalize_version,
+    promotion_tags,
+    semver_tags,
+    unique_tags,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -30,11 +38,22 @@ RUNNERS = {
 PUBLISH_WORKFLOW_PATH = Path(".github/workflows/publish-images.yml")
 PUBLISH_WORKFLOW_TEMPLATE_PATH = Path(".github/workflow-templates/publish-images.yml.j2")
 OCI_LABELS_ENV_PATH = Path("shared/oci-labels.env")
+CONTAINER_SCHEMA_PATH = Path("container.schema.json")
 IMAGES_GLOB = "images/**/container.yaml"
 EXCLUDED_IMAGE_DIR = "_example"
-DEFAULT_BRANCH_TAGS = ["latest"]
-VERSION_PATTERN = r"^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$"
-SEMVER_PART_COUNT = 3
+GLOBAL_BUILD_INPUTS = (
+    ".containerignore",
+    ".github/actions/**",
+    ".github/workflow-templates/**",
+    ".github/workflows/publish-images.yml",
+    "container.schema.json",
+    "pyproject.toml",
+    "scripts/**",
+    "uv.lock",
+)
+SHA256_DIGEST_LENGTH = 71
+GIT_SHA_LENGTH = 40
+LOWERCASE_HEX_DIGITS = frozenset("0123456789abcdef")
 
 type JsonMap = dict[str, Any]
 type JsonList = list[Any]
@@ -296,10 +315,6 @@ def _build_arg(name: str, value: str) -> list[str]:
     return ["--build-arg", f"{name}={value}"]
 
 
-def _safe_ref_tag(ref_name: str) -> str:
-    return re.sub(r"[^a-z0-9._-]+", "-", ref_name.lower()).strip("-")
-
-
 def _image_metadata_paths() -> list[Path]:
     return sorted(path for path in _repo_root().glob(IMAGES_GLOB) if EXCLUDED_IMAGE_DIR not in path.parts)
 
@@ -315,13 +330,28 @@ def _load_images() -> list[JsonMap]:
         if metadata_map is None:
             _fail(f"{_repo_relative_path(path)} must contain a YAML mapping.")
 
-        metadata_map["metadataFile"] = _repo_relative_path(path)
+        metadata_file = _repo_relative_path(path)
+        try:
+            validate_metadata_schema(
+                metadata_map,
+                schema_path=_repo_root() / CONTAINER_SCHEMA_PATH,
+                display_path=metadata_file,
+            )
+        except MetadataSchemaError as error:
+            _fail(str(error))
+
+        metadata_map["metadataFile"] = metadata_file
         images.append(metadata_map)
 
     names = [str(image.get("name", "")) for image in images]
     duplicate_names = sorted(name for name in set(names) if names.count(name) > 1)
     if duplicate_names:
         _fail(f"Duplicate image names: {', '.join(duplicate_names)}.")
+
+    image_refs = [str(image.get("image", "")) for image in images]
+    duplicate_image_refs = sorted(image_ref for image_ref in set(image_refs) if image_refs.count(image_ref) > 1)
+    if duplicate_image_refs:
+        _fail(f"Duplicate registry image references: {', '.join(duplicate_image_refs)}.")
 
     return images
 
@@ -365,10 +395,16 @@ def _validate_build_paths(metadata_file: str, build: JsonMap) -> None:
     if not isinstance(containerfile, str) or not containerfile:
         _fail(f"{metadata_file} must define build.containerfile.")
 
-    if not (_repo_root() / context).is_dir():
+    repository_root = _repo_root().resolve()
+    context_path = (_repo_root() / context).resolve()
+    containerfile_path = (_repo_root() / containerfile).resolve()
+    if not context_path.is_relative_to(repository_root) or not containerfile_path.is_relative_to(repository_root):
+        _fail(f"{metadata_file} build paths must remain inside the repository.")
+
+    if not context_path.is_dir():
         _fail(f"{metadata_file} build.context does not exist: {context}.")
 
-    if not (_repo_root() / containerfile).is_file():
+    if not containerfile_path.is_file():
         _fail(f"{metadata_file} build.containerfile does not exist: {containerfile}.")
 
 
@@ -394,12 +430,88 @@ def _validate_build_args(metadata_file: str, build: JsonMap) -> None:
             _fail(f"{metadata_file} build arg {arg_name} must be a mapping.")
 
         arg_type = arg_definition_map.get("type")
-        if not isinstance(arg_type, str) or not arg_type:
-            _fail(f"{metadata_file} build arg {arg_name} must define type.")
+        if arg_type not in {"external-image", "internal-image", "static"}:
+            _fail(f"{metadata_file} build arg {arg_name} uses unsupported type {arg_type}.")
 
         arg_value = arg_definition_map.get("value")
         if not isinstance(arg_value, str) or not arg_value:
             _fail(f"{metadata_file} build arg {arg_name} must define value.")
+
+    runtime_base_arg = build.get("runtimeBaseArg")
+    runtime_definition = _json_map(build_args.get(runtime_base_arg)) if isinstance(runtime_base_arg, str) else None
+    if runtime_definition is None or runtime_definition.get("type") not in {"external-image", "internal-image"}:
+        _fail(f"{metadata_file} build.runtimeBaseArg must reference an external-image or internal-image build arg.")
+
+
+def _reference_matches_image(reference: str, image: str) -> bool:
+    return reference.startswith((f"{image}:", f"{image}@"))
+
+
+def _declared_image_args(build_args: JsonMap, arg_type: str) -> set[str]:
+    declared: set[str] = set()
+    for name, definition_candidate in _json_map_items(build_args):
+        definition = _json_map(definition_candidate)
+        if definition is not None and definition.get("type") == arg_type:
+            declared.add(name)
+    return declared
+
+
+def _validate_internal_dependency_entries(
+    metadata_file: str,
+    entries: JsonList,
+    build_args: JsonMap,
+    image_names: set[str],
+) -> set[str]:
+    dependency_args: set[str] = set()
+    for dependency_candidate in entries:
+        dependency = _json_map(dependency_candidate)
+        if dependency is None:
+            _fail(f"{metadata_file} internal dependencies must be mappings.")
+
+        dependency_name = dependency.get("image")
+        dependency_arg = dependency.get("arg")
+        if not isinstance(dependency_name, str) or not isinstance(dependency_arg, str):
+            _fail(f"{metadata_file} internal dependencies must define image and arg.")
+        if dependency_name not in image_names:
+            _fail(f"{metadata_file} references unknown internal image {dependency_name}.")
+
+        arg_definition = _json_map(build_args.get(dependency_arg))
+        if arg_definition is None or arg_definition.get("type") != "internal-image":
+            _fail(f"{metadata_file} internal dependency arg {dependency_arg} must use type internal-image.")
+
+        arg_value = arg_definition.get("value")
+        expected_image = f"ghcr.io/strukturpiloten/{dependency_name}"
+        if not isinstance(arg_value, str) or not _reference_matches_image(arg_value, expected_image):
+            _fail(f"{metadata_file} internal dependency {dependency_name} does not match build arg {dependency_arg}.")
+        dependency_args.add(dependency_arg)
+    return dependency_args
+
+
+def _validate_external_dependency_entries(
+    metadata_file: str,
+    entries: JsonList,
+    build_args: JsonMap,
+) -> set[str]:
+    dependency_args: set[str] = set()
+    for dependency_candidate in entries:
+        dependency = _json_map(dependency_candidate)
+        if dependency is None:
+            _fail(f"{metadata_file} external dependencies must be mappings.")
+
+        dependency_arg = dependency.get("arg")
+        dependency_image = dependency.get("image")
+        if not isinstance(dependency_arg, str) or not isinstance(dependency_image, str):
+            _fail(f"{metadata_file} external dependencies must define image and arg.")
+
+        arg_definition = _json_map(build_args.get(dependency_arg))
+        if arg_definition is None or arg_definition.get("type") != "external-image":
+            _fail(f"{metadata_file} external dependency arg {dependency_arg} must use type external-image.")
+
+        arg_value = arg_definition.get("value")
+        if not isinstance(arg_value, str) or not _reference_matches_image(arg_value, dependency_image):
+            _fail(f"{metadata_file} external dependency {dependency_image} does not match build arg {dependency_arg}.")
+        dependency_args.add(dependency_arg)
+    return dependency_args
 
 
 def _validate_dependencies(metadata_file: str, image: JsonMap, image_names: set[str]) -> None:
@@ -416,20 +528,15 @@ def _validate_dependencies(metadata_file: str, image: JsonMap, image_names: set[
     if external_dependencies is None:
         _fail(f"{metadata_file} dependencies.external must be a list.")
 
-    for dependency_candidate in internal_dependencies:
-        dependency = _json_map(dependency_candidate)
-        if (
-            dependency is None
-            or not isinstance(dependency.get("image"), str)
-            or not isinstance(
-                dependency.get("arg"),
-                str,
-            )
-        ):
-            _fail(f"{metadata_file} internal dependencies must define image and arg.")
-
-        if dependency["image"] not in image_names:
-            _fail(f"{metadata_file} references unknown internal image {dependency['image']}.")
+    build_args = _image_build_args(image)
+    internal_args = _validate_internal_dependency_entries(metadata_file, internal_dependencies, build_args, image_names)
+    external_args = _validate_external_dependency_entries(metadata_file, external_dependencies, build_args)
+    declared_internal_args = _declared_image_args(build_args, "internal-image")
+    declared_external_args = _declared_image_args(build_args, "external-image")
+    if internal_args != declared_internal_args:
+        _fail(f"{metadata_file} must declare exactly one internal dependency for every internal-image build arg.")
+    if external_args != declared_external_args:
+        _fail(f"{metadata_file} must declare exactly one external dependency for every external-image build arg.")
 
 
 def _validate_inputs(metadata_file: str, image: JsonMap) -> None:
@@ -437,15 +544,18 @@ def _validate_inputs(metadata_file: str, image: JsonMap) -> None:
     if not all(isinstance(image_input, str) and image_input for image_input in image_inputs):
         _fail(f"{metadata_file} inputs must be non-empty strings.")
 
-
-def _normalize_version(version: str) -> str:
-    """Strip an optional leading v from a SemVer version string."""
-    return version.removeprefix("v")
+    build = _image_build(image)
+    required_paths = (metadata_file, str(build["containerfile"]))
+    for required_path in required_paths:
+        if not any(_input_matches(str(pattern), required_path) for pattern in image_inputs):
+            _fail(f"{metadata_file} inputs do not include required build path {required_path}.")
 
 
 def _validate_version(metadata_file: str, image: JsonMap) -> None:
     version = _require_string(image, "version")
-    if not re.fullmatch(VERSION_PATTERN, version):
+    try:
+        semver_tags(version)
+    except ValueError:
         _fail(f"{metadata_file} version must match SemVer major.minor.patch with an optional prerelease: {version}.")
 
 
@@ -453,6 +563,10 @@ def _validate_image(image: JsonMap, image_names: set[str]) -> None:
     metadata_file = image["metadataFile"]
     for key in ("name", "image", "title", "description", "version"):
         _require_string(image, key)
+
+    expected_image = f"ghcr.io/strukturpiloten/{image['name']}"
+    if image["image"] != expected_image:
+        _fail(f"{metadata_file} image must be {expected_image}.")
 
     _validate_version(metadata_file, image)
     build = _require_mapping(image, "build")
@@ -529,13 +643,14 @@ def _topological_levels(images: list[JsonMap], selected_names: set[str] | None =
     return levels
 
 
-def _changed_files(before: str | None, sha: str, event_name: str) -> list[str]:
+def _changed_files(before: str | None, sha: str, event_name: str) -> list[str] | None:
     if event_name != "push" or not before or not sha or set(before) == {"0"}:
-        return []
+        return None
 
     git = shutil.which("git")
     if git is None:
-        return []
+        _write_stderr("warning: git is unavailable; falling back to a full image rebuild.")
+        return None
 
     result = subprocess.run(  # noqa: S603
         [git, "-C", str(_repo_root()), "diff", "--name-only", before, sha],
@@ -544,7 +659,10 @@ def _changed_files(before: str | None, sha: str, event_name: str) -> list[str]:
         text=True,
     )
     if result.returncode != 0:
-        return []
+        _write_stderr(
+            f"warning: could not inspect changed files for {before}..{sha}; falling back to a full image rebuild."
+        )
+        return None
 
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
@@ -562,7 +680,10 @@ def _selected_image_names(images: list[JsonMap], options: PlanOptions) -> set[st
         return {image["name"] for image in images if image.get("build", {}).get("scheduled", True) is not False}
 
     files = _changed_files(before=options.before, sha=options.sha, event_name=options.event_name)
-    if not files:
+    if files is None:
+        return {image["name"] for image in images}
+
+    if any(_input_matches(pattern, changed_file) for pattern in GLOBAL_BUILD_INPUTS for changed_file in files):
         return {image["name"] for image in images}
 
     return {
@@ -596,7 +717,7 @@ def _normalize_image(image: JsonMap, level: int) -> JsonMap:
     build = image["build"]
     return {
         "name": image["name"],
-        "version": _normalize_version(image["version"]),
+        "version": normalize_version(image["version"]),
         "image": image["image"],
         "title": image["title"],
         "description": image["description"],
@@ -606,6 +727,7 @@ def _normalize_image(image: JsonMap, level: int) -> JsonMap:
             "context": build["context"],
             "containerfile": build["containerfile"],
             "architectures": build["architectures"],
+            "runtimeBaseArg": build["runtimeBaseArg"],
             "args": build.get("args", {}),
         },
         "dependencies": image.get("dependencies", {"internal": [], "external": []}),
@@ -732,23 +854,52 @@ def _command_generate_workflow(args: argparse.Namespace) -> None:
     _write_stdout(f"Wrote {PUBLISH_WORKFLOW_PATH} with {stage_count} dependency stage(s).")
 
 
-def _build_base_args(plan: JsonMap, image: JsonMap, context: _GitHubContext) -> tuple[list[str], str, str]:
+def _dependency_result_reference(
+    *,
+    dependency_name: str,
+    dependency_image: JsonMap,
+    dependency_results_dir: Path | None,
+    source_revision: str,
+) -> str:
+    if dependency_results_dir is None:
+        _fail(f"Build results are required for selected internal dependency {dependency_name}.")
+
+    result_path = dependency_results_dir / f"{dependency_name}-build-result.json"
+    if not result_path.is_file():
+        _fail(f"Missing build result for selected internal dependency {dependency_name}: {result_path}.")
+
+    result = _load_json(result_path)
+    expected_image = str(dependency_image["image"])
+    if result.get("imageName") != dependency_name or result.get("image") != expected_image:
+        _fail(f"Build result for internal dependency {dependency_name} does not match the build plan.")
+    if result.get("sourceRevision") != source_revision:
+        _fail(f"Build result for internal dependency {dependency_name} comes from a different source revision.")
+
+    digest = result.get("indexDigest")
+    if not isinstance(digest, str) or not digest.startswith("sha256:") or len(digest) != SHA256_DIGEST_LENGTH:
+        _fail(f"Build result for internal dependency {dependency_name} has an invalid index digest.")
+    return f"{expected_image}@{digest}"
+
+
+def _build_base_args(
+    plan: JsonMap,
+    image: JsonMap,
+    context: _GitHubContext,
+    dependency_results_dir: Path | None,
+) -> tuple[list[str], str, str]:
     build_args: list[str] = []
-    base_name = ""
-    base_digest = ""
+    effective_values: dict[str, str] = {}
 
     for arg_name, arg_definition in _json_map_items(_image_build_args(image)):
         arg_definition_map = _json_map(arg_definition)
         if arg_definition_map is None:
             continue
         arg_value = arg_definition_map.get("value", "")
-        arg_type = arg_definition_map.get("type", "")
         if not isinstance(arg_value, str) or not arg_value:
             continue
 
+        effective_values[arg_name] = arg_value
         build_args.extend(_build_arg(arg_name, arg_value))
-        if not base_name and arg_type == "external-image":
-            base_name, base_digest = _split_image_digest(arg_value)
 
     for dependency in _internal_dependencies(image):
         dependency_name = dependency.get("image")
@@ -758,7 +909,12 @@ def _build_base_args(plan: JsonMap, image: JsonMap, context: _GitHubContext) -> 
 
         dependency_image = _optional_plan_image(plan, dependency_name)
         if dependency_image is not None:
-            dependency_ref = f"{dependency_image['image']}:sha-{context.sha}"
+            dependency_ref = _dependency_result_reference(
+                dependency_name=dependency_name,
+                dependency_image=dependency_image,
+                dependency_results_dir=dependency_results_dir,
+                source_revision=context.sha,
+            )
         else:
             fallback = _json_map(_image_build_args(image).get(dependency_arg, {}))
             dependency_ref = fallback.get("value", "") if fallback is not None else ""
@@ -766,9 +922,14 @@ def _build_base_args(plan: JsonMap, image: JsonMap, context: _GitHubContext) -> 
         if not isinstance(dependency_ref, str) or not dependency_ref:
             _fail(f"Missing pinned fallback value for internal dependency {dependency_name} ({dependency_arg}).")
 
+        effective_values[dependency_arg] = dependency_ref
         build_args.extend(_build_arg(dependency_arg, dependency_ref))
-        if not base_name:
-            base_name, base_digest = _split_image_digest(dependency_ref)
+
+    runtime_base_arg = _image_build(image).get("runtimeBaseArg")
+    runtime_base = effective_values.get(str(runtime_base_arg), "")
+    base_name, base_digest = _split_image_digest(runtime_base)
+    if not base_name or not base_digest.startswith("sha256:"):
+        _fail(f"Image {image.get('name', '<unknown>')} has no digest-pinned effective runtime base image.")
 
     return build_args, base_name, base_digest
 
@@ -790,7 +951,8 @@ def _command_build_arch_image(args: argparse.Namespace) -> None:
     archive_path = output_dir / f"{image_name}-{architecture}.tar"
     local_image = f"localhost/{image_name}:{context.run_id}-{context.run_attempt}-{architecture}"
     created = dt.datetime.now(tz=dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    build_args, base_name, base_digest = _build_base_args(plan, image, context)
+    dependency_results_dir = Path(args.dependency_results_dir) if args.dependency_results_dir else None
+    build_args, base_name, base_digest = _build_base_args(plan, image, context, dependency_results_dir)
     oci_labels = _oci_labels()
 
     command = [
@@ -830,14 +992,6 @@ def _command_build_arch_image(args: argparse.Namespace) -> None:
     _run(command)
     _run([_tool("sudo"), _tool("buildah"), "push", "--format", "oci", local_image, f"oci-archive:{archive_path}"])
     _write_github_outputs({"image_name": image_name, "arch": architecture, "archive_path": str(archive_path)})
-
-
-def _unique_tags(tags: Sequence[str]) -> list[str]:
-    unique: list[str] = []
-    for tag in tags:
-        if tag and tag not in unique:
-            unique.append(tag)
-    return unique
 
 
 def _architecture_digests(raw_manifest: str, architectures: Sequence[str]) -> dict[str, str]:
@@ -900,16 +1054,25 @@ def _command_publish_image(args: argparse.Namespace) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     image_ref = str(image["image"])
-    sha_tag = f"sha-{context.sha}"
-    tags = [sha_tag, _safe_ref_tag(context.ref_name)]
-    if context.ref_name == args.default_branch:
-        tags.extend(DEFAULT_BRANCH_TAGS)
-    tags = _unique_tags(tags)
+    try:
+        canonical_tag = canonical_build_tag(sha=context.sha, run_id=context.run_id, run_attempt=context.run_attempt)
+    except ValueError as error:
+        _fail(str(error))
+    tags = unique_tags(
+        [
+            canonical_tag,
+            *promotion_tags(
+                event_name=context.event_name,
+                ref_name=context.ref_name,
+                default_branch=args.default_branch,
+                sha=context.sha,
+            ),
+        ]
+    )
     manifest_name = f"{image_name}-{context.run_id}-{context.run_attempt}"
     sudo = _tool("sudo")
     podman = _tool("podman")
     skopeo = _tool("skopeo")
-    credentials = f"{context.actor}:{context.token}"
 
     _run([sudo, podman, "manifest", "create", manifest_name])
     try:
@@ -932,25 +1095,22 @@ def _command_publish_image(args: argparse.Namespace) -> None:
                 ]
             )
 
-        for tag in tags:
-            _run(
-                [
-                    sudo,
-                    podman,
-                    "manifest",
-                    "push",
-                    "--all",
-                    "--format",
-                    "oci",
-                    "--creds",
-                    credentials,
-                    manifest_name,
-                    f"docker://{image_ref}:{tag}",
-                ]
-            )
+        _run(
+            [
+                sudo,
+                podman,
+                "manifest",
+                "push",
+                "--all",
+                "--format",
+                "oci",
+                manifest_name,
+                f"docker://{image_ref}:{canonical_tag}",
+            ]
+        )
 
         raw_manifest = _run(
-            [sudo, skopeo, "inspect", "--raw", "--creds", credentials, f"docker://{image_ref}:{sha_tag}"],
+            [sudo, skopeo, "inspect", "--raw", f"docker://{image_ref}:{canonical_tag}"],
             capture_stdout=True,
         )
         (output_dir / f"{image_name}-index.json").write_text(raw_manifest, encoding="utf-8")
@@ -959,11 +1119,9 @@ def _command_publish_image(args: argparse.Namespace) -> None:
                 sudo,
                 skopeo,
                 "inspect",
-                "--creds",
-                credentials,
                 "--format",
                 "{{.Digest}}",
-                f"docker://{image_ref}:{sha_tag}",
+                f"docker://{image_ref}:{canonical_tag}",
             ],
             capture_stdout=True,
         ).strip()
@@ -1001,6 +1159,7 @@ def _command_publish_image(args: argparse.Namespace) -> None:
                 "image_name": image_name,
                 "image": image_ref,
                 "index_digest": index_digest,
+                "canonical_tag": canonical_tag,
                 "amd64_digest": architecture_digests.get("amd64", ""),
                 "arm64_digest": architecture_digests.get("arm64", ""),
                 "build_result": str(build_result),
@@ -1012,61 +1171,131 @@ def _command_publish_image(args: argparse.Namespace) -> None:
         subprocess.run([sudo, podman, "manifest", "rm", manifest_name], check=False)  # noqa: S603
 
 
+def _remote_digest(command_prefix: Sequence[str], reference: str) -> str | None:
+    command = [*command_prefix, "inspect", "--format", "{{.Digest}}", f"docker://{reference}"]
+    result = subprocess.run(command, capture_output=True, check=False, text=True)  # noqa: S603
+    if result.returncode == 0:
+        digest = result.stdout.strip()
+        if digest.startswith("sha256:") and len(digest) == SHA256_DIGEST_LENGTH:
+            return digest
+        _fail(f"Registry returned an invalid digest for {reference}.")
+
+    missing_markers = ("manifest unknown", "name unknown", "not found")
+    if any(marker in result.stderr.lower() for marker in missing_markers):
+        return None
+    _fail(f"Could not inspect registry reference {reference}.")
+
+
+def _command_promote_image(args: argparse.Namespace) -> None:
+    context = _github_context(require_token=False)
+    digest = args.digest
+    if not digest.startswith("sha256:") or len(digest) != SHA256_DIGEST_LENGTH:
+        _fail(f"Invalid image index digest: {digest}.")
+
+    tags = promotion_tags(
+        event_name=context.event_name,
+        ref_name=context.ref_name,
+        default_branch=args.default_branch,
+        sha=context.sha,
+    )
+    command_prefix = [_tool("sudo"), _tool("skopeo")]
+    immutable_tag = f"sha-{context.sha}" if context.event_name == "push" else None
+
+    for tag in tags:
+        target = f"{args.image}:{tag}"
+        existing_digest = _remote_digest(command_prefix, target)
+        if existing_digest == digest:
+            _write_stdout(f"Registry tag {target} already points to {digest}.")
+            continue
+        if tag == immutable_tag and existing_digest is not None:
+            _fail(f"Refusing to overwrite immutable registry tag {target} ({existing_digest}).")
+
+        _run(
+            [
+                *command_prefix,
+                "copy",
+                "--all",
+                f"docker://{args.image}@{digest}",
+                f"docker://{target}",
+            ]
+        )
+        _write_stdout(f"Promoted {target} to {digest}.")
+
+    _write_github_outputs({"promoted_tags": ",".join(tags)})
+
+
 def _command_validate(_args: argparse.Namespace) -> None:
     images = _load_images()
     _validate_images(images)
     _write_stdout(f"Validated {len(images)} image metadata file(s).")
 
 
-def _semver_tags(version: str) -> list[str]:
-    """Expand a SemVer version into v<major.minor.patch>, v<major.minor>, and v<major> tags."""
-    normalized = _normalize_version(version)
-    stable = normalized.split("-", maxsplit=1)[0]
-    parts = stable.split(".")
-    if len(parts) != SEMVER_PART_COUNT or not all(part.isdigit() for part in parts):
-        _fail(f"Invalid SemVer version: {version}")
-
-    return [f"v{normalized}", f"v{parts[0]}.{parts[1]}", f"v{parts[0]}"]
-
-
 def _command_release_image(args: argparse.Namespace) -> None:
     image_name = args.image
-    version = _normalize_version(args.version)
-    if not re.fullmatch(VERSION_PATTERN, version):
-        _fail(f"Version must match SemVer major.minor.patch with an optional prerelease: {version}.")
+    version = normalize_version(args.version)
+    try:
+        release_tags = semver_tags(version)
+    except ValueError as error:
+        _fail(str(error))
 
-    context = _github_context(require_token=True)
-    if context.token is None:
-        _fail("GITHUB_TOKEN is required to release images.")
+    context = _github_context(require_token=False)
+    if context.ref_name != args.default_branch:
+        _fail(f"Releases must run from the default branch {args.default_branch}, not {context.ref_name}.")
 
     images = _load_images()
+    _validate_images(images)
     image = next((img for img in images if img.get("name") == image_name), None)
     if image is None:
         _fail(f"Image {image_name} not found in repository metadata.")
 
+    metadata_version = normalize_version(str(image["version"]))
+    if metadata_version != version:
+        _fail(
+            f"Requested version {version} does not match {image['metadataFile']} version {metadata_version}; "
+            "merge the version change before releasing."
+        )
+
     image_ref = str(image["image"])
     skopeo = _tool("skopeo")
-    credentials = f"{context.actor}:{context.token}"
+    source_revision = args.source_sha.lower()
+    if len(source_revision) != GIT_SHA_LENGTH or not set(source_revision) <= LOWERCASE_HEX_DIGITS:
+        _fail(f"Release source must be a full lowercase Git commit SHA: {args.source_sha}.")
 
-    source_tag = "latest"
-    index_digest = _run(
-        [skopeo, "inspect", "--creds", credentials, "--format", "{{.Digest}}", f"docker://{image_ref}:{source_tag}"],
-        capture_stdout=True,
-    ).strip()
+    source_tag = f"sha-{source_revision}"
+    source_reference = f"{image_ref}:{source_tag}"
+    index_digest = _remote_digest([skopeo], source_reference)
+    if index_digest is None:
+        _fail(f"Immutable source {source_reference} does not exist.")
 
-    if not index_digest.startswith("sha256:"):
-        _fail(f"Could not resolve digest for {image_ref}:{source_tag}.")
+    config_raw = _run([skopeo, "inspect", "--config", f"docker://{source_reference}"], capture_stdout=True)
+    image_config = _json_map(json.loads(config_raw))
+    config = _json_map(image_config.get("config")) if image_config is not None else None
+    labels = _json_map(config.get("Labels")) if config is not None else None
+    inspection = {"Digest": index_digest, "Labels": labels}
 
-    release_tags = _semver_tags(version)
+    index_digest = _validate_release_inspection(
+        inspection,
+        source_reference=source_reference,
+        source_revision=source_revision,
+        version=version,
+    )
+
+    command_prefix = [skopeo]
+    exact_reference = f"{image_ref}:{release_tags[0]}"
+    existing_exact_digest = _remote_digest(command_prefix, exact_reference)
+    if existing_exact_digest is not None and existing_exact_digest != index_digest:
+        _fail(f"Refusing to overwrite immutable release tag {exact_reference} ({existing_exact_digest}).")
+
     for tag in release_tags:
+        if tag == release_tags[0] and existing_exact_digest == index_digest:
+            _write_stdout(f"Immutable release tag {exact_reference} already points to {index_digest}.")
+            continue
         _write_stdout(f"Tagging {image_ref}:{tag} -> {index_digest}")
         _run(
             [
                 skopeo,
                 "copy",
                 "--all",
-                "--creds",
-                credentials,
                 f"docker://{image_ref}@{index_digest}",
                 f"docker://{image_ref}:{tag}",
             ]
@@ -1082,6 +1311,27 @@ def _command_release_image(args: argparse.Namespace) -> None:
             "tags": ",".join(release_tags),
         }
     )
+
+
+def _validate_release_inspection(
+    inspection: JsonMap,
+    *,
+    source_reference: str,
+    source_revision: str,
+    version: str,
+) -> str:
+    index_digest = inspection.get("Digest")
+    if not isinstance(index_digest, str) or not index_digest.startswith("sha256:"):
+        _fail(f"Could not resolve digest for immutable source {source_reference}.")
+
+    labels = _json_map(inspection.get("Labels"))
+    if labels is None:
+        _fail(f"Immutable source {source_reference} has no OCI labels.")
+    if labels.get("org.opencontainers.image.revision") != source_revision:
+        _fail(f"Immutable source {source_reference} was not built from revision {source_revision}.")
+    if labels.get("org.opencontainers.image.version") != version:
+        _fail(f"Immutable source {source_reference} does not carry OCI version {version}.")
+    return index_digest
 
 
 def _command_plan(args: argparse.Namespace) -> None:
@@ -1131,6 +1381,7 @@ def _parser() -> argparse.ArgumentParser:
     build_arch_parser.add_argument("--plan", required=True)
     build_arch_parser.add_argument("--entry-json", required=True)
     build_arch_parser.add_argument("--output-dir", required=True)
+    build_arch_parser.add_argument("--dependency-results-dir")
     build_arch_parser.set_defaults(func=_command_build_arch_image)
 
     publish_parser = subparsers.add_parser("publish-image")
@@ -1141,6 +1392,12 @@ def _parser() -> argparse.ArgumentParser:
     publish_parser.add_argument("--default-branch", required=True)
     publish_parser.set_defaults(func=_command_publish_image)
 
+    promote_parser = subparsers.add_parser("promote-image")
+    promote_parser.add_argument("--image", required=True)
+    promote_parser.add_argument("--digest", required=True)
+    promote_parser.add_argument("--default-branch", required=True)
+    promote_parser.set_defaults(func=_command_promote_image)
+
     generate_workflow_parser = subparsers.add_parser("generate-workflow")
     generate_workflow_parser.add_argument("--check", action="store_true")
     generate_workflow_parser.set_defaults(func=_command_generate_workflow)
@@ -1148,6 +1405,8 @@ def _parser() -> argparse.ArgumentParser:
     release_parser = subparsers.add_parser("release-image")
     release_parser.add_argument("--image", required=True)
     release_parser.add_argument("--version", required=True)
+    release_parser.add_argument("--source-sha", required=True)
+    release_parser.add_argument("--default-branch", required=True)
     release_parser.set_defaults(func=_command_release_image)
 
     return root_parser

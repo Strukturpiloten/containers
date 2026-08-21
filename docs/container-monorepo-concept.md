@@ -35,6 +35,7 @@ Recommended layout:
 containers/
   README.md
   LICENSE
+  container.schema.json
   docs/
     container-monorepo-concept.md
   images/
@@ -61,7 +62,10 @@ containers/
   .github/
     renovate.json
     workflows/
+      ci.yml
       publish-images.yml
+      release-image.yml
+  tests/
 ```
 
 `images/<family>/<name>` owns one public image. Its `Containerfile`, image-specific documentation, tests, fixtures, and optional root filesystem files live together.
@@ -75,6 +79,8 @@ containers/
 ## Image metadata
 
 Every image should have an `images/<family>/<name>/container.yaml` file. The workflows use this file to validate the image, plan builds, and determine dependency order.
+
+`container.schema.json` is the strict metadata contract. Each metadata file includes a YAML language-server schema comment for editor feedback. Repository validation additionally enforces unique names and registry references, dependency mappings, build-input coverage, final runtime-base selection, and an acyclic dependency graph.
 
 Static OCI label values that are shared across all images (`OCI_LICENSES`, `OCI_VENDOR`, `OCI_SOURCE`) are defined once in `shared/oci-labels.env` and loaded by the build script for every image. Per-image metadata only needs to define `title` and `description`.
 
@@ -92,6 +98,7 @@ build:
   architectures:
     - amd64
     - arm64
+  runtimeBaseArg: PODMAN_TYPO3PHPFPM_BASE_IMAGE
   args:
     PODMAN_TYPO3PHPFPM_BASE_IMAGE:
       value: docker.io/php:8.5.7-fpm-alpine3.22@sha256:95588bfaf1b890e3fc1f308a0a23539c4f03ce28a4fc770473ae3899d6669777
@@ -117,6 +124,13 @@ inputs:
 For images based on another image from the same repository, use `dependencies.internal`:
 
 ```yaml
+build:
+  runtimeBaseArg: BASE_IMAGE
+  args:
+    BASE_IMAGE:
+      value: ghcr.io/strukturpiloten/php-base@sha256:<released-fallback-digest>
+      type: internal-image
+
 dependencies:
   internal:
     - image: php-base
@@ -124,7 +138,7 @@ dependencies:
   external: []
 ```
 
-The build planner resolves `php-base` first, reads its freshly published digest, and passes `BASE_IMAGE=ghcr.io/strukturpiloten/php-base@sha256:<digest>` into dependent builds. Dependent images should not use mutable internal tags during the same workflow run.
+The build planner resolves `php-base` first, reads its freshly published digest, and passes `BASE_IMAGE=ghcr.io/strukturpiloten/php-base@sha256:<digest>` into dependent builds. If only the dependent image is selected, the digest-pinned `internal-image` value is the released fallback. Dependent images never use mutable internal tags.
 
 ## First migration: `typo3-phpfpm`
 
@@ -165,14 +179,13 @@ Jobs:
    - Build each selected image for each architecture with Buildah.
    - Use `--pull-always` for all builds.
    - Use `--no-cache` for scheduled builds and manual forced rebuilds.
-   - Export per-architecture OCI archives as artifacts.
+   - Export per-architecture OCI archives as short-lived artifacts.
 
 3. `publish-image`
 
    - Download architecture archives.
    - Create a multi-arch manifest with Podman.
-   - Publish immutable tags, for example `sha-<commit>` and the current branch name.
-   - For `main`, also publish the `latest` tag.
+   - Publish a unique immutable `run-<run-id>-<attempt>-sha-<commit>` tag as the verification source.
 
 4. `inspect-sign-attest`
 
@@ -180,7 +193,9 @@ Jobs:
    - Generate per-architecture SBOMs with Syft.
    - Sign the index digest with Cosign.
    - Attach provenance and SBOM attestations.
-   - Write one result entry per image to a `build-results.json` artifact.
+   - Only after verification succeeds, promote the immutable `sha-<commit>` tag and mutable branch tag. For `main`, also promote `latest`.
+   - Refuse to overwrite an existing SHA tag. Scheduled and manual rebuilds only move mutable branch/default tags and retain their unique run tag.
+   - Write one result artifact per image containing its exact index and architecture digests. Later dependency stages consume these results as `image@sha256:...` references.
 
 The important part is that the build planner owns dependency order. GitHub Actions matrices can build independent images in parallel, but images in later dependency stages must wait for earlier stages so they can consume exact internal digests. Because GitHub Actions `needs` relationships are static YAML, the workflow file is generated and checked in. The generator computes the required number of dependency stages from image metadata and renders `.github/workflow-templates/publish-images.yml.j2` with Jinja2.
 
@@ -228,7 +243,7 @@ Recommended Renovate behavior:
 - Continue extending `config:recommended` and `helpers:pinGitHubActionDigests`.
 - Keep GitHub Actions pinned to commit digests and allow Renovate to update them.
 - Track external image references in `images/**/container.yaml` and optionally in `images/**/Containerfile`.
-- Track `INSTALL_PHP_EXTENSIONS_VERSION` in `images/**/Containerfile`.
+- Track the digest-pinned `php-extension-installer` build image in `container.yaml` so the helper version and integrity update together.
 - Track Syft and Cosign versions in workflows.
 - Automerge digest updates for external container images.
 - Automerge patch and minor updates for selected tooling, matching the current policy.
@@ -241,6 +256,7 @@ The scripts used by the workflows should also work locally. A developer should b
 ```sh
 uv run --frozen --python 3.14 ruff format --check .
 uv run --frozen --python 3.14 ruff check .
+uv run --frozen --python 3.14 python -m unittest discover -s tests
 uv run --frozen --python 3.14 python -m scripts.container_engine validate
 uv run --frozen --python 3.14 python -m scripts.container_engine plan --event-name workflow_dispatch --ref-name main --default-branch main --sha "$(git rev-parse HEAD)" --output build-plan.json
 uv run --frozen --python 3.14 python -m scripts.container_engine build-arch-image --plan build-plan.json --entry-json '{"name":"typo3-phpfpm","arch":"amd64"}' --output-dir /tmp/oci-archives
@@ -259,25 +275,26 @@ Each image has its own independent SemVer version, tracked in the `version` fiel
 
 ### Tag strategy
 
-| Tag type                   | Example         | Mutability | When pushed                   |
-| -------------------------- | --------------- | ---------- | ----------------------------- |
-| `sha-<commit>`             | `sha-a1b2c3...` | immutable  | Every build on `main`         |
-| `<branch>`                 | `main`          | mutable    | Every build on `main`         |
-| `latest`                   | `latest`        | mutable    | Every build on default branch |
-| `v<major>.<minor>.<patch>` | `v1.2.3`        | immutable  | Release workflow              |
-| `v<major>.<minor>`         | `v1.2`          | mutable    | Release workflow              |
-| `v<major>`                 | `v1`            | mutable    | Release workflow              |
+| Tag type                              | Example                       | Mutability | When pushed                            |
+| ------------------------------------- | ----------------------------- | ---------- | -------------------------------------- |
+| `run-<id>-<attempt>-sha-<commit>`     | `run-42-1-sha-a1b2c3...`     | immutable  | Every build attempt                    |
+| `sha-<commit>`                        | `sha-a1b2c3...`               | immutable  | Verified push build; never overwritten |
+| `<branch>`                            | `main`                        | mutable    | Verified builds for that branch        |
+| `latest`                              | `latest`                      | mutable    | Verified default-branch builds         |
+| `v<major>.<minor>.<patch>[-<suffix>]` | `v1.2.3` or `v1.2.3-rc.1`    | immutable  | Release workflow                       |
+| `v<major>.<minor>`                    | `v1.2`                        | mutable    | Stable release workflow only           |
+| `v<major>`                            | `v1`                          | mutable    | Stable release workflow only           |
 
 ### Release workflow
 
-The `release-image.yml` workflow is triggered manually with `image` and `version` inputs:
+Releases use a two-phase process so the registry image, OCI labels, Git commit, Git tag, and GitHub Release all identify the same build:
 
-1. Validates image metadata.
-2. Resolves the current `:latest` digest from GHCR.
-3. Pushes `v<x.y.z>`, `v<x.y>`, and `v<x>` tags pointing to that digest via `skopeo copy`.
-4. Updates the `version` field in the image's `container.yaml`.
-5. Commits the version bump and creates a git tag `<image>/v<x.y.z>`.
-6. Creates a GitHub Release with auto-generated notes.
+1. Change the image's `version` in `container.yaml` through a pull request and merge it to the default branch.
+2. `publish-images.yml` builds that commit, verifies it, and promotes its immutable `sha-<commit>` snapshot with matching revision and version labels.
+3. Trigger `release-image.yml` from the default branch with the image name, already-merged version, and full source commit SHA. The source commit must be part of the default branch.
+4. The workflow resolves only `sha-<source-commit>`, verifies its digest and OCI revision/version labels, and refuses to overwrite an existing exact SemVer tag.
+5. Stable releases promote `v<x.y.z>`, `v<x.y>`, and `v<x>`; prereleases promote only their exact prerelease tag.
+6. GitHub creates `<image>/v<x.y.z>` at the same commit together with the GitHub Release.
 
 Git tags are prefixed with the image name (`<image>/v<x.y.z>`) to avoid collisions between independent image release lines.
 
@@ -297,7 +314,8 @@ Renovate manages dependency updates (base images, GitHub Actions, tooling), not 
 
 1. Renovate creates a PR with the updated base image reference.
 2. Digest and minor/patch updates are automerged per the existing Renovate rules.
-3. After merge, `publish-images.yml` rebuilds the affected image and its reverse dependencies, pushing `sha-<commit>`, `main`, and `latest`.
-4. A human decides when to create a SemVer release via the `release-image.yml` workflow.
+3. Pull-request CI validates the update before merge.
+4. After merge, `publish-images.yml` rebuilds the affected image and its reverse dependencies, then promotes verified snapshot and mutable tags.
+5. A human changes `container.yaml` through a pull request when a new company image version should be released, waits for its immutable snapshot, and then invokes `release-image.yml`.
 
 Renovate does not create issues or PRs for image version bumps. Version bumps are a manual, deliberate decision.

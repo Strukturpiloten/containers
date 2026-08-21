@@ -12,10 +12,12 @@ on:
       - ".github/renovate.json"
       - ".github/workflow-templates/**"
       - ".github/workflows/publish-images.yml"
+      - "container.schema.json"
       - "images/**"
       - "pyproject.toml"
       - "scripts/**"
       - "shared/**"
+      - "tests/**"
       - "uv.lock"
   schedule:
     - cron: "47 3 * * *"
@@ -23,14 +25,9 @@ on:
 
 concurrency:
   group: publish-images-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
-permissions:
-  attestations: write
-  artifact-metadata: write
-  contents: read
-  id-token: write
-  packages: write
+permissions: {}
 
 env:
   PYTHON_VERSION: "3.14"
@@ -41,6 +38,9 @@ jobs:
   plan:
     name: Plan image builds
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
     outputs:
       has_builds: ${{ steps.outputs.outputs.has_builds }}
 [% for stage in stages %]
@@ -53,6 +53,8 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
+          persist-credentials: false
           submodules: true
 
       - name: Install uv
@@ -73,7 +75,14 @@ jobs:
           set -euo pipefail
 
           uv run --frozen --python "${PYTHON_VERSION}" ruff format --check .
-          uv run --frozen --python "${PYTHON_VERSION}" ruff check --fix --exit-non-zero-on-fix .
+          uv run --frozen --python "${PYTHON_VERSION}" ruff check .
+
+      - name: Run Python tests
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          uv run --frozen --python "${PYTHON_VERSION}" python -m unittest discover -s tests
 
       - name: Validate container metadata
         shell: bash
@@ -111,6 +120,7 @@ jobs:
           name: container-build-plan
           path: build-plan.json
           if-no-files-found: error
+          retention-days: 1
 
 [% for stage in stages %]
   build-stage-[[ stage ]]:
@@ -124,6 +134,9 @@ jobs:
 [% endif %]
     if: needs.plan.outputs.stage_[[ stage ]]_has_builds == 'true'
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.stage_[[ stage ]]_build_matrix) }}
@@ -131,6 +144,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           submodules: true
       - name: Build architecture image
         uses: ./.github/actions/build-arch-image
@@ -144,6 +158,13 @@ jobs:
       - build-stage-[[ stage ]]
     if: needs.plan.outputs.stage_[[ stage ]]_has_builds == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      attestations: write
+      artifact-metadata: write
+      contents: read
+      id-token: write
+      packages: write
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.stage_[[ stage ]]_publish_matrix) }}
@@ -151,13 +172,13 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           submodules: true
       - name: Publish image
         uses: ./.github/actions/publish-image
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           default-branch: ${{ github.event.repository.default_branch }}
           entry: ${{ toJSON(matrix) }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           syft-version: ${{ env.SYFT_VERSION }}
 [% endfor %]
