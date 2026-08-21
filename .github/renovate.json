@@ -18,7 +18,7 @@
                 "/^images\/.+\/container\\.yaml$/"
             ],
             "matchStrings": [
-                "value:\\s*(?<depName>[^:@\\s]+(?:\\/[^:@\\s]+)*):(?<currentValue>[^@\\s]+)(?:@(?<currentDigest>sha256:[a-f0-9]+))?"
+                "value:\\s*(?<depName>[^:@\\s]+(?:\\/[^:@\\s]+)*):(?<currentValue>[^@\\s]+)(?:@(?<currentDigest>sha256:[a-f0-9]+))?\\s*\\n\\s*type:\\s*external-image"
             ],
             "datasourceTemplate": "docker"
         },
@@ -52,20 +52,6 @@
         },
         {
             "customType": "regex",
-            "description": "Track pinned cosign binary releases in GitHub workflows, composite actions and workflow templates",
-            "managerFilePatterns": [
-                "/^\\.github\/(?:workflows\/[^\/]+|actions\/[^\/]+\/action|workflow-templates\\/.+)\\.ya?ml(?:\\.j2)?$/"
-            ],
-            "matchStrings": [
-                "cosign-release:\\s*(?<currentValue>v?\\d+\\.\\d+\\.\\d+)"
-            ],
-            "depNameTemplate": "sigstore/cosign",
-            "packageNameTemplate": "sigstore/cosign",
-            "datasourceTemplate": "github-releases",
-            "versioningTemplate": "semver-coerced"
-        },
-        {
-            "customType": "regex",
             "description": "Track pinned Syft binary releases in GitHub workflows and workflow templates",
             "managerFilePatterns": [
                 "/^\\.github\/(?:workflows\/[^\/]+|workflow-templates\/.+)\\.ya?ml(?:\\.j2)?$/"
@@ -86,6 +72,11 @@
             "/^\\.github/workflow-templates/.+\\.ya?ml\\.j2$/"
         ]
     },
+    "vulnerabilityAlerts": {
+        "enabled": true,
+        "schedule": [],
+        "dependencyDashboardApproval": false
+    },
     "packageRules": [
         {
             "description": "Keep GitHub Actions pinned to immutable commits while allowing Renovate updates",
@@ -93,6 +84,16 @@
                 "github-actions"
             ],
             "pinDigests": true
+        },
+        {
+            "description": "Do not append a digest to the Cosign release input; the installer action itself remains commit-pinned",
+            "matchManagers": [
+                "github-actions"
+            ],
+            "matchPackageNames": [
+                "sigstore/cosign"
+            ],
+            "pinDigests": false
         },
         {
             "description": "Use a readable topic for uv updates",
@@ -106,9 +107,6 @@
         },
         {
             "description": "Use a readable topic for Cosign updates",
-            "matchManagers": [
-                "custom.regex"
-            ],
             "matchPackageNames": [
                 "sigstore/cosign"
             ],
@@ -125,7 +123,7 @@
             "commitMessageTopic": "syft"
         },
         {
-            "description": "Squash-merge pinned container digest updates",
+            "description": "Squash-merge pinned container digest updates after required CI",
             "matchManagers": [
                 "custom.regex"
             ],
@@ -134,6 +132,68 @@
             ],
             "matchUpdateTypes": [
                 "digest"
+            ],
+            "automerge": true,
+            "automergeType": "pr",
+            "automergeStrategy": "squash",
+            "platformAutomerge": true
+        },
+        {
+            "description": "Squash-merge patch updates for externally pinned container images after required CI",
+            "matchManagers": [
+                "custom.regex"
+            ],
+            "matchDatasources": [
+                "docker"
+            ],
+            "matchUpdateTypes": [
+                "patch"
+            ],
+            "automerge": true,
+            "automergeType": "pr",
+            "automergeStrategy": "squash",
+            "platformAutomerge": true
+        },
+        {
+            "description": "Squash-merge tested notify_push patch updates after required CI",
+            "matchManagers": [
+                "custom.regex"
+            ],
+            "matchPackageNames": [
+                "nextcloud/notify_push"
+            ],
+            "matchUpdateTypes": [
+                "patch"
+            ],
+            "automerge": true,
+            "automergeType": "pr",
+            "automergeStrategy": "squash",
+            "platformAutomerge": true
+        },
+        {
+            "description": "Squash-merge tested Python automation dependency updates",
+            "matchPackageNames": [
+                "jinja2",
+                "jsonschema",
+                "pyyaml",
+                "ruff"
+            ],
+            "matchUpdateTypes": [
+                "minor",
+                "patch"
+            ],
+            "automerge": true,
+            "automergeType": "pr",
+            "automergeStrategy": "squash",
+            "platformAutomerge": true
+        },
+        {
+            "description": "Squash-merge patch updates for commit-pinned GitHub Actions after required CI",
+            "matchManagers": [
+                "github-actions"
+            ],
+            "matchUpdateTypes": [
+                "patch"
             ],
             "automerge": true,
             "automergeType": "pr",

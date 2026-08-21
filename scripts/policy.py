@@ -18,7 +18,7 @@ def normalize_version(version: str) -> str:
 
 
 def semver_tags(version: str) -> list[str]:
-    """Return immutable and moving aliases without promoting prereleases."""
+    """Return exact and moving tags without promoting prereleases to stable aliases."""
     normalized = normalize_version(version)
     if not re.fullmatch(VERSION_PATTERN, normalized):
         msg = f"Invalid SemVer version: {version}"
@@ -61,3 +61,9 @@ def promotion_tags(*, event_name: str, ref_name: str, default_branch: str, sha: 
     if ref_name == default_branch:
         tags.append("latest")
     return unique_tags(tags)
+
+
+def maintained_semver_tags(version: str) -> list[str]:
+    """Return mutable maintenance tags only for stable SemVer releases."""
+    tags = semver_tags(version)
+    return tags if "-" not in normalize_version(version) else []

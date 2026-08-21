@@ -16,6 +16,7 @@ ARG OCI_TITLE="TYPO3 PHP-FPM"
 ARG OCI_URL=""
 ARG OCI_VENDOR=""
 ARG OCI_VERSION=""
+ARG SOURCE_DATE_EPOCH
 LABEL org.opencontainers.image.base.digest="${OCI_BASE_DIGEST}" \
     org.opencontainers.image.base.name="${OCI_BASE_NAME}" \
     org.opencontainers.image.created="${OCI_CREATED}" \
