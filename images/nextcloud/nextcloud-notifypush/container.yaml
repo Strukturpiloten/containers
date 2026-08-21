@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=../../../container.schema.json
 schemaVersion: 1
 name: nextcloud-notifypush
 version: v1.0.0
@@ -11,6 +12,7 @@ build:
   architectures:
     - amd64
     - arm64
+  runtimeBaseArg: RUNTIME_IMAGE
   args:
     BASE_IMAGE:
       value: docker.io/rust:1.97.1-alpine3.23@sha256:c4a364ddbf684fe038e6fa6a4f25b30c8dc85247423e0e660676ece0d17be4a2

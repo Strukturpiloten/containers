@@ -38,20 +38,6 @@
         },
         {
             "customType": "regex",
-            "description": "Track install-php-extensions release version in Containerfiles",
-            "managerFilePatterns": [
-                "/^images\/.+\/Containerfile$/"
-            ],
-            "matchStrings": [
-                "ARG INSTALL_PHP_EXTENSIONS_VERSION=(?<currentValue>\\d+\\.\\d+\\.\\d+)"
-            ],
-            "depNameTemplate": "mlocati/docker-php-extension-installer",
-            "packageNameTemplate": "mlocati/docker-php-extension-installer",
-            "datasourceTemplate": "github-releases",
-            "versioningTemplate": "semver-coerced"
-        },
-        {
-            "customType": "regex",
             "description": "Track NOTIFYPUSH_VERSION in container metadata",
             "managerFilePatterns": [
                 "/^images\/nextcloud\/nextcloud-notifypush\/container\\.yaml$/"
@@ -119,16 +105,6 @@
             "commitMessageTopic": "uv"
         },
         {
-            "description": "Use a readable topic for install-php-extensions updates",
-            "matchManagers": [
-                "custom.regex"
-            ],
-            "matchPackageNames": [
-                "mlocati/docker-php-extension-installer"
-            ],
-            "commitMessageTopic": "install-php-extensions"
-        },
-        {
             "description": "Use a readable topic for Cosign updates",
             "matchManagers": [
                 "custom.regex"
@@ -165,7 +141,12 @@
             "platformAutomerge": true
         },
         {
-            "description": "Squash-merge minor and patch updates for all dependencies",
+            "description": "Squash-merge minor and patch updates for selected build tooling",
+            "matchPackageNames": [
+                "anchore/syft",
+                "astral-sh/uv",
+                "sigstore/cosign"
+            ],
             "matchUpdateTypes": [
                 "minor",
                 "patch"

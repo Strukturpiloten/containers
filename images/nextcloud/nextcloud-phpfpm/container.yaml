@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=../../../container.schema.json
 schemaVersion: 1
 name: nextcloud-phpfpm
 version: v1.0.0
@@ -11,9 +12,13 @@ build:
   architectures:
     - amd64
     - arm64
+  runtimeBaseArg: BASE_IMAGE
   args:
     BASE_IMAGE:
       value: docker.io/php:8.5.9-fpm-alpine3.24@sha256:9dc81f4086ea5402227a6bcc489b04b4baba12394624d9621faa92ed812fb8ee
+      type: external-image
+    PHP_EXTENSION_INSTALLER_IMAGE:
+      value: ghcr.io/mlocati/php-extension-installer:2.11.12@sha256:b6d3fa381b9ba5cf051117c1c601d6a523b590e534bf3d56eb4fbe352949c138
       type: external-image
     PODMAN_NEXTCLOUD_DATA_DIR_CONTAINER:
       value: /var/www/nextcloud
@@ -25,6 +30,9 @@ dependencies:
     - name: php
       image: docker.io/php
       arg: BASE_IMAGE
+    - name: php-extension-installer
+      image: ghcr.io/mlocati/php-extension-installer
+      arg: PHP_EXTENSION_INSTALLER_IMAGE
 
 inputs:
   - .github/renovate.json

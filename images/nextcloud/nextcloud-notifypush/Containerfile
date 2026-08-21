@@ -4,6 +4,7 @@ ARG RUNTIME_IMAGE
 FROM ${BASE_IMAGE} AS build
 
 ARG OCI_BASE_DIGEST=""
+ARG OCI_BASE_NAME=""
 ARG OCI_CREATED=""
 ARG OCI_DESCRIPTION="Nextcloud notify_push binary built from source with a minimal Alpine runtime"
 ARG OCI_DOCUMENTATION=""
@@ -37,6 +38,7 @@ RUN set -eux; \
 FROM ${RUNTIME_IMAGE} AS final
 
 ARG OCI_BASE_DIGEST=""
+ARG OCI_BASE_NAME=""
 ARG OCI_CREATED=""
 ARG OCI_DESCRIPTION="Nextcloud notify_push binary built from source with a minimal Alpine runtime"
 ARG OCI_DOCUMENTATION=""
@@ -50,7 +52,7 @@ ARG OCI_VERSION=""
 ARG TARGETARCH
 
 LABEL org.opencontainers.image.base.digest="${OCI_BASE_DIGEST}" \
-    org.opencontainers.image.base.name="${RUNTIME_IMAGE}" \
+    org.opencontainers.image.base.name="${OCI_BASE_NAME}" \
     org.opencontainers.image.created="${OCI_CREATED}" \
     org.opencontainers.image.description="${OCI_DESCRIPTION}" \
     org.opencontainers.image.documentation="${OCI_DOCUMENTATION}" \

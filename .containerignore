@@ -12,8 +12,10 @@
 *.spdx.json
 *.tar
 build-plan.json
+container.schema.json
 docs
 LICENSE
 pyproject.toml
 scripts
+tests
 uv.lock
