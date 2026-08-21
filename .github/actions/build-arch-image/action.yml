@@ -64,6 +64,46 @@ runs:
           "${fallback_args[@]}" \
           --output-dir "${RUNNER_TEMP}/oci-archives"
 
+    - name: Smoke-test Podman CLI
+      if: startsWith(fromJSON(inputs.entry).name, 'podman-')
+      shell: bash
+      env:
+        IMAGE_ARCH: ${{ steps.build.outputs.arch }}
+        IMAGE_NAME: ${{ steps.build.outputs.image_name }}
+        IMAGE_PATH: ${{ steps.build.outputs.archive_path }}
+      run: |
+        set -euo pipefail
+
+        image_ref="localhost/${IMAGE_NAME}:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${IMAGE_ARCH}"
+        sudo podman load --input "${IMAGE_PATH}"
+        sudo podman run --rm --security-opt label=disable "${image_ref}" podman --version
+
+    - name: Smoke-test trusted nested Podman runtime
+      if: startsWith(fromJSON(inputs.entry).name, 'podman-') && github.event_name != 'pull_request'
+      shell: bash
+      env:
+        IMAGE_ARCH: ${{ steps.build.outputs.arch }}
+        IMAGE_NAME: ${{ steps.build.outputs.image_name }}
+        IMAGE_PATH: ${{ steps.build.outputs.archive_path }}
+      run: |
+        set -euo pipefail
+
+        image_ref="localhost/${IMAGE_NAME}:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${IMAGE_ARCH}"
+        run_args=(
+          --rm
+          --device /dev/fuse
+          --security-opt label=disable
+          --volume "${IMAGE_PATH}:/tmp/nested-image.tar:ro"
+        )
+        if [[ "${IMAGE_NAME}" == *-rootful ]]; then
+          run_args+=(--cap-add SYS_ADMIN --cap-add MKNOD)
+        fi
+
+        sudo podman run "${run_args[@]}" "${image_ref}" sh -euc '
+          podman load --input /tmp/nested-image.tar >/dev/null
+          podman run --rm "$1" /usr/bin/true
+        ' -- "${image_ref}"
+
     - name: Upload architecture image archive
       if: inputs.upload-archive == 'true'
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

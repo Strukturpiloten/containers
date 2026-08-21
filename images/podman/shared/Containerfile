@@ -1,0 +1,183 @@
+ARG FEDORA_IMAGE
+
+FROM ${FEDORA_IMAGE} AS podman-builder
+
+ARG AARDVARK_COMMIT=""
+ARG AARDVARK_VERSION=""
+ARG NETAVARK_COMMIT=""
+ARG NETAVARK_VERSION=""
+ARG OCI_VERSION
+ARG PODMAN_COMMIT
+ARG PODMAN_REPOSITORY
+ARG SOURCE_DATE_EPOCH
+
+ENV GOTOOLCHAIN=local \
+    GOFLAGS=-mod=vendor
+
+WORKDIR /src
+
+RUN set -eux; \
+    podman_major="${OCI_VERSION%%.*}"; \
+    dnf --assumeyes --refresh upgrade; \
+    dnf --assumeyes install --setopt=install_weak_deps=False \
+        btrfs-progs-devel \
+        gcc \
+        git-core \
+        glib2-devel \
+        glibc-devel \
+        golang \
+        gpgme-devel \
+        libassuan-devel \
+        libgpg-error-devel \
+        libseccomp-devel \
+        libselinux-devel \
+        make \
+        pkgconf-pkg-config \
+        shadow-utils-subid-devel \
+        sqlite-devel \
+        systemd-devel; \
+    if [ "${podman_major}" = "6" ]; then \
+        dnf --assumeyes install --setopt=install_weak_deps=False cargo protobuf-compiler rust; \
+    fi; \
+    dnf clean all; \
+    rm -rf /var/cache/dnf
+
+RUN set -eux; \
+    git init podman; \
+    cd podman; \
+    git remote add origin "${PODMAN_REPOSITORY}"; \
+    git fetch --depth=1 origin "refs/tags/v${OCI_VERSION}"; \
+    git checkout --detach FETCH_HEAD; \
+    test "$(git rev-parse HEAD)" = "${PODMAN_COMMIT}"; \
+    make PREFIX=/usr podman rootlessport quadlet; \
+    make DESTDIR=/out PREFIX=/usr install.bin; \
+    if [ -d vendor/go.podman.io/common ]; then \
+        common_vendor=vendor/go.podman.io/common; \
+    else \
+        common_vendor=vendor/github.com/containers/common; \
+    fi; \
+    install -D -m 0644 "${common_vendor}/pkg/config/containers.conf" \
+        /out/usr/share/containers/containers.conf; \
+    install -D -m 0644 "${common_vendor}/pkg/seccomp/seccomp.json" \
+        /out/usr/share/containers/seccomp.json; \
+    podman_major="${OCI_VERSION%%.*}"; \
+    printf '%s\n' "${podman_major}" > /out/usr/share/containers/podman-major
+
+RUN set -eux; \
+    podman_major="${OCI_VERSION%%.*}"; \
+    if [ "${podman_major}" = "6" ]; then \
+        test -n "${NETAVARK_VERSION}"; \
+        test -n "${NETAVARK_COMMIT}"; \
+        test -n "${AARDVARK_VERSION}"; \
+        test -n "${AARDVARK_COMMIT}"; \
+        git init netavark; \
+        cd netavark; \
+        git remote add origin https://github.com/containers/netavark.git; \
+        git fetch --depth=1 origin "refs/tags/v${NETAVARK_VERSION}"; \
+        git checkout --detach FETCH_HEAD; \
+        test "$(git rev-parse HEAD)" = "${NETAVARK_COMMIT}"; \
+        CI=1 cargo build --locked --release; \
+        install -D -m 0755 target/release/netavark /out/usr/libexec/podman/netavark; \
+        cd /src; \
+        git init aardvark-dns; \
+        cd aardvark-dns; \
+        git remote add origin https://github.com/containers/aardvark-dns.git; \
+        git fetch --depth=1 origin "refs/tags/v${AARDVARK_VERSION}"; \
+        git checkout --detach FETCH_HEAD; \
+        test "$(git rev-parse HEAD)" = "${AARDVARK_COMMIT}"; \
+        CI=1 cargo build --locked --release; \
+        install -D -m 0755 target/release/aardvark-dns /out/usr/libexec/podman/aardvark-dns; \
+    fi
+
+FROM ${FEDORA_IMAGE} AS final
+
+RUN set -eux; \
+    dnf --assumeyes --refresh upgrade; \
+    dnf --assumeyes install --setopt=install_weak_deps=False \
+        ca-certificates \
+        catatonit \
+        conmon \
+        containers-common \
+        crun \
+        fuse-overlayfs \
+        gpgme \
+        iproute \
+        iptables-nft \
+        openssh-clients \
+        passt \
+        procps-ng \
+        shadow-utils \
+        shadow-utils-subid \
+        slirp4netns \
+        tar; \
+    rpm --setcaps shadow-utils 2>/dev/null || true; \
+    dnf clean all; \
+    rm -f /etc/machine-id /var/lib/systemd/random-seed; \
+    rm -rf /var/cache/dnf /var/log/dnf* /var/log/hawkey.log /var/log/yum.*; \
+    groupadd --gid 1000 podman; \
+    useradd --uid 1000 --gid 1000 --create-home --home-dir /home/podman podman; \
+    printf 'root:1:65535\npodman:1:999\npodman:1001:64535\n' > /etc/subuid; \
+    printf 'root:1:65535\npodman:1:999\npodman:1001:64535\n' > /etc/subgid; \
+    install -d -m 0755 /etc/containers /var/lib/containers; \
+    install -d -m 0700 -o podman -g podman /run/user/1000; \
+    install -d -m 0755 -o podman -g podman /home/podman/.config/containers; \
+    install -d -m 0755 -o podman -g podman /home/podman/.local/share/containers; \
+    chown -R podman:podman /home/podman
+
+COPY --from=podman-builder /out/usr/share/containers/podman-major /usr/share/containers/podman-major
+RUN set -eux; \
+    if ! grep --fixed-strings --line-regexp 6 /usr/share/containers/podman-major; then \
+        dnf --assumeyes install --setopt=install_weak_deps=False aardvark-dns netavark; \
+        dnf clean all; \
+        rm -rf /var/cache/dnf /var/log/dnf* /var/log/hawkey.log /var/log/yum.*; \
+    fi
+
+COPY --from=podman-builder /out/ /
+COPY images/podman/shared/containers.conf /etc/containers/containers.conf
+COPY images/podman/shared/storage.conf /etc/containers/storage.conf
+COPY --chown=podman:podman images/podman/shared/rootless-containers.conf /home/podman/.config/containers/containers.conf
+COPY --chown=podman:podman images/podman/shared/rootless-storage.conf /home/podman/.config/containers/storage.conf
+
+ARG OCI_BASE_DIGEST=""
+ARG OCI_BASE_NAME=""
+ARG OCI_CREATED=""
+ARG OCI_DESCRIPTION="Podman container engine for nested-container workloads"
+ARG OCI_DOCUMENTATION=""
+ARG OCI_LICENSES=""
+ARG OCI_REVISION=""
+ARG OCI_SOURCE=""
+ARG OCI_TITLE="Podman"
+ARG OCI_URL=""
+ARG OCI_VENDOR=""
+ARG OCI_VERSION=""
+
+LABEL org.opencontainers.image.base.digest="${OCI_BASE_DIGEST}" \
+    org.opencontainers.image.base.name="${OCI_BASE_NAME}" \
+    org.opencontainers.image.created="${OCI_CREATED}" \
+    org.opencontainers.image.description="${OCI_DESCRIPTION}" \
+    org.opencontainers.image.documentation="${OCI_DOCUMENTATION}" \
+    org.opencontainers.image.licenses="${OCI_LICENSES}" \
+    org.opencontainers.image.revision="${OCI_REVISION}" \
+    org.opencontainers.image.source="${OCI_SOURCE}" \
+    org.opencontainers.image.title="${OCI_TITLE}" \
+    org.opencontainers.image.url="${OCI_URL}" \
+    org.opencontainers.image.vendor="${OCI_VENDOR}" \
+    org.opencontainers.image.version="${OCI_VERSION}"
+
+ARG RUN_AS_USER
+COPY images/podman/shared/mode-${RUN_AS_USER} /usr/share/containers/podman-mode
+
+ARG HOME_DIR
+ARG RUNTIME_DIR
+ARG STORAGE_PATH
+
+ENV BUILDAH_ISOLATION=chroot \
+    HOME=${HOME_DIR} \
+    XDG_RUNTIME_DIR=${RUNTIME_DIR} \
+    _CONTAINERS_USERNS_CONFIGURED=""
+
+VOLUME ${STORAGE_PATH}
+
+USER ${RUN_AS_USER}
+
+CMD ["podman", "--help"]
