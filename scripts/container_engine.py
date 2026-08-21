@@ -25,7 +25,7 @@ from jinja2 import Environment, FileSystemLoader, StrictUndefined
 from scripts.metadata_schema import MetadataSchemaError, validate_metadata_schema
 from scripts.policy import (
     canonical_build_tag,
-    maintained_semver_tags,
+    compare_semver,
     normalize_version,
     promotion_tags,
     semver_tags,
@@ -42,8 +42,6 @@ RUNNERS = {
 
 PUBLISH_WORKFLOW_PATH = Path(".github/workflows/publish-images.yml")
 PUBLISH_WORKFLOW_TEMPLATE_PATH = Path(".github/workflow-templates/publish-images.yml.j2")
-RELEASE_WORKFLOW_PATH = Path(".github/workflows/release-image.yml")
-RELEASE_WORKFLOW_TEMPLATE_PATH = Path(".github/workflow-templates/release-image.yml.j2")
 OCI_LABELS_ENV_PATH = Path("shared/oci-labels.env")
 CONTAINER_SCHEMA_PATH = Path("container.schema.json")
 IMAGES_GLOB = "images/**/container.yaml"
@@ -51,6 +49,7 @@ EXCLUDED_IMAGE_DIR = "_example"
 GLOBAL_IMAGE_INPUTS = (
     ".containerignore",
     ".github/actions/build-arch-image/**",
+    ".github/actions/finalize-release/**",
     ".github/actions/publish-image/**",
     "scripts/container_engine.py",
     "scripts/policy.py",
@@ -82,9 +81,20 @@ class PlanOptions:
 class _BuildResult:
     image_name: str
     image_ref: str
+    version: str
     source_revision: str
     index_digest: str
     architecture_digests: dict[str, str]
+    tags: Sequence[str]
+
+
+@dataclass(frozen=True)
+class _ReleaseCandidate:
+    image_name: str
+    image_ref: str
+    version: str
+    source_revision: str
+    index_digest: str
     tags: Sequence[str]
 
 
@@ -916,10 +926,8 @@ def _plan_summary(plan: JsonMap) -> str:
         lines.extend(["", "No container images need to be built."])
         return "\n".join(lines)
 
-    maintenance_event = plan.get("eventName") == "schedule" or (
-        plan.get("eventName") == "workflow_dispatch" and plan.get("refName") == plan.get("defaultBranch")
-    )
     publishing_event = plan.get("eventName") in {"push", "schedule", "workflow_dispatch"}
+    release_event = publishing_event and plan.get("refName") == plan.get("defaultBranch")
     lines.extend(
         [
             "",
@@ -939,16 +947,16 @@ def _plan_summary(plan: JsonMap) -> str:
                 default_branch=str(plan.get("defaultBranch", "")),
                 sha=str(plan.get("sourceRevision", "")),
             )
-        if maintenance_event:
-            planned_tags.extend(maintained_semver_tags(version))
+        if release_event:
+            planned_tags.extend(semver_tags(version))
         displayed_tags = ", ".join(unique_tags(planned_tags)) or "none (non-publishing)"
         lines.append(
             f"| `{image.get('name', '')}` | `{image.get('family', '')}` | "
             f"`{', '.join(architectures)}` | {image.get('level', 0)} | `{displayed_tags}` |"
         )
 
-    if maintenance_event:
-        lines.extend(["", "SemVer tags are promoted only when the matching stable GitHub Release already exists."])
+    if release_event:
+        lines.extend(["", "SemVer tags and missing GitHub Releases are finalized automatically from metadata."])
     return "\n".join(lines)
 
 
@@ -981,20 +989,11 @@ def _publish_workflow(stage_count: int) -> str:
     return template.render(stages=list(range(stage_count)), single_stage=stage_count == 1)
 
 
-def _release_workflow(images: list[JsonMap]) -> str:
-    environment = _workflow_environment()
-    template = environment.get_template(RELEASE_WORKFLOW_TEMPLATE_PATH.name)
-    return template.render(image_names=sorted(str(image["name"]) for image in images))
-
-
 def _command_generate_workflow(args: argparse.Namespace) -> None:
     images = _load_images()
     _validate_images(images)
     stage_count = _stage_count(images)
-    workflows = (
-        (PUBLISH_WORKFLOW_PATH, _publish_workflow(stage_count)),
-        (RELEASE_WORKFLOW_PATH, _release_workflow(images)),
-    )
+    workflows = ((PUBLISH_WORKFLOW_PATH, _publish_workflow(stage_count)),)
 
     if args.check:
         stale_paths = [
@@ -1004,19 +1003,74 @@ def _command_generate_workflow(args: argparse.Namespace) -> None:
         ]
         if stale_paths:
             _fail(f"{', '.join(str(path) for path in stale_paths)} is stale. Run generate-workflow without --check.")
-        _write_stdout(
-            f"Generated workflows are up to date with {stage_count} dependency stage(s) "
-            f"and {len(images)} image choice(s)."
-        )
+        _write_stdout(f"Generated workflow is up to date with {stage_count} dependency stage(s).")
         return
 
     for path, workflow in workflows:
         workflow_path = _repo_root() / path
         workflow_path.parent.mkdir(parents=True, exist_ok=True)
         workflow_path.write_text(workflow, encoding="utf-8")
-    _write_stdout(
-        f"Wrote generated workflows with {stage_count} dependency stage(s) and {len(images)} image choice(s)."
+    _write_stdout(f"Wrote generated workflow with {stage_count} dependency stage(s).")
+
+
+def _images_at_revision(revision: str) -> dict[str, JsonMap]:
+    git = _tool("git")
+    raw_paths = _run(
+        [git, "-C", str(_repo_root()), "ls-tree", "-r", "--name-only", revision, "--", "images"],
+        capture_stdout=True,
     )
+    images: dict[str, JsonMap] = {}
+    for raw_path in raw_paths.splitlines():
+        path = Path(raw_path.strip())
+        if path.name != "container.yaml" or EXCLUDED_IMAGE_DIR in path.parts:
+            continue
+        raw_metadata = _run(
+            [git, "-C", str(_repo_root()), "show", f"{revision}:{path.as_posix()}"],
+            capture_stdout=True,
+        )
+        candidate = yaml.safe_load(raw_metadata)
+        image = _json_map(candidate)
+        if image is None or not isinstance(image.get("name"), str) or not isinstance(image.get("version"), str):
+            _fail(f"Historical metadata is invalid at {revision}:{path.as_posix()}.")
+        images[str(image["name"])] = image
+    return images
+
+
+def _command_validate_versions(args: argparse.Namespace) -> None:
+    before = (args.before or "").strip().lower()
+    if not before or set(before) == {"0"}:
+        _write_stdout("No comparison revision is available; skipped version progression validation.")
+        return
+    if len(before) != GIT_SHA_LENGTH or not set(before) <= LOWERCASE_HEX_DIGITS:
+        _fail(f"Version comparison source must be a full lowercase Git commit SHA: {args.before}.")
+
+    current_images = _load_images()
+    _validate_images(current_images)
+    previous_images = _images_at_revision(before)
+    changes: list[str] = []
+    for image in current_images:
+        image_name = str(image["name"])
+        previous = previous_images.get(image_name)
+        if previous is None:
+            changes.append(f"{image_name}: new image at {normalize_version(str(image['version']))}")
+            continue
+
+        previous_version = str(previous["version"])
+        current_version = str(image["version"])
+        if normalize_version(current_version) == normalize_version(previous_version):
+            continue
+        try:
+            comparison = compare_semver(current_version, previous_version)
+        except ValueError as error:
+            _fail(str(error))
+        if comparison <= 0:
+            _fail(f"Image {image_name} version must move forward from {previous_version}, not {current_version}.")
+        changes.append(f"{image_name}: {normalize_version(previous_version)} -> {normalize_version(current_version)}")
+
+    if changes:
+        _write_stdout("Validated version progression: " + ", ".join(changes) + ".")
+    else:
+        _write_stdout("No image versions changed.")
 
 
 def _dependency_result_reference(
@@ -1225,6 +1279,7 @@ def _write_build_result(output_dir: Path, result: _BuildResult) -> Path:
         {
             "imageName": result.image_name,
             "image": result.image_ref,
+            "version": result.version,
             "sourceRevision": result.source_revision,
             "indexDigest": result.index_digest,
             "architectureDigests": result.architecture_digests,
@@ -1343,6 +1398,7 @@ def _command_publish_image(args: argparse.Namespace) -> None:
             _BuildResult(
                 image_name=image_name,
                 image_ref=image_ref,
+                version=normalize_version(str(image["version"])),
                 source_revision=str(plan.get("sourceRevision", context.sha)),
                 index_digest=index_digest,
                 architecture_digests=architecture_digests,
@@ -1382,16 +1438,21 @@ def _remote_digest(command_prefix: Sequence[str], reference: str) -> str | None:
     _fail(f"Could not inspect registry reference {reference}.")
 
 
-def _github_release_exists(context: _GitHubContext, image_name: str, version: str) -> bool:
+def _github_api_root(context: _GitHubContext) -> str:
+    return "https://api.github.com" if context.server_url == "https://github.com" else f"{context.server_url}/api/v3"
+
+
+def _release_tag(image_name: str, version: str) -> str:
+    return f"{image_name}/v{normalize_version(version)}"
+
+
+def _github_release(context: _GitHubContext, image_name: str, version: str) -> JsonMap | None:
     if not context.token:
-        _fail("GITHUB_TOKEN is required to verify maintained SemVer releases.")
-    release_tag = f"{image_name}/v{normalize_version(version)}"
-    api_root = (
-        "https://api.github.com" if context.server_url == "https://github.com" else f"{context.server_url}/api/v3"
-    )
+        _fail("GITHUB_TOKEN is required to inspect automatic releases.")
+    release_tag = _release_tag(image_name, version)
     encoded_tag = urllib.parse.quote(release_tag, safe="")
     request = urllib.request.Request(  # noqa: S310
-        f"{api_root}/repos/{context.repository}/releases/tags/{encoded_tag}",
+        f"{_github_api_root(context)}/repos/{context.repository}/releases/tags/{encoded_tag}",
         headers={
             "Accept": "application/vnd.github+json",
             "Authorization": f"Bearer {context.token}",
@@ -1400,13 +1461,63 @@ def _github_release_exists(context: _GitHubContext, image_name: str, version: st
     )
     try:
         with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310
-            return response.status == http.HTTPStatus.OK
+            if response.status != http.HTTPStatus.OK:
+                _fail(f"GitHub release lookup failed for {release_tag}: HTTP {response.status}.")
+            release = _json_map(json.load(response))
+            if release is None:
+                _fail(f"GitHub returned an invalid release for {release_tag}.")
+            return release
     except urllib.error.HTTPError as error:
         if error.code == http.HTTPStatus.NOT_FOUND:
-            return False
+            return None
         _fail(f"GitHub release lookup failed for {release_tag}: HTTP {error.code}.")
     except urllib.error.URLError as error:
         _fail(f"GitHub release lookup failed for {release_tag}: {error.reason}.")
+
+
+def _create_github_release(
+    context: _GitHubContext,
+    *,
+    image_name: str,
+    version: str,
+    source_revision: str,
+) -> JsonMap:
+    if not context.token:
+        _fail("GITHUB_TOKEN is required to create automatic releases.")
+    release_tag = _release_tag(image_name, version)
+    payload = json.dumps(
+        {
+            "tag_name": release_tag,
+            "target_commitish": source_revision,
+            "name": release_tag,
+            "generate_release_notes": True,
+            "prerelease": "-" in normalize_version(version),
+            "make_latest": "false",
+        }
+    ).encode()
+    request = urllib.request.Request(  # noqa: S310
+        f"{_github_api_root(context)}/repos/{context.repository}/releases",
+        data=payload,
+        method="POST",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {context.token}",
+            "Content-Type": "application/json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310
+            if response.status != http.HTTPStatus.CREATED:
+                _fail(f"GitHub release creation failed for {release_tag}: HTTP {response.status}.")
+            release = _json_map(json.load(response))
+            if release is None:
+                _fail(f"GitHub returned an invalid release for {release_tag}.")
+            return release
+    except urllib.error.HTTPError as error:
+        _fail(f"GitHub release creation failed for {release_tag}: HTTP {error.code}.")
+    except urllib.error.URLError as error:
+        _fail(f"GitHub release creation failed for {release_tag}: {error.reason}.")
 
 
 def _command_promote_image(args: argparse.Namespace) -> None:
@@ -1421,19 +1532,6 @@ def _command_promote_image(args: argparse.Namespace) -> None:
         default_branch=args.default_branch,
         sha=context.sha,
     )
-    maintenance_tags = maintained_semver_tags(args.version)
-    maintenance_event = context.event_name == "schedule" or (
-        context.event_name == "workflow_dispatch" and context.ref_name == args.default_branch
-    )
-    if maintenance_event and maintenance_tags:
-        if _github_release_exists(context, args.image_name, args.version):
-            tags = unique_tags([*tags, *maintenance_tags])
-        else:
-            message = (
-                f"Skipping maintained SemVer tags for {args.image_name} {args.version}: "
-                "matching GitHub Release not found."
-            )
-            _write_stdout(message)
     command_prefix = [_tool("sudo"), _tool("skopeo")]
     immutable_tag = f"sha-{context.sha}" if context.event_name == "push" else None
 
@@ -1487,72 +1585,141 @@ def _release_metadata(image_name: str) -> tuple[JsonMap, str, list[str]]:
     return image, version, release_tags
 
 
-def _command_release_info(args: argparse.Namespace) -> None:
-    image, version, release_tags = _release_metadata(args.image)
-    _write_github_outputs(
-        {
-            "image_name": str(image["name"]),
-            "version": version,
-            "release_tag": release_tags[0],
-        }
-    )
+def _git_tag_revision(tag: str) -> str | None:
+    command = [_tool("git"), "-C", str(_repo_root()), "rev-list", "-n", "1", f"refs/tags/{tag}"]
+    result = subprocess.run(command, capture_output=True, check=False, text=True)  # noqa: S603
+    if result.returncode != 0:
+        return None
+    revision = result.stdout.strip()
+    return revision or None
 
 
-def _command_release_image(args: argparse.Namespace) -> None:
-    image_name = args.image
-    image, version, release_tags = _release_metadata(image_name)
+def _validated_release_build_result(
+    path: Path,
+    *,
+    context: _GitHubContext,
+    image_name: str,
+    image_ref: str,
+    version: str,
+) -> tuple[JsonMap, str, str]:
+    build_result = _load_json(path)
+    source_revision = build_result.get("sourceRevision")
+    index_digest = build_result.get("indexDigest")
+    if build_result.get("imageName") != image_name or build_result.get("image") != image_ref:
+        _fail(f"Build result does not match release image {image_name} ({image_ref}).")
+    if build_result.get("version") != version:
+        _fail(f"Build result for {image_name} does not match metadata version {version}.")
+    if source_revision != context.sha:
+        _fail(f"Build result for {image_name} does not match workflow revision {context.sha}.")
+    if (
+        not isinstance(index_digest, str)
+        or not index_digest.startswith("sha256:")
+        or len(index_digest) != SHA256_DIGEST_LENGTH
+    ):
+        _fail(f"Build result for {image_name} has an invalid index digest.")
+    return build_result, str(source_revision), index_digest
 
-    context = _github_context(require_token=False)
-    if context.ref_name != args.default_branch:
-        _fail(f"Releases must run from the default branch {args.default_branch}, not {context.ref_name}.")
 
-    image_ref = str(image["image"])
-    skopeo = _tool("skopeo")
-    source_revision = args.source_sha.lower()
-    if len(source_revision) != GIT_SHA_LENGTH or not set(source_revision) <= LOWERCASE_HEX_DIGITS:
-        _fail(f"Release source must be a full lowercase Git commit SHA: {args.source_sha}.")
-
-    source_tag = f"sha-{source_revision}"
-    source_reference = f"{image_ref}:{source_tag}"
-    index_digest = _remote_digest([skopeo], source_reference)
-    if index_digest is None:
-        _fail(f"Immutable source {source_reference} does not exist.")
-
+def _inspect_release_source(skopeo: str, image_ref: str, index_digest: str) -> JsonMap:
+    source_reference = f"{image_ref}@{index_digest}"
     config_raw = _run([skopeo, "inspect", "--config", f"docker://{source_reference}"], capture_stdout=True)
     image_config = _json_map(json.loads(config_raw))
     config = _json_map(image_config.get("config")) if image_config is not None else None
     labels = _json_map(config.get("Labels")) if config is not None else None
-    inspection = {"Digest": index_digest, "Labels": labels}
+    return {"Digest": index_digest, "Labels": labels}
 
+
+def _ensure_release_record(
+    context: _GitHubContext,
+    candidate: _ReleaseCandidate,
+    command_prefix: Sequence[str],
+) -> str | None:
+    release_tag = _release_tag(candidate.image_name, candidate.version)
+    release = _github_release(context, candidate.image_name, candidate.version)
+    exact_reference = f"{candidate.image_ref}:{candidate.tags[0]}"
+    existing_exact_digest = _remote_digest(command_prefix, exact_reference)
+    if release is None:
+        tag_revision = _git_tag_revision(release_tag)
+        if tag_revision is not None and tag_revision != candidate.source_revision:
+            _fail(f"Git tag {release_tag} already points to {tag_revision}, not {candidate.source_revision}.")
+        if existing_exact_digest is not None and existing_exact_digest != candidate.index_digest:
+            _fail(f"Refusing to claim existing registry tag {exact_reference} ({existing_exact_digest}).")
+        _create_github_release(
+            context,
+            image_name=candidate.image_name,
+            version=candidate.version,
+            source_revision=candidate.source_revision,
+        )
+        _write_stdout(f"Created automatic GitHub Release {release_tag}.")
+    else:
+        _write_stdout(f"GitHub Release {release_tag} already exists.")
+    return existing_exact_digest
+
+
+def _promote_release_tags(
+    command_prefix: Sequence[str],
+    candidate: _ReleaseCandidate,
+    existing_exact_digest: str | None,
+) -> None:
+    for tag in candidate.tags:
+        target = f"{candidate.image_ref}:{tag}"
+        existing_digest = existing_exact_digest if tag == candidate.tags[0] else _remote_digest(command_prefix, target)
+        if existing_digest == candidate.index_digest:
+            _write_stdout(f"Maintained tag {target} already points to {candidate.index_digest}.")
+            continue
+        _run(
+            [
+                *command_prefix,
+                "copy",
+                "--all",
+                f"docker://{candidate.image_ref}@{candidate.index_digest}",
+                f"docker://{target}",
+            ]
+        )
+        _write_stdout(f"Promoted maintained tag {target} to {candidate.index_digest}.")
+
+
+def _command_finalize_release(args: argparse.Namespace) -> None:
+    image_name = args.image
+    image, version, release_tags = _release_metadata(image_name)
+    context = _github_context(require_token=True)
+    if context.ref_name != args.default_branch:
+        _fail(f"Automatic releases must run from {args.default_branch}, not {context.ref_name}.")
+
+    build_result_path = Path(args.build_result)
+    image_ref = str(image["image"])
+    build_result, source_revision, index_digest = _validated_release_build_result(
+        build_result_path,
+        context=context,
+        image_name=image_name,
+        image_ref=image_ref,
+        version=version,
+    )
+    skopeo = _tool("skopeo")
+    source_reference = f"{image_ref}@{index_digest}"
     index_digest = _validate_release_inspection(
-        inspection,
+        _inspect_release_source(skopeo, image_ref, index_digest),
         source_reference=source_reference,
         source_revision=source_revision,
         version=version,
     )
-
+    candidate = _ReleaseCandidate(
+        image_name=image_name,
+        image_ref=image_ref,
+        version=version,
+        source_revision=source_revision,
+        index_digest=index_digest,
+        tags=release_tags,
+    )
     command_prefix = [skopeo]
-    exact_reference = f"{image_ref}:{release_tags[0]}"
-    existing_exact_digest = _remote_digest(command_prefix, exact_reference)
-    if existing_exact_digest is not None and existing_exact_digest != index_digest:
-        _fail(f"Refusing to replace existing release tag {exact_reference} ({existing_exact_digest}).")
+    existing_exact_digest = _ensure_release_record(context, candidate, command_prefix)
+    _promote_release_tags(command_prefix, candidate, existing_exact_digest)
 
-    for tag in release_tags:
-        if tag == release_tags[0] and existing_exact_digest == index_digest:
-            _write_stdout(f"Release tag {exact_reference} already points to {index_digest}.")
-            continue
-        _write_stdout(f"Tagging {image_ref}:{tag} -> {index_digest}")
-        _run(
-            [
-                skopeo,
-                "copy",
-                "--all",
-                f"docker://{image_ref}@{index_digest}",
-                f"docker://{image_ref}:{tag}",
-            ]
-        )
-
-    _write_stdout(f"Released {image_name} version {version}: {', '.join(release_tags)} -> {image_ref}@{index_digest}")
+    release_tag = _release_tag(image_name, version)
+    recorded_tags = _string_list(build_result.get("tags", [])) or []
+    build_result["tags"] = unique_tags([*recorded_tags, *release_tags])
+    build_result["releaseTag"] = release_tag
+    _write_json(build_result_path, build_result)
     _write_github_outputs(
         {
             "image_name": image_name,
@@ -1560,6 +1727,7 @@ def _command_release_image(args: argparse.Namespace) -> None:
             "version": version,
             "index_digest": index_digest,
             "tags": ",".join(release_tags),
+            "release_tag": release_tag,
         }
     )
 
@@ -1621,6 +1789,10 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     validate_parser = subparsers.add_parser("validate")
     validate_parser.set_defaults(func=_command_validate)
 
+    validate_versions_parser = subparsers.add_parser("validate-versions")
+    validate_versions_parser.add_argument("--before")
+    validate_versions_parser.set_defaults(func=_command_validate_versions)
+
     plan_parser = subparsers.add_parser("plan")
     plan_parser.add_argument("--event-name", default=os.environ.get("GITHUB_EVENT_NAME", "workflow_dispatch"))
     plan_parser.add_argument("--ref-name", default=os.environ.get("GITHUB_REF_NAME", ""))
@@ -1658,9 +1830,7 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     publish_parser.set_defaults(func=_command_publish_image)
 
     promote_parser = subparsers.add_parser("promote-image")
-    promote_parser.add_argument("--image-name", required=True)
     promote_parser.add_argument("--image", required=True)
-    promote_parser.add_argument("--version", required=True)
     promote_parser.add_argument("--digest", required=True)
     promote_parser.add_argument("--default-branch", required=True)
     promote_parser.add_argument("--build-result")
@@ -1670,15 +1840,11 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     generate_workflow_parser.add_argument("--check", action="store_true")
     generate_workflow_parser.set_defaults(func=_command_generate_workflow)
 
-    release_info_parser = subparsers.add_parser("release-info")
-    release_info_parser.add_argument("--image", required=True)
-    release_info_parser.set_defaults(func=_command_release_info)
-
-    release_parser = subparsers.add_parser("release-image")
-    release_parser.add_argument("--image", required=True)
-    release_parser.add_argument("--source-sha", required=True)
-    release_parser.add_argument("--default-branch", required=True)
-    release_parser.set_defaults(func=_command_release_image)
+    finalize_release_parser = subparsers.add_parser("finalize-release")
+    finalize_release_parser.add_argument("--image", required=True)
+    finalize_release_parser.add_argument("--build-result", required=True)
+    finalize_release_parser.add_argument("--default-branch", required=True)
+    finalize_release_parser.set_defaults(func=_command_finalize_release)
 
     return root_parser
 

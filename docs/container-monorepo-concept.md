@@ -63,11 +63,9 @@ containers/
     renovate.json
     workflow-templates/
       publish-images.yml.j2
-      release-image.yml.j2
     workflows/
       ci.yml
       publish-images.yml
-      release-image.yml
   tests/
 ```
 
@@ -200,11 +198,12 @@ Jobs:
    - Sign the index digest with Cosign.
    - Attach provenance and SBOM attestations.
    - Only after verification succeeds, promote the immutable `sha-<commit>` tag and mutable branch tag. For `main`, also promote `latest`.
-   - Scheduled and manual maintenance builds also promote stable `vX.Y.Z`, `vX.Y`, and `vX` tags when the matching image-prefixed GitHub Release already exists.
+   - A dedicated finalization job automatically creates a missing image-prefixed GitHub Release and promotes the version declared in `container.yaml` to `vX.Y.Z`, `vX.Y`, and `vX` after verification succeeds.
+   - Later push, scheduled, and optional manual default-branch builds refresh those maintained SemVer tags automatically.
    - Refuse to overwrite an existing SHA tag. Every rebuild retains its immutable unique run tag and digest for audit and rollback.
    - Write one result artifact per image containing its exact index and architecture digests. Later dependency stages consume these results as `image@sha256:...` references.
 
-The important part is that the build planner owns dependency order. GitHub Actions matrices can build independent images in parallel, but images in later dependency stages must wait for earlier stages so they can consume exact internal digests. Because GitHub Actions `needs` relationships and manual choice options are static YAML, the publish and release workflow files are generated and checked in. The generator computes the required number of dependency stages and release image choices from metadata, then renders the templates under `.github/workflow-templates` with Jinja2.
+The important part is that the build planner owns dependency order. GitHub Actions matrices can build independent images in parallel, but images in later dependency stages must wait for earlier stages so they can consume exact internal digests. Because GitHub Actions `needs` relationships are static YAML, the publish workflow is generated and checked in. The generator computes the required number of dependency stages from metadata, then renders the template under `.github/workflow-templates` with Jinja2.
 
 Regenerate and check the workflow with:
 
@@ -287,32 +286,33 @@ Each image has its own independent SemVer version, tracked in the `version` fiel
 | `sha-<commit>`                        | `sha-a1b2c3...`               | immutable  | Verified push build; never overwritten |
 | `<branch>`                            | `main`                        | mutable    | Verified builds for that branch        |
 | `latest`                              | `latest`                      | mutable    | Verified default-branch builds         |
-| `v<major>.<minor>.<patch>`            | `v1.2.3`                      | maintained | Stable release and scheduled/manual maintenance |
-| `v<major>.<minor>.<patch>-<suffix>`   | `v1.2.3-rc.1`                 | release-only | Prerelease workflow only               |
-| `v<major>.<minor>`                    | `v1.2`                        | maintained | Stable release and scheduled/manual maintenance |
-| `v<major>`                            | `v1`                          | maintained | Stable release and scheduled/manual maintenance |
+| `v<major>.<minor>.<patch>`            | `v1.2.3`                      | maintained | Every verified default-branch build for the declared version |
+| `v<major>.<minor>.<patch>-<suffix>`   | `v1.2.3-rc.1`                 | maintained | Every verified default-branch build for the declared prerelease |
+| `v<major>.<minor>`                    | `v1.2`                        | maintained | Every verified stable default-branch build |
+| `v<major>`                            | `v1`                          | maintained | Every verified stable default-branch build |
 
-### Release workflow
+### Automatic release finalization
 
-Releases use a two-phase process so the registry image, OCI labels, Git commit, Git tag, and GitHub Release all identify the same build:
+The protected default branch and image metadata are the release declaration. Release finalization is automatic:
 
-1. Change the image's `version` in `container.yaml` through a pull request and merge it to the default branch.
-2. `publish-images.yml` builds that commit, verifies it, and promotes its immutable `sha-<commit>` snapshot with matching revision and version labels.
-3. Trigger `release-image.yml` from the default branch, select the image from the metadata-generated dropdown, and enter the full source commit SHA. The source commit must be part of the default branch.
-4. The workflow reads the version from that commit's `container.yaml`, resolves only `sha-<source-commit>`, verifies its digest and OCI revision/version labels, and establishes the initial SemVer tags without replacing another release.
-5. Stable releases promote `v<x.y.z>`, `v<x.y>`, and `v<x>`; prereleases promote only their exact prerelease tag.
-6. GitHub creates `<image>/v<x.y.z>` at the same commit together with the GitHub Release.
+1. Change the image's `version` in `container.yaml` through a pull request when a new compatibility line is required. CI rejects version downgrades.
+2. Merge the reviewed change to the default branch. No release dispatch or copied source SHA is required.
+3. `publish-images.yml` builds the selected commit, verifies it, signs it, attaches attestations, and promotes its immutable `sha-<commit>` snapshot with matching revision and version labels.
+4. A least-privilege finalization job revalidates the published digest and OCI labels. If `<image>/v<x.y.z>` does not exist, it checks for conflicting Git and registry tags before creating the GitHub Release automatically.
+5. The job promotes stable versions to `v<x.y.z>`, `v<x.y>`, and `v<x>`; prereleases receive only their exact prerelease tag.
+6. Subsequent successful default-branch builds update the declared maintained tags to the newly verified digest without moving the Git tag or original GitHub Release commit.
 
-Afterward, successful scheduled or manual maintenance builds may move the stable container tags for that version. Promotion first confirms that the matching GitHub Release exists. The Git tag and release commit remain immutable; registry SemVer tags are maintained pointers. Digests, `run-*`, and `sha-*` references remain immutable artifact identities.
+The operation is idempotent, so rerunning a partially failed workflow reconciles the release safely. A missing release cannot claim an exact registry tag that already points to another digest. The Git tag and release commit remain immutable; registry SemVer tags are maintained pointers. Digests, `run-*`, and `sha-*` references remain immutable artifact identities.
 
 Git tags are prefixed with the image name (`<image>/v<x.y.z>`) to avoid collisions between independent image release lines.
+The monorepo-owned `typo3-phpfpm` line starts at `v2.0.0` so automatic finalization cannot claim the historical `v1.*` tags published by the former TYPO3 repository.
 
 ### Consumer pinning
 
 Consumer repositories (for example `typo3-container`, `nextcloud`) should always reference images with both a version tag and a digest:
 
 ```text
-ghcr.io/strukturpiloten/typo3-phpfpm:v1.2.3@sha256:<digest>
+ghcr.io/strukturpiloten/typo3-phpfpm:v2.0.0@sha256:<digest>
 ```
 
 The version tag provides readability and selects a maintained compatibility line; the digest guarantees immutability. Renovate in the consuming repository should update the digest when the maintained tag moves. Deployments still need an explicit pull/redeploy or Podman auto-update configuration.
@@ -325,6 +325,6 @@ Renovate manages dependency updates (base images, GitHub Actions, tooling), not 
 2. Eligible digest and patch updates request automerge according to the narrow Renovate rules.
 3. Pull-request CI validates and smoke-builds affected architectures before the required gate permits merge.
 4. After merge, `publish-images.yml` rebuilds the affected image and its reverse dependencies, then promotes verified snapshot and mutable tags.
-5. A human changes `container.yaml` through a pull request when a new company image version should be released, waits for its immutable snapshot, and then invokes `release-image.yml`.
+5. The successful default-branch workflow automatically refreshes the declared maintained tags. A human changes `container.yaml` only when a new company image compatibility line is intentionally required; publication still needs no follow-up action.
 
 Renovate does not create issues or PRs for image version bumps. Version bumps are a manual, deliberate decision.
