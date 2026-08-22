@@ -18,6 +18,7 @@ The short version:
 
 ## Current Images
 
+- [images/podman](images/podman) builds rootful and rootless Podman 5.4, 5.5, 5.6, 5.7, 5.8, 6.0, and 6.1 images for `linux/amd64` and `linux/arm64`.
 - [images/typo3/typo3-phpfpm](images/typo3/typo3-phpfpm) builds `ghcr.io/strukturpiloten/typo3-phpfpm` for `linux/amd64` and `linux/arm64`.
 - [images/nextcloud/nextcloud-phpfpm](images/nextcloud/nextcloud-phpfpm) builds `ghcr.io/strukturpiloten/nextcloud-phpfpm` for `linux/amd64` and `linux/arm64`.
 - [images/nextcloud/nextcloud-notifypush](images/nextcloud/nextcloud-notifypush) builds `ghcr.io/strukturpiloten/nextcloud-notifypush` for `linux/amd64` and `linux/arm64`.

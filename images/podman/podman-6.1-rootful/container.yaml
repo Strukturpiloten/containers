@@ -1,0 +1,43 @@
+# yaml-language-server: $schema=../../../container.schema.json
+schemaVersion: 1
+name: podman-6.1-rootful
+version: v6.1.0
+image: ghcr.io/strukturpiloten/podman-6.1-rootful
+title: Podman 6.1 rootful
+description: Podman 6.1 rootful nested-container image built from source on Fedora
+
+build:
+  context: .
+  containerfile: images/podman/shared/Containerfile
+  architectures: [amd64, arm64]
+  runtimeBaseArg: FEDORA_IMAGE
+  args:
+    FEDORA_IMAGE:
+      value: registry.fedoraproject.org/fedora-minimal:44@sha256:db2fcd12529614fc9b4a520bf33109e4aa2d01b66fa9a85f42a56eb27c116124
+      type: external-image
+    PODMAN_COMMIT:
+      value: cade97a52ebdf9dbf9e81de8009015776837a074
+      type: static
+    PODMAN_REPOSITORY:
+      value: https://github.com/podman-container-tools/podman.git
+      type: static
+    NETAVARK_VERSION: {value: 2.1.0, type: static}
+    NETAVARK_COMMIT: {value: 8e91ad1d947ed325327b638f0cb906bea1f7d0ab, type: static}
+    AARDVARK_VERSION: {value: 2.1.0, type: static}
+    AARDVARK_COMMIT: {value: cd7417681229219059939bdd9f0b3bd9ac9abb08, type: static}
+    HOME_DIR: {value: /root, type: static}
+    RUN_AS_USER: {value: root, type: static}
+    RUNTIME_DIR: {value: /run, type: static}
+    STORAGE_PATH: {value: /var/lib/containers, type: static}
+
+dependencies:
+  internal: []
+  external:
+    - name: fedora-minimal
+      image: registry.fedoraproject.org/fedora-minimal
+      arg: FEDORA_IMAGE
+
+inputs:
+  - images/podman/podman-6.1-rootful/**
+  - images/podman/shared/**
+  - shared/oci-labels.env

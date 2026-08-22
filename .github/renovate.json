@@ -52,6 +52,51 @@
         },
         {
             "customType": "regex",
+            "description": "Track each fixed Podman minor line and its immutable source commit",
+            "managerFilePatterns": [
+                "/^images\\/podman\\/podman-\\d+\\.\\d+-(?:rootful|rootless)\\/container\\.yaml$/"
+            ],
+            "matchStrings": [
+                "version:\\s*v(?<currentValue>(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+))[\\s\\S]*?PODMAN_COMMIT:\\s*\\n\\s*value:\\s*(?<currentDigest>[a-f0-9]{40})"
+            ],
+            "depNameTemplate": "podman-{{{major}}}.{{{minor}}}",
+            "packageNameTemplate": "podman-container-tools/podman",
+            "datasourceTemplate": "github-tags",
+            "extractVersionTemplate": "^v(?<version>.+)$",
+            "versioningTemplate": "semver"
+        },
+        {
+            "customType": "regex",
+            "description": "Track Netavark for Podman 6 with an immutable source commit",
+            "managerFilePatterns": [
+                "/^images\\/podman\\/podman-6\\.\\d+-(?:rootful|rootless)\\/container\\.yaml$/"
+            ],
+            "matchStrings": [
+                "NETAVARK_VERSION:\\s*\\{value:\\s*(?<currentValue>\\d+\\.\\d+\\.\\d+),[\\s\\S]*?NETAVARK_COMMIT:\\s*\\{value:\\s*(?<currentDigest>[a-f0-9]{40}),"
+            ],
+            "depNameTemplate": "containers/netavark",
+            "packageNameTemplate": "containers/netavark",
+            "datasourceTemplate": "github-tags",
+            "extractVersionTemplate": "^v(?<version>.+)$",
+            "versioningTemplate": "semver"
+        },
+        {
+            "customType": "regex",
+            "description": "Track Aardvark DNS for Podman 6 with an immutable source commit",
+            "managerFilePatterns": [
+                "/^images\\/podman\\/podman-6\\.\\d+-(?:rootful|rootless)\\/container\\.yaml$/"
+            ],
+            "matchStrings": [
+                "AARDVARK_VERSION:\\s*\\{value:\\s*(?<currentValue>\\d+\\.\\d+\\.\\d+),[\\s\\S]*?AARDVARK_COMMIT:\\s*\\{value:\\s*(?<currentDigest>[a-f0-9]{40}),"
+            ],
+            "depNameTemplate": "containers/aardvark-dns",
+            "packageNameTemplate": "containers/aardvark-dns",
+            "datasourceTemplate": "github-tags",
+            "extractVersionTemplate": "^v(?<version>.+)$",
+            "versioningTemplate": "semver"
+        },
+        {
+            "customType": "regex",
             "description": "Track pinned Syft binary releases in GitHub workflows and workflow templates",
             "managerFilePatterns": [
                 "/^\\.github\/(?:workflows\/[^\/]+|workflow-templates\/.+)\\.ya?ml(?:\\.j2)?$/"
@@ -165,6 +210,70 @@
             "matchUpdateTypes": [
                 "patch"
             ],
+            "automerge": true,
+            "automergeType": "pr",
+            "automergeStrategy": "squash",
+            "platformAutomerge": true
+        },
+        {
+            "description": "Keep Podman 5.4 on its declared compatibility line",
+            "matchDepNames": ["podman-5.4"],
+            "allowedVersions": "/^5\\.4\\./"
+        },
+        {
+            "description": "Keep Podman 5.5 on its declared compatibility line",
+            "matchDepNames": ["podman-5.5"],
+            "allowedVersions": "/^5\\.5\\./"
+        },
+        {
+            "description": "Keep Podman 5.6 on its declared compatibility line",
+            "matchDepNames": ["podman-5.6"],
+            "allowedVersions": "/^5\\.6\\./"
+        },
+        {
+            "description": "Keep Podman 5.7 on its declared compatibility line",
+            "matchDepNames": ["podman-5.7"],
+            "allowedVersions": "/^5\\.7\\./"
+        },
+        {
+            "description": "Keep Podman 5.8 on its declared compatibility line",
+            "matchDepNames": ["podman-5.8"],
+            "allowedVersions": "/^5\\.8\\./"
+        },
+        {
+            "description": "Keep Podman 6.0 on its declared compatibility line",
+            "matchDepNames": ["podman-6.0"],
+            "allowedVersions": "/^6\\.0\\./"
+        },
+        {
+            "description": "Keep Podman 6.1 on its declared compatibility line",
+            "matchDepNames": ["podman-6.1"],
+            "allowedVersions": "/^6\\.1\\./"
+        },
+        {
+            "description": "Squash-merge tested Podman patch releases for each fixed minor line",
+            "matchDepNames": ["/^podman-/"],
+            "matchUpdateTypes": ["patch"],
+            "automerge": true,
+            "automergeType": "pr",
+            "automergeStrategy": "squash",
+            "platformAutomerge": true
+        },
+        {
+            "description": "Update Podman 6 networking helpers together",
+            "matchPackageNames": [
+                "containers/aardvark-dns",
+                "containers/netavark"
+            ],
+            "groupName": "Podman 6 networking helpers"
+        },
+        {
+            "description": "Squash-merge tested patch updates for Podman 6 networking helpers",
+            "matchPackageNames": [
+                "containers/aardvark-dns",
+                "containers/netavark"
+            ],
+            "matchUpdateTypes": ["patch"],
             "automerge": true,
             "automergeType": "pr",
             "automergeStrategy": "squash",
