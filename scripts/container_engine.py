@@ -1221,10 +1221,11 @@ def _command_build_arch_image(args: argparse.Namespace) -> None:
     command.extend(_build_arg("OCI_BASE_NAME", base_name))
     command.extend(_build_arg("OCI_CREATED", created))
     command.extend(_build_arg("OCI_DESCRIPTION", str(image["description"])))
+    documentation_path = Path(str(image["metadataFile"])).parent.as_posix()
     command.extend(
         _build_arg(
             "OCI_DOCUMENTATION",
-            f"{context.server_url}/{context.repository}/tree/{source_revision}/images/{image_name}",
+            f"{context.server_url}/{context.repository}/tree/{source_revision}/{documentation_path}",
         )
     )
     command.extend(_build_arg("OCI_LICENSES", oci_labels["OCI_LICENSES"]))

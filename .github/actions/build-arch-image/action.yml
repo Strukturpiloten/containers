@@ -119,6 +119,12 @@ runs:
         )
         if [[ "${IMAGE_NAME}" == *-rootful ]]; then
           run_args+=(--cap-add SYS_ADMIN --cap-add MKNOD)
+        elif [[ "${IMAGE_NAME}" == "podman-debian-11-rootless" || \
+                "${IMAGE_NAME}" == "podman-ubuntu-22.04-rootless" ]]; then
+          # Podman 3 predates the nested-rootless user-namespace handling used by
+          # newer releases. Limit the privileged fallback to these trusted,
+          # legacy package targets; pull requests run only the unprivileged CLI smoke test.
+          run_args+=(--privileged)
         fi
 
         host_podman=(
