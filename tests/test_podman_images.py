@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 import unittest
 from pathlib import Path
@@ -198,7 +197,7 @@ class PodmanImageTests(unittest.TestCase):
         self.assertEqual(action.count("CONTAINERS_CONF_OVERRIDE:"), 2)
         self.assertEqual(action.count('sudo env "CONTAINERS_CONF_OVERRIDE=${CONTAINERS_CONF_OVERRIDE}"'), 2)
         self.assertEqual(action.count('"${host_podman[@]}" tag'), 2)
-        self.assertIn('host_podman=(env "CONTAINERS_CONF_OVERRIDE=${CONTAINERS_CONF_OVERRIDE}"', action)
+        self.assertNotIn('host_podman=(env "CONTAINERS_CONF_OVERRIDE=${CONTAINERS_CONF_OVERRIDE}"', action)
         self.assertNotIn('"podman-debian-11-rootless"', action)
         self.assertNotIn('"podman-ubuntu-22.04-rootless"', action)
         self.assertIn("fromJSON(inputs.entry).podmanMode", action)
@@ -216,10 +215,8 @@ class PodmanImageTests(unittest.TestCase):
         self.assertIn('test "$(id -u)" -eq "${expected_uid}"', action)
         self.assertIn('test "$(cat /usr/share/containers/podman-mode)" = "$1"', action)
         self.assertIn("Host.Security.Rootless", action)
-        self.assertIn("--userns=keep-id:uid=1000,gid=1000", action)
-        self.assertIn('"${HOST_INNER_RUNTIME_DIR}:/run/user/${outer_host_uid}:rw,U"', action)
-        self.assertIn('chmod 0700 "${HOST_INNER_RUNTIME_DIR}"', action)
-        self.assertIn('test -w "/run/user/$2"', action)
+        self.assertNotIn("--userns=keep-id", action)
+        self.assertNotIn("HOST_INNER_RUNTIME_DIR", action)
         self.assertIn('lock_type = "file"', containers_conf)
 
     def test_local_nested_tests_match_the_ci_privilege_boundary(self) -> None:
@@ -235,34 +232,31 @@ class PodmanImageTests(unittest.TestCase):
         self.assertEqual(rootful_command[1], "-n")
         self.assertEqual(Path(rootful_command[2]).name, "podman")
         self.assertTrue(rootful_separate_store)
-        self.assertEqual(Path(privileged_command[0]).name, "podman")
-        self.assertFalse(privileged_separate_store)
-        self.assertEqual(Path(unprivileged_command[0]).name, "podman")
-        self.assertFalse(unprivileged_separate_store)
+        self.assertEqual(privileged_command, rootful_command)
+        self.assertTrue(privileged_separate_store)
+        self.assertEqual(unprivileged_command, rootful_command)
+        self.assertTrue(unprivileged_separate_store)
 
         privileged_nested = engine._local_nested_podman_command(
             image=privileged_rootless,
             local_image="localhost/test:privileged",
             archive_path=Path("test.tar"),
-            inner_runtime_dir=Path("runtime"),
             outer_podman=privileged_command,
         )
         unprivileged_nested = engine._local_nested_podman_command(
             image=unprivileged_rootless,
             local_image="localhost/test:unprivileged",
             archive_path=Path("test.tar"),
-            inner_runtime_dir=Path("runtime"),
             outer_podman=unprivileged_command,
         )
         self.assertEqual(privileged_nested[0], privileged_command[0])
         self.assertIn("--privileged", privileged_nested)
         self.assertNotIn("apparmor=unconfined", privileged_nested)
-        self.assertIn("--userns=keep-id:uid=1000,gid=1000", privileged_nested)
-        self.assertIn(f"runtime:/run/user/{os.getuid()}:rw,U", privileged_nested)
+        self.assertNotIn("--userns=keep-id", privileged_nested)
         self.assertEqual(unprivileged_nested[0], unprivileged_command[0])
         self.assertNotIn("--privileged", unprivileged_nested)
         self.assertIn("apparmor=unconfined", unprivileged_nested)
-        self.assertIn("--userns=keep-id:uid=1000,gid=1000", unprivileged_nested)
+        self.assertNotIn("--userns=keep-id", unprivileged_nested)
 
     def test_local_source_build_normalizes_the_metadata_version(self) -> None:
         command = engine._local_podman_build_command(

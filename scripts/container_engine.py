@@ -1291,9 +1291,7 @@ def _local_outer_podman_command(image: JsonMap) -> tuple[list[str], bool]:
     if podman_test is None:
         _fail(f"Image {image['name']} has no Podman test profile.")
 
-    if podman_test["mode"] == "rootful":
-        return [_tool("sudo"), "-n", _tool("podman")], True
-    return [_tool("podman")], False
+    return [_tool("sudo"), "-n", _tool("podman")], True
 
 
 def _local_nested_podman_command(
@@ -1301,7 +1299,6 @@ def _local_nested_podman_command(
     image: JsonMap,
     local_image: str,
     archive_path: Path,
-    inner_runtime_dir: Path,
     outer_podman: Sequence[str],
 ) -> list[str]:
     podman_test = _podman_test(image)
@@ -1327,17 +1324,6 @@ def _local_nested_podman_command(
     else:
         _fail(f"Unsupported Podman outer privilege profile: {outer_privilege}.")
 
-    if podman_test["mode"] == "rootless":
-        # The directory is created solely for this invocation, so Podman's U
-        # option can safely map it to UID 1000 in the outer user namespace.
-        run_args.extend(
-            [
-                "--userns=keep-id:uid=1000,gid=1000",
-                "--volume",
-                f"{inner_runtime_dir}:/run/user/{os.getuid()}:rw,U",
-            ]
-        )
-
     script = r"""
 case "$1" in
   rootless) expected_uid=1000; expected_rootless=true ;;
@@ -1345,9 +1331,6 @@ case "$1" in
   *) printf 'Unsupported Podman mode: %s\n' "$1" >&2; exit 1 ;;
 esac
 test "$(id -u)" -eq "${expected_uid}"
-if [ "$1" = rootless ]; then
-  test -w "/run/user/$2"
-fi
 test "$(podman info --format '{{.Host.Security.Rootless}}')" = "${expected_rootless}"
 podman load --input /tmp/nested-image.tar >/dev/null
 nested_image_ids="$(podman images --quiet --no-trunc)"
@@ -1355,7 +1338,7 @@ test -n "${nested_image_ids}"
 test "$(printf '%s\n' "${nested_image_ids}" | wc -l)" -eq 1
 podman run --rm "${nested_image_ids}" /bin/sh -c 'exit 0'
 """.strip()
-    run_args.extend([local_image, "sh", "-euc", script, "--", str(podman_test["mode"]), str(os.getuid())])
+    run_args.extend([local_image, "sh", "-euc", script, "--", str(podman_test["mode"])])
     return run_args
 
 
@@ -1424,8 +1407,6 @@ podman --version
             outer_podman, separate_outer_store = _local_outer_podman_command(image)
             with tempfile.TemporaryDirectory(prefix="strukturpiloten-podman-test-") as temporary_directory:
                 archive_path = Path(temporary_directory) / f"{args.image}-{architecture}.tar"
-                inner_runtime_dir = Path(temporary_directory) / "inner-runtime"
-                inner_runtime_dir.mkdir(mode=0o700)
                 _run([podman, "save", "--format", "oci-archive", "--output", str(archive_path), local_image])
                 if separate_outer_store:
                     _run([*outer_podman, "load", "--quiet", "--input", str(archive_path)])
@@ -1434,7 +1415,6 @@ podman --version
                         image=image,
                         local_image=local_image,
                         archive_path=archive_path,
-                        inner_runtime_dir=inner_runtime_dir,
                         outer_podman=outer_podman,
                     )
                 )

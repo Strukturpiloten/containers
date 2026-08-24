@@ -117,7 +117,6 @@ runs:
         HOST_PODMAN_ROOT: ${{ runner.temp }}/podman-nested/root
         HOST_PODMAN_RUNROOT: ${{ runner.temp }}/podman-nested/runroot
         HOST_PODMAN_TMPDIR: ${{ runner.temp }}/podman-nested/tmp
-        HOST_INNER_RUNTIME_DIR: ${{ runner.temp }}/podman-nested/inner-runtime
         IMAGE_ARCH: ${{ steps.build.outputs.arch }}
         IMAGE_NAME: ${{ steps.build.outputs.image_name }}
         IMAGE_PATH: ${{ steps.build.outputs.archive_path }}
@@ -146,32 +145,14 @@ runs:
           exit 1
         fi
 
-        podman_command=(
+        sudo mkdir -p "${HOST_PODMAN_ROOT}" "${HOST_PODMAN_RUNROOT}" "${HOST_PODMAN_TMPDIR}"
+        host_podman=(
+          sudo env "CONTAINERS_CONF_OVERRIDE=${CONTAINERS_CONF_OVERRIDE}"
           podman
           --root "${HOST_PODMAN_ROOT}"
           --runroot "${HOST_PODMAN_RUNROOT}"
           --tmpdir "${HOST_PODMAN_TMPDIR}"
         )
-        outer_host_uid=0
-        if [ "${PODMAN_MODE}" = "rootful" ]; then
-          sudo mkdir -p "${HOST_PODMAN_ROOT}" "${HOST_PODMAN_RUNROOT}" "${HOST_PODMAN_TMPDIR}"
-          host_podman=(sudo env "CONTAINERS_CONF_OVERRIDE=${CONTAINERS_CONF_OVERRIDE}" "${podman_command[@]}")
-        else
-          outer_host_uid="$(id -u)"
-          mkdir -p \
-            "${HOST_PODMAN_ROOT}" \
-            "${HOST_PODMAN_RUNROOT}" \
-            "${HOST_PODMAN_TMPDIR}" \
-            "${HOST_INNER_RUNTIME_DIR}"
-          # This source is disposable and private to the job. The U option
-          # maps its ownership to UID 1000 inside the outer user namespace.
-          chmod 0700 "${HOST_INNER_RUNTIME_DIR}"
-          run_args+=(
-            --userns=keep-id:uid=1000,gid=1000
-            --volume "${HOST_INNER_RUNTIME_DIR}:/run/user/${outer_host_uid}:rw,U"
-          )
-          host_podman=(env "CONTAINERS_CONF_OVERRIDE=${CONTAINERS_CONF_OVERRIDE}" "${podman_command[@]}")
-        fi
         "${host_podman[@]}" load --quiet --input "${IMAGE_PATH}"
         mapfile -t loaded_images < <("${host_podman[@]}" images --quiet --no-trunc)
         if (( ${#loaded_images[@]} != 1 )); then
@@ -195,9 +176,6 @@ runs:
               ;;
           esac
           test "$(id -u)" -eq "${expected_uid}"
-          if [ "$1" = rootless ]; then
-            test -w "/run/user/$2"
-          fi
           test "$(podman info --format "{{.Host.Security.Rootless}}")" = "${expected_rootless}"
           podman load --input /tmp/nested-image.tar >/dev/null
           nested_image_ids="$(podman images --quiet --no-trunc)"
@@ -211,7 +189,7 @@ runs:
             exit 1
           fi
           podman run --rm "${nested_image_ids}" /bin/sh -c "exit 0"
-        ' -- "${PODMAN_MODE}" "${outer_host_uid}"
+        ' -- "${PODMAN_MODE}"
 
     - name: Upload architecture image archive
       if: inputs.upload-archive == 'true'
