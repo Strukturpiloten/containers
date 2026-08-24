@@ -6,9 +6,14 @@ image: ghcr.io/strukturpiloten/podman-opensuse-tumbleweed-rootful
 title: openSUSE Tumbleweed Podman rootful
 description: openSUSE Tumbleweed distro-packaged Podman rootful compatibility image for CI
 
+tests:
+  podman:
+    mode: rootful
+    outerPrivilege: privileged
+
 build:
   context: .
-  containerfile: images/podman/distro-shared/Containerfile
+  containerfile: images/podman/platforms/opensuse-tumbleweed/Containerfile
   architectures: [amd64, arm64]
   runtimeBaseArg: DISTRO_IMAGE
   args:
@@ -29,6 +34,5 @@ dependencies:
 
 inputs:
   - images/podman/podman-opensuse-tumbleweed-rootful/**
-  - images/podman/distro-shared/**
-  - images/podman/shared/**
+  - images/podman/platforms/opensuse-tumbleweed/**
   - shared/oci-labels.env

@@ -6,6 +6,11 @@ image: ghcr.io/strukturpiloten/podman-6.0-rootful
 title: Podman 6.0 rootful
 description: Podman 6.0 rootful nested-container image built from source on Fedora
 
+tests:
+  podman:
+    mode: rootful
+    outerPrivilege: privileged
+
 build:
   context: .
   containerfile: images/podman/shared/Containerfile

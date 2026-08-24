@@ -6,9 +6,14 @@ image: ghcr.io/strukturpiloten/podman-centos-stream-9-rootless
 title: CentOS Stream 9 Podman rootless
 description: CentOS Stream 9 distro-packaged Podman rootless compatibility image for CI
 
+tests:
+  podman:
+    mode: rootless
+    outerPrivilege: privileged
+
 build:
   context: .
-  containerfile: images/podman/distro-shared/Containerfile
+  containerfile: images/podman/platforms/centos-stream-9/Containerfile
   architectures: [amd64, arm64]
   runtimeBaseArg: DISTRO_IMAGE
   args:
@@ -29,6 +34,5 @@ dependencies:
 
 inputs:
   - images/podman/podman-centos-stream-9-rootless/**
-  - images/podman/distro-shared/**
-  - images/podman/shared/**
+  - images/podman/platforms/centos-stream-9/**
   - shared/oci-labels.env

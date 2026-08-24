@@ -1,0 +1,105 @@
+ARG DISTRO_IMAGE
+
+FROM ${DISTRO_IMAGE}
+
+RUN set -eux; \
+    export DEBIAN_FRONTEND=noninteractive; \
+    apt-get update; \
+    apt-get --yes upgrade; \
+    apt-get install --yes --no-install-recommends ca-certificates crun fuse-overlayfs iproute2 iptables podman procps slirp4netns tar uidmap; \
+    rm -rf /var/lib/apt/lists/*; \
+    mkdir -p /usr/share/strukturpiloten /usr/share/containers; \
+    dpkg-query --show --showformat='${Version}\n' podman > /usr/share/strukturpiloten/podman-package-version; \
+    podman --version > /usr/share/strukturpiloten/podman-version; \
+    command -v crun; \
+    command -v fuse-overlayfs; \
+    rm -f /etc/machine-id /var/lib/systemd/random-seed; \
+    account_name_for_id() { lookup_id="$1"; lookup_file="$2"; while IFS=: read -r account_name _ account_id _; do if [ "${account_id}" = "${lookup_id}" ]; then printf '%s\n' "${account_name}"; return 0; fi; done < "${lookup_file}"; return 0; }; \
+    existing_group="$(account_name_for_id 1000 /etc/group)"; if [ -n "${existing_group}" ] && [ "${existing_group}" != podman ]; then if grep -q '^podman:' /etc/group; then printf 'Cannot rename GID 1000 group %s: podman group already exists\n' "${existing_group}" >&2; exit 1; fi; groupmod --new-name podman "${existing_group}"; fi; \
+    if ! grep -q '^podman:' /etc/group; then groupadd --gid 1000 podman; fi; \
+    existing_user="$(account_name_for_id 1000 /etc/passwd)"; if [ -n "${existing_user}" ] && [ "${existing_user}" != podman ]; then if grep -q '^podman:' /etc/passwd; then printf 'Cannot rename UID 1000 user %s: podman user already exists\n' "${existing_user}" >&2; exit 1; fi; usermod --login podman --home /home/podman "${existing_user}"; fi; \
+    if ! grep -q '^podman:' /etc/passwd; then useradd --uid 1000 --gid 1000 --create-home --home-dir /home/podman podman; fi; \
+    test "$(id -u podman)" -eq 1000; \
+    test "$(id -g podman)" -eq 1000; \
+    printf 'root:1:65535\npodman:1:999\npodman:1001:64535\n' > /etc/subuid; \
+    printf 'root:1:65535\npodman:1:999\npodman:1001:64535\n' > /etc/subgid; \
+    mkdir -p /etc/containers /var/lib/containers /run/user/1000 /home/podman/.config/containers /home/podman/.local/share/containers; \
+    chown -R podman:podman /run/user/1000 /home/podman; \
+    chmod 0755 /run/user; \
+    chmod 0700 /run/user/1000; \
+    if [ -x /usr/bin/newuidmap ]; then chmod u+s /usr/bin/newuidmap; fi; \
+    if [ -x /usr/bin/newgidmap ]; then chmod u+s /usr/bin/newgidmap; fi
+
+COPY images/podman/platforms/debian-12/containers.conf /etc/containers/containers.conf
+COPY images/podman/platforms/debian-12/rootless-containers.conf /home/podman/.config/containers/containers.conf
+
+RUN set -eux; \
+    printf '%s\n' \
+        '[storage]' \
+        'driver = "overlay"' \
+        'graphroot = "/var/lib/containers/storage"' \
+        'runroot = "/run/containers/storage"' \
+        '' \
+        '[storage.options.overlay]' \
+        'mount_program = "/usr/bin/fuse-overlayfs"' \
+        'mountopt = "nodev,fsync=0"' \
+        > /etc/containers/storage.conf; \
+    printf '%s\n' \
+        '[storage]' \
+        'driver = "overlay"' \
+        'graphroot = "/home/podman/.local/share/containers/storage"' \
+        'runroot = "/run/user/1000/containers"' \
+        '' \
+        '[storage.options.overlay]' \
+        'mount_program = "/usr/bin/fuse-overlayfs"' \
+        'mountopt = "nodev,fsync=0"' \
+        > /home/podman/.config/containers/storage.conf; \
+    chown podman:podman \
+        /home/podman/.config/containers/containers.conf \
+        /home/podman/.config/containers/storage.conf
+
+ARG OCI_BASE_DIGEST=""
+ARG OCI_BASE_NAME=""
+ARG OCI_CREATED=""
+ARG OCI_DESCRIPTION="Distro-packaged Podman for compatibility testing"
+ARG OCI_DOCUMENTATION=""
+ARG OCI_LICENSES=""
+ARG OCI_REVISION=""
+ARG OCI_SOURCE=""
+ARG OCI_TITLE="Podman"
+ARG OCI_URL=""
+ARG OCI_VENDOR=""
+ARG OCI_VERSION=""
+
+LABEL org.opencontainers.image.base.digest="${OCI_BASE_DIGEST}" \
+      org.opencontainers.image.base.name="${OCI_BASE_NAME}" \
+      org.opencontainers.image.created="${OCI_CREATED}" \
+      org.opencontainers.image.description="${OCI_DESCRIPTION}" \
+      org.opencontainers.image.documentation="${OCI_DOCUMENTATION}" \
+      org.opencontainers.image.licenses="${OCI_LICENSES}" \
+      org.opencontainers.image.revision="${OCI_REVISION}" \
+      org.opencontainers.image.source="${OCI_SOURCE}" \
+      org.opencontainers.image.title="${OCI_TITLE}" \
+      org.opencontainers.image.url="${OCI_URL}" \
+      org.opencontainers.image.vendor="${OCI_VENDOR}" \
+      org.opencontainers.image.version="${OCI_VERSION}"
+
+ARG RUN_AS_USER
+RUN set -eux; \
+    if [ "${RUN_AS_USER}" = root ]; then podman_mode=rootful; else podman_mode=rootless; fi; \
+    printf '%s\n' "${podman_mode}" > /usr/share/containers/podman-mode
+
+ARG HOME_DIR
+ARG RUNTIME_DIR
+ARG STORAGE_PATH
+
+ENV BUILDAH_ISOLATION=chroot \
+    HOME=${HOME_DIR} \
+    XDG_RUNTIME_DIR=${RUNTIME_DIR} \
+    _CONTAINERS_USERNS_CONFIGURED=""
+
+VOLUME ${STORAGE_PATH}
+
+USER ${RUN_AS_USER}
+
+CMD ["podman", "--help"]

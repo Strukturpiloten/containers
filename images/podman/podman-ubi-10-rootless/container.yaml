@@ -6,9 +6,15 @@ image: ghcr.io/strukturpiloten/podman-ubi-10-rootless
 title: Red Hat UBI 10 Podman rootless
 description: Red Hat UBI 10 distro-packaged Podman rootless compatibility image for CI
 
+tests:
+  podman:
+    mode: rootless
+    outerPrivilege: privileged
+    nestedRuntime: false
+
 build:
   context: .
-  containerfile: images/podman/distro-shared/Containerfile
+  containerfile: images/podman/platforms/ubi-10/Containerfile
   architectures: [amd64, arm64]
   runtimeBaseArg: DISTRO_IMAGE
   args:
@@ -29,6 +35,5 @@ dependencies:
 
 inputs:
   - images/podman/podman-ubi-10-rootless/**
-  - images/podman/distro-shared/**
-  - images/podman/shared/**
+  - images/podman/platforms/ubi-10/**
   - shared/oci-labels.env

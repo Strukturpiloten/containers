@@ -6,9 +6,14 @@ image: ghcr.io/strukturpiloten/podman-fedora-44-rootful
 title: Fedora 44 Podman rootful
 description: Fedora 44 distro-packaged Podman rootful compatibility image for CI
 
+tests:
+  podman:
+    mode: rootful
+    outerPrivilege: privileged
+
 build:
   context: .
-  containerfile: images/podman/distro-shared/Containerfile
+  containerfile: images/podman/platforms/fedora-44/Containerfile
   architectures: [amd64, arm64]
   runtimeBaseArg: DISTRO_IMAGE
   args:
@@ -29,6 +34,5 @@ dependencies:
 
 inputs:
   - images/podman/podman-fedora-44-rootful/**
-  - images/podman/distro-shared/**
-  - images/podman/shared/**
+  - images/podman/platforms/fedora-44/**
   - shared/oci-labels.env

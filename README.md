@@ -55,6 +55,15 @@ uv run --frozen --python 3.14 python -m scripts.container_engine validate
 uv run --frozen --python 3.14 python -m scripts.container_engine generate-workflow --check
 ```
 
+Podman compatibility images also provide a single-image build and nested-runtime check:
+
+```sh
+uv run --frozen --python 3.14 python -m scripts.container_engine test-podman-image \
+  --image podman-debian-12-rootless
+```
+
+This requires a Linux host with Podman and `/dev/fuse`. Rootful profiles are loaded into rootful Podman with `sudo -n`; rootless profiles use the host user's rootless Podman so subordinate-ID mappings remain nested correctly. Configure passwordless permission for rootful checks or use `--skip-nested`. See the [Podman image documentation](images/podman/README.md#build-and-test-architecture) for the trust and fidelity boundaries.
+
 When image metadata changes the internal dependency depth, regenerate the checked-in publishing workflow:
 
 ```sh

@@ -6,6 +6,11 @@ image: ghcr.io/strukturpiloten/podman-6.1-rootless
 title: Podman 6.1 rootless
 description: Podman 6.1 rootless nested-container image built from source on Fedora
 
+tests:
+  podman:
+    mode: rootless
+    outerPrivilege: unprivileged
+
 build:
   context: .
   containerfile: images/podman/shared/Containerfile

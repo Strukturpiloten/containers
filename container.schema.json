@@ -42,6 +42,9 @@
     "build": {
       "$ref": "#/$defs/build"
     },
+    "tests": {
+      "$ref": "#/$defs/tests"
+    },
     "dependencies": {
       "$ref": "#/$defs/dependencies"
     },
@@ -154,6 +157,43 @@
           "additionalProperties": {
             "$ref": "#/$defs/buildArgument"
           }
+        }
+      }
+    },
+    "tests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "podman"
+      ],
+      "properties": {
+        "podman": {
+          "$ref": "#/$defs/podmanTest"
+        }
+      }
+    },
+    "podmanTest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "outerPrivilege"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "rootful",
+            "rootless"
+          ]
+        },
+        "outerPrivilege": {
+          "enum": [
+            "privileged",
+            "unprivileged"
+          ]
+        },
+        "nestedRuntime": {
+          "type": "boolean"
         }
       }
     },
