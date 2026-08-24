@@ -117,6 +117,13 @@ class PodmanImageTests(unittest.TestCase):
         for package_tool in ("dpkg-query", "rpm --query", "apk info", "pacman --query"):
             with self.subTest(package_tool=package_tool):
                 self.assertIn(package_tool, recipe)
+        self.assertIn("rhel:10|centos:10", recipe)
+        self.assertIn("firewall_package=nftables", recipe)
+        self.assertIn("rootless_network_package=passt", recipe)
+        self.assertIn("groupmod --new-name podman", recipe)
+        self.assertIn("usermod --login podman", recipe)
+        self.assertIn("chmod 0755 /run/user", recipe)
+        self.assertIn("chmod 0700 /run/user/1000", recipe)
         self.assertIn("/usr/share/strukturpiloten/podman-package-version", recipe)
         self.assertEqual(recipe.count("FROM "), 1)
 

@@ -23,17 +23,27 @@ RUN set -eux; \
             rm -rf /var/lib/apt/lists/* \
             ;; \
         fedora|rhel|centos) \
+            case "${ID}:${VERSION_ID%%.*}" in \
+                rhel:10|centos:10) \
+                    firewall_package=nftables; \
+                    rootless_network_package=passt \
+                    ;; \
+                *) \
+                    firewall_package=iptables; \
+                    rootless_network_package=slirp4netns \
+                    ;; \
+            esac; \
             dnf --assumeyes --refresh upgrade; \
             dnf --assumeyes install --setopt=install_weak_deps=False \
                 ca-certificates \
                 crun \
                 fuse-overlayfs \
                 iproute \
-                iptables \
+                "${firewall_package}" \
                 podman \
                 procps-ng \
+                "${rootless_network_package}" \
                 shadow-utils \
-                slirp4netns \
                 tar; \
             dnf clean all; \
             rm -rf /var/cache/dnf /var/log/dnf* /var/log/hawkey.log /var/log/yum.* \
@@ -108,10 +118,28 @@ RUN set -eux; \
     if command -v crun; then :; else command -v runc; fi; \
     command -v fuse-overlayfs; \
     rm -f /etc/machine-id /var/lib/systemd/random-seed; \
+    existing_group="$(awk -F: '$3 == 1000 { print $1; exit }' /etc/group)"; \
+    if [ -n "${existing_group}" ] && [ "${existing_group}" != podman ]; then \
+        if grep -q '^podman:' /etc/group; then \
+            printf 'Cannot rename GID 1000 group %s: podman group already exists\n' "${existing_group}" >&2; \
+            exit 1; \
+        fi; \
+        groupmod --new-name podman "${existing_group}"; \
+    fi; \
     if ! grep -q '^podman:' /etc/group; then groupadd --gid 1000 podman; fi; \
+    existing_user="$(awk -F: '$3 == 1000 { print $1; exit }' /etc/passwd)"; \
+    if [ -n "${existing_user}" ] && [ "${existing_user}" != podman ]; then \
+        if grep -q '^podman:' /etc/passwd; then \
+            printf 'Cannot rename UID 1000 user %s: podman user already exists\n' "${existing_user}" >&2; \
+            exit 1; \
+        fi; \
+        usermod --login podman --home /home/podman "${existing_user}"; \
+    fi; \
     if ! grep -q '^podman:' /etc/passwd; then \
         useradd --uid 1000 --gid 1000 --create-home --home-dir /home/podman podman; \
     fi; \
+    test "$(id -u podman)" -eq 1000; \
+    test "$(id -g podman)" -eq 1000; \
     printf 'root:1:65535\npodman:1:999\npodman:1001:64535\n' > /etc/subuid; \
     printf 'root:1:65535\npodman:1:999\npodman:1001:64535\n' > /etc/subgid; \
     mkdir -p \
@@ -121,6 +149,7 @@ RUN set -eux; \
         /home/podman/.config/containers \
         /home/podman/.local/share/containers; \
     chown -R podman:podman /run/user/1000 /home/podman; \
+    chmod 0755 /run/user; \
     chmod 0700 /run/user/1000; \
     if [ -x /usr/bin/newuidmap ]; then chmod u+s /usr/bin/newuidmap; fi; \
     if [ -x /usr/bin/newgidmap ]; then chmod u+s /usr/bin/newgidmap; fi
