@@ -88,13 +88,14 @@ Rootless images run as UID/GID 1000 and store images under `/home/podman/.local/
 ```sh
 podman run --rm \
   --device /dev/fuse \
+  --security-opt apparmor=unconfined \
   --security-opt label=disable \
   --volume podman-debian-12-rootless:/home/podman/.local/share/containers \
   ghcr.io/strukturpiloten/podman-debian-12-rootless:v1.0.0 \
   podman run --rm quay.io/libpod/alpine:latest echo nested-rootless
 ```
 
-Rootless operation requires unprivileged user namespaces, working subordinate UID/GID mappings, `newuidmap`/`newgidmap`, and FUSE overlay support. Host policy can still deny one of those features.
+Rootless operation requires unprivileged user namespaces, working subordinate UID/GID mappings, `newuidmap`/`newgidmap`, and FUSE overlay support. AppArmor profiles commonly applied by outer container runtimes can deny the storage bind mount even after inner Podman enters its user namespace. Disabling AppArmor for the trusted outer container permits that mount while retaining rootless UID 1000, the seccomp profile, and the outer container's reduced capabilities.
 
 The Debian 11 and Ubuntu 22.04 images contain Podman 3. Its older nested-rootless namespace handling commonly requires a privileged outer container. The publishing workflow applies that fallback only to trusted default-branch and scheduled smoke tests for those two images; pull requests run only their unprivileged CLI check. Treat the same fallback as privileged rootful access to the host despite the inner Podman process using UID 1000.
 
