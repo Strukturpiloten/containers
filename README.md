@@ -1,38 +1,51 @@
 # Strukturpiloten Containers
 
-This repository is the public monorepo for company-maintained container images.
+This repository builds and publishes the public container images maintained by Strukturpiloten. Image definitions, dependency pins, release versions, build inputs, and architecture support live with the image they describe. GitHub Actions validates that metadata and handles builds, signing, attestations, and releases.
 
-## Concept
+## Image catalog
 
-The detailed monorepo concept is documented in [docs/container-monorepo-concept.md](docs/container-monorepo-concept.md).
+| Family | Images | Architectures | Documentation |
+| --- | --- | --- | --- |
+| Podman | Exact upstream Podman 5.4–6.1 and distro-packaged compatibility images, each rootful and rootless | AMD64 and ARM64; Arch is AMD64-only | [Podman compatibility images](images/podman/README.md) |
+| Nextcloud | `nextcloud-phpfpm`, `nextcloud-notifypush` | AMD64, ARM64 | [PHP-FPM](images/nextcloud/nextcloud-phpfpm/README.md), [notify_push](images/nextcloud/nextcloud-notifypush/README.md) |
+| TYPO3 | `typo3-phpfpm` | AMD64, ARM64 | [TYPO3 PHP-FPM](images/typo3/typo3-phpfpm/README.md) |
 
-The short version:
+Published image names use `ghcr.io/strukturpiloten/<image-name>`.
 
-- Each image lives in `images/<project>/<name>/` with its own `Containerfile`, `container.yaml`, README, and optional image-specific tests.
-- `container.yaml` describes registry coordinates, build arguments, per-image OCI metadata, external dependencies, internal dependencies, and changed-file inputs.
-- `container.schema.json` is the strict, editor-readable contract for every `container.yaml`; the Python validator adds dependency-graph and repository-policy checks.
-- Static OCI label values shared across all images (`OCI_LICENSES`, `OCI_VENDOR`, `OCI_SOURCE`) are defined once in `shared/oci-labels.env`.
-- GitHub Actions calculates a dependency graph from all `container.yaml` files, builds changed images in topological order, and includes reverse dependencies when an internal base image changes. Daily scheduled builds rebuild every image without cache; manual runs can target all images, one image, or one image family.
-- Every build first publishes a unique immutable run tag. After signing and attestations succeed, push builds promote an immutable `sha-<git-sha>` tag plus mutable branch tags. Verified default-branch builds automatically create missing GitHub Releases from `container.yaml` and refresh the declared SemVer tags. OCI digests, run tags, and SHA tags remain the immutable identities.
-- Renovate tracks digest-pinned external image references in `images/**/container.yaml`, tooling versions, and commit-pinned GitHub Actions. Helper binaries such as `install-php-extensions` are copied from digest-pinned build images so their version and integrity update together.
+## Repository contract
 
-## Current Images
+- `images/<family>/<image>/container.yaml` is the source of truth for one published image.
+- `container.schema.json` defines the metadata format. Repository validation adds dependency-graph, build-path, digest-pinning, and version-progression checks.
+- Containerfiles use the repository root as their build context. Shared runtime files belong under `shared/` or a family-specific shared directory.
+- External base images are pinned by digest. Renovate proposes digest and supported dependency updates through pull requests.
+- Internal image dependencies use exact digests and build in topological stages. Independent images remain in stage 0 and build in parallel.
+- Static OCI label values shared by every image live in `shared/oci-labels.env`; image-specific title, description, version, source revision, and documentation URL come from the build plan.
 
-- [images/podman](images/podman) builds rootful and rootless Podman 5.4, 5.5, 5.6, 5.7, 5.8, 6.0, and 6.1 images for `linux/amd64` and `linux/arm64`.
-- [images/typo3/typo3-phpfpm](images/typo3/typo3-phpfpm) builds `ghcr.io/strukturpiloten/typo3-phpfpm` for `linux/amd64` and `linux/arm64`.
-- [images/nextcloud/nextcloud-phpfpm](images/nextcloud/nextcloud-phpfpm) builds `ghcr.io/strukturpiloten/nextcloud-phpfpm` for `linux/amd64` and `linux/arm64`.
-- [images/nextcloud/nextcloud-notifypush](images/nextcloud/nextcloud-notifypush) builds `ghcr.io/strukturpiloten/nextcloud-notifypush` for `linux/amd64` and `linux/arm64`.
+The current architecture and maintenance rules are described in [Container repository architecture](docs/container-monorepo-concept.md).
 
-## Automation
+## Builds and releases
 
-- [.github/workflows/publish-images.yml](.github/workflows/publish-images.yml) builds and publishes images with Buildah, Podman, and Skopeo. It signs images with Cosign, generates Syft SBOMs, publishes GitHub attestations, and automatically finalizes metadata-declared releases. The workflow is generated from [.github/workflow-templates/publish-images.yml.j2](.github/workflow-templates/publish-images.yml.j2) and image metadata so dependency stage jobs are not hand-written.
-- [.github/workflows/ci.yml](.github/workflows/ci.yml) validates pull requests and smoke-builds affected architectures without registry write permissions. Its `Required CI` job is the stable repository-ruleset check.
-- [.github/renovate.json](.github/renovate.json) tracks external container image digests in `container.yaml`, GitHub Actions pinned to commit SHAs, Syft, Cosign, and `install-php-extensions`.
-- [scripts/container_engine.py](scripts/container_engine.py) validates image metadata and forward-only version changes, calculates dependency-aware build stages, generates the publish workflow, builds architecture archives, publishes manifests, and finalizes releases. Run it through `uv run --python 3.14 python -m scripts.container_engine`.
+Pull requests run validation and smoke-build affected images without publishing. The stable `Required CI` job is intended for the repository ruleset.
 
-Consumers that need automatic maintenance should use a readable tag together with a digest, for example `v1.2.3@sha256:...`, and let Renovate update the digest. A running container still needs an explicit pull/redeploy or Podman auto-update policy after a tag moves.
+Merges to `main` build affected images and reverse dependencies. A daily scheduled run rebuilds every scheduled image without cache so supported base distributions and installed packages can contribute security fixes even when no repository file changed. Manual runs may select all images, one image, or an image family; normal operation does not require manual releases.
 
-Before opening a pull request, run:
+After a build succeeds, the workflow publishes an immutable run tag, inspects the manifest, creates SBOMs, signs the image, and attaches provenance and SBOM attestations. Only then does it update maintained tags and automatically create any missing image-scoped GitHub Release declared by `container.yaml`.
+
+### Tag behavior
+
+| Reference | Mutability | Intended use |
+| --- | --- | --- |
+| OCI digest (`sha256:…`) | Immutable | Reproducible deployments and rollback |
+| `run-<run>-<attempt>-sha-<commit>` | Immutable | Audit trail for one workflow attempt |
+| `sha-<commit>` | Immutable | Verified image built from one repository commit |
+| branch and `latest` | Maintained | Follow successful rebuilds on that branch |
+| `vX.Y.Z`, `vX.Y`, `vX` | Maintained | Follow the declared compatibility line, including security rebuilds |
+
+Consumers should use a readable maintained tag together with a digest, for example `v1.2.3@sha256:…`, and let Renovate update the digest when the maintained tag moves. Running workloads still require a pull and redeploy or a configured auto-update policy.
+
+## Local validation
+
+Run the same non-publishing checks before opening a pull request:
 
 ```sh
 uv run --frozen --python 3.14 ruff format --check .
@@ -40,4 +53,10 @@ uv run --frozen --python 3.14 ruff check .
 uv run --frozen --python 3.14 python -m unittest discover -s tests
 uv run --frozen --python 3.14 python -m scripts.container_engine validate
 uv run --frozen --python 3.14 python -m scripts.container_engine generate-workflow --check
+```
+
+When image metadata changes the internal dependency depth, regenerate the checked-in publishing workflow:
+
+```sh
+uv run --frozen --python 3.14 python -m scripts.container_engine generate-workflow
 ```

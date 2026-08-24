@@ -1,11 +1,18 @@
 # Nextcloud PHP-FPM
 
-Nextcloud PHP-FPM runtime image with PHP extensions, ffmpeg and Strukturpiloten container utilities.
+`ghcr.io/strukturpiloten/nextcloud-phpfpm` is the shared PHP-FPM runtime for Strukturpiloten Nextcloud deployments. It supports AMD64 and ARM64.
 
-The image is built from [Containerfile](Containerfile) and published as:
+## Included runtime
 
-```text
-ghcr.io/strukturpiloten/nextcloud-phpfpm
-```
+- PHP-FPM from the digest-pinned official Alpine-based PHP image;
+- Composer and the PHP extensions declared in the Containerfile;
+- ffmpeg, Git, Supercronic, CA certificates, and timezone data;
+- the shared `check_variables_and_directories.sh` container utility.
 
-The current external base image is declared in [container.yaml](container.yaml) so Renovate and the GitHub Actions workflow can update and build from the same source of truth.
+The working directory is `/var/www/nextcloud`, PHP-FPM listens on port 9000, and the health check validates the PHP-FPM configuration. Application code, Nextcloud configuration, web-server configuration, cron definitions, and persistent data are supplied by the consuming stack.
+
+## Build and updates
+
+`container.yaml` is authoritative for the PHP runtime, extension-installer image, architectures, data path, and Strukturpiloten image version. Both external images are digest-pinned. Renovate proposes supported updates, and the daily rebuild refreshes Alpine packages and PHP extensions against the selected PHP base.
+
+Use a maintained tag plus digest when the deployment should receive reviewed rebuilds. Pin only the digest when the artifact must remain byte-for-byte fixed.

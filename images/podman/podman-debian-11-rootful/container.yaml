@@ -1,0 +1,34 @@
+# yaml-language-server: $schema=../../../container.schema.json
+schemaVersion: 1
+name: podman-debian-11-rootful
+version: v1.0.0
+image: ghcr.io/strukturpiloten/podman-debian-11-rootful
+title: Debian 11 Podman rootful
+description: Debian 11 distro-packaged Podman rootful compatibility image for CI
+
+build:
+  context: .
+  containerfile: images/podman/distro-shared/Containerfile
+  architectures: [amd64, arm64]
+  runtimeBaseArg: DISTRO_IMAGE
+  args:
+    DISTRO_IMAGE:
+      value: docker.io/library/debian:11@sha256:99cdf7792e25416bd801861ccd8e2fb27fb527b25e8d9a8704ebc3ead2015675
+      type: external-image
+    HOME_DIR: {value: /root, type: static}
+    RUN_AS_USER: {value: root, type: static}
+    RUNTIME_DIR: {value: /run, type: static}
+    STORAGE_PATH: {value: /var/lib/containers, type: static}
+
+dependencies:
+  internal: []
+  external:
+    - name: debian-11
+      image: docker.io/library/debian
+      arg: DISTRO_IMAGE
+
+inputs:
+  - images/podman/podman-debian-11-rootful/**
+  - images/podman/distro-shared/**
+  - images/podman/shared/**
+  - shared/oci-labels.env
