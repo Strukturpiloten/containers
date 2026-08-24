@@ -148,6 +148,8 @@ The command performs a no-cache build from the digest-pinned base, verifies the 
 
 The nested configurations use host namespaces and FUSE overlay storage because the images do not boot an init system. Most targets use `crun` with disabled cgroup management. The runc-based openSUSE Leap target keeps cgroups enabled because runc cannot execute the disabled-cgroups OCI configuration. Tumbleweed also keeps cgroups enabled because its rolling package can select runc for a nested workload even when crun is the configured preference. These settings are suitable for CLI and nested-container compatibility tests, but they intentionally differ from some distro host defaults and do not provide a complete systemd or Quadlet environment.
 
+Rootless images fix the OCI runtime state directory below `/run/user/1000`, matching their declared user and `XDG_RUNTIME_DIR`. Without that explicit runtime flag, crun and runc can derive the outer rootless host UID from the user-namespace map—for example UID 1001 on a GitHub-hosted runner—and then try to use an inaccessible directory inside the image.
+
 You can test whether a distro package contains the Quadlet generator and how Boxferry handles its presence or absence, but starting systemd units requires a more complete environment. Use a VM when a test depends on boot order, systemd generators, host cgroup delegation, kernel storage drivers, host networking, SELinux/AppArmor rules, or distribution installer behavior.
 
 GitHub Actions always verify the Podman CLI. Same-repository pull requests, default-branch builds, and scheduled builds additionally load the built image and run a minimal nested container. Fork pull requests do not receive the privileged nested test profile.

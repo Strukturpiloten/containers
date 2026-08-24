@@ -156,13 +156,28 @@ class PodmanImageTests(unittest.TestCase):
                 if platform == "opensuse-leap-16.0":
                     self.assertIn('runtime = "runc"', rootful_config)
                     self.assertIn('cgroups = "enabled"', rootful_config)
+                    rootless_runtime = "runc"
                 elif platform == "opensuse-tumbleweed":
                     self.assertIn('runtime = "crun"', rootful_config)
                     self.assertIn('cgroups = "enabled"', rootful_config)
                     self.assertIn('cgroups = "enabled"', rootless_config)
+                    rootless_runtime = "crun"
                 else:
                     self.assertIn('runtime = "crun"', rootful_config)
                     self.assertIn('cgroups = "disabled"', rootful_config)
+                    rootless_runtime = "crun"
+                self.assertIn("[engine.runtimes_flags]", rootless_config)
+                self.assertIn(
+                    f'{rootless_runtime} = ["root=/run/user/1000/{rootless_runtime}"]',
+                    rootless_config,
+                )
+
+    def test_source_rootless_runtime_state_uses_the_image_uid(self) -> None:
+        rootless_config = (REPOSITORY_ROOT / "images/podman/shared/rootless-containers.conf").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("[engine.runtimes_flags]", rootless_config)
+        self.assertIn('crun = ["root=/run/user/1000/crun"]', rootless_config)
 
     def test_podman_test_profiles_match_image_family_and_mode(self) -> None:
         for name, image in {**self.source_images, **self.distro_images}.items():
