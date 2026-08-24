@@ -9,7 +9,7 @@ They are test fixtures, not production container hosts. A container reproduces t
 The repository provides two complementary families:
 
 - **Upstream-source images** isolate the behavior of exact Podman release tags from 5.4 through 6.1. They build the upstream source without a distribution's Podman patch set.
-- **Distro-package images** install Podman from an operating system's own repositories. They preserve that distribution's package revision, dependencies, helpers, libraries, and downstream patch policy. The repository overlays a common configuration for nested CI operation; it does not claim to preserve every host-level default.
+- **Distro-package images** install Podman from an operating system's own repositories. They preserve that distribution's package revision, dependencies, helpers, libraries, and downstream patch policy. Each OS release owns its nested-CI configuration; the images do not claim to preserve every host-level default.
 
 Every target has separate `-rootful` and `-rootless` images. Rootful/rootless describes the user running Podman inside the outer container; it does not describe the outer host runtime and does not remove the need for nested-container privileges.
 
@@ -97,7 +97,19 @@ podman run --rm \
 
 Rootless operation requires unprivileged user namespaces, working subordinate UID/GID mappings, `newuidmap`/`newgidmap`, and FUSE overlay support. AppArmor profiles commonly applied by outer container runtimes can deny the storage bind mount even after inner Podman enters its user namespace. Disabling AppArmor for the trusted outer container permits that mount while retaining rootless UID 1000, the seccomp profile, and the outer container's reduced capabilities.
 
-The Debian 11 and Ubuntu 22.04 images contain Podman 3. Its older nested-rootless namespace handling commonly requires a privileged outer container. The publishing workflow applies that fallback only to trusted default-branch and scheduled smoke tests for those two images; pull requests run only their unprivileged CLI check. Treat the same fallback as privileged rootful access to the host despite the inner Podman process using UID 1000.
+The distro-package rootless images are tested in a privileged outer container. Distribution packaging of `newuidmap`, file capabilities, seccomp, and AppArmor varies enough that an unprivileged outer container does not provide a portable test boundary. The image still starts as UID/GID 1000, and the test asserts that Podman reports rootless mode. Treat the privileged outer container as rootful access to the runner despite that inner identity.
+
+The exact upstream rootless images use the narrower unprivileged outer profile because their Fedora runtime and subordinate-ID setup are controlled by the shared source-build recipe.
+
+### Automated nested-runtime coverage
+
+| Image profiles | Build and CLI check | Nested `podman run` check | Reason |
+| --- | --- | --- | --- |
+| All rootful profiles | Yes | Yes | The trusted outer test container supplies the required mount and namespace privileges. |
+| Upstream-source, Debian, Ubuntu, Fedora, CentOS Stream, Alpine, and Arch rootless profiles | Yes | Yes | Their `newuidmap`/`newgidmap` path works inside the nested test boundary. |
+| UBI 8, 9, and 10 plus openSUSE Leap and Tumbleweed rootless profiles | Yes | No | Their subordinate-ID helpers reject writing the second nested user namespace's `uid_map`. Replacing those helpers would stop testing the distribution package environment. |
+
+These rootless images remain useful for package, CLI, filesystem, and inspection compatibility. Test operations that must create their Podman user namespace on a UBI or openSUSE host in a VM or dedicated runner instead of another container. Every exception is explicit in the image's `tests.podman.nestedRuntime` metadata; CI does not infer it from an image name.
 
 ### Rootful example
 
@@ -119,13 +131,26 @@ Docker on a Linux host can run the same outer container with equivalent `docker 
 
 Never share a storage volume between Podman versions, OS targets, or root modes. Storage formats and database migrations are part of what compatibility testing can change.
 
+## Build and test architecture
+
+The exact upstream images use the multi-stage `images/podman/shared/Containerfile`. Distro-package images use one recipe per OS release under `images/podman/platforms/`; a platform recipe is shared only by its rootful and rootless variants. Package names, account setup, OCI runtime selection, and cgroup behavior therefore cannot leak between Debian, Ubuntu, Fedora, UBI, openSUSE, Alpine, or Arch targets.
+
+Test one image locally on an AMD64 Linux host with Podman and `/dev/fuse`:
+
+```sh
+uv run --frozen --python 3.14 python -m scripts.container_engine test-podman-image \
+  --image podman-debian-12-rootless
+```
+
+The command performs a no-cache build from the digest-pinned base, verifies the packaged Podman CLI and recorded package revision, then runs the same nested-container check used by Actions. Rootful profiles are loaded into rootful Podman through `sudo -n`. Rootless profiles deliberately use the host user's rootless Podman: the outer user namespace supplies the subordinate-ID range that `newuidmap` must divide again for the inner engine. Configure passwordless permission for rootful Podman or use `--skip-nested`. Local ARM64 checks require an ARM64 host or correctly configured emulation.
+
 ## CI and fidelity limits
 
-The common nested configuration uses host namespaces, FUSE overlay storage, and disabled cgroup management because the images do not boot an init system. That is suitable for CLI and nested-container compatibility tests. It intentionally differs from some distro host defaults and is not a complete systemd or Quadlet environment.
+The nested configurations use host namespaces and FUSE overlay storage because the images do not boot an init system. Most targets use `crun` with disabled cgroup management. The runc-based openSUSE Leap target keeps cgroups enabled because runc cannot execute the disabled-cgroups OCI configuration. Tumbleweed also keeps cgroups enabled because its rolling package can select runc for a nested workload even when crun is the configured preference. These settings are suitable for CLI and nested-container compatibility tests, but they intentionally differ from some distro host defaults and do not provide a complete systemd or Quadlet environment.
 
 You can test whether a distro package contains the Quadlet generator and how Boxferry handles its presence or absence, but starting systemd units requires a more complete environment. Use a VM when a test depends on boot order, systemd generators, host cgroup delegation, kernel storage drivers, host networking, SELinux/AppArmor rules, or distribution installer behavior.
 
-GitHub Actions smoke tests verify the Podman CLI on pull requests. Trusted default-branch and scheduled builds additionally load the built image and run a minimal nested container before publication.
+GitHub Actions always verify the Podman CLI. Same-repository pull requests, default-branch builds, and scheduled builds additionally load the built image and run a minimal nested container. Fork pull requests do not receive the privileged nested test profile.
 
 ## Maintenance and legacy targets
 

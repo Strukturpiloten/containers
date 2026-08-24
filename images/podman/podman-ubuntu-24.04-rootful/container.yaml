@@ -6,9 +6,14 @@ image: ghcr.io/strukturpiloten/podman-ubuntu-24.04-rootful
 title: Ubuntu 24.04 Podman rootful
 description: Ubuntu 24.04 distro-packaged Podman rootful compatibility image for CI
 
+tests:
+  podman:
+    mode: rootful
+    outerPrivilege: privileged
+
 build:
   context: .
-  containerfile: images/podman/distro-shared/Containerfile
+  containerfile: images/podman/platforms/ubuntu-24.04/Containerfile
   architectures: [amd64, arm64]
   runtimeBaseArg: DISTRO_IMAGE
   args:
@@ -29,6 +34,5 @@ dependencies:
 
 inputs:
   - images/podman/podman-ubuntu-24.04-rootful/**
-  - images/podman/distro-shared/**
-  - images/podman/shared/**
+  - images/podman/platforms/ubuntu-24.04/**
   - shared/oci-labels.env

@@ -38,6 +38,20 @@ EXPECTED_DISTRO_ARCHITECTURES = {
     "arch": ["amd64"],
 }
 ROOT_MODES = ("rootful", "rootless")
+PACKAGE_QUERY_BY_PLATFORM = {
+    **{
+        platform: "dpkg-query"
+        for platform in EXPECTED_DISTRO_ARCHITECTURES
+        if platform.startswith(("debian-", "ubuntu-"))
+    },
+    **{
+        platform: "rpm --query"
+        for platform in EXPECTED_DISTRO_ARCHITECTURES
+        if platform.startswith(("fedora-", "centos-", "ubi-", "opensuse-"))
+    },
+    "alpine-3.24": "apk info",
+    "arch": "pacman --query",
+}
 
 
 class PodmanImageTests(unittest.TestCase):
@@ -80,8 +94,12 @@ class PodmanImageTests(unittest.TestCase):
                     image = self.distro_images[f"podman-{distribution}-{mode}"]
                     build = image["build"]
                     self.assertEqual(image["version"], "v1.0.0")
-                    self.assertEqual(build["containerfile"], "images/podman/distro-shared/Containerfile")
+                    platform_directory = f"images/podman/platforms/{distribution}"
+                    self.assertEqual(build["containerfile"], f"{platform_directory}/Containerfile")
                     self.assertEqual(build["architectures"], architectures)
+                    self.assertIn(f"{platform_directory}/**", image["inputs"])
+                    self.assertNotIn("images/podman/distro-shared/**", image["inputs"])
+                    self.assertNotIn("images/podman/shared/**", image["inputs"])
                     self.assertRegex(
                         build["args"]["DISTRO_IMAGE"]["value"],
                         r"^[a-z0-9][a-z0-9._:/-]*@sha256:[a-f0-9]{64}$",
@@ -112,22 +130,54 @@ class PodmanImageTests(unittest.TestCase):
                     self.assertRegex(args["NETAVARK_COMMIT"]["value"], r"^[a-f0-9]{40}$")
                     self.assertRegex(args["AARDVARK_COMMIT"]["value"], r"^[a-f0-9]{40}$")
 
-    def test_distro_recipe_records_the_native_package_revision(self) -> None:
-        recipe = (REPOSITORY_ROOT / "images/podman/distro-shared/Containerfile").read_text(encoding="utf-8")
-        for package_tool in ("dpkg-query", "rpm --query", "apk info", "pacman --query"):
-            with self.subTest(package_tool=package_tool):
-                self.assertIn(package_tool, recipe)
-        self.assertIn("rhel:10|centos:10", recipe)
-        self.assertIn("firewall_package=nftables", recipe)
-        self.assertIn("rootless_network_package=passt", recipe)
-        self.assertIn("account_name_for_id()", recipe)
-        self.assertNotIn("awk -F:", recipe)
-        self.assertIn("groupmod --new-name podman", recipe)
-        self.assertIn("usermod --login podman", recipe)
-        self.assertIn("chmod 0755 /run/user", recipe)
-        self.assertIn("chmod 0700 /run/user/1000", recipe)
-        self.assertIn("/usr/share/strukturpiloten/podman-package-version", recipe)
-        self.assertEqual(recipe.count("FROM "), 1)
+    def test_distro_platforms_own_their_recipe_and_runtime_configuration(self) -> None:
+        platform_root = REPOSITORY_ROOT / "images/podman/platforms"
+        self.assertEqual(
+            {path.name for path in platform_root.iterdir() if path.is_dir()},
+            set(EXPECTED_DISTRO_ARCHITECTURES),
+        )
+
+        for platform, package_query in PACKAGE_QUERY_BY_PLATFORM.items():
+            with self.subTest(platform=platform):
+                directory = platform_root / platform
+                recipe = (directory / "Containerfile").read_text(encoding="utf-8")
+                rootful_config = (directory / "containers.conf").read_text(encoding="utf-8")
+                rootless_config = (directory / "rootless-containers.conf").read_text(encoding="utf-8")
+                self.assertIn(package_query, recipe)
+                self.assertIn("account_name_for_id()", recipe)
+                self.assertIn("groupmod --new-name podman", recipe)
+                self.assertIn("usermod --login podman", recipe)
+                self.assertIn("/usr/share/strukturpiloten/podman-package-version", recipe)
+                self.assertNotIn('case "${ID}"', recipe)
+                self.assertEqual(recipe.count("FROM "), 1)
+                self.assertIn(f"platforms/{platform}/containers.conf", recipe)
+                self.assertIn(f"platforms/{platform}/rootless-containers.conf", recipe)
+                self.assertIn("volumes = [", rootless_config)
+                if platform == "opensuse-leap-16.0":
+                    self.assertIn('runtime = "runc"', rootful_config)
+                    self.assertIn('cgroups = "enabled"', rootful_config)
+                elif platform == "opensuse-tumbleweed":
+                    self.assertIn('runtime = "crun"', rootful_config)
+                    self.assertIn('cgroups = "enabled"', rootful_config)
+                    self.assertIn('cgroups = "enabled"', rootless_config)
+                else:
+                    self.assertIn('runtime = "crun"', rootful_config)
+                    self.assertIn('cgroups = "disabled"', rootful_config)
+
+    def test_podman_test_profiles_match_image_family_and_mode(self) -> None:
+        for name, image in {**self.source_images, **self.distro_images}.items():
+            with self.subTest(image=name):
+                profile = image["tests"]["podman"]
+                mode = "rootless" if name.endswith("-rootless") else "rootful"
+                self.assertEqual(profile["mode"], mode)
+                expected_privilege = (
+                    "unprivileged" if name in self.source_images and mode == "rootless" else "privileged"
+                )
+                self.assertEqual(profile["outerPrivilege"], expected_privilege)
+                expected_nested_runtime = not (
+                    mode == "rootless" and name.startswith(("podman-ubi-", "podman-opensuse-"))
+                )
+                self.assertEqual(profile.get("nestedRuntime", True), expected_nested_runtime)
 
     def test_host_smoke_tests_use_isolated_podman_state(self) -> None:
         action_directory = REPOSITORY_ROOT / ".github/actions/build-arch-image"
@@ -146,18 +196,75 @@ class PodmanImageTests(unittest.TestCase):
         self.assertNotIn("sudo podman run", action)
         self.assertEqual(action.count("CONTAINERS_CONF_OVERRIDE:"), 2)
         self.assertEqual(action.count('sudo env "CONTAINERS_CONF_OVERRIDE=${CONTAINERS_CONF_OVERRIDE}"'), 2)
-        self.assertEqual(action.count('"${host_podman[@]}" tag'), 1)
-        self.assertIn('"podman-debian-11-rootless"', action)
-        self.assertIn('"podman-ubuntu-22.04-rootless"', action)
+        self.assertEqual(action.count('"${host_podman[@]}" tag'), 2)
+        self.assertIn('host_podman=(env "CONTAINERS_CONF_OVERRIDE=${CONTAINERS_CONF_OVERRIDE}"', action)
+        self.assertNotIn('"podman-debian-11-rootless"', action)
+        self.assertNotIn('"podman-ubuntu-22.04-rootless"', action)
+        self.assertIn("fromJSON(inputs.entry).podmanMode", action)
+        self.assertIn("fromJSON(inputs.entry).podmanOuterPrivilege", action)
+        self.assertIn("fromJSON(inputs.entry).podmanNestedRuntime", action)
         self.assertEqual(action.count("github.event_name != 'pull_request'"), 1)
-        self.assertEqual(action.count("run_args+=(--privileged)"), 2)
+        self.assertIn("github.event.pull_request.head.repo.full_name == github.repository", action)
+        self.assertEqual(action.count("run_args+=(--privileged)"), 1)
         self.assertEqual(action.count("run_args+=(--security-opt apparmor=unconfined)"), 1)
         self.assertNotIn("--cap-add SYS_ADMIN", action)
         self.assertNotIn("--cap-add MKNOD", action)
         self.assertIn('nested_image_ids="$(podman images --quiet --no-trunc)"', action)
-        self.assertIn('podman run --rm "${nested_image_ids}" /usr/bin/true', action)
-        self.assertNotIn('podman run --rm "$1" /usr/bin/true', action)
+        self.assertIn('podman run --rm "${nested_image_ids}" /bin/sh -c "exit 0"', action)
+        self.assertNotIn("/usr/bin/true", action)
+        self.assertIn('test "$(id -u)" -eq "${expected_uid}"', action)
+        self.assertIn('test "$(cat /usr/share/containers/podman-mode)" = "$1"', action)
+        self.assertIn("Host.Security.Rootless", action)
         self.assertIn('lock_type = "file"', containers_conf)
+
+    def test_local_nested_tests_match_the_ci_privilege_boundary(self) -> None:
+        rootful = self.distro_images["podman-ubi-8-rootful"]
+        privileged_rootless = self.distro_images["podman-debian-12-rootless"]
+        unprivileged_rootless = self.source_images["podman-6.1-rootless"]
+
+        rootful_command, rootful_separate_store = engine._local_outer_podman_command(rootful)
+        privileged_command, privileged_separate_store = engine._local_outer_podman_command(privileged_rootless)
+        unprivileged_command, unprivileged_separate_store = engine._local_outer_podman_command(unprivileged_rootless)
+
+        self.assertEqual(Path(rootful_command[0]).name, "sudo")
+        self.assertEqual(rootful_command[1], "-n")
+        self.assertEqual(Path(rootful_command[2]).name, "podman")
+        self.assertTrue(rootful_separate_store)
+        self.assertEqual(Path(privileged_command[0]).name, "podman")
+        self.assertFalse(privileged_separate_store)
+        self.assertEqual(Path(unprivileged_command[0]).name, "podman")
+        self.assertFalse(unprivileged_separate_store)
+
+        privileged_nested = engine._local_nested_podman_command(
+            image=privileged_rootless,
+            local_image="localhost/test:privileged",
+            archive_path=Path("test.tar"),
+            outer_podman=privileged_command,
+        )
+        unprivileged_nested = engine._local_nested_podman_command(
+            image=unprivileged_rootless,
+            local_image="localhost/test:unprivileged",
+            archive_path=Path("test.tar"),
+            outer_podman=unprivileged_command,
+        )
+        self.assertEqual(privileged_nested[0], privileged_command[0])
+        self.assertIn("--privileged", privileged_nested)
+        self.assertNotIn("apparmor=unconfined", privileged_nested)
+        self.assertEqual(unprivileged_nested[0], unprivileged_command[0])
+        self.assertNotIn("--privileged", unprivileged_nested)
+        self.assertIn("apparmor=unconfined", unprivileged_nested)
+
+    def test_local_source_build_normalizes_the_metadata_version(self) -> None:
+        command = engine._local_podman_build_command(
+            self.source_images["podman-5.4-rootful"],
+            architecture="amd64",
+            local_image="localhost/test:source",
+            source_revision="a" * 40,
+            source_timestamp=1_700_000_000,
+        )
+
+        self.assertIn("OCI_VERSION=5.4.2", command)
+        self.assertNotIn("OCI_VERSION=v5.4.2", command)
 
 
 if __name__ == "__main__":

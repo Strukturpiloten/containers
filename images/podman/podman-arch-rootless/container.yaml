@@ -6,9 +6,14 @@ image: ghcr.io/strukturpiloten/podman-arch-rootless
 title: Arch Linux Podman rootless
 description: Arch Linux distro-packaged Podman rootless compatibility image for CI
 
+tests:
+  podman:
+    mode: rootless
+    outerPrivilege: privileged
+
 build:
   context: .
-  containerfile: images/podman/distro-shared/Containerfile
+  containerfile: images/podman/platforms/arch/Containerfile
   architectures: [amd64]
   runtimeBaseArg: DISTRO_IMAGE
   args:
@@ -29,6 +34,5 @@ dependencies:
 
 inputs:
   - images/podman/podman-arch-rootless/**
-  - images/podman/distro-shared/**
-  - images/podman/shared/**
+  - images/podman/platforms/arch/**
   - shared/oci-labels.env

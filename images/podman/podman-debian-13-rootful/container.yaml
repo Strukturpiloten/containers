@@ -6,9 +6,14 @@ image: ghcr.io/strukturpiloten/podman-debian-13-rootful
 title: Debian 13 Podman rootful
 description: Debian 13 distro-packaged Podman rootful compatibility image for CI
 
+tests:
+  podman:
+    mode: rootful
+    outerPrivilege: privileged
+
 build:
   context: .
-  containerfile: images/podman/distro-shared/Containerfile
+  containerfile: images/podman/platforms/debian-13/Containerfile
   architectures: [amd64, arm64]
   runtimeBaseArg: DISTRO_IMAGE
   args:
@@ -29,6 +34,5 @@ dependencies:
 
 inputs:
   - images/podman/podman-debian-13-rootful/**
-  - images/podman/distro-shared/**
-  - images/podman/shared/**
+  - images/podman/platforms/debian-13/**
   - shared/oci-labels.env
