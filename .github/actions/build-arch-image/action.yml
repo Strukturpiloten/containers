@@ -128,6 +128,10 @@ runs:
           # newer releases. Limit the privileged fallback to these trusted,
           # legacy package targets; pull requests run only the unprivileged CLI smoke test.
           run_args+=(--privileged)
+        else
+          # Rootless Podman gains mount privileges inside its user namespace, but the
+          # outer AppArmor profile still rejects the storage bind mount on Ubuntu runners.
+          run_args+=(--security-opt apparmor=unconfined)
         fi
 
         host_podman=(

@@ -151,6 +151,7 @@ class PodmanImageTests(unittest.TestCase):
         self.assertIn('"podman-ubuntu-22.04-rootless"', action)
         self.assertEqual(action.count("github.event_name != 'pull_request'"), 1)
         self.assertEqual(action.count("run_args+=(--privileged)"), 2)
+        self.assertEqual(action.count("run_args+=(--security-opt apparmor=unconfined)"), 1)
         self.assertNotIn("--cap-add SYS_ADMIN", action)
         self.assertNotIn("--cap-add MKNOD", action)
         self.assertIn('nested_image_ids="$(podman images --quiet --no-trunc)"', action)
