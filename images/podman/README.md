@@ -104,8 +104,7 @@ Rootful images run Podman as root and store images under `/var/lib/containers`:
 
 ```sh
 podman run --rm \
-  --cap-add SYS_ADMIN \
-  --cap-add MKNOD \
+  --privileged \
   --device /dev/fuse \
   --security-opt label=disable \
   --volume podman-6.1-rootful:/var/lib/containers \
@@ -113,7 +112,7 @@ podman run --rm \
   podman run --rm quay.io/libpod/alpine:latest echo nested-rootful
 ```
 
-`SYS_ADMIN` is broad, and disabling SELinux labels weakens isolation. `--privileged` is a last-resort compatibility fallback for trusted images on isolated runners, not the default invocation. Never expose unrelated repository or deployment secrets to jobs that execute untrusted nested containers.
+Rootful Podman must create storage mounts and namespaces. Adding `SYS_ADMIN` and `MKNOD` alone can still fail when the outer runtime's seccomp or AppArmor policy rejects those mount operations, so the portable nested-rootful invocation is privileged. Use it only for trusted images on isolated runners. Never expose unrelated repository or deployment secrets to jobs that execute nested containers.
 
 Docker on a Linux host can run the same outer container with equivalent `docker run` flags; the inner engine remains Podman and does not use the Docker daemon. Docker Desktop and non-Linux systems depend on their Linux VM exposing `/dev/fuse`, user namespaces, and the required mount operations, so they are not guaranteed environments.
 

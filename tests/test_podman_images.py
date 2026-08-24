@@ -149,7 +149,10 @@ class PodmanImageTests(unittest.TestCase):
         self.assertEqual(action.count('"${host_podman[@]}" tag'), 1)
         self.assertIn('"podman-debian-11-rootless"', action)
         self.assertIn('"podman-ubuntu-22.04-rootless"', action)
-        self.assertEqual(action.count("run_args+=(--privileged)"), 1)
+        self.assertEqual(action.count("github.event_name != 'pull_request'"), 1)
+        self.assertEqual(action.count("run_args+=(--privileged)"), 2)
+        self.assertNotIn("--cap-add SYS_ADMIN", action)
+        self.assertNotIn("--cap-add MKNOD", action)
         self.assertIn('lock_type = "file"', containers_conf)
 
 
