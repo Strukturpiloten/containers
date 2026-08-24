@@ -1328,11 +1328,13 @@ def _local_nested_podman_command(
         _fail(f"Unsupported Podman outer privilege profile: {outer_privilege}.")
 
     if podman_test["mode"] == "rootless":
+        # The directory is created solely for this invocation, so Podman's U
+        # option can safely map it to UID 1000 in the outer user namespace.
         run_args.extend(
             [
                 "--userns=keep-id:uid=1000,gid=1000",
                 "--volume",
-                f"{inner_runtime_dir}:/run/user/{os.getuid()}:rw",
+                f"{inner_runtime_dir}:/run/user/{os.getuid()}:rw,U",
             ]
         )
 
@@ -1343,6 +1345,9 @@ case "$1" in
   *) printf 'Unsupported Podman mode: %s\n' "$1" >&2; exit 1 ;;
 esac
 test "$(id -u)" -eq "${expected_uid}"
+if [ "$1" = rootless ]; then
+  test -w "/run/user/$2"
+fi
 test "$(podman info --format '{{.Host.Security.Rootless}}')" = "${expected_rootless}"
 podman load --input /tmp/nested-image.tar >/dev/null
 nested_image_ids="$(podman images --quiet --no-trunc)"
@@ -1350,7 +1355,7 @@ test -n "${nested_image_ids}"
 test "$(printf '%s\n' "${nested_image_ids}" | wc -l)" -eq 1
 podman run --rm "${nested_image_ids}" /bin/sh -c 'exit 0'
 """.strip()
-    run_args.extend([local_image, "sh", "-euc", script, "--", str(podman_test["mode"])])
+    run_args.extend([local_image, "sh", "-euc", script, "--", str(podman_test["mode"]), str(os.getuid())])
     return run_args
 
 

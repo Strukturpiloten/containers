@@ -217,8 +217,9 @@ class PodmanImageTests(unittest.TestCase):
         self.assertIn('test "$(cat /usr/share/containers/podman-mode)" = "$1"', action)
         self.assertIn("Host.Security.Rootless", action)
         self.assertIn("--userns=keep-id:uid=1000,gid=1000", action)
-        self.assertIn('"${HOST_INNER_RUNTIME_DIR}:/run/user/${outer_host_uid}:rw"', action)
+        self.assertIn('"${HOST_INNER_RUNTIME_DIR}:/run/user/${outer_host_uid}:rw,U"', action)
         self.assertIn('chmod 0700 "${HOST_INNER_RUNTIME_DIR}"', action)
+        self.assertIn('test -w "/run/user/$2"', action)
         self.assertIn('lock_type = "file"', containers_conf)
 
     def test_local_nested_tests_match_the_ci_privilege_boundary(self) -> None:
@@ -257,7 +258,7 @@ class PodmanImageTests(unittest.TestCase):
         self.assertIn("--privileged", privileged_nested)
         self.assertNotIn("apparmor=unconfined", privileged_nested)
         self.assertIn("--userns=keep-id:uid=1000,gid=1000", privileged_nested)
-        self.assertIn(f"runtime:/run/user/{os.getuid()}:rw", privileged_nested)
+        self.assertIn(f"runtime:/run/user/{os.getuid()}:rw,U", privileged_nested)
         self.assertEqual(unprivileged_nested[0], unprivileged_command[0])
         self.assertNotIn("--privileged", unprivileged_nested)
         self.assertIn("apparmor=unconfined", unprivileged_nested)

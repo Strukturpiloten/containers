@@ -96,7 +96,7 @@ podman run --rm \
   --security-opt apparmor=unconfined \
   --security-opt label=disable \
   --userns=keep-id:uid=1000,gid=1000 \
-  --volume "${inner_runtime_dir}:/run/user/${outer_uid}:rw" \
+  --volume "${inner_runtime_dir}:/run/user/${outer_uid}:rw,U" \
   --volume podman-debian-12-rootless:/home/podman/.local/share/containers \
   ghcr.io/strukturpiloten/podman-debian-12-rootless:v1.0.0 \
   podman run --rm quay.io/libpod/alpine:latest echo nested-rootless
@@ -104,7 +104,7 @@ podman run --rm \
 
 Rootless operation requires unprivileged user namespaces, working subordinate UID/GID mappings, `newuidmap`/`newgidmap`, and FUSE overlay support. AppArmor profiles commonly applied by outer container runtimes can deny the storage bind mount even after inner Podman enters its user namespace. The exact upstream profiles disable AppArmor for the trusted outer container while retaining rootless UID 1000, the seccomp profile, and reduced capabilities. Distro-package profiles use the privileged boundary explained below.
 
-The outer `keep-id` mapping preserves the image's UID/GID 1000 when the host user has another ID. The dedicated runtime bind also gives the inner OCI runtime a writable directory at the outer host UID that it derives from the parent user namespace. This matters on GitHub-hosted runners, whose user is currently UID 1001. Keep the directory private and separate it by concurrent job.
+The outer `keep-id` mapping preserves the image's UID/GID 1000 when the host user has another ID. The dedicated runtime bind also gives the inner OCI runtime a writable directory at the outer host UID that it derives from the parent user namespace. The `U` volume option adjusts the disposable source directory to the container user after mapping. This matters on GitHub-hosted runners, whose user is currently UID 1001. Keep the directory private and separate it by concurrent job; do not apply `U` to a shared host directory.
 
 The distro-package rootless images are tested in a privileged outer container. Distribution packaging of `newuidmap`, file capabilities, seccomp, and AppArmor varies enough that an unprivileged outer container does not provide a portable test boundary. The image still starts as UID/GID 1000, and the test asserts that Podman reports rootless mode. Treat the privileged outer container as rootful access to the runner despite that inner identity.
 
