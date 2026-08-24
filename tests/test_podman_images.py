@@ -153,6 +153,9 @@ class PodmanImageTests(unittest.TestCase):
         self.assertEqual(action.count("run_args+=(--privileged)"), 2)
         self.assertNotIn("--cap-add SYS_ADMIN", action)
         self.assertNotIn("--cap-add MKNOD", action)
+        self.assertIn('nested_image_ids="$(podman images --quiet --no-trunc)"', action)
+        self.assertIn('podman run --rm "${nested_image_ids}" /usr/bin/true', action)
+        self.assertNotIn('podman run --rm "$1" /usr/bin/true', action)
         self.assertIn('lock_type = "file"', containers_conf)
 
 

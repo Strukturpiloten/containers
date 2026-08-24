@@ -139,8 +139,18 @@ runs:
         )
         "${host_podman[@]}" run "${run_args[@]}" "${image_ref}" sh -euc '
           podman load --input /tmp/nested-image.tar >/dev/null
-          podman run --rm "$1" /usr/bin/true
-        ' -- "${image_ref}"
+          nested_image_ids="$(podman images --quiet --no-trunc)"
+          if [ -z "${nested_image_ids}" ]; then
+            nested_image_count=0
+          else
+            nested_image_count="$(printf "%s\n" "${nested_image_ids}" | wc -l)"
+          fi
+          if [ "${nested_image_count}" -ne 1 ]; then
+            printf "Expected one nested image, found %s.\n" "${nested_image_count}" >&2
+            exit 1
+          fi
+          podman run --rm "${nested_image_ids}" /usr/bin/true
+        '
 
     - name: Upload architecture image archive
       if: inputs.upload-archive == 'true'
