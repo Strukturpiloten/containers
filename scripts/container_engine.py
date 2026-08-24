@@ -1301,6 +1301,7 @@ def _local_nested_podman_command(
     image: JsonMap,
     local_image: str,
     archive_path: Path,
+    inner_runtime_dir: Path,
     outer_podman: Sequence[str],
 ) -> list[str]:
     podman_test = _podman_test(image)
@@ -1325,6 +1326,15 @@ def _local_nested_podman_command(
         run_args.extend(["--security-opt", "apparmor=unconfined"])
     else:
         _fail(f"Unsupported Podman outer privilege profile: {outer_privilege}.")
+
+    if podman_test["mode"] == "rootless":
+        run_args.extend(
+            [
+                "--userns=keep-id:uid=1000,gid=1000",
+                "--volume",
+                f"{inner_runtime_dir}:/run/user/{os.getuid()}:rw",
+            ]
+        )
 
     script = r"""
 case "$1" in
@@ -1409,6 +1419,8 @@ podman --version
             outer_podman, separate_outer_store = _local_outer_podman_command(image)
             with tempfile.TemporaryDirectory(prefix="strukturpiloten-podman-test-") as temporary_directory:
                 archive_path = Path(temporary_directory) / f"{args.image}-{architecture}.tar"
+                inner_runtime_dir = Path(temporary_directory) / "inner-runtime"
+                inner_runtime_dir.mkdir(mode=0o700)
                 _run([podman, "save", "--format", "oci-archive", "--output", str(archive_path), local_image])
                 if separate_outer_store:
                     _run([*outer_podman, "load", "--quiet", "--input", str(archive_path)])
@@ -1417,6 +1429,7 @@ podman --version
                         image=image,
                         local_image=local_image,
                         archive_path=archive_path,
+                        inner_runtime_dir=inner_runtime_dir,
                         outer_podman=outer_podman,
                     )
                 )

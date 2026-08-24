@@ -86,16 +86,25 @@ The images use `CMD ["podman", "--help"]` and no entrypoint. This makes an argum
 Rootless images run as UID/GID 1000 and store images under `/home/podman/.local/share/containers`:
 
 ```sh
+outer_uid="$(id -u)"
+inner_runtime_dir="${XDG_RUNTIME_DIR}/strukturpiloten-podman-runtime"
+install -d -m 0700 "${inner_runtime_dir}"
+
 podman run --rm \
+  --privileged \
   --device /dev/fuse \
   --security-opt apparmor=unconfined \
   --security-opt label=disable \
+  --userns=keep-id:uid=1000,gid=1000 \
+  --volume "${inner_runtime_dir}:/run/user/${outer_uid}:rw" \
   --volume podman-debian-12-rootless:/home/podman/.local/share/containers \
   ghcr.io/strukturpiloten/podman-debian-12-rootless:v1.0.0 \
   podman run --rm quay.io/libpod/alpine:latest echo nested-rootless
 ```
 
-Rootless operation requires unprivileged user namespaces, working subordinate UID/GID mappings, `newuidmap`/`newgidmap`, and FUSE overlay support. AppArmor profiles commonly applied by outer container runtimes can deny the storage bind mount even after inner Podman enters its user namespace. Disabling AppArmor for the trusted outer container permits that mount while retaining rootless UID 1000, the seccomp profile, and the outer container's reduced capabilities.
+Rootless operation requires unprivileged user namespaces, working subordinate UID/GID mappings, `newuidmap`/`newgidmap`, and FUSE overlay support. AppArmor profiles commonly applied by outer container runtimes can deny the storage bind mount even after inner Podman enters its user namespace. The exact upstream profiles disable AppArmor for the trusted outer container while retaining rootless UID 1000, the seccomp profile, and reduced capabilities. Distro-package profiles use the privileged boundary explained below.
+
+The outer `keep-id` mapping preserves the image's UID/GID 1000 when the host user has another ID. The dedicated runtime bind also gives the inner OCI runtime a writable directory at the outer host UID that it derives from the parent user namespace. This matters on GitHub-hosted runners, whose user is currently UID 1001. Keep the directory private and separate it by concurrent job.
 
 The distro-package rootless images are tested in a privileged outer container. Distribution packaging of `newuidmap`, file capabilities, seccomp, and AppArmor varies enough that an unprivileged outer container does not provide a portable test boundary. The image still starts as UID/GID 1000, and the test asserts that Podman reports rootless mode. Treat the privileged outer container as rootful access to the runner despite that inner identity.
 
@@ -147,8 +156,6 @@ The command performs a no-cache build from the digest-pinned base, verifies the 
 ## CI and fidelity limits
 
 The nested configurations use host namespaces and FUSE overlay storage because the images do not boot an init system. Most targets use `crun` with disabled cgroup management. The runc-based openSUSE Leap target keeps cgroups enabled because runc cannot execute the disabled-cgroups OCI configuration. Tumbleweed also keeps cgroups enabled because its rolling package can select runc for a nested workload even when crun is the configured preference. These settings are suitable for CLI and nested-container compatibility tests, but they intentionally differ from some distro host defaults and do not provide a complete systemd or Quadlet environment.
-
-Rootless images fix the OCI runtime state directory below `/run/user/1000`, matching their declared user and `XDG_RUNTIME_DIR`. Without that explicit runtime flag, crun and runc can derive the outer rootless host UID from the user-namespace map—for example UID 1001 on a GitHub-hosted runner—and then try to use an inaccessible directory inside the image.
 
 You can test whether a distro package contains the Quadlet generator and how Boxferry handles its presence or absence, but starting systemd units requires a more complete environment. Use a VM when a test depends on boot order, systemd generators, host cgroup delegation, kernel storage drivers, host networking, SELinux/AppArmor rules, or distribution installer behavior.
 

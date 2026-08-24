@@ -117,6 +117,7 @@ runs:
         HOST_PODMAN_ROOT: ${{ runner.temp }}/podman-nested/root
         HOST_PODMAN_RUNROOT: ${{ runner.temp }}/podman-nested/runroot
         HOST_PODMAN_TMPDIR: ${{ runner.temp }}/podman-nested/tmp
+        HOST_INNER_RUNTIME_DIR: ${{ runner.temp }}/podman-nested/inner-runtime
         IMAGE_ARCH: ${{ steps.build.outputs.arch }}
         IMAGE_NAME: ${{ steps.build.outputs.image_name }}
         IMAGE_PATH: ${{ steps.build.outputs.archive_path }}
@@ -155,7 +156,17 @@ runs:
           sudo mkdir -p "${HOST_PODMAN_ROOT}" "${HOST_PODMAN_RUNROOT}" "${HOST_PODMAN_TMPDIR}"
           host_podman=(sudo env "CONTAINERS_CONF_OVERRIDE=${CONTAINERS_CONF_OVERRIDE}" "${podman_command[@]}")
         else
-          mkdir -p "${HOST_PODMAN_ROOT}" "${HOST_PODMAN_RUNROOT}" "${HOST_PODMAN_TMPDIR}"
+          outer_host_uid="$(id -u)"
+          mkdir -p \
+            "${HOST_PODMAN_ROOT}" \
+            "${HOST_PODMAN_RUNROOT}" \
+            "${HOST_PODMAN_TMPDIR}" \
+            "${HOST_INNER_RUNTIME_DIR}"
+          chmod 0700 "${HOST_INNER_RUNTIME_DIR}"
+          run_args+=(
+            --userns=keep-id:uid=1000,gid=1000
+            --volume "${HOST_INNER_RUNTIME_DIR}:/run/user/${outer_host_uid}:rw"
+          )
           host_podman=(env "CONTAINERS_CONF_OVERRIDE=${CONTAINERS_CONF_OVERRIDE}" "${podman_command[@]}")
         fi
         "${host_podman[@]}" load --quiet --input "${IMAGE_PATH}"
