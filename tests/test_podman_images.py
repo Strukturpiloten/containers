@@ -120,6 +120,8 @@ class PodmanImageTests(unittest.TestCase):
         self.assertIn("rhel:10|centos:10", recipe)
         self.assertIn("firewall_package=nftables", recipe)
         self.assertIn("rootless_network_package=passt", recipe)
+        self.assertIn("account_name_for_id()", recipe)
+        self.assertNotIn("awk -F:", recipe)
         self.assertIn("groupmod --new-name podman", recipe)
         self.assertIn("usermod --login podman", recipe)
         self.assertIn("chmod 0755 /run/user", recipe)

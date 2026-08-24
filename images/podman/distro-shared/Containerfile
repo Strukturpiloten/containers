@@ -2,6 +2,7 @@ ARG DISTRO_IMAGE
 
 FROM ${DISTRO_IMAGE}
 
+# Keep account lookup shell-only because minimal distro bases may omit awk and getent.
 RUN set -eux; \
     . /etc/os-release; \
     case "${ID}" in \
@@ -118,7 +119,18 @@ RUN set -eux; \
     if command -v crun; then :; else command -v runc; fi; \
     command -v fuse-overlayfs; \
     rm -f /etc/machine-id /var/lib/systemd/random-seed; \
-    existing_group="$(awk -F: '$3 == 1000 { print $1; exit }' /etc/group)"; \
+    account_name_for_id() { \
+        lookup_id="$1"; \
+        lookup_file="$2"; \
+        while IFS=: read -r account_name _ account_id _; do \
+            if [ "${account_id}" = "${lookup_id}" ]; then \
+                printf '%s\n' "${account_name}"; \
+                return 0; \
+            fi; \
+        done < "${lookup_file}"; \
+        return 0; \
+    }; \
+    existing_group="$(account_name_for_id 1000 /etc/group)"; \
     if [ -n "${existing_group}" ] && [ "${existing_group}" != podman ]; then \
         if grep -q '^podman:' /etc/group; then \
             printf 'Cannot rename GID 1000 group %s: podman group already exists\n' "${existing_group}" >&2; \
@@ -127,7 +139,7 @@ RUN set -eux; \
         groupmod --new-name podman "${existing_group}"; \
     fi; \
     if ! grep -q '^podman:' /etc/group; then groupadd --gid 1000 podman; fi; \
-    existing_user="$(awk -F: '$3 == 1000 { print $1; exit }' /etc/passwd)"; \
+    existing_user="$(account_name_for_id 1000 /etc/passwd)"; \
     if [ -n "${existing_user}" ] && [ "${existing_user}" != podman ]; then \
         if grep -q '^podman:' /etc/passwd; then \
             printf 'Cannot rename UID 1000 user %s: podman user already exists\n' "${existing_user}" >&2; \
