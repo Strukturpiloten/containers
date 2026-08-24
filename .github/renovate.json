@@ -200,6 +200,22 @@
             "platformAutomerge": true
         },
         {
+            "description": "Keep source-built Podman images on stable Fedora 44 while allowing digest refreshes",
+            "matchManagers": [
+                "custom.regex"
+            ],
+            "matchFileNames": [
+                "/^images\\/podman\\/podman-\\d+\\.\\d+-(?:rootful|rootless)\\/container\\.yaml$/"
+            ],
+            "matchPackageNames": [
+                "registry.fedoraproject.org/fedora-minimal"
+            ],
+            "matchDatasources": [
+                "docker"
+            ],
+            "allowedVersions": "/^44$/"
+        },
+        {
             "description": "Keep distro compatibility images on their declared OS release while allowing digest refreshes",
             "matchFileNames": [
                 "/^images\\/podman\\/podman-(?:alpine|arch|centos|debian|fedora|opensuse|ubi|ubuntu)-.+\\/container\\.yaml$/"
