@@ -18,7 +18,7 @@ build:
   runtimeBaseArg: DISTRO_IMAGE
   args:
     DISTRO_IMAGE:
-      value: registry.access.redhat.com/ubi10/ubi:latest@sha256:145a2d6e7e224d34fbe601832e3f133c11560e15b4074fad75c449387bb105a0
+      value: registry.access.redhat.com/ubi10/ubi:latest@sha256:bc5a42833e4c84dbf7a29bcd4a0be414addad69e16210c2f0eb73986b356793c
       type: external-image
     HOME_DIR: {value: /root, type: static}
     RUN_AS_USER: {value: root, type: static}
