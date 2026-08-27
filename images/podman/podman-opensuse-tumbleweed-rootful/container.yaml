@@ -18,7 +18,7 @@ build:
   runtimeBaseArg: DISTRO_IMAGE
   args:
     DISTRO_IMAGE:
-      value: registry.opensuse.org/opensuse/tumbleweed:latest@sha256:4ba3c9d0710c0a84b4ae833d24234d44d161fcac3982cb066ccda0a6b1f7bf00
+      value: registry.opensuse.org/opensuse/tumbleweed:latest@sha256:bbe3311a70b9b5fec1f57b44ee86b68fce0490424c5b804e18dd473123216e87
       type: external-image
     HOME_DIR: {value: /root, type: static}
     RUN_AS_USER: {value: root, type: static}
