@@ -185,7 +185,7 @@ jobs:
       - build-stage-0
     if: needs.plan.outputs.stage_0_has_builds == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 90
     permissions:
       attestations: write
       artifact-metadata: write
@@ -219,7 +219,7 @@ jobs:
       needs.plan.outputs.stage_0_has_builds == 'true' &&
       github.ref_name == github.event.repository.default_branch
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 45
     permissions:
       contents: write
       packages: write
