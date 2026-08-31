@@ -108,6 +108,8 @@ Maintained SemVer tags intentionally move after a successful daily security rebu
 
 Release finalization is idempotent. It refuses conflicting exact registry or Git tags and can reconcile a partially completed workflow without replacing an immutable source identity.
 
+Transient publication failures have two bounded recovery layers. Idempotent registry reads, pushes, promotions, and SBOM scans make one initial attempt plus two retries, with a 120-second pause between attempts. Builds, validation, and smoke tests are not retried. If a trusted `push`, scheduled, or manually dispatched publication run still fails, the retry workflow waits 120 seconds and asks GitHub to rerun only failed jobs and their dependants. It never reruns successful jobs, excludes pull requests, and stops after two automatic reruns.
+
 ## Update policy
 
 Renovate reads external image references from `container.yaml`, commit-pinned GitHub Actions, Python dependencies, and selected build tools. Narrow, compatible digest and patch updates may automerge only after required CI passes. Major, incompatible, and compatibility-line changes remain review decisions.

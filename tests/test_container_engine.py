@@ -25,6 +25,78 @@ def _options() -> engine.PlanOptions:
     )
 
 
+class CommandRetryTests(unittest.TestCase):
+    @staticmethod
+    def _result(returncode: int, *, stdout: str = "", stderr: str = "") -> SimpleNamespace:
+        return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
+
+    def test_external_command_retries_after_configured_delay(self) -> None:
+        with (
+            patch.object(
+                engine.subprocess,
+                "run",
+                side_effect=[self._result(1, stderr="temporary failure"), self._result(0, stdout="digest\n")],
+            ) as run,
+            patch.object(engine.time, "sleep") as sleep,
+            patch.object(engine, "_write_stderr"),
+        ):
+            output = engine._run_external(["skopeo", "inspect"], capture_stdout=True)
+
+        self.assertEqual(output, "digest\n")
+        self.assertEqual(run.call_count, 2)
+        sleep.assert_called_once_with(engine.EXTERNAL_COMMAND_RETRY_DELAY_SECONDS)
+
+    def test_external_command_fails_after_retry_budget_is_exhausted(self) -> None:
+        with (
+            patch.object(engine.subprocess, "run", return_value=self._result(1, stderr="registry unavailable")) as run,
+            patch.object(engine.time, "sleep") as sleep,
+            patch.object(engine, "_write_stderr"),
+            self.assertRaisesRegex(engine.ContainerEngineError, "after 3 attempts"),
+        ):
+            engine._run_external(["skopeo", "copy"], capture_stdout=True)
+
+        self.assertEqual(run.call_count, engine.EXTERNAL_COMMAND_ATTEMPTS)
+        self.assertEqual(sleep.call_count, engine.EXTERNAL_COMMAND_ATTEMPTS - 1)
+
+    def test_normal_command_is_not_retried(self) -> None:
+        with (
+            patch.object(engine.subprocess, "run", return_value=self._result(1)) as run,
+            patch.object(engine.time, "sleep") as sleep,
+            self.assertRaisesRegex(engine.ContainerEngineError, "exit code 1"),
+        ):
+            engine._run(["buildah", "bud"])
+
+        run.assert_called_once()
+        sleep.assert_not_called()
+
+    def test_missing_registry_reference_is_not_retried(self) -> None:
+        with (
+            patch.object(
+                engine.subprocess,
+                "run",
+                return_value=self._result(1, stderr="manifest unknown"),
+            ) as run,
+            patch.object(engine.time, "sleep") as sleep,
+        ):
+            digest = engine._remote_digest(["skopeo"], "ghcr.io/strukturpiloten/missing:tag")
+
+        self.assertIsNone(digest)
+        run.assert_called_once()
+        sleep.assert_not_called()
+
+
+class RetryWorkflowTests(unittest.TestCase):
+    def test_workflow_reruns_only_failed_trusted_publication_jobs(self) -> None:
+        workflow = Path(".github/workflows/retry-failed-publish-jobs.yml").read_text(encoding="utf-8")
+
+        self.assertIn("workflow_run:", workflow)
+        self.assertIn("github.event.workflow_run.run_attempt < 3", workflow)
+        self.assertIn("github.event.workflow_run.event == 'schedule'", workflow)
+        self.assertIn("sleep 120", workflow)
+        self.assertIn("/rerun-failed-jobs", workflow)
+        self.assertNotIn('/rerun"', workflow)
+
+
 class PlanningTests(unittest.TestCase):
     def setUp(self) -> None:
         self.images = [

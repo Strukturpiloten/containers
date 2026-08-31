@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -57,6 +58,8 @@ GLOBAL_IMAGE_INPUTS = (
 )
 SHA256_DIGEST_LENGTH = 71
 GIT_SHA_LENGTH = 40
+EXTERNAL_COMMAND_ATTEMPTS = 3
+EXTERNAL_COMMAND_RETRY_DELAY_SECONDS = 120
 LOWERCASE_HEX_DIGITS = frozenset("0123456789abcdef")
 IMAGE_METADATA_PART_COUNT = 4
 
@@ -199,17 +202,58 @@ def _tool(name: str) -> str:
     return path
 
 
-def _run(command: Sequence[str], *, input_text: str | None = None, capture_stdout: bool = False) -> str:
-    result = subprocess.run(  # noqa: S603
+def _run(
+    command: Sequence[str],
+    *,
+    input_text: str | None = None,
+    capture_stdout: bool = False,
+    attempts: int = 1,
+    retry_delay_seconds: int = 0,
+) -> str:
+    if attempts < 1:
+        _fail("Command attempts must be at least one.")
+    if retry_delay_seconds < 0:
+        _fail("Command retry delay cannot be negative.")
+
+    for attempt in range(1, attempts + 1):
+        result = subprocess.run(  # noqa: S603
+            command,
+            capture_output=capture_stdout,
+            check=False,
+            input=input_text,
+            text=True,
+        )
+        if result.returncode == 0:
+            return result.stdout if capture_stdout else ""
+        if capture_stdout and result.stderr:
+            _write_stderr(result.stderr.rstrip())
+        if attempt < attempts:
+            _write_stderr(
+                f"External command attempt {attempt}/{attempts} failed with exit code {result.returncode}; "
+                f"retrying in {retry_delay_seconds} seconds: {' '.join(command)}"
+            )
+            time.sleep(retry_delay_seconds)
+            continue
+
+        attempts_suffix = f" after {attempts} attempts" if attempts > 1 else ""
+        _fail(f"Command failed with exit code {result.returncode}{attempts_suffix}: {' '.join(command)}")
+
+    raise AssertionError
+
+
+def _run_external(
+    command: Sequence[str],
+    *,
+    input_text: str | None = None,
+    capture_stdout: bool = False,
+) -> str:
+    return _run(
         command,
-        capture_output=capture_stdout,
-        check=False,
-        input=input_text,
-        text=True,
+        input_text=input_text,
+        capture_stdout=capture_stdout,
+        attempts=EXTERNAL_COMMAND_ATTEMPTS,
+        retry_delay_seconds=EXTERNAL_COMMAND_RETRY_DELAY_SECONDS,
     )
-    if result.returncode != 0:
-        _fail(f"Command failed with exit code {result.returncode}: {' '.join(command)}")
-    return result.stdout if capture_stdout else ""
 
 
 def _load_json(path: Path) -> JsonMap:
@@ -1610,7 +1654,7 @@ def _command_publish_image(args: argparse.Namespace) -> None:
                 ]
             )
 
-        _run(
+        _run_external(
             [
                 sudo,
                 podman,
@@ -1624,12 +1668,12 @@ def _command_publish_image(args: argparse.Namespace) -> None:
             ]
         )
 
-        raw_manifest = _run(
+        raw_manifest = _run_external(
             [sudo, skopeo, "inspect", "--raw", f"docker://{image_ref}:{canonical_tag}"],
             capture_stdout=True,
         )
         (output_dir / f"{image_name}-index.json").write_text(raw_manifest, encoding="utf-8")
-        index_digest = _run(
+        index_digest = _run_external(
             [
                 sudo,
                 skopeo,
@@ -1643,9 +1687,12 @@ def _command_publish_image(args: argparse.Namespace) -> None:
         architecture_digests = _architecture_digests(raw_manifest, architectures)
 
         syft = _tool("syft")
-        _run([syft, "login", "ghcr.io", "--username", context.actor, "--password-stdin"], input_text=context.token)
+        _run_external(
+            [syft, "login", "ghcr.io", "--username", context.actor, "--password-stdin"],
+            input_text=context.token,
+        )
         for architecture, digest in architecture_digests.items():
-            _run(
+            _run_external(
                 [
                     syft,
                     "scan",
@@ -1690,17 +1737,30 @@ def _command_publish_image(args: argparse.Namespace) -> None:
 
 def _remote_digest(command_prefix: Sequence[str], reference: str) -> str | None:
     command = [*command_prefix, "inspect", "--format", "{{.Digest}}", f"docker://{reference}"]
-    result = subprocess.run(command, capture_output=True, check=False, text=True)  # noqa: S603
-    if result.returncode == 0:
-        digest = result.stdout.strip()
-        if digest.startswith("sha256:") and len(digest) == SHA256_DIGEST_LENGTH:
-            return digest
-        _fail(f"Registry returned an invalid digest for {reference}.")
-
     missing_markers = ("manifest unknown", "name unknown", "not found")
-    if any(marker in result.stderr.lower() for marker in missing_markers):
-        return None
-    _fail(f"Could not inspect registry reference {reference}.")
+    for attempt in range(1, EXTERNAL_COMMAND_ATTEMPTS + 1):
+        result = subprocess.run(command, capture_output=True, check=False, text=True)  # noqa: S603
+        if result.returncode == 0:
+            digest = result.stdout.strip()
+            if digest.startswith("sha256:") and len(digest) == SHA256_DIGEST_LENGTH:
+                return digest
+            _fail(f"Registry returned an invalid digest for {reference}.")
+
+        if any(marker in result.stderr.lower() for marker in missing_markers):
+            return None
+        if result.stderr:
+            _write_stderr(result.stderr.rstrip())
+        if attempt < EXTERNAL_COMMAND_ATTEMPTS:
+            _write_stderr(
+                f"Registry inspection attempt {attempt}/{EXTERNAL_COMMAND_ATTEMPTS} failed; "
+                f"retrying in {EXTERNAL_COMMAND_RETRY_DELAY_SECONDS} seconds: {reference}"
+            )
+            time.sleep(EXTERNAL_COMMAND_RETRY_DELAY_SECONDS)
+            continue
+
+        _fail(f"Could not inspect registry reference {reference} after {EXTERNAL_COMMAND_ATTEMPTS} attempts.")
+
+    raise AssertionError
 
 
 def _github_api_root(context: _GitHubContext) -> str:
@@ -1809,7 +1869,7 @@ def _command_promote_image(args: argparse.Namespace) -> None:
         if tag == immutable_tag and existing_digest is not None:
             _fail(f"Refusing to overwrite immutable registry tag {target} ({existing_digest}).")
 
-        _run(
+        _run_external(
             [
                 *command_prefix,
                 "copy",
@@ -1887,7 +1947,10 @@ def _validated_release_build_result(
 
 def _inspect_release_source(skopeo: str, image_ref: str, index_digest: str) -> JsonMap:
     source_reference = f"{image_ref}@{index_digest}"
-    config_raw = _run([skopeo, "inspect", "--config", f"docker://{source_reference}"], capture_stdout=True)
+    config_raw = _run_external(
+        [skopeo, "inspect", "--config", f"docker://{source_reference}"],
+        capture_stdout=True,
+    )
     image_config = _json_map(json.loads(config_raw))
     config = _json_map(image_config.get("config")) if image_config is not None else None
     labels = _json_map(config.get("Labels")) if config is not None else None
@@ -1932,7 +1995,7 @@ def _promote_release_tags(
         if existing_digest == candidate.index_digest:
             _write_stdout(f"Maintained tag {target} already points to {candidate.index_digest}.")
             continue
-        _run(
+        _run_external(
             [
                 *command_prefix,
                 "copy",
