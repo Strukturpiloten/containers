@@ -18,7 +18,7 @@ build:
   runtimeBaseArg: DISTRO_IMAGE
   args:
     DISTRO_IMAGE:
-      value: registry.fedoraproject.org/fedora:43@sha256:cdad1635f790d8c80e2d2cc432f9cd57cffc4a383cd635ccb5a46c652c5bd90f
+      value: registry.fedoraproject.org/fedora:43@sha256:548204f3a6276fdb39f4fdc498104fc14cae3549c9a179b7694d635a2b98b257
       type: external-image
     HOME_DIR: {value: /root, type: static}
     RUN_AS_USER: {value: root, type: static}
