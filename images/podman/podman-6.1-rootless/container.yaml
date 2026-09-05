@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=../../../container.schema.json
 schemaVersion: 1
 name: podman-6.1-rootless
-version: v6.1.0
+version: v6.1.1
 image: ghcr.io/strukturpiloten/podman-6.1-rootless
 title: Podman 6.1 rootless
 description: Podman 6.1 rootless nested-container image built from source on Fedora
@@ -21,7 +21,7 @@ build:
       value: registry.fedoraproject.org/fedora-minimal:44@sha256:5cbed3b27901c38dfcfeb6daa285681d4599b0532bbb99079d6283faf2853401
       type: external-image
     PODMAN_COMMIT:
-      value: cade97a52ebdf9dbf9e81de8009015776837a074
+      value: 8303f2e25b675ea7f82099d615c60969aec15870
       type: static
     PODMAN_REPOSITORY:
       value: https://github.com/podman-container-tools/podman.git
