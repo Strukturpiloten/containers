@@ -18,7 +18,7 @@ build:
   runtimeBaseArg: DISTRO_IMAGE
   args:
     DISTRO_IMAGE:
-      value: quay.io/centos/centos:stream10@sha256:301bc4e6d5af2b6e707bec46aa71c21dc91ebc97422373cca37ea98d0e1aed63
+      value: quay.io/centos/centos:stream10@sha256:93f84e3f77a01b972d2181d9c24f321457a68e6bae5fe1b075dbe9085197f788
       type: external-image
     HOME_DIR: {value: /home/podman, type: static}
     RUN_AS_USER: {value: podman, type: static}
