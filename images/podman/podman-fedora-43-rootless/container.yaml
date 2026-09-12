@@ -18,7 +18,7 @@ build:
   runtimeBaseArg: DISTRO_IMAGE
   args:
     DISTRO_IMAGE:
-      value: registry.fedoraproject.org/fedora:43@sha256:a9b67b1ef4802b7c87060452cda07a9346d5b140e72bff0581cdf11ddf59d287
+      value: registry.fedoraproject.org/fedora:43@sha256:37d4208f1aa0f4c883d9407b06dfce4d739e6f6d769ee29a6a9faeea2bfbdb39
       type: external-image
     HOME_DIR: {value: /home/podman, type: static}
     RUN_AS_USER: {value: podman, type: static}
