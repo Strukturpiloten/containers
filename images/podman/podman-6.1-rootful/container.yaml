@@ -18,7 +18,7 @@ build:
   runtimeBaseArg: FEDORA_IMAGE
   args:
     FEDORA_IMAGE:
-      value: registry.fedoraproject.org/fedora-minimal:44@sha256:b995d2ef52fdcb369e726b51ed58b4a2e80c22aaad4c75b966c5df310e496125
+      value: registry.fedoraproject.org/fedora-minimal:44@sha256:a91e2ae34a335e59274e0c62895fcc9eb2f754839dff71ab19ca67fd4238ce70
       type: external-image
     PODMAN_COMMIT:
       value: cade97a52ebdf9dbf9e81de8009015776837a074
