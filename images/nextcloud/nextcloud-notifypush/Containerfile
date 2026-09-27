@@ -17,6 +17,7 @@ ARG OCI_VENDOR=""
 ARG OCI_VERSION=""
 ARG NOTIFYPUSH_REPOSITORY
 ARG NOTIFYPUSH_VERSION
+ARG NOTIFYPUSH_COMMIT
 ARG SOURCE_DATE_EPOCH
 ARG TARGETARCH
 
@@ -34,7 +35,18 @@ RUN set -eux; \
     esac; \
     rustup target add "${rust_target}"; \
     git clone --branch "${NOTIFYPUSH_VERSION}" "${NOTIFYPUSH_REPOSITORY}" .; \
-    cargo build --release --target="${rust_target}"
+    test "$(git rev-parse HEAD)" = "${NOTIFYPUSH_COMMIT}"; \
+    test -f Cargo.lock; \
+    cargo build --locked --release --target="${rust_target}"; \
+    mkdir -p /usr/share/strukturpiloten; \
+    { \
+      printf 'notify_push_version=%s\n' "${NOTIFYPUSH_VERSION}"; \
+      printf 'notify_push_commit=%s\n' "${NOTIFYPUSH_COMMIT}"; \
+      printf 'cargo_lock_sha256=%s\n' "$(sha256sum Cargo.lock | cut -d ' ' -f 1)"; \
+      printf 'rustc=%s\n' "$(rustc --version)"; \
+      printf 'cargo=%s\n' "$(cargo --version)"; \
+    } > /usr/share/strukturpiloten/application-components.txt; \
+    apk info -v | sort > /usr/share/strukturpiloten/build-apk-packages.txt
 
 FROM ${RUNTIME_IMAGE} AS final
 
@@ -71,9 +83,13 @@ RUN set -eux; \
     arm64) rust_target="aarch64-unknown-linux-musl" ;; \
     *) echo "Unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
-    mkdir -p /notify_push/target
+    mkdir -p /notify_push/target /usr/share/strukturpiloten; \
+    apk upgrade --no-cache; \
+    apk info -v | sort > /usr/share/strukturpiloten/runtime-apk-packages.txt
 
 COPY --from=build /notify_push/target/*/release/notify_push /notify_push
+COPY --from=build /usr/share/strukturpiloten/application-components.txt /usr/share/strukturpiloten/application-components.txt
+COPY --from=build /usr/share/strukturpiloten/build-apk-packages.txt /usr/share/strukturpiloten/build-apk-packages.txt
 
 # Alpine guest user
 USER 405

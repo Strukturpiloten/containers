@@ -39,20 +39,6 @@
     },
     {
       "customType": "regex",
-      "description": "Track NOTIFYPUSH_VERSION in container metadata",
-      "managerFilePatterns": [
-        "/^images/nextcloud/nextcloud-notifypush/container\\.yaml$/"
-      ],
-      "matchStrings": [
-        "NOTIFYPUSH_VERSION:\\s*\\n\\s*value:\\s*(?<currentValue>v?\\d+\\.\\d+\\.\\d+)"
-      ],
-      "depNameTemplate": "nextcloud/notify_push",
-      "packageNameTemplate": "nextcloud/notify_push",
-      "datasourceTemplate": "github-releases",
-      "versioningTemplate": "semver-coerced"
-    },
-    {
-      "customType": "regex",
       "description": "Track each fixed Podman minor line and its immutable source commit",
       "managerFilePatterns": [
         "/^images\\/podman\\/podman-\\d+\\.\\d+-(?:rootful|rootless)\\/container\\.yaml$/"
@@ -149,6 +135,78 @@
       "depNameTemplate": "rhysd/actionlint",
       "datasourceTemplate": "github-releases",
       "versioningTemplate": "semver-coerced"
+    },
+    {
+      "customType": "regex",
+      "description": "Track the notify_push release tag and immutable source commit together",
+      "managerFilePatterns": [
+        "/^images/nextcloud/nextcloud-notifypush/container\\.yaml$/"
+      ],
+      "matchStrings": [
+        "NOTIFYPUSH_VERSION:\\s*\\n\\s*value:\\s*v(?<currentValue>\\d+\\.\\d+\\.\\d+)[\\s\\S]*?NOTIFYPUSH_COMMIT:\\s*\\n\\s*value:\\s*(?<currentDigest>[a-f0-9]{40})"
+      ],
+      "depNameTemplate": "nextcloud/notify_push",
+      "packageNameTemplate": "nextcloud/notify_push",
+      "datasourceTemplate": "github-tags",
+      "versioningTemplate": "semver",
+      "extractVersionTemplate": "^v(?<version>.+)$"
+    },
+    {
+      "customType": "regex",
+      "description": "Track exact PHP_APCU_VERSION in PHP image metadata",
+      "managerFilePatterns": [
+        "/^images\\/(?:nextcloud\\/nextcloud-phpfpm|typo3\\/typo3-phpfpm)\\/container\\.yaml$/"
+      ],
+      "matchStrings": [
+        "PHP_APCU_VERSION:\\s*\\n\\s*value:\\s*(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "krakjoe/apcu",
+      "packageNameTemplate": "krakjoe/apcu",
+      "datasourceTemplate": "github-tags",
+      "versioningTemplate": "semver",
+      "extractVersionTemplate": "^v(?<version>.+)$"
+    },
+    {
+      "customType": "regex",
+      "description": "Track exact PHP_IMAGICK_VERSION in PHP image metadata",
+      "managerFilePatterns": [
+        "/^images\\/(?:nextcloud\\/nextcloud-phpfpm|typo3\\/typo3-phpfpm)\\/container\\.yaml$/"
+      ],
+      "matchStrings": [
+        "PHP_IMAGICK_VERSION:\\s*\\n\\s*value:\\s*(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "Imagick/imagick",
+      "packageNameTemplate": "Imagick/imagick",
+      "datasourceTemplate": "github-tags",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "description": "Track exact PHP_REDIS_VERSION in PHP image metadata",
+      "managerFilePatterns": [
+        "/^images\\/(?:nextcloud\\/nextcloud-phpfpm|typo3\\/typo3-phpfpm)\\/container\\.yaml$/"
+      ],
+      "matchStrings": [
+        "PHP_REDIS_VERSION:\\s*\\n\\s*value:\\s*(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "phpredis/phpredis",
+      "packageNameTemplate": "phpredis/phpredis",
+      "datasourceTemplate": "github-tags",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "description": "Track exact COMPOSER_VERSION in PHP image metadata",
+      "managerFilePatterns": [
+        "/^images\\/(?:nextcloud\\/nextcloud-phpfpm|typo3\\/typo3-phpfpm)\\/container\\.yaml$/"
+      ],
+      "matchStrings": [
+        "COMPOSER_VERSION:\\s*\\n\\s*value:\\s*(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "composer/composer",
+      "packageNameTemplate": "composer/composer",
+      "datasourceTemplate": "github-releases",
+      "versioningTemplate": "semver"
     }
   ],
   "github-actions": {
@@ -446,6 +504,49 @@
         ".github/actions/**",
         ".github/workflow-templates/**"
       ]
+    },
+    {
+      "description": "PHP extension and Composer version updates require human review",
+      "matchPackageNames": [
+        "krakjoe/apcu",
+        "Imagick/imagick",
+        "phpredis/phpredis",
+        "composer/composer"
+      ],
+      "automerge": false
+    },
+    {
+      "description": "Group compatible patch and digest updates for nextcloud-notifypush",
+      "matchFileNames": [
+        "/^images\\/(?:nextcloud|typo3)\\/nextcloud-notifypush\\/container\\.yaml$/"
+      ],
+      "matchUpdateTypes": [
+        "patch",
+        "digest"
+      ],
+      "groupName": "nextcloud-notifypush patch and digest inputs"
+    },
+    {
+      "description": "Group compatible patch and digest updates for nextcloud-phpfpm",
+      "matchFileNames": [
+        "/^images\\/(?:nextcloud|typo3)\\/nextcloud-phpfpm\\/container\\.yaml$/"
+      ],
+      "matchUpdateTypes": [
+        "patch",
+        "digest"
+      ],
+      "groupName": "nextcloud-phpfpm patch and digest inputs"
+    },
+    {
+      "description": "Group compatible patch and digest updates for typo3-phpfpm",
+      "matchFileNames": [
+        "/^images\\/(?:nextcloud|typo3)\\/typo3-phpfpm\\/container\\.yaml$/"
+      ],
+      "matchUpdateTypes": [
+        "patch",
+        "digest"
+      ],
+      "groupName": "typo3-phpfpm patch and digest inputs"
     }
   ]
 }

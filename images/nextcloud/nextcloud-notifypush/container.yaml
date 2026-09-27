@@ -26,6 +26,9 @@ build:
     NOTIFYPUSH_VERSION:
       value: v1.4.1
       type: static
+    NOTIFYPUSH_COMMIT:
+      value: 3cbef8d0abd401bfa1ce4c39428fc445059654bc
+      type: static
 
 dependencies:
   internal: []

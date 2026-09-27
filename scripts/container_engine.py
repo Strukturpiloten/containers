@@ -100,6 +100,7 @@ class _BuildResult:
     source_revision: str
     index_digest: str
     architecture_digests: dict[str, str]
+    component_inputs: dict[str, str]
     tags: Sequence[str]
     run_id: str
     run_attempt: str
@@ -1642,6 +1643,20 @@ def _architecture_digests(raw_manifest: str, architectures: Sequence[str]) -> di
     return digests
 
 
+def _component_inputs(image: JsonMap) -> dict[str, str]:
+    """Capture the exact declared build inputs alongside digest evidence."""
+    specifications = _json_map(_image_build(image).get("args"))
+    if specifications is None:
+        _fail(f"Image {image['name']} has invalid build arguments.")
+    inputs: dict[str, str] = {}
+    for name, candidate in _json_map_items(specifications):
+        specification = _json_map(candidate)
+        if specification is None or not isinstance(specification.get("value"), str):
+            _fail(f"Image {image['name']} has an invalid value for {name}.")
+        inputs[name] = specification["value"]
+    return inputs
+
+
 def _write_build_result(output_dir: Path, result: _BuildResult) -> Path:
     build_result = output_dir / f"{result.image_name}-build-result.json"
     _write_json(
@@ -1653,6 +1668,7 @@ def _write_build_result(output_dir: Path, result: _BuildResult) -> Path:
             "sourceRevision": result.source_revision,
             "indexDigest": result.index_digest,
             "architectureDigests": result.architecture_digests,
+            "componentInputs": result.component_inputs,
             "tags": list(result.tags),
             "rebuilt": True,
             "runId": result.run_id,
@@ -1833,6 +1849,7 @@ def _command_publish_image(args: argparse.Namespace) -> None:
                 source_revision=str(plan.get("sourceRevision", context.sha)),
                 index_digest=index_digest,
                 architecture_digests=architecture_digests,
+                component_inputs=_component_inputs(image),
                 tags=tags,
                 run_id=str(source_identity.run_id),
                 run_attempt=str(source_identity.run_attempt),

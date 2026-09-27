@@ -20,6 +20,6 @@ podman run --rm \
 
 ## Build and updates
 
-The multi-stage build compiles the metadata-pinned upstream `notify_push` tag for the target musl architecture, then copies only the binary into a digest-pinned Alpine runtime. Git, Rust, and build artifacts are not present in the final image.
+The multi-stage build verifies the metadata-pinned upstream `notify_push` tag against its immutable commit, requires the upstream `Cargo.lock` with `cargo build --locked`, and compiles for the target musl architecture. Git, Rust, and build artifacts are absent from the final image. The image keeps `/usr/share/strukturpiloten/application-components.txt` with the upstream commit, lockfile hash, and actual Rust/Cargo versions; its build and runtime Alpine package lists are beside it.
 
-`container.yaml` is authoritative for the upstream version, builder, runtime base, architectures, and Strukturpiloten image version. Renovate proposes supported input updates, and the daily rebuild refreshes Alpine packages. Use a maintained tag plus digest for automated updates or a digest alone for an immutable artifact.
+`container.yaml` is authoritative for the paired upstream version and commit, builder, runtime base, architectures, and Strukturpiloten image version. Renovate proposes a version and commit together. Daily rebuilds refresh Alpine packages without silently moving the application source or locked Rust dependencies. Use a maintained tag plus digest for automated updates or a digest alone for an immutable artifact.
