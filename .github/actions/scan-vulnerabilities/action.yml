@@ -16,10 +16,13 @@ inputs:
     description: Source Git revision expected in the candidate OCI config.
     required: true
   baseline-ref:
-    description: Maintained tag for this same image (for example image:major).
+    description: Maintained latest tag for this same image; genuine absence bootstraps first publication.
     required: true
   admission:
     description: Declared lifecycle admission (production, isolated-test, or disabled).
+    required: true
+  registry-token:
+    description: Read-only token for GHCR baseline inspection and Grype registry access.
     required: true
   output-dir:
     description: Directory to write scans, verified identities, report and summary.
@@ -72,31 +75,59 @@ runs:
         BASELINE_REF: ${{ inputs.baseline-ref }}
         ADMISSION: ${{ inputs.admission }}
         OUTPUT_DIR: ${{ inputs.output-dir }}
+        REGISTRY_TOKEN: ${{ inputs.registry-token }}
+        GITHUB_TOKEN: ${{ inputs.registry-token }}
       run: |
         set -euo pipefail
         command -v skopeo >/dev/null
         mkdir -p "$OUTPUT_DIR"
+        printf '%s' "$REGISTRY_TOKEN" | skopeo login --username "$GITHUB_ACTOR" --password-stdin ghcr.io
+        export DOCKER_CONFIG="${RUNNER_TEMP}/grype-docker-config"
+        mkdir -p "$DOCKER_CONFIG"
+        python3 - <<'PY_AUTH'
+        import base64
+        import json
+        import os
+        from pathlib import Path
+        credentials = f"{os.environ['GITHUB_ACTOR']}:{os.environ['REGISTRY_TOKEN']}".encode()
+        config = {"auths": {"ghcr.io": {"auth": base64.b64encode(credentials).decode()}}}
+        target = Path(os.environ["DOCKER_CONFIG"]) / "config.json"
+        target.write_text(json.dumps(config), encoding="utf-8")
+        target.chmod(0o600)
+        PY_AUTH
         python3 -m scripts.scan_sources candidate --archive "$CANDIDATE_ARCHIVE" \
           --architecture "$ARCHITECTURE" --source-revision "$SOURCE_REVISION" \
           --output "$OUTPUT_DIR/candidate-source.json"
         python3 -m scripts.scan_sources baseline --image "$IMAGE" --reference "$BASELINE_REF" \
-          --architecture "$ARCHITECTURE" --output "$OUTPUT_DIR/baseline-source.json"
+          --architecture "$ARCHITECTURE" --allow-missing --output "$OUTPUT_DIR/baseline-source.json"
         candidate_digest="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["manifestDigest"])' "$OUTPUT_DIR/candidate-source.json")"
-        baseline_digest="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["manifestDigest"])' "$OUTPUT_DIR/baseline-source.json")"
+        baseline_status="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("status", "observed"))' "$OUTPUT_DIR/baseline-source.json")"
+        baseline_digest=""
+        baseline_args=()
+        if [[ "$baseline_status" = observed ]]; then
+          baseline_digest="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["manifestDigest"])' "$OUTPUT_DIR/baseline-source.json")"
+          baseline_args+=(--baseline-digest "$baseline_digest" --baseline-scan "$OUTPUT_DIR/baseline-grype.json")
+        elif [[ "$baseline_status" != absent ]]; then
+          echo "Invalid baseline status: $baseline_status" >&2
+          exit 2
+        fi
         grype db update
+        export GRYPE_DB_AUTO_UPDATE=false
         grype version -o json > "$OUTPUT_DIR/grype-version.json"
         grype db status -o json > "$OUTPUT_DIR/grype-db.json"
         grype "oci-archive:${CANDIDATE_ARCHIVE}" --platform "linux/${ARCHITECTURE}" -o json > "$OUTPUT_DIR/candidate-grype.json"
-        grype "registry:${IMAGE}@${baseline_digest}" --platform "linux/${ARCHITECTURE}" -o json > "$OUTPUT_DIR/baseline-grype.json"
+        if [[ "$baseline_status" = observed ]]; then
+          grype "registry:${IMAGE}@${baseline_digest}" --platform "linux/${ARCHITECTURE}" -o json > "$OUTPUT_DIR/baseline-grype.json"
+        fi
         status=0
         python3 -m scripts.vulnerability \
           --image "$IMAGE" --architecture "$ARCHITECTURE" \
-          --candidate-digest "$candidate_digest" --baseline-digest "$baseline_digest" \
+          --candidate-digest "$candidate_digest" "${baseline_args[@]}" \
           --candidate-source "oci-archive:${CANDIDATE_ARCHIVE}" --admission "$ADMISSION" \
+          --source-revision "$SOURCE_REVISION" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
           --candidate-evidence "$OUTPUT_DIR/candidate-source.json" \
           --baseline-evidence "$OUTPUT_DIR/baseline-source.json" \
           --candidate-scan "$OUTPUT_DIR/candidate-grype.json" \
-          --baseline-scan "$OUTPUT_DIR/baseline-grype.json" \
           --scanner "$OUTPUT_DIR/grype-version.json" --database "$OUTPUT_DIR/grype-db.json" \
           --exceptions security/vulnerability-exceptions.json \
           --json-output "$OUTPUT_DIR/vulnerability-report.json" \

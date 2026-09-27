@@ -13,10 +13,12 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from scripts.admission import image_policy
 from scripts.scan_sources import published_manifest
 
 DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 REVISION_RE = re.compile(r"[0-9a-f]{40}\Z")
+ASSET_PAGE_SIZE = 100
 
 
 class ReleaseEvidenceError(ValueError):
@@ -76,13 +78,96 @@ def _attached_records(
     return records
 
 
-def record(  # noqa: C901
+def _require_complete(  # noqa: PLR0913, C901
+    *,
+    name: str,
+    image: str,
+    version: str,
+    source: str,
+    run_id: str,
+    execution_attempt: int,
+    architecture_digests: dict[str, str],
+    published: dict[str, dict[str, Any]],
+    runtime: list[dict[str, Any]],
+    scans: list[dict[str, Any]],
+) -> None:
+    """Reject incomplete or cross-build evidence before recording a release asset."""
+    expected = set(architecture_digests)
+    if set(published) != expected:
+        msg = "Every architecture needs a verified published configuration."
+        raise ReleaseEvidenceError(msg)
+    for label, entries in (("runtime", runtime), ("scan", scans)):
+        if len(entries) != len(expected) or {entry.get("architecture") for entry in entries} != expected:
+            msg = f"Exactly one {label} record is required for every architecture."
+            raise ReleaseEvidenceError(msg)
+    for architecture in sorted(expected):
+        policy = image_policy(name, architecture)
+        runtime_item = next(item for item in runtime if item["architecture"] == architecture)
+        scan_item = next(item for item in scans if item["architecture"] == architecture)
+        identity = runtime_item.get("imageIdentity")
+        candidate = scan_item.get("candidateSource")
+        baseline_source = scan_item.get("baselineSource")
+
+        def attempt_ok(item: dict[str, Any]) -> bool:
+            attempt = item.get("runAttempt")
+            return (
+                item.get("runId") == run_id
+                and isinstance(attempt, str)
+                and attempt.isdecimal()
+                and 1 <= int(attempt) <= execution_attempt
+            )
+
+        if (
+            runtime_item.get("image") != name
+            or runtime_item.get("profile") != policy["requiredRuntimeProfile"]
+            or runtime_item.get("status") != "passed"
+            or not attempt_ok(runtime_item)
+            or not isinstance(identity, dict)
+            or identity.get("sourceRevision") != source
+            or identity.get("version") != version
+            or identity.get("architecture") != architecture
+            or identity.get("configDigest") != published[architecture]["configDigest"]
+        ):
+            msg = f"Runtime evidence for {name} {architecture} does not match publication."
+            raise ReleaseEvidenceError(msg)
+        if (
+            scan_item.get("image") != image
+            or scan_item.get("admission") != policy["admission"]
+            or scan_item.get("decision") != "passed"
+            or scan_item.get("sourceRevision") != source
+            or not attempt_ok(scan_item)
+            or not isinstance(candidate, dict)
+            or not isinstance(baseline_source, dict)
+            or candidate.get("sourceRevision") != source
+            or candidate.get("version") != version
+            or candidate.get("architecture") != architecture
+            or candidate.get("configDigest") != published[architecture]["configDigest"]
+            or candidate.get("manifestDigest") != identity.get("manifestDigest")
+            or str(candidate.get("archiveSha256", "")).removeprefix("sha256:") != identity.get("archiveSha256")
+            or scan_item.get("candidateDigest") != identity.get("manifestDigest")
+        ):
+            msg = f"Scan evidence for {name} {architecture} does not match publication."
+            raise ReleaseEvidenceError(msg)
+        if scan_item.get("baselineStatus") == "absent":
+            if scan_item.get("baselineDigest") is not None or baseline_source.get("status") != "absent":
+                msg = f"First-publication baseline evidence for {name} {architecture} is incomplete."
+                raise ReleaseEvidenceError(msg)
+        elif scan_item.get("baselineStatus") != "observed" or baseline_source.get("manifestDigest") != scan_item.get(
+            "baselineDigest"
+        ):
+            msg = f"Baseline evidence for {name} {architecture} is incomplete."
+            raise ReleaseEvidenceError(msg)
+
+
+def record(  # noqa: C901, PLR0912, PLR0913
     build_result: dict[str, Any],
     *,
     release_origin_revision: str,
     runtime_evidence: list[dict[str, Any]] | None = None,
     scan_reports: list[dict[str, Any]] | None = None,
     published_configs: dict[str, dict[str, Any]] | None = None,
+    require_complete: bool = False,
+    execution_attempt: int | None = None,
 ) -> dict[str, Any]:
     """Keep immutable release origin separate from each later maintenance build source."""
     name, image, version = (build_result.get(key) for key in ("imageName", "image", "version"))
@@ -129,6 +214,22 @@ def record(  # noqa: C901
         ):
             msg = "Published configuration evidence does not match build result."
             raise ReleaseEvidenceError(msg)
+    if require_complete:
+        if execution_attempt is None:
+            msg = "Complete release evidence requires the execution attempt."
+            raise ReleaseEvidenceError(msg)
+        _require_complete(
+            name=name,
+            image=image,
+            version=version,
+            source=source,
+            run_id=run_id,
+            execution_attempt=execution_attempt,
+            architecture_digests=architecture_digests,
+            published=published,
+            runtime=runtime,
+            scans=scans,
+        )
     for label, entries in (("runtime", runtime), ("scan", scans)):
         for entry in entries:
             if entry.get("image") != name and entry.get("image") != image:
@@ -183,21 +284,29 @@ def asset_name(evidence: dict[str, Any]) -> str:
 def upload(evidence: dict[str, Any], payload: bytes, *, repository: str, token: str, release: dict[str, Any]) -> None:
     """Upload a new asset; an existing name must contain exactly the same bytes."""
     name = asset_name(evidence)
-    assets_url = f"https://api.github.com/repos/{repository}/releases/{release['id']}/assets?per_page=100"
-    assets = json.loads(_github_request(assets_url, token))
-    if not isinstance(assets, list):
-        msg = "GitHub returned invalid release assets."
-        raise ReleaseEvidenceError(msg)
-    for asset in assets:
-        if isinstance(asset, dict) and asset.get("name") == name:
-            expected = f"sha256:{hashlib.sha256(payload).hexdigest()}"
-            if asset.get("digest") == expected:
+    assets_url = f"https://api.github.com/repos/{repository}/releases/{release['id']}/assets"
+    page = 1
+    while True:
+        assets = json.loads(_github_request(f"{assets_url}?per_page={ASSET_PAGE_SIZE}&page={page}", token))
+        if not isinstance(assets, list):
+            msg = "GitHub returned invalid release assets."
+            raise ReleaseEvidenceError(msg)
+        for asset in assets:
+            if isinstance(asset, dict) and asset.get("name") == name:
+                expected = f"sha256:{hashlib.sha256(payload).hexdigest()}"
+                if asset.get("digest") == expected:
+                    return
+                url = asset.get("url")
+                if (
+                    not isinstance(url, str)
+                    or _github_request(url, token, accept="application/octet-stream") != payload
+                ):
+                    msg = f"Existing release asset {name} has different contents."
+                    raise ReleaseEvidenceError(msg)
                 return
-            url = asset.get("url")
-            if not isinstance(url, str) or _github_request(url, token, accept="application/octet-stream") != payload:
-                msg = f"Existing release asset {name} has different contents."
-                raise ReleaseEvidenceError(msg)
-            return
+        if len(assets) < ASSET_PAGE_SIZE:
+            break
+        page += 1
     upload_url = release.get("upload_url")
     if not isinstance(upload_url, str):
         msg = "GitHub release has no asset upload URL."
@@ -215,6 +324,7 @@ def main() -> None:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--upload", action="store_true")
     parser.add_argument("--verify-publication", action="store_true")
+    parser.add_argument("--require-complete", action="store_true")
     args = parser.parse_args()
     build_result = _read_json(args.build_result)
     token, repository = os.environ.get("GITHUB_TOKEN"), os.environ.get("GITHUB_REPOSITORY")
@@ -241,12 +351,14 @@ def main() -> None:
         build_result,
         release_origin_revision=origin,
         runtime_evidence=_attached_records(
-            args.runtime_evidence_dir, "*-runtime-evidence.json", build_result["imageName"], architectures
+            args.runtime_evidence_dir, "*.json", build_result["imageName"], architectures
         ),
         scan_reports=_attached_records(
             args.scan_report_dir, "*vulnerability-report.json", build_result["image"], architectures
         ),
         published_configs=published,
+        require_complete=args.require_complete,
+        execution_attempt=int(os.environ.get("GITHUB_RUN_ATTEMPT", "0")),
     )
     payload = (json.dumps(evidence, indent=2, sort_keys=True) + "\n").encode()
     args.output.parent.mkdir(parents=True, exist_ok=True)

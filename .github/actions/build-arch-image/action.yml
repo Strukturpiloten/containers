@@ -103,6 +103,57 @@ runs:
         if-no-files-found: error
         retention-days: 7
 
+    - name: Resolve declared scan admission
+      id: scan-policy
+      shell: bash
+      env:
+        IMAGE_ARCH: ${{ steps.build.outputs.arch }}
+        IMAGE_NAME: ${{ steps.build.outputs.image_name }}
+      run: |
+        set -euo pipefail
+
+        uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.admission \
+          --name "$IMAGE_NAME" --architecture "$IMAGE_ARCH" \
+          --plan "${RUNNER_TEMP}/container-build-plan/build-plan.json" \
+          --output "${RUNNER_TEMP}/scan-policy.json" --github-output "$GITHUB_OUTPUT"
+
+    - name: Scan image vulnerabilities
+      id: scan
+      uses: ./.github/actions/scan-vulnerabilities
+      with:
+        image: ${{ steps.scan-policy.outputs.image }}
+        architecture: ${{ steps.build.outputs.arch }}
+        candidate-archive: ${{ steps.build.outputs.archive_path }}
+        source-revision: ${{ steps.scan-policy.outputs.sourceRevision }}
+        baseline-ref: ${{ steps.scan-policy.outputs.baselineRef }}
+        admission: ${{ steps.scan-policy.outputs.admission }}
+        registry-token: ${{ github.token }}
+        output-dir: ${{ runner.temp }}/vulnerability-evidence
+
+    - name: Retain vulnerability report for publication
+      if: always() && steps.build.outcome == 'success'
+      shell: bash
+      env:
+        IMAGE_ARCH: ${{ steps.build.outputs.arch }}
+        IMAGE_NAME: ${{ steps.build.outputs.image_name }}
+      run: |
+        set -euo pipefail
+
+        report="${RUNNER_TEMP}/vulnerability-evidence/vulnerability-report.json"
+        if [[ -f "$report" ]]; then
+          mkdir -p "${RUNNER_TEMP}/scan-reports"
+          cp "$report" "${RUNNER_TEMP}/scan-reports/${IMAGE_NAME}-${IMAGE_ARCH}-vulnerability-report.json"
+        fi
+
+    - name: Upload vulnerability report
+      if: always() && steps.build.outcome == 'success'
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ steps.build.outputs.image_name }}-${{ steps.build.outputs.arch }}-vulnerability-report
+        path: ${{ runner.temp }}/scan-reports/${{ steps.build.outputs.image_name }}-${{ steps.build.outputs.arch }}-vulnerability-report.json
+        if-no-files-found: warn
+        retention-days: 7
+
     - name: Upload architecture image archive
       if: inputs.upload-archive == 'true'
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

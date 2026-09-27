@@ -9,6 +9,7 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from scripts.scan_sources import SourceError, baseline_registry, candidate_archive
@@ -54,6 +55,31 @@ class SourceIdentityTests(unittest.TestCase):
                 candidate_archive(path, "arm64")
             with self.assertRaises(SourceError):
                 candidate_archive(path, "amd64", "c" * 40)
+
+    def test_only_registry_not_found_bootstraps_baseline(self) -> None:
+        missing = SimpleNamespace(returncode=1, stderr=b"manifest unknown", stdout=b"")
+        with (
+            patch("scripts.scan_sources.subprocess.run", return_value=missing),
+            patch("scripts.scan_sources._github_package_absent", return_value=True),
+        ):
+            evidence = baseline_registry("ghcr.io/example", "ghcr.io/example:latest", "amd64", allow_missing=True)
+        self.assertEqual(evidence["status"], "absent")
+        forbidden = SimpleNamespace(returncode=1, stderr=b"403 Forbidden", stdout=b"")
+        with (
+            patch("scripts.scan_sources.subprocess.run", return_value=forbidden),
+            patch("scripts.scan_sources._github_package_absent", return_value=True),
+        ):
+            evidence = baseline_registry("ghcr.io/example", "ghcr.io/example:latest", "amd64", allow_missing=True)
+        self.assertEqual(evidence["verifiedBy"], "authenticated-github-packages-404")
+        with (
+            patch("scripts.scan_sources.subprocess.run", return_value=forbidden),
+            patch("scripts.scan_sources._github_package_absent", return_value=False),
+            self.assertRaises(SourceError),
+        ):
+            baseline_registry("ghcr.io/example", "ghcr.io/example:latest", "amd64", allow_missing=True)
+        unauthorized = SimpleNamespace(returncode=1, stderr=b"unauthorized: manifest unknown", stdout=b"")
+        with patch("scripts.scan_sources.subprocess.run", return_value=unauthorized), self.assertRaises(SourceError):
+            baseline_registry("ghcr.io/example", "ghcr.io/example:latest", "amd64", allow_missing=True)
 
     def test_registry_baseline_selects_matching_architecture(self) -> None:
         manifest_raw, descriptor = _blob(

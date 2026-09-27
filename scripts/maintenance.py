@@ -311,7 +311,12 @@ def _load_evidence(directory: Path) -> tuple[dict[str, dict[str, Any]], dict[str
             msg = f"Ambiguous build evidence in {path}."
             raise MaintenanceError(msg)
         builds[name] = data
-    for path in sorted(directory.rglob("*-runtime-evidence.json")):
+    runtime_paths = set(directory.rglob("*-runtime-evidence.json"))
+    for architecture in ("amd64", "arm64"):
+        runtime_paths.update(
+            path for path in directory.rglob(f"*-{architecture}.json") if "runtime-evidence" in path.parent.parts
+        )
+    for path in sorted(runtime_paths):
         data = _read_json(path)
         name = data.get("image")
         if not isinstance(name, str):
@@ -328,6 +333,7 @@ def main() -> None:
     parser.add_argument("--registry-observations", type=Path)
     parser.add_argument("--json-output", type=Path, required=True)
     parser.add_argument("--markdown-output", type=Path, required=True)
+    parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
     from scripts import container_engine  # noqa: PLC0415
 
@@ -336,10 +342,22 @@ def main() -> None:
     builds, runtime = _load_evidence(args.evidence_dir) if args.evidence_dir else ({}, {})
     observations = _read_json(args.registry_observations) if args.registry_observations else {}
     report = catalogue(images, build_results=builds, runtime_results=runtime, registry_observations=observations)
+    json_text = json.dumps(report, indent=2, sort_keys=True) + "\n"
+    markdown_text = markdown_catalogue(report)
+    if args.check:
+        if (
+            not args.json_output.is_file()
+            or args.json_output.read_text(encoding="utf-8") != json_text
+            or not args.markdown_output.is_file()
+            or args.markdown_output.read_text(encoding="utf-8") != markdown_text
+        ):
+            msg = "Generated image catalogue is stale. Regenerate both docs/image-catalogue files."
+            raise MaintenanceError(msg)
+        return
     args.json_output.parent.mkdir(parents=True, exist_ok=True)
     args.markdown_output.parent.mkdir(parents=True, exist_ok=True)
-    args.json_output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    args.markdown_output.write_text(markdown_catalogue(report), encoding="utf-8")
+    args.json_output.write_text(json_text, encoding="utf-8")
+    args.markdown_output.write_text(markdown_text, encoding="utf-8")
 
 
 if __name__ == "__main__":

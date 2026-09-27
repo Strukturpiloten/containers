@@ -53,6 +53,8 @@ jobs:
           uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine validate-versions \
             --before "${BEFORE}"
           uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine generate-workflow --check
+          uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.maintenance --check \
+            --json-output docs/image-catalogue.json --markdown-output docs/image-catalogue.md
 
   plan:
     name: Plan pull-request builds
@@ -140,6 +142,7 @@ jobs:
     timeout-minutes: 120
     permissions:
       contents: read
+      packages: read
     strategy:
       fail-fast: false
       max-parallel: 8

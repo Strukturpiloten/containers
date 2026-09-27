@@ -5,9 +5,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
 import tarfile
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +20,10 @@ SHA256_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
 class SourceError(ValueError):
     """The source cannot be bound to a single verified architecture manifest."""
+
+
+class RegistryMissingError(SourceError):
+    """An authenticated registry lookup positively reported a missing baseline tag."""
 
 
 def _sha256(raw: bytes) -> str:
@@ -128,6 +136,7 @@ def candidate_archive(path: Path, architecture: str, source_revision: str | None
         "manifestDigest": manifest_digest,
         "configDigest": config_digest,
         "sourceRevision": revision,
+        "version": labels.get("org.opencontainers.image.version") if isinstance(labels, dict) else None,
     }
 
 
@@ -138,7 +147,13 @@ def _skopeo_raw(reference: str) -> bytes:
         check=False,
     )
     if result.returncode != 0:
-        msg = f"Could not inspect registry reference {reference}: {result.stderr.decode(errors='replace').strip()}"
+        error = result.stderr.decode(errors="replace").strip()
+        msg = f"Could not inspect registry reference {reference}: {error}"
+        lowered = error.lower()
+        if not any(
+            word in lowered for word in ("unauthorized", "denied", "forbidden", "timeout", "connection")
+        ) and any(marker in lowered for marker in ("manifest unknown", "name unknown")):
+            raise RegistryMissingError(msg)
         raise SourceError(msg)
     return result.stdout
 
@@ -174,18 +189,66 @@ def published_manifest(image: str, digest: str, architecture: str) -> dict[str, 
     return {"architecture": architecture, "manifestDigest": digest, "configDigest": config_digest}
 
 
-def baseline_registry(image: str, reference: str, architecture: str) -> dict[str, Any]:
+def _github_package_absent(image: str) -> bool:
+    """Require an authenticated GitHub Packages 404 before first-publication bootstrap."""
+    token, repository = os.environ.get("GITHUB_TOKEN"), os.environ.get("GITHUB_REPOSITORY")
+    if not token or not repository or not image.startswith("ghcr.io/"):
+        msg = "Authenticated package lookup is required for baseline bootstrap."
+        raise SourceError(msg)
+    owner, package = image.removeprefix("ghcr.io/").split("/", 1)
+    if owner.casefold() != repository.split("/", 1)[0].casefold():
+        msg = "Baseline image owner does not match the authenticated repository."
+        raise SourceError(msg)
+    package_path = urllib.parse.quote(package, safe="")
+    url = f"https://api.github.com/orgs/{urllib.parse.quote(owner)}/packages/container/{package_path}"
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "strukturpiloten-container-scan",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20):  # noqa: S310
+            return False
+    except urllib.error.HTTPError as error:
+        if error.code == 404:  # noqa: PLR2004
+            return True
+        msg = f"Authenticated package lookup failed with HTTP {error.code}."
+        raise SourceError(msg) from error
+    except urllib.error.URLError as error:
+        msg = "Authenticated package lookup failed due to a network error."
+        raise SourceError(msg) from error
+
+
+def baseline_registry(image: str, reference: str, architecture: str, *, allow_missing: bool = False) -> dict[str, Any]:
     """Bind a maintained tag to its index and selected architecture manifest."""
     if architecture not in {"amd64", "arm64"} or not reference.startswith(f"{image}:"):
         msg = "Baseline must be a tag of the same image and a supported architecture."
         raise SourceError(msg)
-    index_raw = _skopeo_raw(reference)
+    try:
+        index_raw = _skopeo_raw(reference)
+    except SourceError as error:
+        eligible = isinstance(error, RegistryMissingError) or "403 Forbidden" in str(error)
+        if not allow_missing or not eligible or not _github_package_absent(image):
+            raise
+        return {
+            "type": "registry",
+            "status": "absent",
+            "image": image,
+            "reference": reference,
+            "architecture": architecture,
+            "verifiedBy": "authenticated-github-packages-404",
+        }
     index_digest = _sha256(index_raw)
     descriptor = _select_manifest(_json(index_raw), architecture)
     manifest_digest, _ = _descriptor(descriptor)
     published = published_manifest(image, manifest_digest, architecture)
     return {
         "type": "registry",
+        "status": "observed",
         "reference": reference,
         "image": image,
         "architecture": architecture,
@@ -204,6 +267,7 @@ def main() -> None:
     parser.add_argument("--image")
     parser.add_argument("--reference")
     parser.add_argument("--source-revision")
+    parser.add_argument("--allow-missing", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.kind == "candidate":
@@ -213,7 +277,7 @@ def main() -> None:
     else:
         if args.image is None or args.reference is None:
             parser.error("baseline requires --image and --reference")
-        evidence = baseline_registry(args.image, args.reference, args.architecture)
+        evidence = baseline_registry(args.image, args.reference, args.architecture, allow_missing=args.allow_missing)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 

@@ -91,6 +91,8 @@ jobs:
           set -euo pipefail
 
           uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine generate-workflow --check
+          uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.maintenance --check \
+            --json-output docs/image-catalogue.json --markdown-output docs/image-catalogue.md
 
       - name: Check Python formatting and linting
         shell: bash
