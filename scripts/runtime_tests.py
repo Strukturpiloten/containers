@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +47,7 @@ class RuntimeContext:
         self.timeout = timeout
         self.directory = Path(tempfile.mkdtemp(prefix="strukturpiloten-runtime-"))
         self.containers: list[str] = []
+        self.run_containers: set[str] = set()
         self.checks: list[dict[str, Any]] = []
         self.image_ref = f"localhost/{image}:runtime-{os.getpid()}"
         self._sudo = ["sudo", "-n"] if use_sudo else []
@@ -102,6 +104,57 @@ class RuntimeContext:
         return output
 
     def podman(self, name: str, *args: str, timeout: int | None = None, check: bool = True) -> str:
+        if args and args[0] == "run":
+            try:
+                image_index = args.index(self.image_ref)
+            except ValueError as error:
+                raise ProbeError(f"{name}: outer Podman run must use {self.image_ref}") from error
+            options = args[1:image_index]
+            if any(
+                option in ("--name", "--cidfile") or option.startswith(("--name=", "--cidfile=")) for option in options
+            ):
+                raise ProbeError(f"{name}: outer Podman run must not override owned name or cidfile")
+            if any(option == "--rmi" or option.startswith("--rmi=") for option in options):
+                raise ProbeError(f"{name}: outer Podman run must not auto-remove its image")
+            # Podman removes cidfiles with --rm containers. Keep one-shot containers
+            # until our exact-ID cleanup so ownership survives timeout/cancellation.
+            options = tuple(option for option in options if option != "--rm" and not option.startswith("--rm="))
+            run_id = uuid.uuid4().hex
+            container_name = f"strukturpiloten-runtime-{run_id}"
+            cidfile = self.directory / f"run-{run_id}.cid"
+            self.containers.append(container_name)
+            self.run_containers.add(container_name)
+            completed = False
+            try:
+                output = self.command(
+                    name,
+                    [
+                        *self._podman,
+                        "run",
+                        "--name",
+                        container_name,
+                        "--cidfile",
+                        str(cidfile),
+                        *options,
+                        *args[image_index:],
+                    ],
+                    timeout=timeout,
+                    check=check,
+                )
+                completed = True
+                return output
+            finally:
+                # The name is registered before spawn; a cidfile promotes ownership
+                # to the exact ID even when the CLI times out or is cancelled.
+                if cidfile.is_file():
+                    container = cidfile.read_text(encoding="utf-8").strip()
+                    if not re.fullmatch(r"[a-f0-9]{64}", container):
+                        raise ProbeError(f"{name}: invalid Podman cidfile {cidfile}")
+                    self.containers[self.containers.index(container_name)] = container
+                    self.run_containers.remove(container_name)
+                    self.run_containers.add(container)
+                elif completed and self.checks[-1].get("exitCode") == 0:
+                    raise ProbeError(f"{name}: Podman run succeeded without cidfile {cidfile}")
         return self.command(name, [*self._podman, *args], timeout=timeout, check=check)
 
     def assert_equal(self, name: str, actual: str, expected: str) -> None:
@@ -140,7 +193,8 @@ class RuntimeContext:
         )
         if not re.fullmatch(r"[a-f0-9]{64}", container):
             raise ProbeError(f"{name}: no container ID returned")
-        self.containers.append(container)
+        if container not in self.containers:
+            self.containers.append(container)
         return container
 
     def exec(self, name: str, container: str, *args: str) -> str:
@@ -174,6 +228,24 @@ class RuntimeContext:
         """Stop only tracked containers and remove the store only after verified teardown."""
         failed: list[str] = []
         for container in reversed(self.containers):
+            if container in getattr(self, "run_containers", set()):
+                try:
+                    self.podman(
+                        "check owned run container existence", "container", "exists", container, timeout=10, check=False
+                    )
+                except ProbeError:
+                    failed.append(container)
+                    continue
+                observed = self.checks[-1].get("exitCode")
+                if observed == 1:
+                    # A run cancelled before creation has no container to remove.
+                    # Exit 1 is Podman's documented exact-container absence result.
+                    self.checks[-1]["status"] = "passed"
+                    self.checks[-1]["expectedExitCode"] = 1
+                    continue
+                if observed != 0:
+                    failed.append(container)
+                    continue
             # Local host Podman cannot always deliver signals into a container. An
             # in-guest signal lets the service exit before the host removes it.
             try:
@@ -220,6 +292,8 @@ class RuntimeContext:
         if failed:
             raise ProbeError(f"cannot remove owned containers {failed}; preserving isolated store {self.directory}")
         self.containers.clear()
+        if hasattr(self, "run_containers"):
+            self.run_containers.clear()
         self.podman("unmount isolated containers", "unmount", "--all", timeout=20)
         self.podman("cleanup owned image", "image", "rm", "--force", self.image_ref, timeout=15, check=False)
         for mount in self._owned_mounts():
