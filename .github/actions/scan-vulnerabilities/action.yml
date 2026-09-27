@@ -112,7 +112,17 @@ runs:
           echo "Invalid baseline status: $baseline_status" >&2
           exit 2
         fi
-        grype db update
+        for attempt in 1 2 3; do
+          if grype db update; then
+            break
+          fi
+          if (( attempt == 3 )); then
+            echo "Grype database update failed after 3 attempts" >&2
+            exit 1
+          fi
+          echo "Grype database update failed (attempt ${attempt}/3); retrying in 3 seconds" >&2
+          sleep 3
+        done
         export GRYPE_DB_AUTO_UPDATE=false
         grype version -o json > "$OUTPUT_DIR/grype-version.json"
         grype db status -o json > "$OUTPUT_DIR/grype-db.json"
