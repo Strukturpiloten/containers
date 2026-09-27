@@ -24,6 +24,17 @@
     },
     {
       "customType": "regex",
+      "description": "Track digest-pinned base images in private payload manifests",
+      "managerFilePatterns": [
+        "/^images\\/.+\\/payload\\.yaml$/"
+      ],
+      "matchStrings": [
+        "(?:^|\\n)\\s*[A-Z][A-Z0-9_]*_IMAGE:\\s*(?<depName>[^:@\\s]+):(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[a-f0-9]{64})"
+      ],
+      "datasourceTemplate": "docker"
+    },
+    {
+      "customType": "regex",
       "description": "Track pinned uv version in GitHub workflows, composite actions and workflow templates",
       "managerFilePatterns": [
         "/^\\.github/(?:workflows/[^/]+|actions/[^/]+/action|workflow-templates/.+)\\.ya?ml(?:\\.j2)?$/",
@@ -39,12 +50,12 @@
     },
     {
       "customType": "regex",
-      "description": "Track each fixed Podman minor line and its immutable source commit",
+      "description": "Track each canonical Podman minor release and immutable source commit",
       "managerFilePatterns": [
-        "/^images\\/podman\\/podman-\\d+\\.\\d+-(?:rootful|rootless)\\/container\\.yaml$/"
+        "/^images\\/podman\\/payloads\\/podman-\\d+\\.\\d+\\.yaml$/"
       ],
       "matchStrings": [
-        "version:\\s*v(?<currentValue>(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+))[\\s\\S]*?PODMAN_COMMIT:\\s*\\n\\s*value:\\s*(?<currentDigest>[a-f0-9]{40})"
+        "OCI_VERSION:\\s*(?<currentValue>(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+))[\\s\\S]*?PODMAN_COMMIT:\\s*(?<currentDigest>[a-f0-9]{40})"
       ],
       "depNameTemplate": "podman-{{{major}}}.{{{minor}}}",
       "packageNameTemplate": "podman-container-tools/podman",
@@ -56,10 +67,10 @@
       "customType": "regex",
       "description": "Track Netavark for Podman 6 with an immutable source commit",
       "managerFilePatterns": [
-        "/^images\\/podman\\/podman-6\\.\\d+-(?:rootful|rootless)\\/container\\.yaml$/"
+        "/^images\\/podman\\/payloads\\/podman-6\\.\\d+\\.yaml$/"
       ],
       "matchStrings": [
-        "NETAVARK_VERSION:\\s*\\{value:\\s*(?<currentValue>\\d+\\.\\d+\\.\\d+),[\\s\\S]*?NETAVARK_COMMIT:\\s*\\{value:\\s*(?<currentDigest>[a-f0-9]{40}),"
+        "NETAVARK_VERSION:\\s*(?<currentValue>\\d+\\.\\d+\\.\\d+)[\\s\\S]*?NETAVARK_COMMIT:\\s*(?<currentDigest>[a-f0-9]{40})"
       ],
       "depNameTemplate": "containers/netavark",
       "packageNameTemplate": "containers/netavark",
@@ -71,16 +82,42 @@
       "customType": "regex",
       "description": "Track Aardvark DNS for Podman 6 with an immutable source commit",
       "managerFilePatterns": [
-        "/^images\\/podman\\/podman-6\\.\\d+-(?:rootful|rootless)\\/container\\.yaml$/"
+        "/^images\\/podman\\/payloads\\/podman-6\\.\\d+\\.yaml$/"
       ],
       "matchStrings": [
-        "AARDVARK_VERSION:\\s*\\{value:\\s*(?<currentValue>\\d+\\.\\d+\\.\\d+),[\\s\\S]*?AARDVARK_COMMIT:\\s*\\{value:\\s*(?<currentDigest>[a-f0-9]{40}),"
+        "AARDVARK_VERSION:\\s*(?<currentValue>\\d+\\.\\d+\\.\\d+)[\\s\\S]*?AARDVARK_COMMIT:\\s*(?<currentDigest>[a-f0-9]{40})"
       ],
       "depNameTemplate": "containers/aardvark-dns",
       "packageNameTemplate": "containers/aardvark-dns",
       "datasourceTemplate": "github-tags",
       "extractVersionTemplate": "^v(?<version>.+)$",
       "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "description": "Keep rootful and rootless Podman versions aligned with each canonical payload release",
+      "managerFilePatterns": [
+        "/^images\\/podman\\/podman-\\d+\\.\\d+-(?:rootful|rootless)\\/container\\.yaml$/"
+      ],
+      "matchStrings": [
+        "version:\\s*v(?<currentValue>(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+))"
+      ],
+      "depNameTemplate": "podman-{{{major}}}.{{{minor}}}",
+      "packageNameTemplate": "podman-container-tools/podman",
+      "datasourceTemplate": "github-tags",
+      "extractVersionTemplate": "^v(?<version>.+)$",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "description": "Track Fedora base digest for canonical Podman payload builders",
+      "managerFilePatterns": [
+        "/^images\\/podman\\/payloads\\/podman-\\d+\\.\\d+\\.yaml$/"
+      ],
+      "matchStrings": [
+        "FEDORA_IMAGE:\\s*(?<depName>[^:@\\s]+):(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[a-f0-9]{64})"
+      ],
+      "datasourceTemplate": "docker"
     },
     {
       "customType": "regex",
@@ -303,7 +340,8 @@
         "custom.regex"
       ],
       "matchFileNames": [
-        "/^images\\/podman\\/podman-\\d+\\.\\d+-(?:rootful|rootless)\\/container\\.yaml$/"
+        "/^images\\/podman\\/podman-\\d+\\.\\d+-(?:rootful|rootless)\\/container\\.yaml$/",
+        "/^images\\/podman\\/payloads\\/podman-\\d+\\.\\d+\\.yaml$/"
       ],
       "matchPackageNames": [
         "registry.fedoraproject.org/fedora-minimal"
@@ -547,6 +585,99 @@
         "digest"
       ],
       "groupName": "typo3-phpfpm patch and digest inputs"
+    },
+    {
+      "description": "Update Podman 5.4 payload and both consumer versions together",
+      "matchDepNames": [
+        "podman-5.4"
+      ],
+      "groupName": "Podman 5.4 release"
+    },
+    {
+      "description": "Update Podman 5.5 payload and both consumer versions together",
+      "matchDepNames": [
+        "podman-5.5"
+      ],
+      "groupName": "Podman 5.5 release"
+    },
+    {
+      "description": "Update Podman 5.6 payload and both consumer versions together",
+      "matchDepNames": [
+        "podman-5.6"
+      ],
+      "groupName": "Podman 5.6 release"
+    },
+    {
+      "description": "Update Podman 5.7 payload and both consumer versions together",
+      "matchDepNames": [
+        "podman-5.7"
+      ],
+      "groupName": "Podman 5.7 release"
+    },
+    {
+      "description": "Update Podman 5.8 payload and both consumer versions together",
+      "matchDepNames": [
+        "podman-5.8"
+      ],
+      "groupName": "Podman 5.8 release"
+    },
+    {
+      "description": "Update Podman 6.0 payload and both consumer versions together",
+      "matchDepNames": [
+        "podman-6.0"
+      ],
+      "groupName": "Podman 6.0 release"
+    },
+    {
+      "description": "Update Podman 6.1 payload and both consumer versions together",
+      "matchDepNames": [
+        "podman-6.1"
+      ],
+      "groupName": "Podman 6.1 release"
+    },
+    {
+      "description": "Update source Podman Fedora base in payloads and both runtime variants together",
+      "matchPackageNames": [
+        "registry.fedoraproject.org/fedora-minimal"
+      ],
+      "matchFileNames": [
+        "/^images\\/podman\\/payloads\\/podman-\\d+\\.\\d+\\.yaml$/",
+        "/^images\\/podman\\/podman-\\d+\\.\\d+-(?:rootful|rootless)\\/container\\.yaml$/"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "groupName": "Podman Fedora 44 base"
+    },
+    {
+      "description": "Keep Docker payload builders on Alpine 3.24 while allowing digest refreshes",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchFileNames": [
+        "/^images\\/docker\\/upstream\\/.+\\/payload\\.yaml$/"
+      ],
+      "matchPackageNames": [
+        "docker.io/library/alpine"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "allowedVersions": "/^3\\.24$/"
+    },
+    {
+      "description": "Update Docker Alpine base digests in payloads and runtime variants together",
+      "matchPackageNames": [
+        "docker.io/library/alpine"
+      ],
+      "matchFileNames": [
+        "/^images\\/docker\\/upstream\\/.+\\/payload\\.yaml$/",
+        "/^images\\/docker\\/docker-.+-(?:rootful|rootless)\\/container\\.yaml$/"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "groupName": "Docker Alpine 3.24 base"
     }
   ]
 }

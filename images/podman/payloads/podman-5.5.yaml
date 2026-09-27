@@ -1,0 +1,19 @@
+schemaVersion: 1
+name: podman-5.5
+build:
+  context: .
+  containerfile: images/podman/shared/Payload.Containerfile
+  architectures:
+  - amd64
+  - arm64
+  args:
+    FEDORA_IMAGE: registry.fedoraproject.org/fedora-minimal:44@sha256:eeac878460ca077301befe60ba603186b12af7ff45a58ee9aeafefbcf4c26f10
+    OCI_VERSION: 5.5.2
+    PODMAN_COMMIT: e7d8226745ba07a64b7176a7f128e4ef53225a0e
+    PODMAN_REPOSITORY: https://github.com/podman-container-tools/podman.git
+consumer:
+  versionArg: OCI_VERSION
+  runtimeBaseArg: FEDORA_IMAGE
+provenance:
+  source: upstream Podman release tag and verified immutable commit
+  runtimeDistribution: Fedora Minimal 44

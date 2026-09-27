@@ -1,0 +1,23 @@
+schemaVersion: 1
+name: podman-6.0
+build:
+  context: .
+  containerfile: images/podman/shared/Payload.Containerfile
+  architectures:
+  - amd64
+  - arm64
+  args:
+    FEDORA_IMAGE: registry.fedoraproject.org/fedora-minimal:44@sha256:eeac878460ca077301befe60ba603186b12af7ff45a58ee9aeafefbcf4c26f10
+    OCI_VERSION: 6.0.2
+    PODMAN_COMMIT: b28edb9ad70ce4317dc762ee9ce0a6d081d154e9
+    PODMAN_REPOSITORY: https://github.com/podman-container-tools/podman.git
+    NETAVARK_VERSION: 2.1.0
+    NETAVARK_COMMIT: 8e91ad1d947ed325327b638f0cb906bea1f7d0ab
+    AARDVARK_VERSION: 2.1.0
+    AARDVARK_COMMIT: cd7417681229219059939bdd9f0b3bd9ac9abb08
+consumer:
+  versionArg: OCI_VERSION
+  runtimeBaseArg: FEDORA_IMAGE
+provenance:
+  source: upstream Podman release tag and verified immutable commit
+  runtimeDistribution: Fedora Minimal 44

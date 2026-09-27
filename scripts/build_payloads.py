@@ -69,7 +69,20 @@ def load_manifest(root: Path, relative_path: str) -> dict[str, Any]:
     if not isinstance(record.get("provenance"), dict) or not record["provenance"]:
         _fail("Payload provenance is required.")
     _validate_architectures(build)
+    _validate_consumer_contract(record)
     return record
+
+
+def _validate_consumer_contract(record: dict[str, Any]) -> None:
+    consumer = record.get("consumer")
+    if consumer is None:
+        return
+    if not isinstance(consumer, dict) or set(consumer) != {"versionArg", "runtimeBaseArg"}:
+        _fail("Payload consumer must define versionArg and runtimeBaseArg.")
+    arguments = record["build"].get("args", {})
+    for field in ("versionArg", "runtimeBaseArg"):
+        if consumer[field] not in arguments:
+            _fail(f"Payload consumer.{field} must reference a build argument.")
 
 
 def _validate_architectures(build: dict[str, Any]) -> None:
@@ -103,6 +116,16 @@ def plan_payloads(root: Path, images: list[dict[str, Any]], runners: dict[str, s
         if name in names and names[name] != manifest:
             _fail(f"Payload name {name} is used by multiple manifests.")
         names[name] = manifest
+        consumer = record.get("consumer")
+        if consumer is not None:
+            arguments = record["build"]["args"]
+            expected_version = "v" + arguments[consumer["versionArg"]].removeprefix("v")
+            if image.get("version") != expected_version:
+                _fail(f"Payload {name} version does not match consumer {image['name']}.")
+            base_arg = consumer["runtimeBaseArg"]
+            image_base = build.get("args", {}).get(base_arg, {}).get("value")
+            if image_base != arguments[base_arg] or build.get("runtimeBaseArg") != base_arg:
+                _fail(f"Payload {name} runtime base does not match consumer {image['name']}.")
         for architecture in build["architectures"]:
             if architecture not in record["build"]["architectures"]:
                 _fail(f"Payload {name} does not support {architecture} for {image['name']}.")

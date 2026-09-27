@@ -169,6 +169,9 @@
         "containerfile": {
           "$ref": "#/$defs/relativePath"
         },
+        "payload": {
+          "$ref": "#/$defs/relativePath"
+        },
         "architectures": {
           "type": "array",
           "minItems": 1,

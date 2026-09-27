@@ -25,7 +25,7 @@ Every target has separate `-rootful` and `-rootless` images. Rootful/rootless de
 | 6.0 | `podman-6.0-{rootful,rootless}` | 6.0.2 | Fedora Minimal 44 | Upstream tag; no distro Podman patches | AMD64, ARM64 | Yes | Yes |
 | 6.1 | `podman-6.1-{rootful,rootless}` | 6.1.0 | Fedora Minimal 44 | Upstream tag; no distro Podman patches | AMD64, ARM64 | Yes | Yes |
 
-The multi-stage source recipe compiles Podman in a toolchain stage and copies only its output into the runtime stage. Podman, Netavark, and Aardvark DNS sources are pinned to verified commits. Fedora runtime packages are upgraded on every build; “no distro Podman patches” applies to the Podman source, not to its Fedora runtime dependencies.
+The upstream source recipes compile one private OCI payload per Podman minor line and architecture. Both root modes consume the same-run payload archive after its revision, manifest hash, and archive hash have been verified. The payload is never published. Podman, Netavark, and Aardvark DNS sources are pinned to verified commits in `images/podman/payloads/`. Each final image starts from its own digest-pinned Fedora Minimal 44 base, refreshes Fedora packages, then copies only the compiled output. “No distro Podman patches” applies to the Podman source, not the Fedora runtime dependencies.
 
 ### Distribution packages
 
@@ -136,7 +136,16 @@ Never share a storage volume between Podman versions, OS targets, or root modes.
 
 ## Build and test architecture
 
-The exact upstream images use the multi-stage `images/podman/shared/Containerfile`. Distro-package images use one recipe per OS release under `images/podman/platforms/`; a platform recipe is shared only by its rootful and rootless variants. Package names, account setup, OCI runtime selection, and cgroup behavior therefore cannot leak between Debian, Ubuntu, Fedora, UBI, openSUSE, Alpine, or Arch targets.
+The exact upstream images use `images/podman/shared/Payload.Containerfile` to compile the shared payload and `images/podman/shared/Containerfile` for each root-mode runtime. Distro-package images use one recipe per OS release under `images/podman/platforms/`; a platform recipe is shared only by its rootful and rootless variants. Package names, account setup, OCI runtime selection, and cgroup behavior therefore cannot leak between Debian, Ubuntu, Fedora, UBI, openSUSE, Alpine, or Arch targets.
+
+For one minor line on one architecture, plan for one source compile plus two Fedora runtime builds. The table is a capacity estimate, **not a measured benchmark**; no native Buildah build was run in this workspace. It helps size CI storage and timeouts until runner measurements replace it.
+
+| Work for one line and architecture | Approximate wall time | Approximate transient storage |
+| --- | ---: | ---: |
+| Source payload build and OCI archive | 15–40 minutes | 2–5 GiB builder layers; 50–250 MiB archive |
+| Rootful and rootless final images | 2–8 minutes each | 0.5–1.5 GiB per image during build |
+
+The old two-variant layout compiled the source twice per line and architecture; this layout compiles it once. The final Fedora package refresh still runs twice. To record representative values on an isolated runner, time the `scripts.build_payloads` invocation and both architecture builds, record archive bytes with `du -h`, and compare Buildah storage usage before and after the line. Use a dedicated Buildah store when measuring so unrelated cached layers do not inflate the result.
 
 Test one image locally on an AMD64 Linux host with Podman and `/dev/fuse`:
 

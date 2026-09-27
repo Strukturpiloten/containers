@@ -22,22 +22,13 @@ tests:
 build:
   context: .
   containerfile: images/podman/shared/Containerfile
+  payload: images/podman/payloads/podman-6.0.yaml
   architectures: [amd64, arm64]
   runtimeBaseArg: FEDORA_IMAGE
   args:
     FEDORA_IMAGE:
       value: registry.fedoraproject.org/fedora-minimal:44@sha256:eeac878460ca077301befe60ba603186b12af7ff45a58ee9aeafefbcf4c26f10
       type: external-image
-    PODMAN_COMMIT:
-      value: b28edb9ad70ce4317dc762ee9ce0a6d081d154e9
-      type: static
-    PODMAN_REPOSITORY:
-      value: https://github.com/podman-container-tools/podman.git
-      type: static
-    NETAVARK_VERSION: {value: 2.1.0, type: static}
-    NETAVARK_COMMIT: {value: 8e91ad1d947ed325327b638f0cb906bea1f7d0ab, type: static}
-    AARDVARK_VERSION: {value: 2.1.0, type: static}
-    AARDVARK_COMMIT: {value: cd7417681229219059939bdd9f0b3bd9ac9abb08, type: static}
     HOME_DIR: {value: /home/podman, type: static}
     RUN_AS_USER: {value: podman, type: static}
     RUNTIME_DIR: {value: /run/user/1000, type: static}
@@ -53,4 +44,5 @@ dependencies:
 inputs:
   - images/podman/podman-6.0-rootless/**
   - images/podman/shared/**
+  - images/podman/payloads/podman-6.0.yaml
   - shared/oci-labels.env

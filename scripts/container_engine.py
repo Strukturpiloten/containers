@@ -623,7 +623,9 @@ def _validate_inputs(metadata_file: str, image: JsonMap) -> None:
         _fail(f"{metadata_file} inputs must be non-empty strings.")
 
     build = _image_build(image)
-    required_paths = (metadata_file, str(build["containerfile"]))
+    required_paths = [metadata_file, str(build["containerfile"])]
+    if "payload" in build:
+        required_paths.append(str(build["payload"]))
     for required_path in required_paths:
         if not any(_input_matches(str(pattern), required_path) for pattern in image_inputs):
             _fail(f"{metadata_file} inputs do not include required build path {required_path}.")
@@ -1333,16 +1335,21 @@ def _source_timestamp(source_revision: str) -> tuple[int, str]:
     return timestamp, created
 
 
-def _local_podman_build_command(
+def _local_podman_build_command(  # noqa: PLR0913 - the local image, source identity and payload are independent inputs.
     image: JsonMap,
     *,
     architecture: str,
     local_image: str,
     source_revision: str,
     source_timestamp: int,
+    payload_image: str | None = None,
 ) -> list[str]:
     build = _image_build(image)
     build_args: list[str] = []
+    if build.get("payload"):
+        if payload_image is None:
+            _fail(f"Image {image['name']} requires a local payload build.")
+        build_args.extend(_build_arg("BUILD_PAYLOAD_IMAGE", payload_image))
     for arg_name, arg_definition in _json_map_items(_image_build_args(image)):
         definition = _json_map(arg_definition)
         if definition is not None:
@@ -1387,7 +1394,7 @@ def _local_podman_build_command(
         architecture,
         "--format",
         "oci",
-        "--pull=always",
+        "--pull=missing" if payload_image else "--pull=always",
         "--no-cache",
         "--timestamp",
         str(source_timestamp),
@@ -1398,6 +1405,47 @@ def _local_podman_build_command(
         str(containerfile_path),
         str(context_path),
     ]
+
+
+def _build_local_payload(image: JsonMap, architecture: str, source_timestamp: int, podman: str) -> str | None:
+    manifest = _image_build(image).get("payload")
+    if not manifest:
+        return None
+    try:
+        record = build_payloads.load_manifest(_repo_root(), str(manifest))
+    except build_payloads.PayloadError as error:
+        _fail(str(error))
+    payload_image = f"localhost/{record['name']}:local-{os.getpid()}-{architecture}"
+    payload_build = record["build"]
+    payload_arguments = {
+        **payload_build.get("args", {}),
+        **payload_build.get("architectureArgs", {}).get(architecture, {}),
+    }
+    command = [
+        podman,
+        "build",
+        "--arch",
+        architecture,
+        "--format",
+        "oci",
+        "--pull=always",
+        "--no-cache",
+        "--timestamp",
+        str(source_timestamp),
+    ]
+    for key, value in sorted(payload_arguments.items()):
+        command.extend(_build_arg(key, value))
+    command.extend(
+        [
+            "--tag",
+            payload_image,
+            "--file",
+            str(_repo_root() / payload_build["containerfile"]),
+            str(_repo_root() / payload_build["context"]),
+        ]
+    )
+    _run(command)
+    return payload_image
 
 
 def _command_test_podman_image(args: argparse.Namespace) -> None:
@@ -1419,7 +1467,9 @@ def _command_test_podman_image(args: argparse.Namespace) -> None:
     local_image = f"localhost/{args.image}:local-{os.getpid()}"
     podman = _tool("podman")
     evidence = args.evidence or f"{args.image}-{architecture}-runtime-evidence.json"
+    payload_image: str | None = None
     try:
+        payload_image = _build_local_payload(image, architecture, source_timestamp, podman)
         _write_stdout(f"Building {args.image} for local linux/{architecture} testing.")
         _run(
             _local_podman_build_command(
@@ -1428,6 +1478,7 @@ def _command_test_podman_image(args: argparse.Namespace) -> None:
                 local_image=local_image,
                 source_revision=source_revision,
                 source_timestamp=source_timestamp,
+                payload_image=payload_image,
             )
         )
         result = run_runtime(
@@ -1449,6 +1500,14 @@ def _command_test_podman_image(args: argparse.Namespace) -> None:
             _fail(f"Runtime checks failed for {args.image}: {result.get('error', 'see evidence')}")
         _write_stdout(f"Local runtime checks passed for {args.image} ({architecture}); evidence: {evidence}.")
     finally:
+        if payload_image is not None:
+            subprocess.run(  # noqa: S603 - remove only the task-owned local payload image.
+                [podman, "image", "rm", "--force", payload_image],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=30,
+            )
         subprocess.run(  # noqa: S603
             [podman, "image", "rm", "--force", local_image],
             check=False,

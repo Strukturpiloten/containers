@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import copy
+import json
 import re
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
 
+from scripts import build_payloads as payloads
 from scripts import container_engine as engine
 from scripts import runtime_tests
 
@@ -66,14 +69,100 @@ class PodmanImageTests(unittest.TestCase):
             with self.subTest(line=line):
                 rootful = self.source_images[f"podman-{line}-rootful"]
                 rootless = self.source_images[f"podman-{line}-rootless"]
+                manifest = f"images/podman/payloads/podman-{line}.yaml"
+                record = payloads.load_manifest(REPOSITORY_ROOT, manifest)
+                self.assertEqual(rootful["build"]["payload"], manifest)
+                self.assertEqual(rootless["build"]["payload"], manifest)
+                self.assertEqual(rootful["version"], rootless["version"])
                 self.assertRegex(rootful["version"], rf"^v{re.escape(line)}\.(0|[1-9]\d*)$")
-                self.assertEqual(rootless["version"], rootful["version"])
-                self.assertEqual(rootful["build"]["architectures"], ["amd64", "arm64"])
-                self.assertEqual(rootless["build"]["architectures"], ["amd64", "arm64"])
-                rootful_commit = rootful["build"]["args"]["PODMAN_COMMIT"]["value"]
-                rootless_commit = rootless["build"]["args"]["PODMAN_COMMIT"]["value"]
-                self.assertRegex(rootful_commit, r"^[a-f0-9]{40}$")
-                self.assertEqual(rootless_commit, rootful_commit)
+                self.assertEqual(rootful["version"], "v" + record["build"]["args"]["OCI_VERSION"])
+                self.assertEqual(record["build"]["architectures"], ["amd64", "arm64"])
+                self.assertRegex(record["build"]["args"]["PODMAN_COMMIT"], r"^[a-f0-9]{40}$")
+                for image in (rootful, rootless):
+                    self.assertEqual(image["build"]["architectures"], ["amd64", "arm64"])
+                    self.assertEqual(
+                        image["build"]["args"]["FEDORA_IMAGE"]["value"],
+                        record["build"]["args"]["FEDORA_IMAGE"],
+                    )
+                    self.assertIn(manifest, image["inputs"])
+                    self.assertNotIn("PODMAN_COMMIT", image["build"]["args"])
+                    self.assertNotIn("PODMAN_REPOSITORY", image["build"]["args"])
+
+    def test_source_payload_plan_deduplicates_variants_and_rejects_drift(self) -> None:
+        images = [self.source_images[f"podman-5.4-{mode}"] for mode in ROOT_MODES]
+        plan = payloads.plan_payloads(REPOSITORY_ROOT, images, {"amd64": "amd", "arm64": "arm"})
+        self.assertEqual(len(plan["include"]), 2)
+        for field, value, message in (
+            ("version", "v5.4.999", "version"),
+            ("base", "registry.fedoraproject.org/fedora-minimal:44@sha256:" + "0" * 64, "runtime base"),
+        ):
+            with self.subTest(field=field):
+                changed = copy.deepcopy(images[0])
+                if field == "version":
+                    changed["version"] = value
+                else:
+                    changed["build"]["args"]["FEDORA_IMAGE"]["value"] = value
+                with self.assertRaisesRegex(payloads.PayloadError, message):
+                    payloads.plan_payloads(REPOSITORY_ROOT, [changed], {"amd64": "amd", "arm64": "arm"})
+
+    def test_source_recipes_keep_runtime_refresh_and_private_payload_boundary(self) -> None:
+        payload_recipe = (REPOSITORY_ROOT / "images/podman/shared/Payload.Containerfile").read_text()
+        runtime_recipe = (REPOSITORY_ROOT / "images/podman/shared/Containerfile").read_text()
+        self.assertIn("FROM scratch AS payload", payload_recipe)
+        self.assertIn("COPY --from=podman-builder /out/ /out/", payload_recipe)
+        self.assertIn("FROM ${BUILD_PAYLOAD_IMAGE} AS compiled-podman", runtime_recipe)
+        self.assertEqual(runtime_recipe.count("FROM ${FEDORA_IMAGE}"), 1)
+        self.assertIn("dnf --assumeyes --refresh upgrade", runtime_recipe)
+        self.assertNotIn("make PREFIX=/usr podman", runtime_recipe)
+        self.assertIn("COPY --from=compiled-podman /out/ /", runtime_recipe)
+
+    def test_renovate_updates_payload_pins_and_consumer_versions_together(self) -> None:
+        config = json.loads((REPOSITORY_ROOT / ".github/renovate.json").read_text())
+        managers = {manager["description"]: manager for manager in config["customManagers"]}
+        source = managers["Track each canonical Podman minor release and immutable source commit"]
+        consumer = managers["Keep rootful and rootless Podman versions aligned with each canonical payload release"]
+        base = managers["Track Fedora base digest for canonical Podman payload builders"]
+        for line in EXPECTED_SOURCE_LINES:
+            with self.subTest(line=line):
+                manifest = REPOSITORY_ROOT / f"images/podman/payloads/podman-{line}.yaml"
+                source_text = manifest.read_text()
+                source_match = re.search(source["matchStrings"][0].replace("(?<", "(?P<"), source_text)
+                base_match = re.search(base["matchStrings"][0].replace("(?<", "(?P<"), source_text)
+                self.assertIsNotNone(source_match)
+                self.assertIsNotNone(base_match)
+                self.assertEqual(source_match.group("major") + "." + source_match.group("minor"), line)
+                for mode in ROOT_MODES:
+                    metadata = REPOSITORY_ROOT / f"images/podman/podman-{line}-{mode}/container.yaml"
+                    consumer_match = re.search(consumer["matchStrings"][0].replace("(?<", "(?P<"), metadata.read_text())
+                    self.assertIsNotNone(consumer_match)
+                    self.assertEqual(consumer_match.group("currentValue"), source_match.group("currentValue"))
+                self.assertTrue(
+                    any(
+                        rule.get("matchDepNames") == [f"podman-{line}"] and rule.get("groupName")
+                        for rule in config["packageRules"]
+                    )
+                )
+
+    def test_renovate_tracks_plain_payload_base_references(self) -> None:
+        config = json.loads((REPOSITORY_ROOT / ".github/renovate.json").read_text())
+        manager = next(
+            item
+            for item in config["customManagers"]
+            if item.get("description") == "Track digest-pinned base images in private payload manifests"
+        )
+        example = "    ALPINE_IMAGE: docker.io/library/alpine:3.24@sha256:" + "a" * 64
+        match = re.search(manager["matchStrings"][0].replace("(?<", "(?P<"), example)
+        self.assertIsNotNone(match)
+        self.assertEqual(match.group("depName"), "docker.io/library/alpine")
+        self.assertEqual(match.group("currentValue"), "3.24")
+        self.assertTrue(re.search(manager["managerFilePatterns"][0][1:-1], "images/docker/upstream/28/payload.yaml"))
+        self.assertTrue(
+            any(
+                rule.get("matchPackageNames") == ["docker.io/library/alpine"]
+                and rule.get("allowedVersions") == r"/^3\.24$/"
+                for rule in config["packageRules"]
+            )
+        )
 
     def test_every_distro_target_has_both_root_modes(self) -> None:
         expected_names = {
@@ -114,15 +203,19 @@ class PodmanImageTests(unittest.TestCase):
                     "/home/podman/.local/share/containers",
                 )
 
-    def test_podman_6_source_images_use_matching_version_2_network_helpers(self) -> None:
+    def test_podman_6_payloads_use_matching_version_2_network_helpers(self) -> None:
         for line in ("6.0", "6.1"):
-            for mode in ROOT_MODES:
-                with self.subTest(line=line, mode=mode):
-                    args = self.source_images[f"podman-{line}-{mode}"]["build"]["args"]
-                    self.assertRegex(args["NETAVARK_VERSION"]["value"], r"^2\.")
-                    self.assertRegex(args["AARDVARK_VERSION"]["value"], r"^2\.")
-                    self.assertRegex(args["NETAVARK_COMMIT"]["value"], r"^[a-f0-9]{40}$")
-                    self.assertRegex(args["AARDVARK_COMMIT"]["value"], r"^[a-f0-9]{40}$")
+            with self.subTest(line=line):
+                manifest = f"images/podman/payloads/podman-{line}.yaml"
+                args = payloads.load_manifest(REPOSITORY_ROOT, manifest)["build"]["args"]
+                self.assertRegex(args["NETAVARK_VERSION"], r"^2\.")
+                self.assertRegex(args["AARDVARK_VERSION"], r"^2\.")
+                self.assertRegex(args["NETAVARK_COMMIT"], r"^[a-f0-9]{40}$")
+                self.assertRegex(args["AARDVARK_COMMIT"], r"^[a-f0-9]{40}$")
+                for mode in ROOT_MODES:
+                    image_args = self.source_images[f"podman-{line}-{mode}"]["build"]["args"]
+                    self.assertNotIn("NETAVARK_VERSION", image_args)
+                    self.assertNotIn("AARDVARK_COMMIT", image_args)
 
     def test_distro_platforms_own_their_recipe_and_runtime_configuration(self) -> None:
         platform_root = REPOSITORY_ROOT / "images/podman/platforms"
@@ -222,8 +315,10 @@ class PodmanImageTests(unittest.TestCase):
             local_image="localhost/test:source",
             source_revision="a" * 40,
             source_timestamp=1_700_000_000,
+            payload_image="localhost/podman-5.4:local",
         )
 
+        self.assertIn("BUILD_PAYLOAD_IMAGE=localhost/podman-5.4:local", command)
         self.assertIn("OCI_VERSION=5.4.2", command)
         self.assertNotIn("OCI_VERSION=v5.4.2", command)
 
