@@ -9,6 +9,1552 @@
         "reason": "No successful build result supplied.",
         "status": "unknown"
       },
+      "image": "ghcr.io/strukturpiloten/docker-20.10-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "legacy",
+        "supportBoundary": "Pinned static Engine and bundled dependencies are not patched by Alpine OS rebuilds; isolated compatibility fixture only."
+      },
+      "name": "docker-20.10-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v20.10.24"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-20.10-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "legacy",
+        "supportBoundary": "Pinned static Engine and bundled dependencies are not patched by Alpine OS rebuilds; isolated compatibility fixture only."
+      },
+      "name": "docker-20.10-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v20.10.24"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-23-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "legacy",
+        "supportBoundary": "Pinned static Engine and bundled dependencies are not patched by Alpine OS rebuilds; isolated compatibility fixture only."
+      },
+      "name": "docker-23-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v23.0.6"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-23-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "legacy",
+        "supportBoundary": "Pinned static Engine and bundled dependencies are not patched by Alpine OS rebuilds; isolated compatibility fixture only."
+      },
+      "name": "docker-23-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v23.0.6"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-24-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "legacy",
+        "supportBoundary": "Pinned static Engine and bundled dependencies are not patched by Alpine OS rebuilds; isolated compatibility fixture only."
+      },
+      "name": "docker-24-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v24.0.9"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-24-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "legacy",
+        "supportBoundary": "Pinned static Engine and bundled dependencies are not patched by Alpine OS rebuilds; isolated compatibility fixture only."
+      },
+      "name": "docker-24-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v24.0.9"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-25-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "legacy",
+        "supportBoundary": "Pinned static Engine and bundled dependencies are not patched by Alpine OS rebuilds; isolated compatibility fixture only."
+      },
+      "name": "docker-25-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v25.0.5"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-25-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "legacy",
+        "supportBoundary": "Pinned static Engine and bundled dependencies are not patched by Alpine OS rebuilds; isolated compatibility fixture only."
+      },
+      "name": "docker-25-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v25.0.5"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-26-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "legacy",
+        "supportBoundary": "Pinned static Engine and bundled dependencies are not patched by Alpine OS rebuilds; isolated compatibility fixture only."
+      },
+      "name": "docker-26-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v26.1.4"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-26-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "legacy",
+        "supportBoundary": "Pinned static Engine and bundled dependencies are not patched by Alpine OS rebuilds; isolated compatibility fixture only."
+      },
+      "name": "docker-26-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v26.1.4"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-27-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "legacy",
+        "supportBoundary": "Pinned static Engine and bundled dependencies are not patched by Alpine OS rebuilds; isolated compatibility fixture only."
+      },
+      "name": "docker-27-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v27.5.1"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-27-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "legacy",
+        "supportBoundary": "Pinned static Engine and bundled dependencies are not patched by Alpine OS rebuilds; isolated compatibility fixture only."
+      },
+      "name": "docker-27-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v27.5.1"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-28-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "legacy",
+        "supportBoundary": "Pinned static Engine and bundled dependencies are not patched by Alpine OS rebuilds; isolated compatibility fixture only."
+      },
+      "name": "docker-28-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v28.5.2"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-28-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "legacy",
+        "supportBoundary": "Pinned static Engine and bundled dependencies are not patched by Alpine OS rebuilds; isolated compatibility fixture only."
+      },
+      "name": "docker-28-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v28.5.2"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-29-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "maintained",
+        "supportBoundary": "Selected current Engine remains subject to upstream and security review."
+      },
+      "name": "docker-29-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v29.8.1"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-29-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "maintained",
+        "supportBoundary": "Selected current Engine remains subject to upstream and security review."
+      },
+      "name": "docker-29-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v29.8.1"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-alpine-3.24-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "maintained",
+        "supportBoundary": "Vendor package revisions can advance with repository updates; image shares runner kernel and host security policy."
+      },
+      "name": "docker-alpine-3.24-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-alpine-3.24-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "maintained",
+        "supportBoundary": "Vendor package revisions can advance with repository updates; image shares runner kernel and host security policy."
+      },
+      "name": "docker-alpine-3.24-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-arch-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "maintained",
+        "supportBoundary": "Vendor package revisions can advance with repository updates; image shares runner kernel and host security policy."
+      },
+      "name": "docker-arch-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-arch-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "maintained",
+        "supportBoundary": "Vendor package revisions can advance with repository updates; image shares runner kernel and host security policy."
+      },
+      "name": "docker-arch-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-debian-11-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "legacy",
+        "supportBoundary": "Debian 11 is past LTS; signed archived main currently installs an older historical Docker revision. Isolated compatibility fixture only."
+      },
+      "name": "docker-debian-11-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-debian-11-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "legacy",
+        "supportBoundary": "Debian 11 is past LTS; signed archived main currently installs an older historical Docker revision. Isolated compatibility fixture only."
+      },
+      "name": "docker-debian-11-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-debian-12-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "maintained",
+        "supportBoundary": "Vendor package revisions can advance with repository updates; image shares runner kernel and host security policy."
+      },
+      "name": "docker-debian-12-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-debian-12-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "maintained",
+        "supportBoundary": "Vendor package revisions can advance with repository updates; image shares runner kernel and host security policy."
+      },
+      "name": "docker-debian-12-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-debian-13-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "maintained",
+        "supportBoundary": "Vendor package revisions can advance with repository updates; image shares runner kernel and host security policy."
+      },
+      "name": "docker-debian-13-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-debian-13-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "maintained",
+        "supportBoundary": "Vendor package revisions can advance with repository updates; image shares runner kernel and host security policy."
+      },
+      "name": "docker-debian-13-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-fedora-43-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "maintained",
+        "supportBoundary": "Vendor package revisions can advance with repository updates; image shares runner kernel and host security policy."
+      },
+      "name": "docker-fedora-43-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-fedora-43-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "maintained",
+        "supportBoundary": "Vendor package revisions can advance with repository updates; image shares runner kernel and host security policy."
+      },
+      "name": "docker-fedora-43-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-fedora-44-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "maintained",
+        "supportBoundary": "Vendor package revisions can advance with repository updates; image shares runner kernel and host security policy."
+      },
+      "name": "docker-fedora-44-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-fedora-44-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "maintained",
+        "supportBoundary": "Vendor package revisions can advance with repository updates; image shares runner kernel and host security policy."
+      },
+      "name": "docker-fedora-44-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-opensuse-leap-16.0-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "maintained",
+        "supportBoundary": "Vendor package revisions can advance with repository updates; image shares runner kernel and host security policy."
+      },
+      "name": "docker-opensuse-leap-16.0-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-opensuse-leap-16.0-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "maintained",
+        "supportBoundary": "Vendor package revisions can advance with repository updates; image shares runner kernel and host security policy."
+      },
+      "name": "docker-opensuse-leap-16.0-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-opensuse-tumbleweed-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "maintained",
+        "supportBoundary": "Vendor package revisions can advance with repository updates; image shares runner kernel and host security policy."
+      },
+      "name": "docker-opensuse-tumbleweed-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-opensuse-tumbleweed-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "maintained",
+        "supportBoundary": "Vendor package revisions can advance with repository updates; image shares runner kernel and host security policy."
+      },
+      "name": "docker-opensuse-tumbleweed-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-ubuntu-22.04-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "maintained",
+        "supportBoundary": "Vendor package revisions can advance with repository updates; image shares runner kernel and host security policy."
+      },
+      "name": "docker-ubuntu-22.04-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-ubuntu-22.04-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "maintained",
+        "supportBoundary": "Vendor package revisions can advance with repository updates; image shares runner kernel and host security policy."
+      },
+      "name": "docker-ubuntu-22.04-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-ubuntu-24.04-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "maintained",
+        "supportBoundary": "Vendor package revisions can advance with repository updates; image shares runner kernel and host security policy."
+      },
+      "name": "docker-ubuntu-24.04-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-ubuntu-24.04-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "maintained",
+        "supportBoundary": "Vendor package revisions can advance with repository updates; image shares runner kernel and host security policy."
+      },
+      "name": "docker-ubuntu-24.04-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-ubuntu-26.04-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "maintained",
+        "supportBoundary": "Vendor package revisions can advance with repository updates; image shares runner kernel and host security policy."
+      },
+      "name": "docker-ubuntu-26.04-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/docker-ubuntu-26.04-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "maintained",
+        "supportBoundary": "Vendor package revisions can advance with repository updates; image shares runner kernel and host security policy."
+      },
+      "name": "docker-ubuntu-26.04-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
       "image": "ghcr.io/strukturpiloten/nextcloud-notifypush",
       "lifecycle": {
         "admission": "production",
