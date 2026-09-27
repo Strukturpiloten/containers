@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=../../../container.schema.json
 schemaVersion: 1
 name: podman-5.8-rootful
-version: v5.8.6
+version: v5.8.7
 image: ghcr.io/strukturpiloten/podman-5.8-rootful
 title: Podman 5.8 rootful
 description: Podman 5.8 rootful nested-container image built from source on Fedora
@@ -21,7 +21,7 @@ build:
       value: registry.fedoraproject.org/fedora-minimal:44@sha256:b995d2ef52fdcb369e726b51ed58b4a2e80c22aaad4c75b966c5df310e496125
       type: external-image
     PODMAN_COMMIT:
-      value: a859fc66702c23e869c282c63e92d9b6cd264229
+      value: c593b672bf3db1173aebea565ebf1a724ea196dc
       type: static
     PODMAN_REPOSITORY:
       value: https://github.com/podman-container-tools/podman.git
