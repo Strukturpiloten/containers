@@ -74,6 +74,20 @@ case "$distro" in
             zypper --non-interactive install --no-recommends \
                 fuse-overlayfs rootlesskit slirp4netns
         fi
+        if [ "$distro" = opensuse-tumbleweed ]; then
+            zypper --non-interactive install --no-recommends nftables
+            # Tumbleweed ships xtables-nft, but registers only the legacy backend by default.
+            for program in iptables iptables-restore iptables-save ip6tables ip6tables-restore ip6tables-save; do
+                printf '%s\n' \
+                    'binary=/usr/sbin/xtables-nft-multi' \
+                    'group=iptables, ip6tables, ip6tables-restore, ip6tables-save, iptables-restore, iptables-save' \
+                    'options=KeepArgv0' \
+                    > "/usr/share/libalternatives/$program/2.conf"
+            done
+            alts -s -n iptables -p 2
+            iptables -V | grep -F '(nf_tables)'
+            nft --version
+        fi
         rpm --query --info "$engine_package" > "$provenance/vendor-source"
         rpm --query --queryformat '%{VERSION}-%{RELEASE}.%{ARCH}\n' \
             "$engine_package" > "$provenance/package-version"
