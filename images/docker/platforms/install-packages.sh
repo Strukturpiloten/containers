@@ -151,5 +151,9 @@ printf '%s:100000:65536\n' "$user_name" > /etc/subuid
 printf '%s:100000:65536\n' "$user_name" > /etc/subgid
 mkdir -p /var/lib/docker /run/docker /run/user/1000 /home/docker/.local/share/docker
 chown -R 1000:1000 /run/user/1000 /home/docker
+if [ "$mode" = rootless ]; then
+    # Packaged dockerd creates its plugin manager beneath /run/docker even with a custom exec-root.
+    chown -R 1000:1000 /run/docker
+fi
 chmod 0700 /run/user/1000
 rm -f /etc/machine-id /var/lib/systemd/random-seed
