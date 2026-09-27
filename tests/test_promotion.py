@@ -134,7 +134,7 @@ class PublicationScenarios(unittest.TestCase):
         )
         raw_index = json.dumps({"manifests": [{"platform": {"os": "linux", "architecture": "amd64"}, "digest": NEW}]})
         canonical = engine.canonical_build_tag(sha=REVISION, run_id="100", run_attempt="1")
-        image = {"image": IMAGE, "version": "v1.0.0"}
+        image = {"image": IMAGE, "version": "v1.0.0", "build": {"args": {}}}
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             archives = root / "archives"
