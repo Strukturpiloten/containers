@@ -27,7 +27,7 @@ build:
   runtimeBaseArg: BASE_IMAGE
   args:
     BASE_IMAGE:
-      value: docker.io/php:8.5.11-fpm-alpine3.24@sha256:94ca6b9ecaf5e80e45759694502e55278f0b8e3652455275f4e12dd6f13ecf64
+      value: docker.io/php:8.5.11-fpm-alpine3.24@sha256:fa01fb1645cd0fc566a5f146b099adace33b906571f972f71f2182a7c12d1cd7
       type: external-image
     COMPOSER_VERSION:
       value: 2.10.3
