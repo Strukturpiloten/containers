@@ -56,6 +56,8 @@ jobs:
       contents: read
     outputs:
       has_builds: ${{ steps.outputs.outputs.has_builds }}
+      has_payloads: ${{ steps.outputs.outputs.has_payloads }}
+      payload_matrix: ${{ steps.outputs.outputs.payload_matrix }}
       smoke_build_matrix: ${{ steps.outputs.outputs.smoke_build_matrix }}
     steps:
       - name: Check out repository
@@ -109,10 +111,24 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  payloads:
+    name: Payload ${{ matrix.name }} ${{ matrix.arch }}
+    needs: plan
+    if: needs.plan.outputs.has_payloads == 'true'
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.plan.outputs.payload_matrix) }}
+    uses: ./.github/workflows/build-one-payload.yml
+    with:
+      entry: ${{ toJSON(matrix) }}
+
   smoke-build:
     name: Smoke build ${{ matrix.name }} ${{ matrix.arch }}
-    needs: plan
-    if: needs.plan.outputs.has_builds == 'true'
+    needs: [plan, payloads]
+    if: always() && !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.has_builds == 'true'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     permissions:
@@ -142,6 +158,7 @@ jobs:
       - validate
       - plan
       - smoke-build
+      - payloads
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -151,6 +168,8 @@ jobs:
         shell: bash
         env:
           HAS_BUILDS: ${{ needs.plan.outputs.has_builds }}
+          HAS_PAYLOADS: ${{ needs.plan.outputs.has_payloads }}
+          PAYLOAD_RESULT: ${{ needs.payloads.result }}
           PLAN_RESULT: ${{ needs.plan.result }}
           SMOKE_RESULT: ${{ needs.smoke-build.result }}
           VALIDATE_RESULT: ${{ needs.validate.result }}
@@ -167,6 +186,10 @@ jobs:
           fi
           if [ "${HAS_BUILDS}" != "true" ] && [ "${SMOKE_RESULT}" != "skipped" ]; then
             echo "Unexpected smoke-build result: ${SMOKE_RESULT}." >&2
+            exit 1
+          fi
+          if [ "${HAS_PAYLOADS}" = "true" ] && [ "${PAYLOAD_RESULT}" != "success" ]; then
+            echo "A required shared payload did not build successfully." >&2
             exit 1
           fi
           echo "Required repository checks passed."

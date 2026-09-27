@@ -44,6 +44,13 @@ runs:
         path: ${{ runner.temp }}/dependency-results
         merge-multiple: true
 
+    - name: Download same-run payload
+      if: fromJSON(inputs.entry).payloadName != ''
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      with:
+        name: payload-${{ fromJSON(inputs.entry).payloadName }}-${{ fromJSON(inputs.entry).arch }}
+        path: ${{ runner.temp }}/payload
+
     - name: Build image archive
       id: build
       shell: bash
@@ -61,6 +68,7 @@ runs:
           --plan "${RUNNER_TEMP}/container-build-plan/build-plan.json" \
           --entry-json '${{ inputs.entry }}' \
           --dependency-results-dir "${RUNNER_TEMP}/dependency-results" \
+          --payload-dir "${RUNNER_TEMP}/payload" \
           "${fallback_args[@]}" \
           --output-dir "${RUNNER_TEMP}/oci-archives"
 

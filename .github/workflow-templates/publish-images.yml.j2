@@ -13,6 +13,7 @@ on:
       - ".github/workflow-templates/**"
       - ".github/workflows/publish-images.yml"
       - ".github/workflows/publish-one-image.yml"
+      - ".github/workflows/build-one-payload.yml"
       - "container.schema.json"
       - "images/**"
       - "pyproject.toml"
@@ -58,6 +59,8 @@ jobs:
       contents: read
     outputs:
       has_builds: ${{ steps.outputs.outputs.has_builds }}
+      has_payloads: ${{ steps.outputs.outputs.has_payloads }}
+      payload_matrix: ${{ steps.outputs.outputs.payload_matrix }}
 [% for stage in stages %]
       stage_[[ stage ]]_has_builds: ${{ steps.outputs.outputs.stage_[[ stage ]]_has_builds }}
       stage_[[ stage ]]_build_matrix: ${{ steps.outputs.outputs.stage_[[ stage ]]_build_matrix }}
@@ -158,11 +161,25 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  payloads:
+    name: Payload ${{ matrix.name }} ${{ matrix.arch }}
+    needs: plan
+    if: needs.plan.outputs.has_payloads == 'true'
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.plan.outputs.payload_matrix) }}
+    uses: ./.github/workflows/build-one-payload.yml
+    with:
+      entry: ${{ toJSON(matrix) }}
+
 [% for stage in stages %]
   publish-stage-[[ stage ]]:
     name: Publish ${{ matrix.name }}
 [% if stage == 0 %]
-    needs: plan
+    needs: [plan, payloads]
 [% else %]
     needs:
       - plan

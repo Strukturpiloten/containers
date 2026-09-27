@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, NoReturn, cast
 import yaml
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
+from scripts import build_payloads
 from scripts.metadata_schema import MetadataSchemaError, validate_metadata_schema
 from scripts.policy import (
     canonical_build_tag,
@@ -55,6 +56,7 @@ GLOBAL_IMAGE_INPUTS = (
     ".github/actions/publish-image/**",
     "scripts/container_engine.py",
     "scripts/policy.py",
+    "scripts/build_payloads.py",
 )
 SHA256_DIGEST_LENGTH = 71
 GIT_SHA_LENGTH = 40
@@ -680,6 +682,10 @@ def _validate_images(images: list[JsonMap]) -> None:
         _validate_image(image, image_names)
 
     _topological_levels(images)
+    try:
+        build_payloads.plan_payloads(_repo_root(), images, RUNNERS)
+    except build_payloads.PayloadError as error:
+        _fail(str(error))
 
 
 def _dependency_names(image: JsonMap) -> list[str]:
@@ -871,10 +877,19 @@ def _normalize_image(image: JsonMap, level: int) -> JsonMap:
             "architectures": build["architectures"],
             "runtimeBaseArg": build["runtimeBaseArg"],
             "args": build.get("args", {}),
+            **({"payload": build["payload"]} if "payload" in build else {}),
         },
         "tests": image.get("tests", {}),
         "dependencies": image.get("dependencies", {"internal": [], "external": []}),
     }
+
+
+def _matrix_payload_fields(image: JsonMap) -> JsonMap:
+    manifest = _image_build(image).get("payload")
+    if manifest is None:
+        return {}
+    record = build_payloads.load_manifest(_repo_root(), str(manifest))
+    return {"payloadName": record["name"]}
 
 
 def _matrix_image_test_fields(image: JsonMap) -> JsonMap:
@@ -900,6 +915,7 @@ def _stage_build_matrix(selected_images: list[JsonMap], stage: int) -> JsonMap:
                 "runner": RUNNERS[architecture],
                 "stage": stage,
                 **_matrix_image_test_fields(image),
+                **_matrix_payload_fields(image),
             }
             for architecture in _image_architectures(image)
         )
@@ -929,6 +945,7 @@ def _smoke_build_matrix(selected_images: list[JsonMap]) -> JsonMap:
                 "runner": RUNNERS[architecture],
                 "stage": image["level"],
                 **_matrix_image_test_fields(image),
+                **_matrix_payload_fields(image),
             }
             for architecture in _image_architectures(image)
         )
@@ -974,6 +991,7 @@ def _build_plan(images: list[JsonMap], options: PlanOptions) -> JsonMap:
         "images": selected_images,
         "smokeBuildMatrix": _smoke_build_matrix(selected_images),
         "stageMatrices": stage_matrices,
+        "payloadMatrix": build_payloads.plan_payloads(_repo_root(), selected_images, RUNNERS),
         "selection": {
             "scope": options.scope,
             "target": options.target or "",
@@ -987,7 +1005,10 @@ def _build_plan(images: list[JsonMap], options: PlanOptions) -> JsonMap:
 
 
 def _github_outputs(plan: JsonMap) -> str:
+    payload_matrix = plan.get("payloadMatrix", {"include": []})
     outputs = [
+        f"has_payloads={'true' if payload_matrix['include'] else 'false'}",
+        f"payload_matrix={json.dumps(payload_matrix, separators=(',', ':'))}",
         f"has_builds={'true' if plan['hasImages'] else 'false'}",
         f"smoke_build_matrix={json.dumps(plan['smokeBuildMatrix'], separators=(',', ':'))}",
     ]
@@ -1513,6 +1534,17 @@ def _command_build_arch_image(args: argparse.Namespace) -> None:
         dependency_results_dir,
         use_published_dependency_fallback=args.use_published_dependency_fallback,
     )
+    payload_manifest = _image_build(image).get("payload")
+    if payload_manifest:
+        if not args.payload_dir:
+            _fail(f"Image {image_name} requires same-run payload artifacts.")
+        try:
+            payload_image = build_payloads.import_payload(
+                _repo_root(), str(payload_manifest), architecture, source_revision, Path(args.payload_dir)
+            )
+        except build_payloads.PayloadError as error:
+            _fail(str(error))
+        build_args.extend(_build_arg("DOCKER_PAYLOAD_IMAGE", payload_image))
     oci_labels = _oci_labels()
 
     command = [
@@ -1523,7 +1555,7 @@ def _command_build_arch_image(args: argparse.Namespace) -> None:
         architecture,
         "--format",
         "oci",
-        "--pull-always",
+        "--pull-always=false" if payload_manifest else "--pull-always",
         "--timestamp",
         str(source_timestamp),
     ]
@@ -2152,6 +2184,7 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     build_arch_parser.add_argument("--entry-json", required=True)
     build_arch_parser.add_argument("--output-dir", required=True)
     build_arch_parser.add_argument("--dependency-results-dir")
+    build_arch_parser.add_argument("--payload-dir")
     build_arch_parser.add_argument("--use-published-dependency-fallback", action="store_true")
     build_arch_parser.set_defaults(func=_command_build_arch_image)
 
