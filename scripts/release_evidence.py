@@ -321,35 +321,45 @@ def _same_evidence_payload(existing: bytes, expected: bytes) -> bool:
     return old == new
 
 
-def upload(  # noqa: C901, PLR0912
+def _release_assets(repository: str, release_id: int, token: str) -> list[dict[str, Any]]:
+    """Read every page so hidden extra assets cannot pass publication checks."""
+    assets_url = f"https://api.github.com/repos/{repository}/releases/{release_id}/assets"
+    records: list[dict[str, Any]] = []
+    page = 1
+    while True:
+        assets = json.loads(_github_request(f"{assets_url}?per_page={ASSET_PAGE_SIZE}&page={page}", token))
+        if not isinstance(assets, list) or any(not isinstance(asset, dict) for asset in assets):
+            msg = "GitHub returned invalid release assets."
+            raise ReleaseEvidenceError(msg)
+        records.extend(assets)
+        if len(assets) < ASSET_PAGE_SIZE:
+            return records
+        page += 1
+
+
+def upload(  # noqa: C901
     evidence: dict[str, Any], payload: bytes, *, repository: str, token: str, release: dict[str, Any]
 ) -> bytes:
     """Upload new evidence or return an existing substantively identical asset."""
     name = asset_name(evidence)
-    assets_url = f"https://api.github.com/repos/{repository}/releases/{release['id']}/assets"
-    page = 1
-    while True:
-        assets = json.loads(_github_request(f"{assets_url}?per_page={ASSET_PAGE_SIZE}&page={page}", token))
-        if not isinstance(assets, list):
-            msg = "GitHub returned invalid release assets."
+    assets = _release_assets(repository, release["id"], token)
+    if assets:
+        if len(assets) != 1 or assets[0].get("name") != name:
+            msg = f"Evidence release {release.get('tag_name')} has unexpected assets."
             raise ReleaseEvidenceError(msg)
-        for asset in assets:
-            if isinstance(asset, dict) and asset.get("name") == name:
-                expected = f"sha256:{hashlib.sha256(payload).hexdigest()}"
-                if asset.get("digest") == expected:
-                    return payload
-                url = asset.get("url")
-                if not isinstance(url, str):
-                    msg = f"Existing release asset {name} has no download URL."
-                    raise ReleaseEvidenceError(msg)
-                existing = _github_request(url, token, accept="application/octet-stream")
-                if existing != payload and not _same_evidence_payload(existing, payload):
-                    msg = f"Existing release asset {name} has different contents."
-                    raise ReleaseEvidenceError(msg)
-                return existing
-        if len(assets) < ASSET_PAGE_SIZE:
-            break
-        page += 1
+        asset = assets[0]
+        expected = f"sha256:{hashlib.sha256(payload).hexdigest()}"
+        if asset.get("digest") == expected and asset.get("size") == len(payload):
+            return payload
+        url = asset.get("url")
+        if not isinstance(url, str):
+            msg = f"Existing release asset {name} has no download URL."
+            raise ReleaseEvidenceError(msg)
+        existing = _github_request(url, token, accept="application/octet-stream")
+        if existing != payload and not _same_evidence_payload(existing, payload):
+            msg = f"Existing release asset {name} has different contents."
+            raise ReleaseEvidenceError(msg)
+        return existing
     if not release.get("draft"):
         msg = f"Published evidence release {release.get('tag_name')} has no matching asset."
         raise ReleaseEvidenceError(msg)
@@ -372,20 +382,75 @@ def upload(  # noqa: C901, PLR0912
         ):
             msg = f"GitHub uploaded evidence asset {name} with different contents."
             raise ReleaseEvidenceError(msg)
+    uploaded = _release_assets(repository, release["id"], token)
+    if len(uploaded) != 1 or uploaded[0].get("name") != name:
+        msg = f"Evidence release {release.get('tag_name')} has unexpected assets after upload."
+        raise ReleaseEvidenceError(msg)
     return payload
 
 
-def _evidence_release(repository: str, tag: str, token: str) -> dict[str, Any] | None:
+def _evidence_release(  # noqa: C901
+    repository: str, tag: str, token: str
+) -> dict[str, Any] | None:
+    """Resolve drafts by GraphQL tag lookup, then read their full REST metadata."""
     encoded = urllib.parse.quote(tag, safe="")
     try:
         raw = _github_request(f"https://api.github.com/repos/{repository}/releases/tags/{encoded}", token)
     except ReleaseEvidenceError as error:
-        if error.status_code == http.HTTPStatus.NOT_FOUND:
-            return None
-        raise
-    release = json.loads(raw)
-    if not isinstance(release, dict):
-        msg = f"GitHub returned an invalid evidence release for {tag}."
+        if error.status_code != http.HTTPStatus.NOT_FOUND:
+            raise
+    else:
+        published = json.loads(raw)
+        if (
+            not isinstance(published, dict)
+            or not isinstance(published.get("id"), int)
+            or published.get("tag_name") != tag
+            or published.get("draft") is not False
+        ):
+            msg = f"GitHub returned an invalid published evidence release for {tag}."
+            raise ReleaseEvidenceError(msg)
+        return published
+    owner, separator, name = repository.partition("/")
+    if not separator or not owner or not name or "/" in name:
+        msg = f"Invalid GitHub repository identity {repository}."
+        raise ReleaseEvidenceError(msg)
+    query = (
+        "query($owner:String!,$name:String!,$tag:String!){"
+        "repository(owner:$owner,name:$name){"
+        "release(tagName:$tag){databaseId isDraft tagName name}}}"
+    )
+    body = json.dumps({"query": query, "variables": {"owner": owner, "name": name, "tag": tag}}).encode()
+    result = json.loads(_github_request("https://api.github.com/graphql", token, data=body))
+    if not isinstance(result, dict) or result.get("errors") or not isinstance(result.get("data"), dict):
+        msg = f"GitHub GraphQL evidence release lookup failed for {tag}."
+        raise ReleaseEvidenceError(msg)
+    repository_data = result["data"].get("repository")
+    if not isinstance(repository_data, dict) or "release" not in repository_data:
+        msg = f"GitHub GraphQL returned an invalid repository for {tag}."
+        raise ReleaseEvidenceError(msg)
+    found = repository_data["release"]
+    if found is None:
+        return None
+    if (
+        not isinstance(found, dict)
+        or not isinstance(found.get("databaseId"), int)
+        or found.get("tagName") != tag
+        or found.get("isDraft") is not True
+        or found.get("name") != tag
+    ):
+        msg = f"GitHub GraphQL returned an invalid evidence release for {tag}."
+        raise ReleaseEvidenceError(msg)
+    release = json.loads(
+        _github_request(f"https://api.github.com/repos/{repository}/releases/{found['databaseId']}", token)
+    )
+    if (
+        not isinstance(release, dict)
+        or release.get("id") != found["databaseId"]
+        or release.get("tag_name") != tag
+        or release.get("draft") != found["isDraft"]
+        or release.get("name") != tag
+    ):
+        msg = f"GitHub REST release identity does not match GraphQL for {tag}."
         raise ReleaseEvidenceError(msg)
     return release
 
@@ -407,17 +472,28 @@ def _validate_evidence_release(release: dict[str, Any], evidence: dict[str, Any]
 
 
 def _verify_evidence_tag(evidence: dict[str, Any], *, repository: str, token: str, allow_missing: bool = False) -> None:
-    """Confirm the published Git tag resolves to the build source, not a moved ref."""
+    """Confirm the Git tag points at the build source, or is absent for a draft."""
     tag = evidence["evidenceReleaseTag"]
     encoded = urllib.parse.quote(tag, safe="")
     try:
-        raw = _github_request(f"https://api.github.com/repos/{repository}/commits/{encoded}", token)
+        raw = _github_request(f"https://api.github.com/repos/{repository}/git/ref/tags/{encoded}", token)
     except ReleaseEvidenceError as error:
         if allow_missing and error.status_code == http.HTTPStatus.NOT_FOUND:
             return
         raise
-    commit = json.loads(raw)
-    if not isinstance(commit, dict) or commit.get("sha") != evidence["evidenceReleaseRevision"]:
+    ref = json.loads(raw)
+    target = ref.get("object") if isinstance(ref, dict) else None
+    if not isinstance(target, dict) or ref.get("ref") != f"refs/tags/{tag}":
+        msg = f"GitHub returned an invalid evidence Git tag {tag}."
+        raise ReleaseEvidenceError(msg)
+    if target.get("type") == "commit":
+        revision = target.get("sha")
+    elif target.get("type") == "tag":
+        commit = json.loads(_github_request(f"https://api.github.com/repos/{repository}/commits/{encoded}", token))
+        revision = commit.get("sha") if isinstance(commit, dict) else None
+    else:
+        revision = None
+    if revision != evidence["evidenceReleaseRevision"]:
         msg = f"Evidence release tag {tag} does not resolve to the build source revision."
         raise ReleaseEvidenceError(msg)
 
@@ -457,7 +533,11 @@ def _create_evidence_release(evidence: dict[str, Any], *, repository: str, token
     if not release["draft"]:
         msg = f"GitHub did not create evidence release {tag} as a draft."
         raise ReleaseEvidenceError(msg)
-    return release
+    unique = _evidence_release(repository, tag, token)
+    if unique is None or unique.get("id") != release["id"]:
+        msg = f"Created evidence release {tag} could not be uniquely recovered."
+        raise ReleaseEvidenceError(msg)
+    return unique
 
 
 def publish(evidence: dict[str, Any], payload: bytes, *, repository: str, token: str) -> bytes:
@@ -471,6 +551,10 @@ def publish(evidence: dict[str, Any], payload: bytes, *, repository: str, token:
         _verify_evidence_tag(evidence, repository=repository, token=token, allow_missing=True)
     canonical = upload(evidence, payload, repository=repository, token=token, release=release)
     if release["draft"]:
+        unique = _evidence_release(repository, tag, token)
+        if unique is None or unique.get("id") != release["id"] or not unique.get("draft"):
+            msg = f"Evidence release {tag} changed before publication."
+            raise ReleaseEvidenceError(msg)
         body = json.dumps({"draft": False, "make_latest": "false"}).encode()
         _github_request(
             f"https://api.github.com/repos/{repository}/releases/{release['id']}",
@@ -483,8 +567,8 @@ def publish(evidence: dict[str, Any], payload: bytes, *, repository: str, token:
             msg = f"Published evidence release {tag} disappeared."
             raise ReleaseEvidenceError(msg)
         _validate_evidence_release(published, evidence)
-        if published["draft"]:
-            msg = f"Evidence release {tag} remained a draft after publication."
+        if published["draft"] or published.get("id") != release["id"]:
+            msg = f"Evidence release {tag} did not publish the selected draft."
             raise ReleaseEvidenceError(msg)
     _verify_evidence_tag(evidence, repository=repository, token=token)
     return canonical
