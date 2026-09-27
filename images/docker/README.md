@@ -44,3 +44,26 @@ The native contract starts each daemon, checks the actual Engine and CLI/API ran
 ```
 
 The admission pilot on an AMD64 Linux host ran Docker 20.10.24 and 29.8.1 in both daemon modes on Alpine 3.24. All four started, reported the expected API version and root mode, and ran a real nested Alpine container. The full native contract passed for both 20.10 modes. CI must record full contract evidence for 29 and the six middle lines before admission. Observed final pilot image sizes were about 211 MiB (20.10 rootful), 271 MiB (20.10 rootless), 242 MiB (29 rootful), and 275 MiB (29 rootless) before final image-size optimization. Pilot payload builds took roughly 16–18 seconds; final runtime builds took roughly 10–18 seconds each on this host. These are observations, not time budgets or reproducibility claims.
+
+## Distribution-packaged Engine catalogue
+
+Each distribution has `docker-<distribution>-rootful` and `docker-<distribution>-rootless` images. These install the distribution's Docker or Moby packages with its own package manager, rather than the upstream static Engine archive. The AMD64 package-only builds on 2026-09-27 recorded these installed Engine package revisions; repositories may publish newer revisions on a subsequent build.
+
+| Distribution | Native Engine package revision | `dockerd --version` Engine version |
+| --- | --- | --- |
+| Alpine 3.24 | `docker-29.5.3-r1` | `29.5.3` |
+| Arch Linux | `docker 1:29.8.1-1` | `29.8.1` |
+| Debian 11 | `docker.io 20.10.5+dfsg1-1+deb11u2` | `20.10.5+dfsg1` |
+| Debian 12 | `docker.io 20.10.24+dfsg1-1+deb12u1+b6` | `20.10.24+dfsg1` |
+| Debian 13 | `docker.io 26.1.5+dfsg1-9+deb13u1` | `26.1.5+dfsg1` |
+| Fedora 43 | `moby-engine 29.6.2-1.fc43.x86_64` | `29.6.2` |
+| Fedora 44 | `moby-engine 29.7.2-1.fc44.x86_64` | `29.7.2` |
+| openSUSE Leap 16.0 | `docker 29.4.0_ce-160000.7.1.x86_64` | `29.4.0-ce` |
+| openSUSE Tumbleweed | `docker 29.7.2_ce-41.1.x86_64` | `29.7.2-ce` |
+| Ubuntu 22.04 | `docker.io 29.1.3-0ubuntu3~22.04.2` | `29.1.3` |
+| Ubuntu 24.04 | `docker.io 29.1.3-0ubuntu3~24.04.2` | `29.1.3` |
+| Ubuntu 26.04 | `docker.io 29.1.3-0ubuntu4.1` | `29.1.3` |
+
+Debian 13 also installs its separate native `docker-cli` package. Debian 11 uses the signed archived Bullseye main repository: its live security index advertises `20.10.5+dfsg1-1+deb11u4`, but the corresponding package download returned HTTP 404 during this build, so the archived `+deb11u2` revision is the observed installed version. Both modes install the distribution's BusyBox package for the offline nested HTTP fixture. Rootless images additionally install the distribution's RootlessKit, `slirp4netns`, `fuse-overlayfs`, and subordinate-ID tools. Build evidence in each image records the package manager's selected source, the installed Engine package revision, the full installed package list, and the observed binary versions under `/usr/share/strukturpiloten/docker/`.
+
+Both modes declare a separate Docker data-root volume and use only an internal Unix socket. Rootless runs as UID 1000 with subordinate UID/GID ranges and the distribution's RootlessKit. The AMD64 builds only prove package availability, installed binary provenance, and image construction. Daemon startup, API compatibility, nested workloads, and cleanup have **not** yet passed the native contract for these distribution images. Their ARM64 builds and native contract are pending CI admission; Arch requests AMD64 only because its official base image does not provide ARM64.

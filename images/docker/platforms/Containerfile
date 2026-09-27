@@ -1,0 +1,43 @@
+ARG DISTRO_IMAGE
+FROM ${DISTRO_IMAGE}
+
+ARG DISTRO_ID
+ARG ENGINE_PACKAGE
+ARG RUN_AS_USER
+COPY images/docker/platforms/install-packages.sh /usr/local/bin/install-docker-packages
+RUN /usr/local/bin/install-docker-packages "${DISTRO_ID}" "${ENGINE_PACKAGE}" "${RUN_AS_USER}"
+COPY images/docker/platforms/start-distro.sh /usr/local/bin/start-dockerd
+
+ARG OCI_BASE_DIGEST=""
+ARG OCI_BASE_NAME=""
+ARG OCI_CREATED=""
+ARG OCI_DESCRIPTION="Distro-packaged Docker Engine for nested-container tests"
+ARG OCI_DOCUMENTATION=""
+ARG OCI_LICENSES=""
+ARG OCI_REVISION=""
+ARG OCI_SOURCE=""
+ARG OCI_TITLE="Docker Engine"
+ARG OCI_URL=""
+ARG OCI_VENDOR=""
+ARG OCI_VERSION=""
+LABEL org.opencontainers.image.base.digest="${OCI_BASE_DIGEST}" \
+      org.opencontainers.image.base.name="${OCI_BASE_NAME}" \
+      org.opencontainers.image.created="${OCI_CREATED}" \
+      org.opencontainers.image.description="${OCI_DESCRIPTION}" \
+      org.opencontainers.image.documentation="${OCI_DOCUMENTATION}" \
+      org.opencontainers.image.licenses="${OCI_LICENSES}" \
+      org.opencontainers.image.revision="${OCI_REVISION}" \
+      org.opencontainers.image.source="${OCI_SOURCE}" \
+      org.opencontainers.image.title="${OCI_TITLE}" \
+      org.opencontainers.image.url="${OCI_URL}" \
+      org.opencontainers.image.vendor="${OCI_VENDOR}" \
+      org.opencontainers.image.version="${OCI_VERSION}"
+
+ARG HOME_DIR
+ARG RUNTIME_DIR
+ARG DOCKER_HOST_VALUE
+ARG STORAGE_PATH
+ENV HOME=${HOME_DIR} XDG_RUNTIME_DIR=${RUNTIME_DIR} DOCKER_HOST=${DOCKER_HOST_VALUE}
+VOLUME ${STORAGE_PATH}
+USER ${RUN_AS_USER}
+CMD ["/usr/local/bin/start-dockerd"]

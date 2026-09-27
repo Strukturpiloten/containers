@@ -70,9 +70,16 @@ def run_docker(
         ctx.image_ref,
         "sh",
         "-euc",
-        'test "$(id -u)" = "$1"; test -s /usr/share/strukturpiloten/docker/engine-version; '
-        "test -s /usr/share/strukturpiloten/docker/engine-archive-sha256; "
-        "docker --version; dockerd --version",
+        'test "$(id -u)" = "$1"; '
+        "provenance=/usr/share/strukturpiloten/docker; "
+        'test -s "$provenance/engine-version"; '
+        'if test -s "$provenance/engine-archive-sha256"; then :; '
+        'else test "$(cat "$provenance/provenance-kind")" = distro-package; '
+        "for item in package-version vendor-source os-packages docker-version dockerd-version; do "
+        'test -s "$provenance/$item"; done; '
+        'test "$(docker --version)" = "$(cat "$provenance/docker-version")"; '
+        'test "$(dockerd --version)" = "$(cat "$provenance/dockerd-version")"; '
+        "fi; docker --version; dockerd --version",
         "--",
         expected_uid,
     )
@@ -195,7 +202,7 @@ def run_docker(
                 "--restart",
                 "unless-stopped",
                 "--health-cmd",
-                "wget -q -O /dev/null http://127.0.0.1:8080/",
+                "busybox wget -q -O /dev/null http://127.0.0.1:8080/",
                 "--health-interval",
                 "2s",
                 "--health-retries",
@@ -207,7 +214,10 @@ def run_docker(
                 "#!/bin/sh\n"
                 "printf 'HTTP/1.0 200 OK\\r\\nContent-Length: 17\\r\\n\\r\\ndocker-native-ok\\n'\n"
                 "EOF\n"
-                "chmod 0755 /tmp/serve-http; exec busybox nc -lk -p 8080 -e /tmp/serve-http",
+                "chmod 0755 /tmp/serve-http; "
+                "if busybox nc --help 2>&1 | grep -q -- '-lk'; then "
+                "exec busybox nc -lk -p 8080 -e /tmp/serve-http; "
+                "else exec busybox nc -ll -p 8080 -e /tmp/serve-http; fi",
             )
             ctx.exec(
                 "wait for synthetic HTTP container",
@@ -240,7 +250,7 @@ def run_docker(
                 nested,
                 "sh",
                 "-euc",
-                "wget -q -O - http://docker-native-web:8080/ | grep -F docker-native-ok",
+                "busybox wget -q -O - http://docker-native-web:8080/ | grep -F docker-native-ok",
             )
             outer_port = ctx.port(container, 18080)
             _wait_http(outer_port, b"docker-native-ok")

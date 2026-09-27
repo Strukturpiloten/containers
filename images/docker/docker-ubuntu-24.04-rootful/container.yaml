@@ -1,0 +1,64 @@
+# yaml-language-server: $schema=../../../container.schema.json
+schemaVersion: 1
+name: docker-ubuntu-24.04-rootful
+version: v1.0.0
+image: ghcr.io/strukturpiloten/docker-ubuntu-24.04-rootful
+title: Docker Engine Ubuntu 24.04 rootful
+description: Native Ubuntu 24.04 docker.io package with rootful Docker daemon for isolated compatibility tests
+tests:
+  docker:
+    mode: rootful
+    outerPrivilege: privileged
+    nestedRuntime: true
+build:
+  context: .
+  containerfile: images/docker/platforms/Containerfile
+  architectures:
+  - amd64
+  - arm64
+  runtimeBaseArg: DISTRO_IMAGE
+  args:
+    DISTRO_IMAGE:
+      value: docker.io/library/ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3
+      type: external-image
+    DISTRO_ID:
+      value: ubuntu-24.04
+      type: static
+    ENGINE_PACKAGE:
+      value: docker.io
+      type: static
+    RUN_AS_USER:
+      value: root
+      type: static
+    HOME_DIR:
+      value: /root
+      type: static
+    RUNTIME_DIR:
+      value: /run
+      type: static
+    DOCKER_HOST_VALUE:
+      value: unix:///var/run/docker.sock
+      type: static
+    STORAGE_PATH:
+      value: /var/lib/docker
+      type: static
+dependencies:
+  internal: []
+  external:
+  - name: ubuntu-24.04
+    image: docker.io/library/ubuntu
+    arg: DISTRO_IMAGE
+inputs:
+- images/docker/docker-ubuntu-24.04-rootful/**
+- images/docker/platforms/Containerfile
+- images/docker/platforms/install-packages.sh
+- images/docker/platforms/start-distro.sh
+- shared/oci-labels.env
+lifecycle:
+  state: maintained
+  admission: isolated-test
+  reviewAfter: '2026-10-27'
+  supportBoundary: Vendor package revisions can advance with repository updates; image shares runner kernel and host security
+    policy.
+  requiredRuntimeProfiles:
+  - docker
