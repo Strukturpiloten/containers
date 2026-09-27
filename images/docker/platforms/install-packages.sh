@@ -72,7 +72,7 @@ case "$distro" in
             busybox ca-certificates "$engine_package" iproute2 iptables procps shadow tar
         if [ "$mode" = rootless ]; then
             zypper --non-interactive install --no-recommends \
-                fuse-overlayfs rootlesskit slirp4netns
+                fuse-overlayfs libcap-progs rootlesskit slirp4netns
         fi
         if [ "$distro" = opensuse-tumbleweed ]; then
             zypper --non-interactive install --no-recommends nftables
@@ -143,7 +143,22 @@ if [ "$mode" = rootless ]; then
     command -v newuidmap
     command -v newgidmap
     rootlesskit --version > "$provenance/rootlesskit-version"
-    chmod u+s "$(command -v newuidmap)" "$(command -v newgidmap)"
+    case "$distro" in
+        opensuse-*)
+            # SUSE grants one file capability to each helper. Combining those caps with
+            # setuid leaves the helpers unable to open a root-owned child uid_map.
+            for helper in "$(command -v newuidmap)" "$(command -v newgidmap)"; do
+                if [ -n "$(getcap "$helper")" ]; then
+                    setcap -r "$helper"
+                fi
+                chmod 4755 "$helper"
+                test "$(stat -c '%u:%g %a' "$helper")" = '0:0 4755'
+                test -z "$(getcap "$helper")"
+            done
+            printf '%s\n' setuid-only > "$provenance/uidmap-helper-mode"
+            ;;
+        *) chmod u+s "$(command -v newuidmap)" "$(command -v newgidmap)" ;;
+    esac
     printf 'rootlesskit=%s\n' "$(cat "$provenance/rootlesskit-version")" \
         >> "$provenance/components.txt"
 fi
