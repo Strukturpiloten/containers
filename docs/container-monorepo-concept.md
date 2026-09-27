@@ -106,9 +106,9 @@ Maintained pointers:
 
 Maintained SemVer tags intentionally move after a successful daily security rebuild. This lets a readable version line receive supported base-image and package fixes. Consumers that require byte-for-byte immutability pin the digest. Consumers that want maintenance use a tag plus digest and automate reviewed digest updates.
 
-Release finalization is idempotent. It refuses conflicting exact registry or Git tags and can reconcile a partially completed workflow without replacing an immutable source identity.
+Release finalization is idempotent. It refuses conflicting exact registry or Git tags and can reconcile a partially completed workflow without replacing an immutable source identity. Each published OCI index records its GitHub run ID, attempt, and source revision. Before moving any maintained tag, the workflow checks every target's publication identity and refuses to replace an equal or newer publication with a different digest.
 
-Transient publication failures have two bounded recovery layers. Idempotent registry reads, pushes, promotions, and SBOM scans make one initial attempt plus two retries, with a 120-second pause between attempts. Builds, validation, and smoke tests are not retried. If a trusted `push`, scheduled, or manually dispatched publication run still fails, the retry workflow waits 120 seconds and asks GitHub to rerun only failed jobs and their dependants. It never reruns successful jobs, excludes pull requests, and stops after two automatic reruns.
+Transient publication failures have two bounded recovery layers. Idempotent registry reads, pushes, promotions, and SBOM scans make one initial attempt plus two retries, with a 120-second pause between attempts. Builds, validation, and smoke tests are not retried. If a trusted `push`, scheduled, or manually dispatched run still fails solely in publication or finalization jobs, the retry workflow waits 120 seconds and asks GitHub to rerun those failed jobs and their dependants. Validation, build, and test failures do not trigger automatic reruns. It never reruns successful jobs, excludes pull requests, and stops after two automatic reruns.
 
 ## Update policy
 

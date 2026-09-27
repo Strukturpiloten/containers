@@ -5,9 +5,11 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import fnmatch
+import hashlib
 import http
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -34,6 +36,13 @@ from scripts.policy import (
     semver_tags,
     unique_tags,
 )
+from scripts.promotion import (
+    REVISION_ANNOTATION,
+    RUN_ATTEMPT_ANNOTATION,
+    RUN_ID_ANNOTATION,
+    PublicationIdentity,
+    require_fresh_promotion,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -57,6 +66,7 @@ GLOBAL_IMAGE_INPUTS = (
     "scripts/container_engine.py",
     "scripts/policy.py",
     "scripts/build_payloads.py",
+    "scripts/promotion.py",
 )
 SHA256_DIGEST_LENGTH = 71
 GIT_SHA_LENGTH = 40
@@ -92,6 +102,8 @@ class _BuildResult:
     index_digest: str
     architecture_digests: dict[str, str]
     tags: Sequence[str]
+    run_id: str
+    run_attempt: str
 
 
 @dataclass(frozen=True)
@@ -1632,9 +1644,39 @@ def _write_build_result(output_dir: Path, result: _BuildResult) -> Path:
             "architectureDigests": result.architecture_digests,
             "tags": list(result.tags),
             "rebuilt": True,
+            "runId": result.run_id,
+            "runAttempt": result.run_attempt,
         },
     )
     return build_result
+
+
+def _annotate_oci_layout(layout_dir: Path, annotations: dict[str, str]) -> None:
+    """Stamp the multiarch index in a local OCI layout before its registry copy."""
+    layout_index_path = layout_dir / "index.json"
+    layout_index = _load_json(layout_index_path)
+    descriptors = _json_list(layout_index.get("manifests"))
+    if descriptors is None or len(descriptors) != 1:
+        _fail(f"OCI layout {layout_dir} must contain exactly one publication index.")
+    descriptor = _json_map(descriptors[0])
+    if descriptor is None or descriptor.get("mediaType") != "application/vnd.oci.image.index.v1+json":
+        _fail(f"OCI layout {layout_dir} does not contain an OCI image index.")
+    digest = descriptor.get("digest")
+    if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        _fail(f"OCI layout {layout_dir} has an invalid index digest.")
+    blob_dir = layout_dir / "blobs" / "sha256"
+    index_path = blob_dir / digest.removeprefix("sha256:")
+    index = _load_json(index_path)
+    if _json_list(index.get("manifests")) is None:
+        _fail(f"OCI layout {layout_dir} has no multiarch index entries.")
+    recorded = _json_map(index.get("annotations")) or {}
+    index["annotations"] = {**recorded, **annotations}
+    content = json.dumps(index, separators=(",", ":"), ensure_ascii=False).encode()
+    new_digest = hashlib.sha256(content).hexdigest()
+    (blob_dir / new_digest).write_bytes(content)
+    descriptor["digest"] = f"sha256:{new_digest}"
+    descriptor["size"] = len(content)
+    _write_json(layout_index_path, layout_index)
 
 
 def _command_publish_image(args: argparse.Namespace) -> None:
@@ -1692,6 +1734,7 @@ def _command_publish_image(args: argparse.Namespace) -> None:
                 ]
             )
 
+        layout_dir = output_dir / f"{image_name}-oci-layout"
         _run_external(
             [
                 sudo,
@@ -1702,6 +1745,28 @@ def _command_publish_image(args: argparse.Namespace) -> None:
                 "--format",
                 "oci",
                 manifest_name,
+                f"oci:{layout_dir}:publication",
+            ]
+        )
+        _run([sudo, "chown", "-R", f"{os.getuid()}:{os.getgid()}", str(layout_dir)])
+        _annotate_oci_layout(
+            layout_dir,
+            {
+                RUN_ID_ANNOTATION: context.run_id,
+                RUN_ATTEMPT_ANNOTATION: context.run_attempt,
+                REVISION_ANNOTATION: context.sha,
+            },
+        )
+        _run_external(
+            [
+                sudo,
+                skopeo,
+                "copy",
+                "--all",
+                "--format",
+                "oci",
+                "--preserve-digests",
+                f"oci:{layout_dir}:publication",
                 f"docker://{image_ref}:{canonical_tag}",
             ]
         )
@@ -1723,6 +1788,11 @@ def _command_publish_image(args: argparse.Namespace) -> None:
             capture_stdout=True,
         ).strip()
         architecture_digests = _architecture_digests(raw_manifest, architectures)
+        source_identity = _publication_identity(
+            _registry_annotations([sudo, skopeo], f"{image_ref}@{index_digest}"), f"{image_ref}@{index_digest}"
+        )
+        if source_identity != PublicationIdentity.from_values(context.run_id, context.run_attempt):
+            _fail(f"Published image {image_ref}@{index_digest} has an unexpected publication identity.")
 
         syft = _tool("syft")
         _run_external(
@@ -1753,6 +1823,8 @@ def _command_publish_image(args: argparse.Namespace) -> None:
                 index_digest=index_digest,
                 architecture_digests=architecture_digests,
                 tags=tags,
+                run_id=str(source_identity.run_id),
+                run_attempt=str(source_identity.run_attempt),
             ),
         )
         _write_github_outputs(
@@ -1883,6 +1955,109 @@ def _create_github_release(
         _fail(f"GitHub release creation failed for {release_tag}: {error.reason}.")
 
 
+def _registry_labels(command_prefix: Sequence[str], reference: str) -> JsonMap:
+    raw = _run_external(
+        [*command_prefix, "inspect", "--config", f"docker://{reference}"],
+        capture_stdout=True,
+    )
+    try:
+        image_config = _json_map(json.loads(raw))
+    except json.JSONDecodeError:
+        image_config = None
+    config = _json_map(image_config.get("config")) if image_config is not None else None
+    labels = _json_map(config.get("Labels")) if config is not None else None
+    if labels is None:
+        _fail(f"Registry image {reference} has no OCI labels.")
+    return labels
+
+
+def _registry_annotations(command_prefix: Sequence[str], reference: str) -> JsonMap:
+    raw = _run_external([*command_prefix, "inspect", "--raw", f"docker://{reference}"], capture_stdout=True)
+    try:
+        manifest = _json_map(json.loads(raw))
+    except json.JSONDecodeError:
+        manifest = None
+    if manifest is None:
+        _fail(f"Registry returned an invalid OCI index for {reference}.")
+    annotations = _json_map(manifest.get("annotations"))
+    return annotations if annotations is not None else {}
+
+
+def _publication_identity(annotations: JsonMap, reference: str) -> PublicationIdentity:
+    try:
+        return PublicationIdentity.from_annotations(annotations)
+    except ValueError as error:
+        _fail(f"Cannot establish publication freshness for {reference}: {error}")
+
+
+def _validate_publication_source(
+    command_prefix: Sequence[str], image_ref: str, digest: str, context: _GitHubContext
+) -> PublicationIdentity:
+    annotations = _registry_annotations(command_prefix, f"{image_ref}@{digest}")
+    identity = _publication_identity(annotations, f"{image_ref}@{digest}")
+    expected = PublicationIdentity.from_values(context.run_id, context.run_attempt)
+    if identity != expected:
+        _fail(f"Publication identity {identity} does not belong to workflow run {expected}.")
+    if annotations.get(REVISION_ANNOTATION) != context.sha:
+        _fail(f"Publication source {image_ref}@{digest} does not match workflow revision {context.sha}.")
+    canonical = canonical_build_tag(sha=context.sha, run_id=context.run_id, run_attempt=context.run_attempt)
+    if _remote_digest(command_prefix, f"{image_ref}:{canonical}") != digest:
+        _fail(f"Canonical registry tag {image_ref}:{canonical} does not point to {digest}.")
+    return identity
+
+
+def _preflight_promotion(  # noqa: PLR0913
+    command_prefix: Sequence[str],
+    image_ref: str,
+    digest: str,
+    *,
+    tags: Sequence[str],
+    identity: PublicationIdentity,
+    source_revision: str,
+    immutable_tag: str | None = None,
+) -> dict[str, str | None]:
+    """Inspect every target before making any maintained alias changes."""
+    existing: dict[str, str | None] = {}
+    for tag in tags:
+        target = f"{image_ref}:{tag}"
+        current_digest = _remote_digest(command_prefix, target)
+        existing[tag] = current_digest
+        if current_digest is None or current_digest == digest:
+            continue
+        if tag == immutable_tag:
+            _fail(f"Refusing to overwrite immutable registry tag {target} ({current_digest}).")
+        annotations = _registry_annotations(command_prefix, target)
+        if RUN_ID_ANNOTATION not in annotations and RUN_ATTEMPT_ANNOTATION not in annotations:
+            labels = _registry_labels(command_prefix, target)
+            previous_revision = labels.get("org.opencontainers.image.revision")
+            if not isinstance(previous_revision, str) or not _git_is_strict_ancestor(
+                previous_revision, source_revision
+            ):
+                _fail(
+                    f"Cannot establish publication freshness for legacy registry tag {target}; "
+                    "its source revision must be a strict ancestor."
+                )
+            continue
+        current_identity = _publication_identity(annotations, target)
+        try:
+            require_fresh_promotion(candidate=identity, existing=current_identity, same_digest=False)
+        except ValueError as error:
+            _fail(f"Refusing stale promotion of {target}: {error}")
+    return existing
+
+
+def _git_is_strict_ancestor(earlier: str, later: str) -> bool:
+    if earlier == later or not re.fullmatch(r"[0-9a-f]{40}", earlier):
+        return False
+    result = subprocess.run(  # noqa: S603
+        [_tool("git"), "-C", str(_repo_root()), "merge-base", "--is-ancestor", earlier, later],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    return result.returncode == 0
+
+
 def _command_promote_image(args: argparse.Namespace) -> None:
     context = _github_context(require_token=False)
     digest = args.digest
@@ -1897,34 +2072,88 @@ def _command_promote_image(args: argparse.Namespace) -> None:
     )
     command_prefix = [_tool("sudo"), _tool("skopeo")]
     immutable_tag = f"sha-{context.sha}" if context.event_name == "push" else None
+    identity = _validate_publication_source(command_prefix, args.image, digest, context)
+    build_result = _load_json(Path(args.build_result)) if args.build_result else None
+    if build_result is not None and (
+        build_result.get("image") != args.image
+        or build_result.get("indexDigest") != digest
+        or build_result.get("sourceRevision") != context.sha
+        or build_result.get("runId") != str(identity.run_id)
+        or build_result.get("runAttempt") != str(identity.run_attempt)
+    ):
+        _fail(f"Build result does not match publication identity for {args.image}.")
+    existing = _preflight_promotion(
+        command_prefix,
+        args.image,
+        digest,
+        tags=tags,
+        identity=identity,
+        source_revision=context.sha,
+        immutable_tag=immutable_tag,
+    )
 
     for tag in tags:
         target = f"{args.image}:{tag}"
-        existing_digest = _remote_digest(command_prefix, target)
+        existing_digest = existing[tag]
         if existing_digest == digest:
             _write_stdout(f"Registry tag {target} already points to {digest}.")
             continue
-        if tag == immutable_tag and existing_digest is not None:
-            _fail(f"Refusing to overwrite immutable registry tag {target} ({existing_digest}).")
 
         _run_external(
             [
                 *command_prefix,
                 "copy",
                 "--all",
+                "--format",
+                "oci",
+                "--preserve-digests",
                 f"docker://{args.image}@{digest}",
                 f"docker://{target}",
             ]
         )
         _write_stdout(f"Promoted {target} to {digest}.")
 
-    if args.build_result:
+    if args.build_result and build_result is not None:
         build_result_path = Path(args.build_result)
-        build_result = _load_json(build_result_path)
         recorded_tags = _string_list(build_result.get("tags", [])) or []
         build_result["tags"] = unique_tags([*recorded_tags, *tags])
         _write_json(build_result_path, build_result)
     _write_github_outputs({"promoted_tags": ",".join(tags)})
+
+
+def _command_rollback_image(args: argparse.Namespace) -> None:
+    """Explicit, compare-and-swap override for an operator-controlled rollback."""
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", args.tag) or args.tag.startswith(("sha-", "run-")):
+        _fail(f"Rollback target must be a maintained registry tag: {args.tag}.")
+    for value in (args.digest, args.expected_current_digest):
+        if not value.startswith("sha256:") or len(value) != SHA256_DIGEST_LENGTH:
+            _fail(f"Invalid image index digest: {value}.")
+    if not args.reason.strip():
+        _fail("A rollback reason is required.")
+    command_prefix = [_tool("skopeo")]
+    source = f"{args.image}@{args.digest}"
+    target = f"{args.image}:{args.tag}"
+    if _remote_digest(command_prefix, source) != args.digest:
+        _fail(f"Rollback source {source} is unavailable.")
+    current = _remote_digest(command_prefix, target)
+    if current != args.expected_current_digest:
+        _fail(f"Rollback target {target} changed: expected {args.expected_current_digest}, found {current}.")
+    if current == args.digest:
+        _write_stdout(f"Rollback target {target} already points to {args.digest}.")
+        return
+    _run_external(
+        [
+            *command_prefix,
+            "copy",
+            "--all",
+            "--format",
+            "oci",
+            "--preserve-digests",
+            f"docker://{source}",
+            f"docker://{target}",
+        ]
+    )
+    _write_stdout(f"Rolled back {target} to {args.digest}. Reason: {args.reason}")
 
 
 def _command_validate(_args: argparse.Namespace) -> None:
@@ -1974,6 +2203,8 @@ def _validated_release_build_result(
         _fail(f"Build result for {image_name} does not match metadata version {version}.")
     if source_revision != context.sha:
         _fail(f"Build result for {image_name} does not match workflow revision {context.sha}.")
+    if build_result.get("runId") != context.run_id or build_result.get("runAttempt") != context.run_attempt:
+        _fail(f"Build result for {image_name} does not match workflow run identity.")
     if (
         not isinstance(index_digest, str)
         or not index_digest.startswith("sha256:")
@@ -1985,14 +2216,7 @@ def _validated_release_build_result(
 
 def _inspect_release_source(skopeo: str, image_ref: str, index_digest: str) -> JsonMap:
     source_reference = f"{image_ref}@{index_digest}"
-    config_raw = _run_external(
-        [skopeo, "inspect", "--config", f"docker://{source_reference}"],
-        capture_stdout=True,
-    )
-    image_config = _json_map(json.loads(config_raw))
-    config = _json_map(image_config.get("config")) if image_config is not None else None
-    labels = _json_map(config.get("Labels")) if config is not None else None
-    return {"Digest": index_digest, "Labels": labels}
+    return {"Digest": index_digest, "Labels": _registry_labels([skopeo], source_reference)}
 
 
 def _ensure_release_record(
@@ -2025,11 +2249,11 @@ def _ensure_release_record(
 def _promote_release_tags(
     command_prefix: Sequence[str],
     candidate: _ReleaseCandidate,
-    existing_exact_digest: str | None,
+    existing: dict[str, str | None],
 ) -> None:
     for tag in candidate.tags:
         target = f"{candidate.image_ref}:{tag}"
-        existing_digest = existing_exact_digest if tag == candidate.tags[0] else _remote_digest(command_prefix, target)
+        existing_digest = existing[tag]
         if existing_digest == candidate.index_digest:
             _write_stdout(f"Maintained tag {target} already points to {candidate.index_digest}.")
             continue
@@ -2038,6 +2262,9 @@ def _promote_release_tags(
                 *command_prefix,
                 "copy",
                 "--all",
+                "--format",
+                "oci",
+                "--preserve-digests",
                 f"docker://{candidate.image_ref}@{candidate.index_digest}",
                 f"docker://{target}",
             ]
@@ -2069,6 +2296,9 @@ def _command_finalize_release(args: argparse.Namespace) -> None:
         source_revision=source_revision,
         version=version,
     )
+    identity = _validate_publication_source([skopeo], image_ref, index_digest, context)
+    if build_result.get("runId") != str(identity.run_id) or build_result.get("runAttempt") != str(identity.run_attempt):
+        _fail(f"Build result for {image_name} does not match immutable image identity.")
     candidate = _ReleaseCandidate(
         image_name=image_name,
         image_ref=image_ref,
@@ -2078,8 +2308,18 @@ def _command_finalize_release(args: argparse.Namespace) -> None:
         tags=release_tags,
     )
     command_prefix = [skopeo]
+    existing = _preflight_promotion(
+        command_prefix,
+        image_ref,
+        index_digest,
+        tags=release_tags,
+        identity=identity,
+        source_revision=source_revision,
+    )
     existing_exact_digest = _ensure_release_record(context, candidate, command_prefix)
-    _promote_release_tags(command_prefix, candidate, existing_exact_digest)
+    if existing_exact_digest != existing[release_tags[0]]:
+        _fail(f"Registry tag {image_ref}:{release_tags[0]} changed during release preparation.")
+    _promote_release_tags(command_prefix, candidate, existing)
 
     release_tag = _release_tag(image_name, version)
     recorded_tags = _string_list(build_result.get("tags", [])) or []
@@ -2208,6 +2448,14 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     promote_parser.add_argument("--default-branch", required=True)
     promote_parser.add_argument("--build-result")
     promote_parser.set_defaults(func=_command_promote_image)
+
+    rollback_parser = subparsers.add_parser("rollback-image")
+    rollback_parser.add_argument("--image", required=True)
+    rollback_parser.add_argument("--tag", required=True)
+    rollback_parser.add_argument("--digest", required=True)
+    rollback_parser.add_argument("--expected-current-digest", required=True)
+    rollback_parser.add_argument("--reason", required=True)
+    rollback_parser.set_defaults(func=_command_rollback_image)
 
     generate_workflow_parser = subparsers.add_parser("generate-workflow")
     generate_workflow_parser.add_argument("--check", action="store_true")

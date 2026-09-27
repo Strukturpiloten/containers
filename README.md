@@ -31,6 +31,8 @@ Merges to `main` build affected images and reverse dependencies. A daily schedul
 
 After a build succeeds, the workflow publishes an immutable run tag, inspects the manifest, creates SBOMs, signs the image, and attaches provenance and SBOM attestations. Only then does it update maintained tags and automatically create any missing image-scoped GitHub Release declared by `container.yaml`.
 
+Maintained tag promotion checks the image's publication run ID and attempt against every existing target before making any changes. A retry of an older run cannot move a newer tag backwards; a retry of the same digest is harmless. For images published before this identity was recorded, the first promotion is accepted only when the existing image's source revision is a strict ancestor of the new revision. A same-revision legacy rebuild needs an operator decision.
+
 ### Tag behavior
 
 | Reference | Mutability | Intended use |
@@ -42,6 +44,17 @@ After a build succeeds, the workflow publishes an immutable run tag, inspects th
 | `vX.Y.Z`, `vX.Y`, `vX` | Maintained | Follow the declared compatibility line, including security rebuilds |
 
 Consumers should use a readable maintained tag together with a digest, for example `v1.2.3@sha256:…`, and let Renovate update the digest when the maintained tag moves. Running workloads still require a pull and redeploy or a configured auto-update policy.
+
+To intentionally roll back a maintained tag, first authenticate `skopeo` to GHCR, record the current tag digest, and choose the previously verified immutable image digest. Run one tag at a time, recording the reason in the command output:
+
+```sh
+uv run --frozen --python 3.14 python -m scripts.container_engine rollback-image \
+  --image ghcr.io/strukturpiloten/IMAGE --tag latest \
+  --digest sha256:PREVIOUS_DIGEST --expected-current-digest sha256:CURRENT_DIGEST \
+  --reason 'incident reference and reason'
+```
+
+The expected current digest guards against an intervening update. This command deliberately bypasses automatic freshness policy for that one alias. Repeat with the then-current digest for each other alias that must move. An ordinary later successful publication can move the alias forward again; cancel any queued old runs during incident handling.
 
 ## Local validation
 
