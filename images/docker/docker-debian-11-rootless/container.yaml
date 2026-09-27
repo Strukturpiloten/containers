@@ -58,7 +58,10 @@ lifecycle:
   state: legacy
   admission: isolated-test
   reviewAfter: '2026-10-27'
-  supportBoundary: Debian 11 is past LTS; signed archived main currently installs an older historical Docker revision. Isolated
-    compatibility fixture only.
+  supportBoundary: >-
+    Debian 11 is past LTS; signed archived main installs historical Docker 20.10.5.
+    Its rootless daemon needs an outer workload OOM score of zero for nested containers
+    because it predates Moby's rootful-in-rootless OOM fix (moby/moby#46563 and #46626).
+    This is an isolated compatibility fixture.
   requiredRuntimeProfiles:
   - docker

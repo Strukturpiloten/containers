@@ -137,6 +137,12 @@ def _run_nested_docker(
         "--publish",
         "127.0.0.1::18080",
     ]
+    if ctx.name == "docker-debian-11-rootless":
+        # Native Bullseye Docker 20.10.5 predates the OOM-score fix in Moby #46626.
+        # With an inherited positive score, its runc cannot lower a nested container
+        # to Docker's default score of zero (Moby #46563). Normalize the privileged
+        # outer workload while keeping every inner docker run at its default.
+        outer_args.extend(["--oom-score-adj", "0"])
     if profile["outerPrivilege"] == "privileged":
         outer_args.append("--privileged")
     else:
@@ -146,6 +152,11 @@ def _run_nested_docker(
     try:
         budget.checkpoint()
         verify_outer_container_limits(ctx, container)
+        if ctx.name == "docker-debian-11-rootless":
+            score = _checked_exec(
+                ctx, budget, "read legacy Docker outer OOM score", container, "cat", "/proc/1/oom_score_adj"
+            )
+            ctx.assert_equal("legacy Docker outer OOM score", score, "0")
         budget.checkpoint()
         _checked_exec(
             ctx,
