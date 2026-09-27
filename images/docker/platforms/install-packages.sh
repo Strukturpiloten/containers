@@ -26,6 +26,7 @@ case "$distro" in
         fi
         export DEBIAN_FRONTEND=noninteractive
         apt-get update
+        apt-get --yes upgrade
         apt-get install --yes --no-install-recommends \
             busybox ca-certificates "$engine_package" iproute2 iptables passwd procps tar
         if [ "$distro" = debian-13 ]; then
@@ -60,6 +61,11 @@ case "$distro" in
         ;;
     opensuse-leap-16.0|opensuse-tumbleweed)
         zypper --non-interactive refresh
+        if [ "$distro" = opensuse-tumbleweed ]; then
+            zypper --non-interactive dist-upgrade --no-recommends
+        else
+            zypper --non-interactive update
+        fi
         zypper --non-interactive install --no-recommends \
             busybox ca-certificates "$engine_package" iproute2 iptables procps shadow tar
         if [ "$mode" = rootless ]; then
