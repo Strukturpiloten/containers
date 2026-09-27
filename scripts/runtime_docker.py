@@ -142,6 +142,35 @@ def _run_nested_docker(
         outer_args.append("--privileged")
     else:
         outer_args.extend(["--security-opt", "apparmor=unconfined"])
+    if mode == "rootless":
+        # Preserve helper and process state even if RootlessKit exits before podman exec can attach.
+        ctx.podman(
+            "inspect rootless UID mapping helpers",
+            "run",
+            "--rm",
+            "--security-opt",
+            "label=disable",
+            *outer_args,
+            ctx.image_ref,
+            "sh",
+            "-euc",
+            "id; "
+            "stat -c 'helper %n owner=%u:%g mode=%a' /usr/bin/newuidmap /usr/bin/newgidmap; "
+            "printf 'helper capabilities: '; "
+            "if command -v getcap >/dev/null 2>&1; then "
+            "getcap -v /usr/bin/newuidmap /usr/bin/newgidmap || :; "
+            "elif command -v getfattr >/dev/null 2>&1; then "
+            "getfattr -n security.capability -e hex /usr/bin/newuidmap /usr/bin/newgidmap 2>&1 || :; "
+            "else printf 'getcap and getfattr unavailable\n'; fi; "
+            "printf 'uid_map:\n'; cat /proc/self/uid_map; "
+            "printf 'gid_map:\n'; cat /proc/self/gid_map; "
+            "printf 'process status:\n'; cat /proc/self/status; "
+            "printf 'process procfs ownership: '; stat -c '%u:%g %a' /proc/$$; "
+            "if command -v setpriv >/dev/null 2>&1; then "
+            "printf 'securebits and privileges:\n'; setpriv --dump || :; fi; "
+            "if command -v python3 >/dev/null 2>&1; then "
+            "python3 -c 'import ctypes; print(\"dumpable:\", ctypes.CDLL(None).prctl(3))' || :; fi",
+        )
     budget.checkpoint()
     container = ctx.start("start nested Docker daemon", options=tuple(outer_args))
     try:
