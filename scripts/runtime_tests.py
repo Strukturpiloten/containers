@@ -238,6 +238,12 @@ class RuntimeContext:
         remaining = self._owned_mounts()
         if remaining:
             raise ProbeError(f"refusing to delete mounted isolated store: {remaining}")
+        containers = self.podman("audit isolated containers", "ps", "--all", "--quiet", timeout=10)
+        if containers:
+            raise ProbeError(
+                f"refusing to delete isolated store {self.directory} "
+                f"with remaining containers: {containers.splitlines()}"
+            )
         if self._sudo:
             result = subprocess.run(
                 [*self._sudo, "rm", "-rf", "--", str(self.directory)],

@@ -74,6 +74,43 @@ class RuntimeCommandTests(unittest.TestCase):
                 remove.assert_not_called()
             self.assertTrue(context.directory.exists())
 
+    def test_untracked_stopped_container_preserves_isolated_store(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            context = RuntimeContext.__new__(RuntimeContext)
+            context.directory = Path(directory)
+            context.containers = []
+            context.checks = []
+            context.image_ref = "localhost/test:runtime"
+            context._sudo = []
+            context._owned_mounts = MagicMock(return_value=[])
+            context.podman = MagicMock(
+                side_effect=lambda name, *_args, **_kwargs: "stopped-id" if name == "audit isolated containers" else ""
+            )
+
+            with patch("scripts.runtime_tests.shutil.rmtree") as remove:
+                with self.assertRaisesRegex(ProbeError, "remaining containers"):
+                    context.cleanup()
+                remove.assert_not_called()
+            context.podman.assert_any_call("audit isolated containers", "ps", "--all", "--quiet", timeout=10)
+            self.assertTrue(context.directory.exists())
+
+    def test_clean_isolated_store_is_removed_after_container_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            context = RuntimeContext.__new__(RuntimeContext)
+            context.directory = Path(directory)
+            context.containers = []
+            context.checks = []
+            context.image_ref = "localhost/test:runtime"
+            context._sudo = []
+            context._owned_mounts = MagicMock(return_value=[])
+            context.podman = MagicMock(return_value="")
+
+            with patch("scripts.runtime_tests.shutil.rmtree") as remove:
+                context.cleanup()
+                remove.assert_called_once_with(context.directory)
+            context.podman.assert_any_call("audit isolated containers", "ps", "--all", "--quiet", timeout=10)
+            self.assertEqual(context.checks[-1], {"name": "cleanup isolated store", "status": "passed"})
+
     def test_cleanup_failure_is_recorded_in_architecture_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             context = MagicMock()
