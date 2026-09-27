@@ -60,7 +60,7 @@ runs:
           *) echo "Unsupported Grype host architecture" >&2; exit 2 ;;
         esac
         archive="grype_${release#v}_linux_${machine}.tar.gz"
-        curl -fsSL "https://github.com/anchore/grype/releases/download/${release}/${archive}" -o "${RUNNER_TEMP}/${archive}"
+        curl --retry 3 --retry-delay 2 --retry-all-errors -fsSL "https://github.com/anchore/grype/releases/download/${release}/${archive}" -o "${RUNNER_TEMP}/${archive}"
         printf '%s  %s\n' "${expected}" "${RUNNER_TEMP}/${archive}" | sha256sum -c -
         mkdir -p "${RUNNER_TEMP}/grype-bin"
         tar -xzf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}/grype-bin" grype

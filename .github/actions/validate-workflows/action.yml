@@ -21,8 +21,8 @@ runs:
         trap 'rm -rf -- "$scratch"' EXIT
         archive="actionlint_${ACTIONLINT_VERSION}_linux_${arch}.tar.gz"
         base="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}"
-        curl --fail --silent --show-error --location "${base}/${archive}" -o "${scratch}/${archive}"
-        curl --fail --silent --show-error --location "${base}/actionlint_${ACTIONLINT_VERSION}_checksums.txt" -o "${scratch}/checksums.txt"
+        curl --retry 3 --retry-delay 2 --retry-all-errors --fail --silent --show-error --location "${base}/${archive}" -o "${scratch}/${archive}"
+        curl --retry 3 --retry-delay 2 --retry-all-errors --fail --silent --show-error --location "${base}/actionlint_${ACTIONLINT_VERSION}_checksums.txt" -o "${scratch}/checksums.txt"
         (cd "${scratch}" && sha256sum --check --ignore-missing checksums.txt)
         tar -xzf "${scratch}/${archive}" -C "${scratch}" actionlint
         "${scratch}/actionlint" -color
