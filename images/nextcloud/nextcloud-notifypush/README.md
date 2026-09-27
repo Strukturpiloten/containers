@@ -6,7 +6,7 @@
 
 - The process runs as Alpine's unprivileged `guest` user (UID 405).
 - The service listens on TCP port 7867.
-- The default command is `/notify_push /nextcloud/config/config.php`.
+- The default command is `/usr/local/bin/notify_push /nextcloud/config/config.php`.
 - Mount the Nextcloud configuration so that the default path is readable, or replace the command with the required config path.
 
 Example:
@@ -17,6 +17,8 @@ podman run --rm \
   --volume ./nextcloud-config.php:/nextcloud/config/config.php:ro \
   ghcr.io/strukturpiloten/nextcloud-notifypush:v1.0.0
 ```
+
+CI also starts the server with a temporary SQLite database and synthetic Redis/Nextcloud endpoints, then verifies a WebSocket upgrade. This confirms startup and HTTP interaction; a deployment still needs working Redis, database, and Nextcloud services for push delivery.
 
 ## Build and updates
 

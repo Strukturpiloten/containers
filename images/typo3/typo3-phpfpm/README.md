@@ -9,7 +9,7 @@
 - Git, Supercronic, CA certificates, and timezone data;
 - the shared `check_variables_and_directories.sh` container utility.
 
-The working directory is `/var/www/typo3`, PHP-FPM listens on port 9000, and the health check validates the PHP-FPM configuration. TYPO3 source, site configuration, web-server configuration, cron definitions, and persistent data are supplied by the consuming stack.
+The working directory is `/var/www/typo3`, PHP-FPM listens on port 9000, and CI sends a real FastCGI request to the running PHP-FPM service. For an orchestrator liveness probe, run `php -r '$s = @fsockopen("127.0.0.1", 9000, $errno, $error, 2); if (!$s) exit(1); fclose($s);'` inside the container. Container stop sends SIGQUIT for graceful shutdown. TYPO3 source, site configuration, web-server configuration, cron definitions, and persistent data are supplied by the consuming stack.
 
 ## Versions and updates
 

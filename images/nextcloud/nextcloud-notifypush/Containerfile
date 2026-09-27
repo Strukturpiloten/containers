@@ -62,7 +62,6 @@ ARG OCI_TITLE="Nextcloud notify_push"
 ARG OCI_URL=""
 ARG OCI_VENDOR=""
 ARG OCI_VERSION=""
-ARG TARGETARCH
 
 LABEL org.opencontainers.image.base.digest="${OCI_BASE_DIGEST}" \
     org.opencontainers.image.base.name="${OCI_BASE_NAME}" \
@@ -78,16 +77,11 @@ LABEL org.opencontainers.image.base.digest="${OCI_BASE_DIGEST}" \
     org.opencontainers.image.version="${OCI_VERSION}"
 
 RUN set -eux; \
-    case "${TARGETARCH}" in \
-    amd64) rust_target="x86_64-unknown-linux-musl" ;; \
-    arm64) rust_target="aarch64-unknown-linux-musl" ;; \
-    *) echo "Unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; \
-    esac; \
-    mkdir -p /notify_push/target /usr/share/strukturpiloten; \
+    mkdir -p /usr/share/strukturpiloten; \
     apk upgrade --no-cache; \
     apk info -v | sort > /usr/share/strukturpiloten/runtime-apk-packages.txt
 
-COPY --from=build /notify_push/target/*/release/notify_push /notify_push
+COPY --from=build /notify_push/target/*/release/notify_push /usr/local/bin/notify_push
 COPY --from=build /usr/share/strukturpiloten/application-components.txt /usr/share/strukturpiloten/application-components.txt
 COPY --from=build /usr/share/strukturpiloten/build-apk-packages.txt /usr/share/strukturpiloten/build-apk-packages.txt
 
@@ -96,4 +90,4 @@ USER 405
 
 EXPOSE 7867
 
-CMD ["/notify_push", "/nextcloud/config/config.php"]
+CMD ["/usr/local/bin/notify_push", "/nextcloud/config/config.php"]

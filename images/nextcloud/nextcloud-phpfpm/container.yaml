@@ -6,6 +6,10 @@ image: ghcr.io/strukturpiloten/nextcloud-phpfpm
 title: Nextcloud PHP-FPM
 description: Nextcloud PHP-FPM runtime image with PHP extensions, ffmpeg and container utilities
 
+tests:
+  phpFpm:
+    extensions: [apcu, exif, gd, gmp, imagick, intl, pcntl, pdo_mysql, pdo_pgsql, pgsql, redis, sodium, sysvsem, zip]
+
 build:
   context: .
   containerfile: images/nextcloud/nextcloud-phpfpm/Containerfile

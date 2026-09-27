@@ -13,7 +13,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -61,6 +60,8 @@ GLOBAL_IMAGE_INPUTS = (
     ".github/actions/finalize-release/**",
     ".github/actions/publish-image/**",
     "scripts/container_engine.py",
+    "scripts/runtime_tests.py",
+    "scripts/runtime_docker.py",
     "scripts/policy.py",
     "scripts/build_payloads.py",
     "scripts/workflow_config.py",
@@ -640,7 +641,24 @@ def _podman_test(image: JsonMap) -> JsonMap | None:
     return _json_map(tests.get("podman")) if tests is not None else None
 
 
+def _validate_docker_tests(metadata_file: str, image: JsonMap) -> None:
+    name = str(image.get("name", ""))
+    tests = _json_map(image.get("tests")) or {}
+    docker_test = _json_map(tests.get("docker"))
+    if name.startswith("docker-"):
+        if docker_test is None:
+            _fail(f"{metadata_file} must declare tests.docker.")
+        expected_mode = "rootless" if name.endswith("-rootless") else "rootful" if name.endswith("-rootful") else None
+        if expected_mode is None or docker_test.get("mode") != expected_mode:
+            _fail(f"{metadata_file} tests.docker.mode must match the image name suffix.")
+        if expected_mode == "rootful" and docker_test.get("outerPrivilege") != "privileged":
+            _fail(f"{metadata_file} rootful Docker tests require a privileged outer container.")
+    elif docker_test is not None:
+        _fail(f"{metadata_file} declares a Docker test profile for a non-Docker image.")
+
+
 def _validate_tests(metadata_file: str, image: JsonMap) -> None:
+    _validate_docker_tests(metadata_file, image)
     name = str(image.get("name", ""))
     podman_test = _podman_test(image)
     if not name.startswith("podman-"):
@@ -1381,63 +1399,10 @@ def _local_podman_build_command(
     ]
 
 
-def _local_outer_podman_command(image: JsonMap) -> tuple[list[str], bool]:
-    podman_test = _podman_test(image)
-    if podman_test is None:
-        _fail(f"Image {image['name']} has no Podman test profile.")
-
-    return [_tool("sudo"), "-n", _tool("podman")], True
-
-
-def _local_nested_podman_command(
-    *,
-    image: JsonMap,
-    local_image: str,
-    archive_path: Path,
-    outer_podman: Sequence[str],
-) -> list[str]:
-    podman_test = _podman_test(image)
-    if podman_test is None:
-        _fail(f"Image {image['name']} has no Podman test profile.")
-
-    run_args = [
-        *outer_podman,
-        "run",
-        "--rm",
-        "--device",
-        "/dev/fuse",
-        "--security-opt",
-        "label=disable",
-        "--volume",
-        f"{archive_path}:/tmp/nested-image.tar:ro",
-    ]
-    outer_privilege = str(podman_test["outerPrivilege"])
-    if outer_privilege == "privileged":
-        run_args.append("--privileged")
-    elif outer_privilege == "unprivileged":
-        run_args.extend(["--security-opt", "apparmor=unconfined"])
-    else:
-        _fail(f"Unsupported Podman outer privilege profile: {outer_privilege}.")
-
-    script = r"""
-case "$1" in
-  rootless) expected_uid=1000; expected_rootless=true ;;
-  rootful) expected_uid=0; expected_rootless=false ;;
-  *) printf 'Unsupported Podman mode: %s\n' "$1" >&2; exit 1 ;;
-esac
-test "$(id -u)" -eq "${expected_uid}"
-test "$(podman info --format '{{.Host.Security.Rootless}}')" = "${expected_rootless}"
-podman load --input /tmp/nested-image.tar >/dev/null
-nested_image_ids="$(podman images --quiet --no-trunc)"
-test -n "${nested_image_ids}"
-test "$(printf '%s\n' "${nested_image_ids}" | wc -l)" -eq 1
-podman run --rm "${nested_image_ids}" /bin/sh -c 'exit 0'
-""".strip()
-    run_args.extend([local_image, "sh", "-euc", script, "--", str(podman_test["mode"])])
-    return run_args
-
-
 def _command_test_podman_image(args: argparse.Namespace) -> None:
+    """Build locally, then use the same metadata-driven runtime harness as CI."""
+    from scripts.runtime_tests import run as run_runtime  # noqa: PLC0415
+
     images = _load_images()
     _validate_images(images)
     image = next((candidate for candidate in images if candidate["name"] == args.image), None)
@@ -1448,19 +1413,11 @@ def _command_test_podman_image(args: argparse.Namespace) -> None:
     if architecture not in _image_architectures(image):
         _fail(f"Image {args.image} does not support architecture {architecture}.")
 
-    source_revision = _run(
-        [_tool("git"), "-C", str(_repo_root()), "rev-parse", "HEAD"],
-        capture_stdout=True,
-    ).strip()
+    source_revision = _run([_tool("git"), "-C", str(_repo_root()), "rev-parse", "HEAD"], capture_stdout=True).strip()
     source_timestamp, _created = _source_timestamp(source_revision)
     local_image = f"localhost/{args.image}:local-{os.getpid()}"
     podman = _tool("podman")
-    podman_test = _podman_test(image)
-    if podman_test is None:
-        _fail(f"Image {args.image} has no Podman test profile.")
-    outer_podman = [podman]
-    separate_outer_store = False
-
+    evidence = args.evidence or f"{args.image}-{architecture}-runtime-evidence.json"
     try:
         _write_stdout(f"Building {args.image} for local linux/{architecture} testing.")
         _run(
@@ -1472,63 +1429,31 @@ def _command_test_podman_image(args: argparse.Namespace) -> None:
                 source_timestamp=source_timestamp,
             )
         )
-        _run(
-            [
-                podman,
-                "run",
-                "--rm",
-                "--security-opt",
-                "label=disable",
-                local_image,
-                "sh",
-                "-euc",
-                """
-case "$1" in
-  rootless) expected_uid=1000 ;;
-  rootful) expected_uid=0 ;;
-  *) printf 'Unsupported Podman mode: %s\\n' "$1" >&2; exit 1 ;;
-esac
-test "$(id -u)" -eq "${expected_uid}"
-test "$(cat /usr/share/containers/podman-mode)" = "$1"
-podman --version
-""".strip(),
-                "--",
-                str(podman_test["mode"]),
-            ]
-        )
-
-        nested_runtime = bool(podman_test.get("nestedRuntime", True))
-        if not args.skip_nested and nested_runtime:
-            outer_podman, separate_outer_store = _local_outer_podman_command(image)
-            with tempfile.TemporaryDirectory(prefix="strukturpiloten-podman-test-") as temporary_directory:
-                archive_path = Path(temporary_directory) / f"{args.image}-{architecture}.tar"
-                _run([podman, "save", "--format", "oci-archive", "--output", str(archive_path), local_image])
-                if separate_outer_store:
-                    _run([*outer_podman, "load", "--quiet", "--input", str(archive_path)])
-                _run(
-                    _local_nested_podman_command(
-                        image=image,
-                        local_image=local_image,
-                        archive_path=archive_path,
-                        outer_podman=outer_podman,
-                    )
-                )
-        elif not args.skip_nested:
-            _write_stdout(f"Nested runtime check is disabled by the test profile for {args.image}.")
-        _write_stdout(f"Local Podman checks passed for {args.image} ({architecture}).")
-    finally:
-        if separate_outer_store:
-            subprocess.run(  # noqa: S603
-                [*outer_podman, "image", "rm", "--force", local_image],
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+        result = run_runtime(
+            argparse.Namespace(
+                metadata=None,
+                image_name=args.image,
+                image_ref=local_image,
+                archive=None,
+                arch=architecture,
+                evidence=evidence,
+                allow_privileged=True,
+                skip_nested=args.skip_nested,
+                sudo=False,
+                no_sudo=False,
+                timeout=45,
             )
+        )
+        if result["status"] != "passed":
+            _fail(f"Runtime checks failed for {args.image}: {result.get('error', 'see evidence')}")
+        _write_stdout(f"Local runtime checks passed for {args.image} ({architecture}); evidence: {evidence}.")
+    finally:
         subprocess.run(  # noqa: S603
             [podman, "image", "rm", "--force", local_image],
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            timeout=30,
         )
 
 
@@ -2478,6 +2403,7 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     local_test_parser.add_argument("--image", required=True)
     local_test_parser.add_argument("--architecture", choices=sorted(RUNNERS), default="amd64")
     local_test_parser.add_argument("--skip-nested", action="store_true")
+    local_test_parser.add_argument("--evidence", help="write structured per-architecture runtime evidence here")
     local_test_parser.set_defaults(func=_command_test_podman_image)
 
     publish_parser = subparsers.add_parser("publish-image")

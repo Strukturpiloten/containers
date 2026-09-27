@@ -6,6 +6,10 @@ image: ghcr.io/strukturpiloten/typo3-phpfpm
 title: TYPO3 PHP-FPM
 description: TYPO3 PHP-FPM runtime image with TYPO3 extensions and container utilities
 
+tests:
+  phpFpm:
+    extensions: [apcu, exif, gd, gmp, imagick, intl, pcntl, pdo_mysql, pdo_pgsql, pgsql, redis, sodium, sysvsem, zip]
+
 build:
   context: .
   containerfile: images/typo3/typo3-phpfpm/Containerfile

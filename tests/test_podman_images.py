@@ -5,8 +5,10 @@ from __future__ import annotations
 import re
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock
 
 from scripts import container_engine as engine
+from scripts import runtime_tests
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_SOURCE_LINES = ("5.4", "5.5", "5.6", "5.7", "5.8", "6.0", "6.1")
@@ -175,80 +177,43 @@ class PodmanImageTests(unittest.TestCase):
         action_directory = REPOSITORY_ROOT / ".github/actions/build-arch-image"
         action = (action_directory / "action.yml").read_text(encoding="utf-8")
         containers_conf = (action_directory / "podman-smoke-containers.conf").read_text(encoding="utf-8")
+        runtime = (REPOSITORY_ROOT / "scripts/runtime_tests.py").read_text(encoding="utf-8")
 
-        for option, variable in (
-            ("root", "HOST_PODMAN_ROOT"),
-            ("runroot", "HOST_PODMAN_RUNROOT"),
-            ("tmpdir", "HOST_PODMAN_TMPDIR"),
-        ):
-            with self.subTest(option=option):
-                self.assertEqual(action.count(f'--{option} "${{{variable}}}"'), 2)
-
-        self.assertNotIn("sudo podman load", action)
-        self.assertNotIn("sudo podman run", action)
-        self.assertEqual(action.count("CONTAINERS_CONF_OVERRIDE:"), 2)
-        self.assertEqual(action.count('sudo env "CONTAINERS_CONF_OVERRIDE=${CONTAINERS_CONF_OVERRIDE}"'), 2)
-        self.assertEqual(action.count('"${host_podman[@]}" tag'), 2)
-        self.assertNotIn('host_podman=(env "CONTAINERS_CONF_OVERRIDE=${CONTAINERS_CONF_OVERRIDE}"', action)
-        self.assertNotIn('"podman-debian-11-rootless"', action)
-        self.assertNotIn('"podman-ubuntu-22.04-rootless"', action)
-        self.assertIn("fromJSON(inputs.entry).podmanMode", action)
-        self.assertIn("fromJSON(inputs.entry).podmanOuterPrivilege", action)
-        self.assertIn("fromJSON(inputs.entry).podmanNestedRuntime", action)
+        self.assertEqual(action.count("python -m scripts.runtime_tests"), 1)
+        self.assertIn("--archive", action)
+        self.assertIn("--evidence", action)
+        self.assertIn("Upload runtime evidence", action)
+        self.assertIn("--root", runtime)
+        self.assertIn("--runroot", runtime)
+        self.assertIn("--tmpdir", runtime)
+        self.assertIn("CONTAINERS_CONF_OVERRIDE", runtime)
         self.assertEqual(action.count("github.event_name != 'pull_request'"), 1)
         self.assertIn("github.event.pull_request.head.repo.full_name == github.repository", action)
-        self.assertEqual(action.count("run_args+=(--privileged)"), 1)
-        self.assertEqual(action.count("run_args+=(--security-opt apparmor=unconfined)"), 1)
-        self.assertNotIn("--cap-add SYS_ADMIN", action)
-        self.assertNotIn("--cap-add MKNOD", action)
-        self.assertIn('nested_image_ids="$(podman images --quiet --no-trunc)"', action)
-        self.assertIn('podman run --rm "${nested_image_ids}" /bin/sh -c "exit 0"', action)
-        self.assertNotIn("/usr/bin/true", action)
-        self.assertIn('test "$(id -u)" -eq "${expected_uid}"', action)
-        self.assertIn('test "$(cat /usr/share/containers/podman-mode)" = "$1"', action)
-        self.assertIn("Host.Security.Rootless", action)
-        self.assertNotIn("--userns=keep-id", action)
-        self.assertNotIn("HOST_INNER_RUNTIME_DIR", action)
+        self.assertIn("--allow-privileged", action)
+        self.assertIn("privileged test requires trusted context", runtime)
+        self.assertIn("nestedRuntime", runtime)
         self.assertIn('lock_type = "file"', containers_conf)
 
-    def test_local_nested_tests_match_the_ci_privilege_boundary(self) -> None:
-        rootful = self.distro_images["podman-ubi-8-rootful"]
-        privileged_rootless = self.distro_images["podman-debian-12-rootless"]
-        unprivileged_rootless = self.source_images["podman-6.1-rootless"]
+    def test_nested_runtime_respects_trusted_privilege_boundary(self) -> None:
+        privileged = self.distro_images["podman-debian-12-rootless"]["tests"]["podman"]
+        unprivileged = self.source_images["podman-6.1-rootless"]["tests"]["podman"]
+        context = MagicMock()
+        context.run.return_value = "podman version"
 
-        rootful_command, rootful_separate_store = engine._local_outer_podman_command(rootful)
-        privileged_command, privileged_separate_store = engine._local_outer_podman_command(privileged_rootless)
-        unprivileged_command, unprivileged_separate_store = engine._local_outer_podman_command(unprivileged_rootless)
+        runtime_tests._podman(context, privileged, archive=Path("test.tar"), allow_privileged=False, skip_nested=False)
+        self.assertEqual(context.run.call_count, 1)
+        context.skip.assert_called_once_with("nested Podman runtime", "privileged test requires trusted context")
 
-        self.assertEqual(Path(rootful_command[0]).name, "sudo")
-        self.assertEqual(rootful_command[1], "-n")
-        self.assertEqual(Path(rootful_command[2]).name, "podman")
-        self.assertTrue(rootful_separate_store)
-        self.assertEqual(privileged_command, rootful_command)
-        self.assertTrue(privileged_separate_store)
-        self.assertEqual(unprivileged_command, rootful_command)
-        self.assertTrue(unprivileged_separate_store)
+        context.reset_mock()
+        runtime_tests._podman(context, privileged, archive=Path("test.tar"), allow_privileged=True, skip_nested=False)
+        self.assertIn("--privileged", context.run.call_args.kwargs["options"])
 
-        privileged_nested = engine._local_nested_podman_command(
-            image=privileged_rootless,
-            local_image="localhost/test:privileged",
-            archive_path=Path("test.tar"),
-            outer_podman=privileged_command,
+        context.reset_mock()
+        runtime_tests._podman(
+            context, unprivileged, archive=Path("test.tar"), allow_privileged=False, skip_nested=False
         )
-        unprivileged_nested = engine._local_nested_podman_command(
-            image=unprivileged_rootless,
-            local_image="localhost/test:unprivileged",
-            archive_path=Path("test.tar"),
-            outer_podman=unprivileged_command,
-        )
-        self.assertEqual(privileged_nested[0], privileged_command[0])
-        self.assertIn("--privileged", privileged_nested)
-        self.assertNotIn("apparmor=unconfined", privileged_nested)
-        self.assertNotIn("--userns=keep-id", privileged_nested)
-        self.assertEqual(unprivileged_nested[0], unprivileged_command[0])
-        self.assertNotIn("--privileged", unprivileged_nested)
-        self.assertIn("apparmor=unconfined", unprivileged_nested)
-        self.assertNotIn("--userns=keep-id", unprivileged_nested)
+        self.assertIn("apparmor=unconfined", context.run.call_args.kwargs["options"])
+        self.assertNotIn("--privileged", context.run.call_args.kwargs["options"])
 
     def test_local_source_build_normalizes_the_metadata_version(self) -> None:
         command = engine._local_podman_build_command(

@@ -89,7 +89,4 @@ RUN install -d -m 0777 /home/www-data
 
 EXPOSE 9000
 
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-    CMD php-fpm -t || exit 1
-
-STOPSIGNAL SIGKILL
+STOPSIGNAL SIGQUIT
