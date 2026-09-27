@@ -12,7 +12,7 @@ on:
         type: string
 
 concurrency:
-  group: validate-containers-${{ github.ref }}
+  group: diagnose-containers-${{ github.ref }}-${{ inputs.target || 'all' }}
   cancel-in-progress: true
 
 permissions: {}
