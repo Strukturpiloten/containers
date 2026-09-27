@@ -79,6 +79,47 @@ class PublicationScenarios(unittest.TestCase):
         self.assertEqual(identity, PublicationIdentity(100, 2))
         self.assertIn("--raw", run.call_args.args[0])
 
+    def test_finalize_rerun_accepts_prior_successful_publish_attempt(self) -> None:
+        context = engine._GitHubContext(
+            actor="actor",
+            event_name="schedule",
+            ref_name="main",
+            repository="Strukturpiloten/containers",
+            run_attempt="2",
+            run_id="100",
+            server_url="https://github.com",
+            sha=REVISION,
+            token=None,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            result_path = Path(directory) / "build-result.json"
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "imageName": "example",
+                        "image": IMAGE,
+                        "version": "1.0.0",
+                        "sourceRevision": REVISION,
+                        "indexDigest": OLD,
+                        "runId": "100",
+                        "runAttempt": "1",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            engine._validated_release_build_result(
+                result_path, context=context, image_name="example", image_ref=IMAGE, version="1.0.0"
+            )
+        with (
+            patch.object(engine, "_registry_annotations", return_value=_annotations(100, 1)),
+            patch.object(engine, "_remote_digest", return_value=OLD) as digest,
+        ):
+            identity = engine._validate_publication_source(
+                ["skopeo"], IMAGE, OLD, context, expected_identity=PublicationIdentity(100, 1)
+            )
+        self.assertEqual(identity, PublicationIdentity(100, 1))
+        self.assertIn("run-100-1-sha-", digest.call_args.args[1])
+
     def _preflight(
         self,
         *,

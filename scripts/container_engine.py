@@ -1991,16 +1991,21 @@ def _publication_identity(annotations: JsonMap, reference: str) -> PublicationId
 
 
 def _validate_publication_source(
-    command_prefix: Sequence[str], image_ref: str, digest: str, context: _GitHubContext
+    command_prefix: Sequence[str],
+    image_ref: str,
+    digest: str,
+    context: _GitHubContext,
+    *,
+    expected_identity: PublicationIdentity | None = None,
 ) -> PublicationIdentity:
     annotations = _registry_annotations(command_prefix, f"{image_ref}@{digest}")
     identity = _publication_identity(annotations, f"{image_ref}@{digest}")
-    expected = PublicationIdentity.from_values(context.run_id, context.run_attempt)
+    expected = expected_identity or PublicationIdentity.from_values(context.run_id, context.run_attempt)
     if identity != expected:
         _fail(f"Publication identity {identity} does not belong to workflow run {expected}.")
     if annotations.get(REVISION_ANNOTATION) != context.sha:
         _fail(f"Publication source {image_ref}@{digest} does not match workflow revision {context.sha}.")
-    canonical = canonical_build_tag(sha=context.sha, run_id=context.run_id, run_attempt=context.run_attempt)
+    canonical = canonical_build_tag(sha=context.sha, run_id=str(expected.run_id), run_attempt=str(expected.run_attempt))
     if _remote_digest(command_prefix, f"{image_ref}:{canonical}") != digest:
         _fail(f"Canonical registry tag {image_ref}:{canonical} does not point to {digest}.")
     return identity
@@ -2203,7 +2208,17 @@ def _validated_release_build_result(
         _fail(f"Build result for {image_name} does not match metadata version {version}.")
     if source_revision != context.sha:
         _fail(f"Build result for {image_name} does not match workflow revision {context.sha}.")
-    if build_result.get("runId") != context.run_id or build_result.get("runAttempt") != context.run_attempt:
+    try:
+        published_identity = PublicationIdentity.from_values(
+            str(build_result.get("runId", "")), str(build_result.get("runAttempt", ""))
+        )
+        execution_identity = PublicationIdentity.from_values(context.run_id, context.run_attempt)
+    except ValueError:
+        _fail(f"Build result for {image_name} has an invalid run identity.")
+    if (
+        published_identity.run_id != execution_identity.run_id
+        or published_identity.run_attempt > execution_identity.run_attempt
+    ):
         _fail(f"Build result for {image_name} does not match workflow run identity.")
     if (
         not isinstance(index_digest, str)
@@ -2296,7 +2311,10 @@ def _command_finalize_release(args: argparse.Namespace) -> None:
         source_revision=source_revision,
         version=version,
     )
-    identity = _validate_publication_source([skopeo], image_ref, index_digest, context)
+    published_identity = PublicationIdentity.from_values(str(build_result["runId"]), str(build_result["runAttempt"]))
+    identity = _validate_publication_source(
+        [skopeo], image_ref, index_digest, context, expected_identity=published_identity
+    )
     if build_result.get("runId") != str(identity.run_id) or build_result.get("runAttempt") != str(identity.run_attempt):
         _fail(f"Build result for {image_name} does not match immutable image identity.")
     candidate = _ReleaseCandidate(
