@@ -1568,7 +1568,7 @@ def _command_build_arch_image(args: argparse.Namespace) -> None:
             )
         except build_payloads.PayloadError as error:
             _fail(str(error))
-        build_args.extend(_build_arg("DOCKER_PAYLOAD_IMAGE", payload_image))
+        build_args.extend(_build_arg("BUILD_PAYLOAD_IMAGE", payload_image))
     oci_labels = _oci_labels()
 
     command = [

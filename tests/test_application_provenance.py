@@ -87,6 +87,8 @@ class ApplicationProvenanceTests(unittest.TestCase):
                 architecture_digests={"amd64": f"sha256:{'c' * 64}", "arm64": f"sha256:{'d' * 64}"},
                 component_inputs=inputs,
                 tags=["run-1-1"],
+                run_id="1",
+                run_attempt="1",
             )
             recorded = json.loads(engine._write_build_result(Path(directory), result).read_text(encoding="utf-8"))
         self.assertEqual(recorded["sourceRevision"], "a" * 40)
