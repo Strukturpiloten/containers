@@ -151,8 +151,14 @@ def build_payload(root: Path, manifest: str, architecture: str, revision: str, o
         _fail(f"Unsupported payload architecture: {architecture}")
     if re.fullmatch(r"[a-f0-9]{40}", revision) is None:
         _fail("Payload source revision must be a full Git SHA.")
+    git = shutil.which("git") or "/usr/bin/git"
+    checkout_revision = subprocess.check_output(  # noqa: S603 - fixed git command.
+        [git, "rev-parse", "HEAD"], cwd=root, text=True
+    ).strip()
+    if checkout_revision != revision:
+        _fail(f"Payload source revision {revision} does not match checkout HEAD {checkout_revision}.")
     timestamp = subprocess.check_output(  # noqa: S603 - fixed git command; full SHA validated above.
-        [shutil.which("git") or "/usr/bin/git", "show", "-s", "--format=%ct", revision], cwd=root, text=True
+        [git, "show", "-s", "--format=%ct", revision], cwd=root, text=True
     ).strip()
     arguments = {**build.get("args", {}), **build.get("architectureArgs", {}).get(architecture, {})}
     name = record["name"]

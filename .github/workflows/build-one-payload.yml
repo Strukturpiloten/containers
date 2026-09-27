@@ -43,7 +43,7 @@ jobs:
         env:
           PAYLOAD_MANIFEST: ${{ fromJSON(inputs.entry).manifest }}
           PAYLOAD_ARCH: ${{ fromJSON(inputs.entry).arch }}
-          SOURCE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+          SOURCE_REVISION: ${{ github.sha }}
         run: |
           set -euo pipefail
           uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.build_payloads \

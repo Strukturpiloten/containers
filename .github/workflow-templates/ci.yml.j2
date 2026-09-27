@@ -84,7 +84,7 @@ jobs:
           BUILD_SCOPE: all
           BUILD_TARGET: ""
           REF_NAME: ${{ github.head_ref || github.ref_name }}
-          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          SOURCE_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
 

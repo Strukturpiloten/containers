@@ -1318,6 +1318,12 @@ def _build_base_args(
     return build_args, base_name, base_digest
 
 
+def _require_checkout_revision(source_revision: str) -> None:
+    checkout_revision = _run([_tool("git"), "-C", str(_repo_root()), "rev-parse", "HEAD"], capture_stdout=True).strip()
+    if checkout_revision != source_revision:
+        _fail(f"Build source revision {source_revision} does not match checkout HEAD {checkout_revision}.")
+
+
 def _source_timestamp(source_revision: str) -> tuple[int, str]:
     if len(source_revision) != GIT_SHA_LENGTH or not set(source_revision.lower()) <= LOWERCASE_HEX_DIGITS:
         _fail(f"Build source must be a full Git commit SHA: {source_revision}.")
@@ -1517,7 +1523,7 @@ def _command_test_podman_image(args: argparse.Namespace) -> None:
         )
 
 
-def _command_build_arch_image(args: argparse.Namespace) -> None:
+def _command_build_arch_image(args: argparse.Namespace) -> None:  # noqa: PLR0915 - build identity and OCI labels require separate checks.
     image_name, architecture = _entry(args.entry_json, require_arch=True)
     if architecture is None:
         _fail("Architecture is required for architecture builds.")
@@ -1526,6 +1532,7 @@ def _command_build_arch_image(args: argparse.Namespace) -> None:
     plan = _load_json(Path(args.plan))
     image = _plan_image(plan, image_name)
     source_revision = str(plan.get("sourceRevision", ""))
+    _require_checkout_revision(source_revision)
     source_timestamp, created = _source_timestamp(source_revision)
     architectures = _image_architectures(image)
     if architecture not in architectures:
@@ -2459,6 +2466,7 @@ def _validate_release_inspection(
 
 
 def _command_plan(args: argparse.Namespace) -> None:
+    _require_checkout_revision(args.sha)
     images = _load_images()
     _validate_images(images)
     options = PlanOptions(

@@ -76,6 +76,15 @@ class SharedPayloadTests(unittest.TestCase):
         with self.assertRaisesRegex(payloads.PayloadError, "does not support arm64"):
             payloads.plan_payloads(self.root, [self.image("rootless", ["arm64"])], {"arm64": "arm-runner"})
 
+    def test_payload_build_rejects_head_sha_when_checkout_is_merge_sha(self) -> None:
+        with (
+            patch.object(payloads.subprocess, "check_output", return_value="b" * 40),
+            patch.object(payloads, "_run") as run,
+            self.assertRaisesRegex(payloads.PayloadError, "does not match checkout HEAD"),
+        ):
+            payloads.build_payload(self.root, self.manifest_path, "amd64", REVISION, self.root / "artifacts")
+        run.assert_not_called()
+
     def test_missing_same_run_evidence_never_falls_back_to_a_registry(self) -> None:
         with patch.object(payloads, "_run") as run, self.assertRaisesRegex(payloads.PayloadError, "Missing same-run"):
             payloads.import_payload(self.root, self.manifest_path, "amd64", REVISION, self.root)
