@@ -354,7 +354,8 @@
     {
       "description": "Keep distro compatibility images on their declared OS release while allowing digest refreshes",
       "matchFileNames": [
-        "/^images\\/podman\\/podman-(?:alpine|arch|centos|debian|fedora|opensuse|ubi|ubuntu)-.+\\/container\\.yaml$/"
+        "/^images\\/podman\\/podman-(?:alpine|arch|centos|debian|fedora|opensuse|ubi|ubuntu)-.+\\/container\\.yaml$/",
+        "/^images\\/docker\\/docker-(?:alpine|arch|debian|fedora|opensuse|ubuntu)(?:-.+)?-(?:rootful|rootless)\\/container\\.yaml$/"
       ],
       "matchDatasources": [
         "docker"
@@ -650,12 +651,13 @@
       "groupName": "Podman Fedora 44 base"
     },
     {
-      "description": "Keep Docker payload builders on Alpine 3.24 while allowing digest refreshes",
+      "description": "Keep upstream Docker payloads and runtime images on Alpine 3.24 while allowing digest refreshes",
       "matchManagers": [
         "custom.regex"
       ],
       "matchFileNames": [
-        "/^images\\/docker\\/upstream\\/.+\\/payload\\.yaml$/"
+        "/^images\\/docker\\/upstream\\/.+\\/payload\\.yaml$/",
+        "/^images\\/docker\\/docker-\\d+(?:\\.\\d+)?-(?:rootful|rootless)\\/container\\.yaml$/"
       ],
       "matchPackageNames": [
         "docker.io/library/alpine"
@@ -672,12 +674,240 @@
       ],
       "matchFileNames": [
         "/^images\\/docker\\/upstream\\/.+\\/payload\\.yaml$/",
-        "/^images\\/docker\\/docker-.+-(?:rootful|rootless)\\/container\\.yaml$/"
+        "/^images\\/docker\\/docker-\\d+(?:\\.\\d+)?-(?:rootful|rootless)\\/container\\.yaml$/"
       ],
       "matchUpdateTypes": [
         "digest"
       ],
       "groupName": "Docker Alpine 3.24 base"
+    },
+    {
+      "description": "Update Docker Alpine 3.24 distro base digest for both root modes together",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "docker.io/library/alpine"
+      ],
+      "matchFileNames": [
+        "/^images\\/docker\\/docker-alpine-3\\.24-(?:rootful|rootless)\\/container\\.yaml$/"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "groupName": "Docker Alpine 3.24 distro base"
+    },
+    {
+      "description": "Update Docker Arch distro base digest for both root modes together",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "docker.io/library/archlinux"
+      ],
+      "matchFileNames": [
+        "/^images\\/docker\\/docker-arch-(?:rootful|rootless)\\/container\\.yaml$/"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "groupName": "Docker Arch distro base"
+    },
+    {
+      "description": "Update Docker Debian 11 distro base digest for both root modes together",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "docker.io/library/debian"
+      ],
+      "matchFileNames": [
+        "/^images\\/docker\\/docker-debian-11-(?:rootful|rootless)\\/container\\.yaml$/"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "groupName": "Docker Debian 11 distro base"
+    },
+    {
+      "description": "Update Docker Debian 12 distro base digest for both root modes together",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "docker.io/library/debian"
+      ],
+      "matchFileNames": [
+        "/^images\\/docker\\/docker-debian-12-(?:rootful|rootless)\\/container\\.yaml$/"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "groupName": "Docker Debian 12 distro base"
+    },
+    {
+      "description": "Update Docker Debian 13 distro base digest for both root modes together",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "docker.io/library/debian"
+      ],
+      "matchFileNames": [
+        "/^images\\/docker\\/docker-debian-13-(?:rootful|rootless)\\/container\\.yaml$/"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "groupName": "Docker Debian 13 distro base"
+    },
+    {
+      "description": "Update Docker Fedora 43 distro base digest for both root modes together",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "registry.fedoraproject.org/fedora"
+      ],
+      "matchFileNames": [
+        "/^images\\/docker\\/docker-fedora-43-(?:rootful|rootless)\\/container\\.yaml$/"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "groupName": "Docker Fedora 43 distro base"
+    },
+    {
+      "description": "Update Docker Fedora 44 distro base digest for both root modes together",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "registry.fedoraproject.org/fedora"
+      ],
+      "matchFileNames": [
+        "/^images\\/docker\\/docker-fedora-44-(?:rootful|rootless)\\/container\\.yaml$/"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "groupName": "Docker Fedora 44 distro base"
+    },
+    {
+      "description": "Update Docker openSUSE Leap 16.0 distro base digest for both root modes together",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "registry.opensuse.org/opensuse/leap"
+      ],
+      "matchFileNames": [
+        "/^images\\/docker\\/docker-opensuse-leap-16\\.0-(?:rootful|rootless)\\/container\\.yaml$/"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "groupName": "Docker openSUSE Leap 16.0 distro base"
+    },
+    {
+      "description": "Update Docker openSUSE Tumbleweed distro base digest for both root modes together",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "registry.opensuse.org/opensuse/tumbleweed"
+      ],
+      "matchFileNames": [
+        "/^images\\/docker\\/docker-opensuse-tumbleweed-(?:rootful|rootless)\\/container\\.yaml$/"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "groupName": "Docker openSUSE Tumbleweed distro base"
+    },
+    {
+      "description": "Update Docker Ubuntu 22.04 distro base digest for both root modes together",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "docker.io/library/ubuntu"
+      ],
+      "matchFileNames": [
+        "/^images\\/docker\\/docker-ubuntu-22\\.04-(?:rootful|rootless)\\/container\\.yaml$/"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "groupName": "Docker Ubuntu 22.04 distro base"
+    },
+    {
+      "description": "Update Docker Ubuntu 24.04 distro base digest for both root modes together",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "docker.io/library/ubuntu"
+      ],
+      "matchFileNames": [
+        "/^images\\/docker\\/docker-ubuntu-24\\.04-(?:rootful|rootless)\\/container\\.yaml$/"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "groupName": "Docker Ubuntu 24.04 distro base"
+    },
+    {
+      "description": "Update Docker Ubuntu 26.04 distro base digest for both root modes together",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "docker.io/library/ubuntu"
+      ],
+      "matchFileNames": [
+        "/^images\\/docker\\/docker-ubuntu-26\\.04-(?:rootful|rootless)\\/container\\.yaml$/"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "groupName": "Docker Ubuntu 26.04 distro base"
     }
   ]
 }
