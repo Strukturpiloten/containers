@@ -12,6 +12,7 @@ on:
       - ".github/renovate.json"
       - ".github/workflow-templates/**"
       - ".github/workflows/publish-images.yml"
+      - ".github/workflows/publish-one-image.yml"
       - "container.schema.json"
       - "images/**"
       - "pyproject.toml"
@@ -155,88 +156,24 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  build-stage-0:
-    name: Build ${{ matrix.name }} ${{ matrix.arch }}
-    needs: plan
-    if: needs.plan.outputs.stage_0_has_builds == 'true'
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 120
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.plan.outputs.stage_0_build_matrix) }}
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-          submodules: true
-      - name: Build architecture image
-        uses: ./.github/actions/build-arch-image
-        with:
-          entry: ${{ toJSON(matrix) }}
-
   publish-stage-0:
     name: Publish ${{ matrix.name }}
-    needs:
-      - plan
-      - build-stage-0
-    if: needs.plan.outputs.stage_0_has_builds == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    needs: plan
+    # A failed unrelated image must not block this stage. The builder requires
+    # same-run results for selected dependencies and fails closed if missing.
+    if: >-
+      always() && !cancelled() && needs.plan.result == 'success' &&
+      needs.plan.outputs.stage_0_has_builds == 'true'
     permissions:
       attestations: write
       artifact-metadata: write
-      contents: read
+      contents: write
       id-token: write
       packages: write
     strategy:
       fail-fast: false
+      max-parallel: 4
       matrix: ${{ fromJSON(needs.plan.outputs.stage_0_publish_matrix) }}
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-          submodules: true
-      - name: Publish image
-        uses: ./.github/actions/publish-image
-        with:
-          default-branch: ${{ github.event.repository.default_branch }}
-          entry: ${{ toJSON(matrix) }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          syft-version: ${{ env.SYFT_VERSION }}
-
-  finalize-stage-0:
-    name: Finalize release ${{ matrix.name }}
-    needs:
-      - plan
-      - publish-stage-0
-    if: >-
-      needs.plan.outputs.stage_0_has_builds == 'true' &&
-      github.ref_name == github.event.repository.default_branch
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    permissions:
-      contents: write
-      packages: write
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.plan.outputs.stage_0_publish_matrix) }}
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          fetch-tags: true
-          persist-credentials: false
-          submodules: true
-      - name: Finalize release
-        uses: ./.github/actions/finalize-release
-        with:
-          default-branch: ${{ github.event.repository.default_branch }}
-          entry: ${{ toJSON(matrix) }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+    uses: ./.github/workflows/publish-one-image.yml
+    with:
+      entry: ${{ toJSON(matrix) }}

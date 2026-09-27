@@ -360,8 +360,10 @@ class ReleaseValidationTests(unittest.TestCase):
 
     def test_publish_workflow_finalizes_releases_automatically(self) -> None:
         workflow = engine._publish_workflow(1)
-        self.assertIn("finalize-stage-0:", workflow)
-        self.assertIn("uses: ./.github/actions/finalize-release", workflow)
+        self.assertIn("uses: ./.github/workflows/publish-one-image.yml", workflow)
+        reusable = (engine._repo_root() / ".github/workflows/publish-one-image.yml").read_text()
+        self.assertIn("uses: ./.github/actions/finalize-release", reusable)
+        self.assertIn("needs: publish", reusable)
         self.assertIn("contents: write", workflow)
         self.assertNotIn("source-sha", workflow)
 
