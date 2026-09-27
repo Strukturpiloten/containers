@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import unittest
+import urllib.error
 from unittest.mock import patch
 
-from scripts.release_evidence import ReleaseEvidenceError, asset_name, record, upload
+from scripts.release_evidence import ReleaseEvidenceError, _github_request, asset_name, publish, record, upload
 
 BUILD = {
     "imageName": "example",
@@ -21,6 +23,124 @@ BUILD = {
     "runAttempt": "2",
     "releaseTag": "example/v1.0.0",
 }
+
+
+class FakeGitHub:
+    """Exercise ordering and immutable retry against the GitHub REST boundary."""
+
+    def __init__(
+        self, evidence: dict, asset: bytes | None = None, *, published: bool = False, race: bool = False
+    ) -> None:
+        """Initialize in-memory release state."""
+        self.evidence = evidence
+        self.asset = asset
+        self.release = self._release(draft=False) if published else None
+        self.race = race
+        self.tag_sha = evidence["evidenceReleaseRevision"]
+        self.tag_exists_when_draft = False
+        self.asset_name_override: str | None = None
+        self.extra_asset_name: str | None = None
+        self.graph_release_id_override: int | None = None
+        self.graphql_errors = False
+        self.calls: list[str] = []
+
+    def _release(self, *, draft: bool) -> dict:
+        return {
+            "id": 1,
+            "tag_name": self.evidence["evidenceReleaseTag"],
+            "name": self.evidence["evidenceReleaseTag"],
+            "target_commitish": self.evidence["evidenceReleaseRevision"],
+            "draft": draft,
+            "immutable": not draft,
+            "upload_url": "https://uploads.github.com/repos/org/repo/releases/1/assets{?name,label}",
+        }
+
+    def __call__(  # noqa: C901, PLR0911, PLR0912
+        self, url: str, _token: str, *, data: bytes | None = None, method: str | None = None, **_kwargs: object
+    ) -> bytes:
+        if "/releases/tags/" in url:
+            self.calls.append("rest-tag")
+            if self.release is None or self.release["draft"]:
+                message = "drafts are hidden from REST tag lookup"
+                raise ReleaseEvidenceError(message, status_code=404)
+            return json.dumps(self.release).encode()
+        if url.endswith("/graphql"):
+            self.calls.append("graphql")
+            if self.graphql_errors:
+                return json.dumps({"errors": [{"message": "failure"}]}).encode()
+            found = None
+            if self.release is not None:
+                found = {
+                    "databaseId": self.graph_release_id_override or self.release["id"],
+                    "isDraft": self.release["draft"],
+                    "tagName": self.release["tag_name"],
+                    "name": self.release["name"],
+                }
+            return json.dumps({"data": {"repository": {"release": found}}}).encode()
+        if url.endswith("/releases/1") and method is None:
+            self.calls.append("rest-id")
+            return json.dumps(self.release).encode()
+        if url.endswith("/releases/2") and method is None:
+            self.calls.append("rest-id")
+            return json.dumps({**self.release, "id": 2}).encode()
+        if "/git/ref/tags/" in url:
+            self.calls.append("verify-tag")
+            if self.release is None or (self.release["draft"] and not self.tag_exists_when_draft):
+                message = "missing tag"
+                raise ReleaseEvidenceError(message, status_code=404)
+            return json.dumps(
+                {
+                    "ref": f"refs/tags/{self.evidence['evidenceReleaseTag']}",
+                    "object": {"type": "commit", "sha": self.tag_sha},
+                }
+            ).encode()
+        if url.startswith("https://api.github.com/") and "/releases/1/assets?" in url:
+            self.calls.append("list-assets")
+            assets = []
+            if self.asset is not None:
+                assets = [
+                    {
+                        "name": self.asset_name_override or asset_name(self.evidence),
+                        "digest": f"sha256:{hashlib.sha256(self.asset).hexdigest()}",
+                        "size": len(self.asset),
+                        "url": "https://api.github.com/repos/org/repo/releases/assets/55",
+                    }
+                ]
+            if self.extra_asset_name is not None:
+                assets.append({"name": self.extra_asset_name})
+            return json.dumps(assets).encode()
+        if url.endswith("/assets/55"):
+            self.calls.append("download")
+            return self.asset
+        if url.startswith("https://uploads.github.com/"):
+            self.calls.append("upload")
+            if self.release is None or not self.release["draft"]:
+                message = "uploaded outside draft"
+                raise AssertionError(message)
+            self.asset = data
+            return json.dumps(
+                {
+                    "name": asset_name(self.evidence),
+                    "digest": f"sha256:{hashlib.sha256(data).hexdigest()}",
+                    "size": len(data),
+                }
+            ).encode()
+        if url.endswith("/releases/1") and method == "PATCH":
+            self.calls.append("publish")
+            if self.asset is None:
+                message = "published before upload"
+                raise AssertionError(message)
+            self.release = self._release(draft=False)
+            return json.dumps(self.release).encode()
+        if url.endswith("/releases") and data is not None:
+            self.calls.append("create-draft")
+            self.release = self._release(draft=True)
+            if self.race:
+                message = "raced"
+                raise ReleaseEvidenceError(message, status_code=422)
+            return json.dumps(self.release).encode()
+        message = f"unexpected API request: {url}"
+        raise AssertionError(message)
 
 
 class ReleaseEvidenceTests(unittest.TestCase):
@@ -141,7 +261,10 @@ class ReleaseEvidenceTests(unittest.TestCase):
             json.dumps([{"name": f"older-{number}"} for number in range(100)]).encode(),
             json.dumps([{"name": asset_name(evidence), "digest": digest}]).encode(),
         ]
-        with patch("scripts.release_evidence._github_request", side_effect=pages) as request:
+        with (
+            patch("scripts.release_evidence._github_request", side_effect=pages) as request,
+            self.assertRaisesRegex(ReleaseEvidenceError, "unexpected assets"),
+        ):
             upload(evidence, payload, repository="org/repo", token=BUILD["runId"], release={"id": 1})
         self.assertEqual(request.call_count, 2)
         self.assertIn("page=2", request.call_args.args[0])
@@ -152,7 +275,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
         correct = f"sha256:{hashlib.sha256(payload).hexdigest()}"
         with patch(
             "scripts.release_evidence._github_request",
-            return_value=json.dumps([{"name": asset_name(evidence), "digest": correct}]).encode(),
+            return_value=json.dumps([{"name": asset_name(evidence), "digest": correct, "size": len(payload)}]).encode(),
         ) as request:
             upload(evidence, payload, repository="org/repo", token=BUILD["runId"], release={"id": 1})
         request.assert_called_once()
@@ -164,6 +287,155 @@ class ReleaseEvidenceTests(unittest.TestCase):
             self.assertRaises(ReleaseEvidenceError),
         ):
             upload(evidence, payload, repository="org/repo", token=BUILD["runId"], release={"id": 1})
+
+    def test_draft_upload_publish_and_published_retry(self) -> None:
+        evidence = record(BUILD, release_origin_revision="d" * 40)
+        payload = json.dumps(evidence).encode()
+        api = FakeGitHub(evidence)
+        with patch("scripts.release_evidence._github_request", side_effect=api):
+            self.assertEqual(publish(evidence, payload, repository="org/repo", token=BUILD["runId"]), payload)
+            self.assertEqual(publish(evidence, payload, repository="org/repo", token=BUILD["runId"]), payload)
+        self.assertEqual(api.calls[:3], ["rest-tag", "graphql", "create-draft"])
+        self.assertLess(api.calls.index("upload"), api.calls.index("publish"))
+        self.assertEqual(api.calls.count("upload"), 1)
+        self.assertEqual(api.calls.count("publish"), 1)
+        self.assertEqual(api.calls.count("verify-tag"), 3)
+        self.assertTrue(api.release["immutable"])
+
+    def test_create_race_reuses_matching_draft(self) -> None:
+        evidence = record(BUILD, release_origin_revision="d" * 40)
+        payload = json.dumps(evidence).encode()
+        api = FakeGitHub(evidence, race=True)
+        with patch("scripts.release_evidence._github_request", side_effect=api):
+            self.assertEqual(publish(evidence, payload, repository="org/repo", token=BUILD["runId"]), payload)
+        self.assertEqual(api.calls.count("create-draft"), 1)
+        self.assertEqual(api.calls.count("upload"), 1)
+        self.assertEqual(api.calls.count("publish"), 1)
+
+    def test_published_retry_reuses_canonical_timestamp_but_rejects_changed_evidence(self) -> None:
+        evidence = record(BUILD, release_origin_revision="d" * 40)
+        old = json.dumps(evidence).encode()
+        changed = {**evidence, "buildSucceededAt": "2026-09-27T13:00:00+00:00"}
+        api = FakeGitHub(evidence, old, published=True)
+        with patch("scripts.release_evidence._github_request", side_effect=api):
+            self.assertEqual(
+                publish(changed, json.dumps(changed).encode(), repository="org/repo", token=BUILD["runId"]), old
+            )
+            divergent = {**changed, "indexDigest": f"sha256:{'f' * 64}"}
+            with self.assertRaisesRegex(ReleaseEvidenceError, "unexpected assets"):
+                publish(divergent, json.dumps(divergent).encode(), repository="org/repo", token=BUILD["runId"])
+        self.assertNotIn("upload", api.calls)
+        self.assertNotIn("publish", api.calls)
+
+    def test_draft_rejects_asset_from_different_index_before_upload(self) -> None:
+        evidence = record(BUILD, release_origin_revision="d" * 40)
+        other = {**evidence, "indexDigest": f"sha256:{'f' * 64}"}
+        api = FakeGitHub(evidence, json.dumps(other).encode())
+        api.release = api._release(draft=True)
+        api.asset_name_override = asset_name(other)
+        with (
+            patch("scripts.release_evidence._github_request", side_effect=api),
+            self.assertRaisesRegex(ReleaseEvidenceError, "unexpected assets"),
+        ):
+            publish(evidence, json.dumps(evidence).encode(), repository="org/repo", token=BUILD["runId"])
+        self.assertNotIn("upload", api.calls)
+        self.assertNotIn("publish", api.calls)
+
+    def test_release_with_extra_asset_is_rejected_even_when_expected_asset_exists(self) -> None:
+        evidence = record(BUILD, release_origin_revision="d" * 40)
+        api = FakeGitHub(evidence, json.dumps(evidence).encode(), published=True)
+        api.extra_asset_name = "unrelated.txt"
+        with (
+            patch("scripts.release_evidence._github_request", side_effect=api),
+            self.assertRaisesRegex(ReleaseEvidenceError, "unexpected assets"),
+        ):
+            publish(evidence, json.dumps(evidence).encode(), repository="org/repo", token=BUILD["runId"])
+        self.assertNotIn("upload", api.calls)
+
+    def test_published_release_without_asset_fails_without_mutation(self) -> None:
+        evidence = record(BUILD, release_origin_revision="d" * 40)
+        api = FakeGitHub(evidence, published=True)
+        with (
+            patch("scripts.release_evidence._github_request", side_effect=api),
+            self.assertRaisesRegex(ReleaseEvidenceError, "no matching asset"),
+        ):
+            publish(evidence, json.dumps(evidence).encode(), repository="org/repo", token=BUILD["runId"])
+        self.assertEqual(api.calls, ["rest-tag", "list-assets"])
+
+    def test_draft_hidden_from_rest_tag_lookup_is_found_by_graphql(self) -> None:
+        evidence = record(BUILD, release_origin_revision="d" * 40)
+        payload = json.dumps(evidence).encode()
+        api = FakeGitHub(evidence)
+        api.release = api._release(draft=True)
+        with patch("scripts.release_evidence._github_request", side_effect=api):
+            self.assertEqual(publish(evidence, payload, repository="org/repo", token=BUILD["runId"]), payload)
+        self.assertEqual(api.calls[:3], ["rest-tag", "graphql", "rest-id"])
+        self.assertNotIn("create-draft", api.calls)
+        self.assertIn("publish", api.calls)
+
+    def test_graphql_lookup_error_is_not_treated_as_missing_draft(self) -> None:
+        evidence = record(BUILD, release_origin_revision="d" * 40)
+        api = FakeGitHub(evidence)
+        api.graphql_errors = True
+        with (
+            patch("scripts.release_evidence._github_request", side_effect=api),
+            self.assertRaisesRegex(ReleaseEvidenceError, "GraphQL evidence release lookup failed"),
+        ):
+            publish(evidence, json.dumps(evidence).encode(), repository="org/repo", token=BUILD["runId"])
+        self.assertNotIn("create-draft", api.calls)
+
+    def test_create_race_with_different_graphql_release_id_fails_closed(self) -> None:
+        evidence = record(BUILD, release_origin_revision="d" * 40)
+        api = FakeGitHub(evidence)
+        api.graph_release_id_override = 2
+        with (
+            patch("scripts.release_evidence._github_request", side_effect=api),
+            self.assertRaisesRegex(ReleaseEvidenceError, "could not be uniquely recovered"),
+        ):
+            publish(evidence, json.dumps(evidence).encode(), repository="org/repo", token=BUILD["runId"])
+        self.assertIn("create-draft", api.calls)
+        self.assertNotIn("upload", api.calls)
+        self.assertNotIn("publish", api.calls)
+
+    def test_existing_draft_with_wrong_git_tag_is_not_published(self) -> None:
+        evidence = record(BUILD, release_origin_revision="d" * 40)
+        api = FakeGitHub(evidence)
+        api.release = api._release(draft=True)
+        api.tag_exists_when_draft = True
+        api.tag_sha = "c" * 40
+        with (
+            patch("scripts.release_evidence._github_request", side_effect=api),
+            self.assertRaisesRegex(ReleaseEvidenceError, "does not resolve"),
+        ):
+            publish(evidence, json.dumps(evidence).encode(), repository="org/repo", token=BUILD["runId"])
+        self.assertNotIn("upload", api.calls)
+        self.assertNotIn("publish", api.calls)
+
+    def test_existing_asset_must_preserve_valid_timestamp_and_nested_evidence(self) -> None:
+        evidence = record(BUILD, release_origin_revision="d" * 40)
+        current = {**evidence, "buildSucceededAt": "2026-09-27T13:00:00+00:00"}
+        for existing in (
+            {key: value for key, value in evidence.items() if key != "buildSucceededAt"},
+            {**evidence, "runtimeEvidence": [{"profile": "incorrect"}]},
+        ):
+            api = FakeGitHub(evidence, json.dumps(existing).encode(), published=True)
+            with (
+                patch("scripts.release_evidence._github_request", side_effect=api),
+                self.assertRaisesRegex(ReleaseEvidenceError, "different contents"),
+            ):
+                publish(current, json.dumps(current).encode(), repository="org/repo", token=BUILD["runId"])
+            self.assertNotIn("publish", api.calls)
+
+    def test_http_failure_includes_bounded_response_detail(self) -> None:
+        error = urllib.error.HTTPError("https://api.github.com/", 422, "unprocessable", {}, io.BytesIO(b"x" * 2000))
+        with (
+            patch("scripts.release_evidence.urllib.request.urlopen", side_effect=error),
+            self.assertRaises(ReleaseEvidenceError) as failure,
+        ):
+            _github_request("https://api.github.com/", "token")
+        self.assertIn("HTTP 422", str(failure.exception))
+        self.assertLess(len(str(failure.exception)), 1200)
+        self.assertEqual(failure.exception.status_code, 422)
 
 
 if __name__ == "__main__":
