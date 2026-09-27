@@ -61,6 +61,7 @@ GLOBAL_IMAGE_INPUTS = (
     ".github/actions/publish-image/**",
     "scripts/container_engine.py",
     "scripts/runtime_tests.py",
+    "scripts/oci_artifacts.py",
     "scripts/runtime_docker.py",
     "scripts/policy.py",
     "scripts/build_payloads.py",

@@ -26,6 +26,7 @@ from typing import Any
 import yaml
 
 from scripts.metadata_schema import validate_metadata_schema
+from scripts.oci_artifacts import archive_identity
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TIMEOUT = 45
@@ -114,16 +115,19 @@ class RuntimeContext:
     def skip(self, name: str, reason: str) -> None:
         self.checks.append({"name": name, "status": "skipped", "reason": reason})
 
-    def load_archive(self, archive: Path) -> None:
+    def load_archive(self, archive: Path) -> dict[str, str]:
+        identity = archive_identity(archive, self.architecture)
         self.podman("load OCI archive", "load", "--quiet", "--input", str(archive), timeout=180)
         ids = self.podman("list loaded images", "images", "--quiet", "--no-trunc").splitlines()
         if len(ids) != 1:
             raise ProbeError(f"expected one image in isolated store, got {len(ids)}")
+        self.assert_equal("loaded image configuration digest", ids[0], identity["configDigest"])
         self.podman("tag runtime image", "tag", ids[0], self.image_ref)
         actual_arch = self.podman(
             "inspect image architecture", "image", "inspect", "--format", "{{.Architecture}}", self.image_ref
         )
         self.assert_equal("image architecture", actual_arch, self.architecture)
+        return identity
 
     def run(self, name: str, *command: str, options: tuple[str, ...] = (), timeout: int | None = None) -> str:
         return self.podman(
@@ -198,7 +202,15 @@ class RuntimeContext:
                 pass
             try:
                 self.podman(
-                    "cleanup owned container", "rm", "--force", "--time", "2", container, timeout=10, check=False
+                    "cleanup owned container",
+                    "rm",
+                    "--force",
+                    "--volumes",
+                    "--time",
+                    "2",
+                    container,
+                    timeout=10,
+                    check=False,
                 )
             except ProbeError:
                 failed.append(container)
@@ -525,6 +537,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "profile": next(iter(profiles)),
         "status": "failed",
         "checks": [],
+        "host": {"architecture": platform.machine(), "kernel": platform.release(), "system": platform.system()},
+        "runId": os.environ.get("GITHUB_RUN_ID", ""),
+        "runAttempt": os.environ.get("GITHUB_RUN_ATTEMPT", ""),
     }
     use_sudo = args.sudo or (
         not args.no_sudo
@@ -545,7 +560,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 timeout=180,
             )
             generated_archive = True
-        ctx.load_archive(archive)
+        evidence["imageIdentity"] = ctx.load_archive(archive)
+        evidence["host"]["podmanVersion"] = ctx.podman("host Podman version", "--version")
         profile_name, profile = next(iter(profiles.items()))
         if profile_name == "podman":
             _podman(ctx, profile, archive=archive, allow_privileged=args.allow_privileged, skip_nested=args.skip_nested)

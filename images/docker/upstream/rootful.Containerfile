@@ -38,4 +38,5 @@ LABEL org.opencontainers.image.base.digest="${OCI_BASE_DIGEST}" \
       org.opencontainers.image.version="${OCI_VERSION}"
 
 ENV DOCKER_HOST=unix:///var/run/docker.sock
+VOLUME ["/var/lib/docker"]
 CMD ["/usr/local/bin/start-dockerd"]

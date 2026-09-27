@@ -78,6 +78,8 @@ class RuntimeCommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             context = MagicMock()
             context.checks = []
+            context.load_archive.return_value = {}
+            context.podman.return_value = "podman fixture"
             context.cleanup.side_effect = ProbeError("isolated store retained")
             evidence_path = Path(directory) / "evidence.json"
             args = argparse.Namespace(

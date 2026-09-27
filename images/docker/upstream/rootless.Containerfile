@@ -16,8 +16,7 @@ RUN set -eux; \
     chmod 0700 /run/user/1000; \
     apk info -vv > /usr/share/strukturpiloten/docker/os-packages
 COPY --from=payload /payload/engine/ /usr/local/bin/
-COPY --from=payload /payload/rootless/rootlesskit /usr/local/bin/rootlesskit
-COPY --from=payload /payload/rootless/dockerd-rootless.sh /usr/local/bin/dockerd-rootless.sh
+COPY --from=payload /payload/rootless/ /usr/local/bin/
 COPY --from=payload /payload/provenance/ /usr/share/strukturpiloten/docker/
 COPY images/docker/upstream/start-rootless.sh /usr/local/bin/start-dockerd
 
@@ -51,4 +50,5 @@ ENV HOME=/home/docker \
     DOCKER_HOST=unix:///run/user/1000/docker.sock \
     DOCKERD_ROOTLESS_ROOTLESSKIT_NET=slirp4netns
 USER docker
+VOLUME ["/home/docker/.local/share/docker"]
 CMD ["/usr/local/bin/start-dockerd"]

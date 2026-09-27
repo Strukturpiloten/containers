@@ -36,6 +36,10 @@ test -x /payload/engine/containerd
 test -x /payload/engine/runc
 test -x /payload/rootless/rootlesskit
 test -x /payload/rootless/dockerd-rootless.sh
+case "$ENGINE_VERSION" in
+    20.10.*|23.*|24.*|25.*|26.*|27.*)
+        test -x /payload/rootless/rootlesskit-docker-proxy ;;
+esac
 /payload/engine/dockerd --version | grep -F "Docker version $ENGINE_VERSION,"
 /payload/engine/docker --version | grep -F "Docker version $ENGINE_VERSION,"
 printf '%s\n' "$ENGINE_VERSION" > /payload/provenance/engine-version
