@@ -102,7 +102,7 @@ class _BuildResult:
     source_revision: str
     index_digest: str
     architecture_digests: dict[str, str]
-    component_inputs: dict[str, str]
+    component_inputs: dict[str, Any]
     tags: Sequence[str]
     run_id: str
     run_attempt: str
@@ -1635,18 +1635,53 @@ def _architecture_digests(raw_manifest: str, architectures: Sequence[str]) -> di
     return digests
 
 
-def _component_inputs(image: JsonMap) -> dict[str, str]:
-    """Capture the exact declared build inputs alongside digest evidence."""
-    specifications = _json_map(_image_build(image).get("args"))
+def _component_inputs(image: JsonMap) -> dict[str, Any]:
+    """Capture consumer and payload inputs alongside published digest evidence."""
+    build = _image_build(image)
+    specifications = _json_map(build.get("args"))
     if specifications is None:
         _fail(f"Image {image['name']} has invalid build arguments.")
-    inputs: dict[str, str] = {}
+    inputs: dict[str, Any] = {}
     for name, candidate in _json_map_items(specifications):
         specification = _json_map(candidate)
         if specification is None or not isinstance(specification.get("value"), str):
             _fail(f"Image {image['name']} has an invalid value for {name}.")
         inputs[name] = specification["value"]
+
+    manifest = build.get("payload")
+    if manifest is not None:
+        if not isinstance(manifest, str):
+            _fail(f"Image {image['name']} has an invalid payload manifest path.")
+        try:
+            record = build_payloads.load_manifest(_repo_root(), manifest)
+            manifest_sha256 = build_payloads.sha256(build_payloads.repository_path(_repo_root(), manifest))
+        except build_payloads.PayloadError as error:
+            _fail(str(error))
+        payload_build = record["build"]
+        architectures = _image_architectures(image)
+        if set(architectures) - set(payload_build["architectures"]):
+            _fail(f"Payload {record['name']} does not support every architecture of {image['name']}.")
+        architecture_args = payload_build.get("architectureArgs", {})
+        inputs["payload"] = {
+            "name": record["name"],
+            "manifest": manifest,
+            "manifestSha256": manifest_sha256,
+            "args": dict(payload_build.get("args", {})),
+            "architectureArgs": {
+                architecture: dict(architecture_args.get(architecture, {})) for architecture in architectures
+            },
+            "provenance": record["provenance"],
+        }
     return inputs
+
+
+def _require_payload_publication_source(plan: JsonMap, image: JsonMap, revision: str) -> None:
+    """Bind payload provenance to the same checked-out revision used by builds."""
+    if _image_build(image).get("payload") is None:
+        return
+    if plan.get("sourceRevision") != revision:
+        _fail("Payload publication plan source does not match the workflow revision.")
+    _require_checkout_revision(revision)
 
 
 def _write_build_result(output_dir: Path, result: _BuildResult) -> Path:
@@ -1759,6 +1794,7 @@ def _command_publish_image(args: argparse.Namespace) -> None:  # noqa: PLR0915
 
     plan = _load_json(Path(args.plan))
     image = _plan_image(plan, image_name)
+    _require_payload_publication_source(plan, image, context.sha)
     architectures = _image_architectures(image)
     archives_dir = Path(args.archives_dir)
     output_dir = Path(args.output_dir)
