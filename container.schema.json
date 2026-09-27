@@ -42,6 +42,9 @@
     "build": {
       "$ref": "#/$defs/build"
     },
+    "lifecycle": {
+      "$ref": "#/$defs/lifecycle"
+    },
     "tests": {
       "$ref": "#/$defs/tests"
     },
@@ -67,6 +70,42 @@
     "imageReference": {
       "type": "string",
       "pattern": "^[a-z0-9][a-z0-9._:/-]*@sha256:[a-f0-9]{64}$"
+    },
+    "lifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "admission",
+        "reviewAfter",
+        "supportBoundary",
+        "requiredRuntimeProfiles"
+      ],
+      "properties": {
+        "state": {
+          "enum": ["maintained", "legacy", "experimental"]
+        },
+        "admission": {
+          "enum": ["production", "isolated-test", "disabled"]
+        },
+        "reviewAfter": {
+          "type": "string",
+          "format": "date",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        },
+        "supportBoundary": {
+          "type": "string",
+          "minLength": 16
+        },
+        "requiredRuntimeProfiles": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": ["podman", "phpFpm", "notifyPush", "docker"]
+          }
+        }
+      }
     },
     "buildArgument": {
       "type": "object",

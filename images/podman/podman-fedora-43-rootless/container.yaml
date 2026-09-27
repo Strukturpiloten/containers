@@ -6,6 +6,14 @@ image: ghcr.io/strukturpiloten/podman-fedora-43-rootless
 title: Fedora 43 Podman rootless
 description: Fedora 43 distro-packaged Podman rootless compatibility image for CI
 
+lifecycle:
+  state: legacy
+  admission: isolated-test
+  reviewAfter: "2026-12-31"
+  supportBoundary: "Historical distribution compatibility fixture; vendor security support and installed engine fixes require separate review."
+  requiredRuntimeProfiles:
+    - podman
+
 tests:
   podman:
     mode: rootless

@@ -6,6 +6,14 @@ image: ghcr.io/strukturpiloten/podman-fedora-44-rootless
 title: Fedora 44 Podman rootless
 description: Fedora 44 distro-packaged Podman rootless compatibility image for CI
 
+lifecycle:
+  state: maintained
+  admission: isolated-test
+  reviewAfter: "2026-12-31"
+  supportBoundary: "Repository rebuilds refresh distribution packages; vendor support determines installed Podman security maintenance."
+  requiredRuntimeProfiles:
+    - podman
+
 tests:
   podman:
     mode: rootless

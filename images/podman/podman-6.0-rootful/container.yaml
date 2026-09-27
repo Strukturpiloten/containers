@@ -6,6 +6,14 @@ image: ghcr.io/strukturpiloten/podman-6.0-rootful
 title: Podman 6.0 rootful
 description: Podman 6.0 rootful nested-container image built from source on Fedora
 
+lifecycle:
+  state: legacy
+  admission: isolated-test
+  reviewAfter: "2026-12-31"
+  supportBoundary: "Pinned historical Podman source is retained for compatibility; OS refreshes do not patch that engine line."
+  requiredRuntimeProfiles:
+    - podman
+
 tests:
   podman:
     mode: rootful

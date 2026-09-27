@@ -10,6 +10,14 @@ tests:
   phpFpm:
     extensions: [apcu, exif, gd, gmp, imagick, intl, pcntl, pdo_mysql, pdo_pgsql, pgsql, redis, sodium, sysvsem, zip]
 
+lifecycle:
+  state: maintained
+  admission: production
+  reviewAfter: "2026-12-31"
+  supportBoundary: "Repository maintains pinned application inputs and base images; upstream component support requires separate review."
+  requiredRuntimeProfiles:
+    - phpFpm
+
 build:
   context: .
   containerfile: images/typo3/typo3-phpfpm/Containerfile

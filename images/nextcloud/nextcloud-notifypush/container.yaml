@@ -9,6 +9,14 @@ description: Nextcloud notify_push binary built from source with a minimal Alpin
 tests:
   notifyPush: {}
 
+lifecycle:
+  state: maintained
+  admission: production
+  reviewAfter: "2026-12-31"
+  supportBoundary: "Repository maintains pinned application inputs and base images; upstream component support requires separate review."
+  requiredRuntimeProfiles:
+    - notifyPush
+
 build:
   context: .
   containerfile: images/nextcloud/nextcloud-notifypush/Containerfile

@@ -6,6 +6,14 @@ image: ghcr.io/strukturpiloten/podman-alpine-3.24-rootless
 title: Alpine 3.24 Podman rootless
 description: Alpine 3.24 distro-packaged Podman rootless compatibility image for CI
 
+lifecycle:
+  state: maintained
+  admission: isolated-test
+  reviewAfter: "2026-12-31"
+  supportBoundary: "Repository rebuilds refresh distribution packages; vendor support determines installed Podman security maintenance."
+  requiredRuntimeProfiles:
+    - podman
+
 tests:
   podman:
     mode: rootless

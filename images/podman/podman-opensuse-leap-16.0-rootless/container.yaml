@@ -6,6 +6,14 @@ image: ghcr.io/strukturpiloten/podman-opensuse-leap-16.0-rootless
 title: openSUSE Leap 16.0 Podman rootless
 description: openSUSE Leap 16.0 distro-packaged Podman rootless compatibility image for CI
 
+lifecycle:
+  state: maintained
+  admission: isolated-test
+  reviewAfter: "2026-12-31"
+  supportBoundary: "Repository rebuilds refresh distribution packages; vendor support determines installed Podman security maintenance."
+  requiredRuntimeProfiles:
+    - podman
+
 tests:
   podman:
     mode: rootless

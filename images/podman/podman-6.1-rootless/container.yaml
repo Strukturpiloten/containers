@@ -6,6 +6,14 @@ image: ghcr.io/strukturpiloten/podman-6.1-rootless
 title: Podman 6.1 rootless
 description: Podman 6.1 rootless nested-container image built from source on Fedora
 
+lifecycle:
+  state: maintained
+  admission: isolated-test
+  reviewAfter: "2026-12-31"
+  supportBoundary: "Selected source-built Podman line receives repository rebuilds; upstream engine fixes require reviewed source updates."
+  requiredRuntimeProfiles:
+    - podman
+
 tests:
   podman:
     mode: rootless

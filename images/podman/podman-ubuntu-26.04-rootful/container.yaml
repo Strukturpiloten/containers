@@ -6,6 +6,14 @@ image: ghcr.io/strukturpiloten/podman-ubuntu-26.04-rootful
 title: Ubuntu 26.04 Podman rootful
 description: Ubuntu 26.04 distro-packaged Podman rootful compatibility image for CI
 
+lifecycle:
+  state: maintained
+  admission: isolated-test
+  reviewAfter: "2026-12-31"
+  supportBoundary: "Repository rebuilds refresh distribution packages; vendor support determines installed Podman security maintenance."
+  requiredRuntimeProfiles:
+    - podman
+
 tests:
   podman:
     mode: rootful
