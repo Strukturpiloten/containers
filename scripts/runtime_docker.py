@@ -235,8 +235,9 @@ def _run_nested_docker(
                     "-euc",
                     "echo volume-ok > /probe/marker",
                 )
-            except ProbeError:
-                with suppress(ProbeError):
+            except RuntimeError:
+                # The probe entrypoint runs as __main__, so its ProbeError has a distinct module identity.
+                with suppress(RuntimeError):
                     _docker(
                         ctx,
                         budget,
