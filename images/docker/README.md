@@ -4,7 +4,7 @@ These images run Docker Engine inside an isolated Linux container so native impo
 
 ## Upstream Engine catalogue
 
-Each line has a `docker-<line>-rootful` and a `docker-<line>-rootless` image. The selected patch is refreshed within its line; image tags identify the exact Engine release. A digest identifies one immutable published build, while the readable version tag may move after a reviewed OS rebuild.
+Each line has a `docker-<line>-rootful` and a `docker-<line>-rootless` image. The selected patch is a reviewed pin within its line; image tags identify the exact Engine release. A digest identifies one immutable published build, while the readable version tag may move after a reviewed OS rebuild.
 
 | Line | Engine and CLI | containerd | runc | RootlessKit | Status |
 | --- | --- | --- | --- | --- | --- |
@@ -21,7 +21,9 @@ The Engine, CLI, containerd, and runc binaries come from Docker's official stati
 
 The shared payload is a build-only OCI artifact. It is assembled once per Engine release and architecture in a build run, then supplied to both final recipes through `BUILD_PAYLOAD_IMAGE`. It has no public `container.yaml`, release tag, or invented registry digest. The final images alone have public image metadata. The pinned common runtime base is Alpine 3.24 at its multi-architecture manifest digest recorded in each image. Runtime packages receive repository updates during image builds; old static Engine binaries and their vendored dependencies do not receive fixes from an Alpine rebuild. Retire a legacy line when its compatibility value no longer justifies isolated testing.
 
-Compose and Buildx are separate products and are not installed. No Compose-provider behavior is implied. Distribution-package Docker images are a separate family whose package revision and userspace will follow each distribution, rather than this shared Alpine payload.
+Renovate updates the pinned runtime-base digests in paired groups. Upstream Engine releases and their Engine/rootless-extras archive checksums are reviewed manual updates: update the payload manifest, verified per-architecture checksums and component provenance, then the paired image versions, and require the full native CI contract before publication. Distribution packages refresh during reviewed image rebuilds; the installed package manifest records their actual revisions.
+
+Compose and Buildx are separate products and are not installed. No Compose-provider behavior is implied. Distribution-package Docker images are a separate family whose package revision and userspace follow each distribution.
 
 ## Runtime modes and admission
 
@@ -33,7 +35,7 @@ The native Docker probe limits both outer Podman runs to two CPUs, 4 GiB of memo
 
 The task-owned Podman store has a 12 GiB **observed** disk budget, including anonymous volumes and the offline Docker fixture. The harness measures the store before starting nested work, then polls with `du --one-file-system` two seconds after each completed sample; `du` is killed after five seconds, with an eight-second outer timeout fallback. A sample that sees only files disappearing during traversal is retried once; permission or other measurement errors fail closed. Evidence records the limit, peak measured usage, sample count, transient retries, cadence, and measured overshoot. This is an admission and monitoring limit, not a hard filesystem quota: writes can pass the threshold between samples, and there is no fixed byte bound on overshoot. The probe checks the monitor before and after each nested work command and starts no further work after an excess or measurement failure. An already-running command can continue until its timeout (180 seconds for the fixture save; otherwise the configured per-command timeout, default 45 seconds and capped at 300 seconds) before owned-resource cleanup runs. The sampler and any timed-out `du` process group stop before isolated-store cleanup. No global prune is used.
 
-Build metadata requests AMD64 and ARM64 as unmerged CI admission candidates. The payload manifests include verified ARM64 archive checksums, but ARM64 native evidence is pending; publication and compatibility claims require ARM64 daemon, API, network, storage, port, mount, and cleanup results first. A green cross-build or emulated binary execution is not sufficient. Linux kernel and host security behavior still need dedicated host testing when they matter.
+Upstream build metadata declares AMD64 and ARM64. Every declared architecture and daemon mode must pass native daemon, API, network, storage, port, mount, resource-budget, and cleanup checks before publication. Consult the immutable release maintenance evidence for the results of a specific image digest. A green cross-build or emulated binary execution is not sufficient. Linux kernel and host security behavior still need dedicated host testing when they matter.
 
 ## Validation
 
@@ -47,7 +49,7 @@ The native contract starts each daemon, checks the actual Engine and CLI/API ran
   --evidence /tmp/docker-20.10-rootful-evidence.json
 ```
 
-The admission pilot on an AMD64 Linux host ran Docker 20.10.24 and 29.8.1 in both daemon modes on Alpine 3.24. All four started, reported the expected API version and root mode, and ran a real nested Alpine container. The full native contract passed for both 20.10 modes. CI must record full contract evidence for 29 and the six middle lines before admission. Observed final pilot image sizes were about 211 MiB (20.10 rootful), 271 MiB (20.10 rootless), 242 MiB (29 rootful), and 275 MiB (29 rootless) before final image-size optimization. Pilot payload builds took roughly 16–18 seconds; final runtime builds took roughly 10–18 seconds each on this host. These are observations, not time budgets or reproducibility claims.
+The admission pilot on an AMD64 Linux host ran Docker 20.10.24 and 29.8.1 in both daemon modes on Alpine 3.24. All four started, reported the expected API version and root mode, and ran a real nested Alpine container. The full native contract passed for both 20.10 modes. Publication requires full native contract evidence for every declared Engine line, daemon mode and architecture; pilot measurements alone do not satisfy that gate. Observed final pilot image sizes were about 211 MiB (20.10 rootful), 271 MiB (20.10 rootless), 242 MiB (29 rootful), and 275 MiB (29 rootless) before final image-size optimization. Pilot payload builds took roughly 16–18 seconds; final runtime builds took roughly 10–18 seconds each on this host. These are observations, not time budgets or reproducibility claims.
 
 ## Distribution-packaged Engine catalogue
 
@@ -70,4 +72,4 @@ Each distribution has `docker-<distribution>-rootful` and `docker-<distribution>
 
 Debian 13 also installs its separate native `docker-cli` package. Debian 11 uses the signed archived Bullseye main repository: its live security index advertises `20.10.5+dfsg1-1+deb11u4`, but the corresponding package download returned HTTP 404 during this build, so the archived `+deb11u2` revision is the observed installed version. Both modes install the distribution's BusyBox package for the offline nested HTTP fixture. Rootless images additionally install the distribution's RootlessKit, `slirp4netns`, `fuse-overlayfs`, and subordinate-ID tools. Build evidence in each image records the package manager's selected source, the installed Engine package revision, the full installed package list, and the observed binary versions under `/usr/share/strukturpiloten/docker/`.
 
-Both modes declare a separate Docker data-root volume and use only an internal Unix socket. Rootless runs as UID 1000 with subordinate UID/GID ranges and the distribution's RootlessKit. The AMD64 builds only prove package availability, installed binary provenance, and image construction. Daemon startup, API compatibility, nested workloads, and cleanup have **not** yet passed the native contract for these distribution images. Their ARM64 builds and native contract are pending CI admission; Arch requests AMD64 only because its official base image does not provide ARM64.
+Both modes declare a separate Docker data-root volume and use only an internal Unix socket. Rootless runs as UID 1000 with subordinate UID/GID ranges and the distribution's RootlessKit. Package-only builds prove package availability, installed binary provenance, and image construction. Publication additionally requires native daemon startup, API compatibility, nested workloads, resource-budget checks and cleanup on every declared architecture. These profiles request AMD64 and ARM64, except Arch, whose official base image provides AMD64 only. Use the immutable release maintenance evidence to establish which exact published digest passed those checks.
