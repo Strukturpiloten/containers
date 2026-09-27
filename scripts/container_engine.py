@@ -1692,7 +1692,59 @@ def _annotate_oci_layout(layout_dir: Path, annotations: dict[str, str]) -> None:
     _write_json(layout_index_path, layout_index)
 
 
-def _command_publish_image(args: argparse.Namespace) -> None:
+def _oci_layout_index_raw(layout_dir: Path) -> str:
+    """Read and verify the annotated multiarch index in a local OCI layout."""
+    layout = _load_json(layout_dir / "index.json")
+    descriptors = _json_list(layout.get("manifests"))
+    if descriptors is None or len(descriptors) != 1:
+        _fail(f"OCI layout {layout_dir} must contain exactly one index descriptor.")
+    descriptor = _json_map(descriptors[0])
+    digest = descriptor.get("digest") if descriptor is not None else None
+    if not isinstance(digest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+        _fail(f"OCI layout {layout_dir} has an invalid index digest.")
+    raw = (layout_dir / "blobs" / "sha256" / digest.removeprefix("sha256:")).read_bytes()
+    if hashlib.sha256(raw).hexdigest() != digest.removeprefix("sha256:"):
+        _fail(f"OCI layout {layout_dir} index failed digest verification.")
+    return raw.decode("utf-8")
+
+
+def _reusable_immutable_publication(
+    command_prefix: Sequence[str],
+    image_ref: str,
+    source_revision: str,
+    architecture_digests: dict[str, str],
+    context: _GitHubContext,
+) -> tuple[str, PublicationIdentity, str, str] | None:
+    """Reuse a prior same-run publication only when its immutable image contents match."""
+    if context.event_name != "push":
+        return None
+    immutable_reference = f"{image_ref}:sha-{source_revision}"
+    digest = _remote_digest(command_prefix, immutable_reference)
+    if digest is None:
+        return None
+    reference = f"{image_ref}@{digest}"
+    annotations = _registry_annotations(command_prefix, reference)
+    identity = _publication_identity(annotations, reference)
+    execution = PublicationIdentity.from_values(context.run_id, context.run_attempt)
+    if (
+        identity.run_id != execution.run_id
+        or identity.run_attempt > execution.run_attempt
+        or annotations.get(REVISION_ANNOTATION) != source_revision
+    ):
+        _fail(f"Immutable registry tag {immutable_reference} belongs to another publication.")
+    canonical = canonical_build_tag(
+        sha=source_revision, run_id=str(identity.run_id), run_attempt=str(identity.run_attempt)
+    )
+    if _remote_digest(command_prefix, f"{image_ref}:{canonical}") != digest:
+        _fail(f"Immutable registry tag {immutable_reference} has no matching canonical publication.")
+    raw_manifest = _run_external([*command_prefix, "inspect", "--raw", f"docker://{reference}"], capture_stdout=True)
+    existing_architectures = _architecture_digests(raw_manifest, list(architecture_digests))
+    if existing_architectures != architecture_digests:
+        _fail(f"Immutable registry tag {immutable_reference} has different architecture contents.")
+    return digest, identity, canonical, raw_manifest
+
+
+def _command_publish_image(args: argparse.Namespace) -> None:  # noqa: PLR0915
     image_name, _architecture = _entry(args.entry_json, require_arch=False)
     context = _github_context(require_token=True)
     if context.token is None:
@@ -1770,42 +1822,44 @@ def _command_publish_image(args: argparse.Namespace) -> None:
                 REVISION_ANNOTATION: context.sha,
             },
         )
-        _run_external(
-            [
-                sudo,
-                skopeo,
-                "copy",
-                "--all",
-                "--format",
-                "oci",
-                "--preserve-digests",
-                f"oci:{layout_dir}:publication",
-                f"docker://{image_ref}:{canonical_tag}",
-            ]
+        local_architecture_digests = _architecture_digests(_oci_layout_index_raw(layout_dir), architectures)
+        command_prefix = [sudo, skopeo]
+        reuse = _reusable_immutable_publication(
+            command_prefix, image_ref, context.sha, local_architecture_digests, context
         )
-
-        raw_manifest = _run_external(
-            [sudo, skopeo, "inspect", "--raw", f"docker://{image_ref}:{canonical_tag}"],
-            capture_stdout=True,
-        )
+        if reuse is None:
+            _run_external(
+                [
+                    sudo,
+                    skopeo,
+                    "copy",
+                    "--all",
+                    "--format",
+                    "oci",
+                    "--preserve-digests",
+                    f"oci:{layout_dir}:publication",
+                    f"docker://{image_ref}:{canonical_tag}",
+                ]
+            )
+            raw_manifest = _run_external(
+                [sudo, skopeo, "inspect", "--raw", f"docker://{image_ref}:{canonical_tag}"],
+                capture_stdout=True,
+            )
+            index_digest = _remote_digest(command_prefix, f"{image_ref}:{canonical_tag}")
+            if index_digest is None:
+                _fail(f"Canonical registry tag {image_ref}:{canonical_tag} is unavailable.")
+            source_identity = PublicationIdentity.from_values(context.run_id, context.run_attempt)
+        else:
+            index_digest, source_identity, canonical_tag, raw_manifest = reuse
+            tags = unique_tags([canonical_tag, *tags[1:]])
+            _write_stdout(f"Reused immutable publication {image_ref}@{index_digest} from {source_identity}.")
         (output_dir / f"{image_name}-index.json").write_text(raw_manifest, encoding="utf-8")
-        index_digest = _run_external(
-            [
-                sudo,
-                skopeo,
-                "inspect",
-                "--format",
-                "{{.Digest}}",
-                f"docker://{image_ref}:{canonical_tag}",
-            ],
-            capture_stdout=True,
-        ).strip()
         architecture_digests = _architecture_digests(raw_manifest, architectures)
-        source_identity = _publication_identity(
-            _registry_annotations([sudo, skopeo], f"{image_ref}@{index_digest}"), f"{image_ref}@{index_digest}"
+        if architecture_digests != local_architecture_digests:
+            _fail(f"Published image {image_ref}@{index_digest} does not match built architecture contents.")
+        source_identity = _validate_publication_source(
+            command_prefix, image_ref, index_digest, context, expected_identity=source_identity
         )
-        if source_identity != PublicationIdentity.from_values(context.run_id, context.run_attempt):
-            _fail(f"Published image {image_ref}@{index_digest} has an unexpected publication identity.")
 
         syft = _tool("syft")
         _run_external(
@@ -2014,7 +2068,10 @@ def _validate_publication_source(
 ) -> PublicationIdentity:
     annotations = _registry_annotations(command_prefix, f"{image_ref}@{digest}")
     identity = _publication_identity(annotations, f"{image_ref}@{digest}")
-    expected = expected_identity or PublicationIdentity.from_values(context.run_id, context.run_attempt)
+    execution = PublicationIdentity.from_values(context.run_id, context.run_attempt)
+    expected = expected_identity or execution
+    if expected.run_id != execution.run_id or expected.run_attempt > execution.run_attempt:
+        _fail(f"Publication identity {expected} does not belong to this workflow execution {execution}.")
     if identity != expected:
         _fail(f"Publication identity {identity} does not belong to workflow run {expected}.")
     if annotations.get(REVISION_ANNOTATION) != context.sha:
@@ -2091,8 +2148,18 @@ def _command_promote_image(args: argparse.Namespace) -> None:
     )
     command_prefix = [_tool("sudo"), _tool("skopeo")]
     immutable_tag = f"sha-{context.sha}" if context.event_name == "push" else None
-    identity = _validate_publication_source(command_prefix, args.image, digest, context)
     build_result = _load_json(Path(args.build_result)) if args.build_result else None
+    expected_identity = None
+    if build_result is not None:
+        try:
+            expected_identity = PublicationIdentity.from_values(
+                str(build_result.get("runId", "")), str(build_result.get("runAttempt", ""))
+            )
+        except ValueError as error:
+            _fail(f"Build result has an invalid publication identity: {error}")
+    identity = _validate_publication_source(
+        command_prefix, args.image, digest, context, expected_identity=expected_identity
+    )
     if build_result is not None and (
         build_result.get("image") != args.image
         or build_result.get("indexDigest") != digest

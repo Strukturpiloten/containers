@@ -120,6 +120,160 @@ class PublicationScenarios(unittest.TestCase):
         self.assertEqual(identity, PublicationIdentity(100, 1))
         self.assertIn("run-100-1-sha-", digest.call_args.args[1])
 
+    def test_retry_reuses_prior_immutable_publication_before_any_registry_copy(self) -> None:
+        context = engine._GitHubContext(
+            actor="actor",
+            event_name="push",
+            ref_name="main",
+            repository="Strukturpiloten/containers",
+            run_attempt="2",
+            run_id="100",
+            server_url="https://github.com",
+            sha=REVISION,
+            token=REVISION,
+        )
+        raw_index = json.dumps({"manifests": [{"platform": {"os": "linux", "architecture": "amd64"}, "digest": NEW}]})
+        canonical = engine.canonical_build_tag(sha=REVISION, run_id="100", run_attempt="1")
+        image = {"image": IMAGE, "version": "v1.0.0"}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archives = root / "archives"
+            archives.mkdir()
+            (archives / "example-amd64.tar").write_bytes(b"archive")
+            args = SimpleNamespace(
+                entry_json="{}",
+                plan=str(root / "plan.json"),
+                archives_dir=str(archives),
+                output_dir=str(root / "results"),
+                default_branch="main",
+            )
+
+            def digest(_prefix: list[str], reference: str) -> str | None:
+                if reference in {f"{IMAGE}:sha-{REVISION}", f"{IMAGE}:{canonical}"}:
+                    return OLD
+                return None
+
+            with (
+                patch.object(engine, "_entry", return_value=("example", None)),
+                patch.object(engine, "_github_context", return_value=context),
+                patch.object(engine, "_load_json", return_value={"sourceRevision": REVISION}),
+                patch.object(engine, "_plan_image", return_value=image),
+                patch.object(engine, "_image_architectures", return_value=["amd64"]),
+                patch.object(engine, "_tool", side_effect=lambda name: name),
+                patch.object(engine, "_run"),
+                patch.object(engine, "_annotate_oci_layout"),
+                patch.object(engine, "_oci_layout_index_raw", return_value=raw_index),
+                patch.object(engine, "_remote_digest", side_effect=digest),
+                patch.object(engine, "_registry_annotations", return_value=_annotations(100, 1)),
+                patch.object(
+                    engine,
+                    "_run_external",
+                    side_effect=lambda command, **_kwargs: raw_index if "--raw" in command else "",
+                ) as external,
+                patch.object(engine, "_write_github_outputs") as outputs,
+                patch.object(engine.subprocess, "run"),
+            ):
+                engine._command_publish_image(args)
+            result = json.loads((root / "results" / "example-build-result.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["indexDigest"], OLD)
+            self.assertEqual(result["runAttempt"], "1")
+            self.assertEqual(result["architectureDigests"], {"amd64": NEW})
+            self.assertEqual(outputs.call_args.args[0]["canonical_tag"], canonical)
+            self.assertFalse(any("copy" in call.args[0] for call in external.call_args_list))
+            promote_args = SimpleNamespace(
+                image=IMAGE,
+                digest=OLD,
+                build_result=str(root / "results" / "example-build-result.json"),
+                default_branch="main",
+            )
+            with (
+                patch.object(engine, "_github_context", return_value=context),
+                patch.object(engine, "_tool", side_effect=lambda name: name),
+                patch.object(engine, "_registry_annotations", return_value=_annotations(100, 1)),
+                patch.object(engine, "_remote_digest", return_value=OLD),
+                patch.object(engine, "_write_github_outputs"),
+            ):
+                engine._command_promote_image(promote_args)
+            promoted = json.loads((root / "results" / "example-build-result.json").read_text(encoding="utf-8"))
+            self.assertEqual(promoted["runAttempt"], "1")
+            self.assertIn(f"sha-{REVISION}", promoted["tags"])
+
+    def test_immutable_retry_rejects_changed_architecture_contents(self) -> None:
+        context = engine._GitHubContext(
+            actor="actor",
+            event_name="push",
+            ref_name="main",
+            repository="Strukturpiloten/containers",
+            run_attempt="2",
+            run_id="100",
+            server_url="https://github.com",
+            sha=REVISION,
+            token=None,
+        )
+        remote = json.dumps({"manifests": [{"platform": {"os": "linux", "architecture": "amd64"}, "digest": NEW}]})
+        with (
+            patch.object(engine, "_remote_digest", return_value=OLD),
+            patch.object(engine, "_registry_annotations", return_value=_annotations(100, 1)),
+            patch.object(engine, "_run_external", return_value=remote),
+            self.assertRaisesRegex(engine.ContainerEngineError, "different architecture contents"),
+        ):
+            engine._reusable_immutable_publication(["skopeo"], IMAGE, REVISION, {"amd64": OLD}, context)
+
+    def test_immutable_retry_rejects_other_run_even_with_same_contents(self) -> None:
+        context = engine._GitHubContext(
+            actor="actor",
+            event_name="push",
+            ref_name="main",
+            repository="Strukturpiloten/containers",
+            run_attempt="2",
+            run_id="100",
+            server_url="https://github.com",
+            sha=REVISION,
+            token=None,
+        )
+        for foreign_run in (99, 101):
+            with (
+                self.subTest(foreign_run=foreign_run),
+                patch.object(engine, "_remote_digest", return_value=OLD),
+                patch.object(engine, "_registry_annotations", return_value=_annotations(foreign_run, 1)),
+                self.assertRaisesRegex(engine.ContainerEngineError, "another publication"),
+            ):
+                engine._reusable_immutable_publication(["skopeo"], IMAGE, REVISION, {"amd64": NEW}, context)
+
+    def test_promotion_accepts_prior_attempt_result_from_same_run(self) -> None:
+        context = engine._GitHubContext(
+            actor="actor",
+            event_name="push",
+            ref_name="main",
+            repository="Strukturpiloten/containers",
+            run_attempt="2",
+            run_id="100",
+            server_url="https://github.com",
+            sha=REVISION,
+            token=None,
+        )
+        result = {
+            "image": IMAGE,
+            "indexDigest": OLD,
+            "sourceRevision": REVISION,
+            "runId": "100",
+            "runAttempt": "1",
+            "tags": [],
+        }
+        args = SimpleNamespace(image=IMAGE, digest=OLD, build_result="result.json", default_branch="main")
+        with (
+            patch.object(engine, "_github_context", return_value=context),
+            patch.object(engine, "_load_json", return_value=result),
+            patch.object(engine, "_tool", side_effect=lambda name: name),
+            patch.object(engine, "_registry_annotations", return_value=_annotations(100, 1)),
+            patch.object(engine, "_remote_digest", return_value=OLD),
+            patch.object(engine, "_write_json") as write,
+            patch.object(engine, "_write_github_outputs"),
+        ):
+            engine._command_promote_image(args)
+        write.assert_called_once()
+        self.assertEqual(result["runAttempt"], "1")
+
     def _preflight(
         self,
         *,
