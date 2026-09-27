@@ -72,4 +72,11 @@ Each distribution has `docker-<distribution>-rootful` and `docker-<distribution>
 
 Debian 13 also installs its separate native `docker-cli` package. Debian 11 uses the signed archived Bullseye main repository: its live security index advertises `20.10.5+dfsg1-1+deb11u4`, but the corresponding package download returned HTTP 404 during this build, so the archived `+deb11u2` revision is the observed installed version. Both modes install the distribution's BusyBox package for the offline nested HTTP fixture. Rootless images additionally install the distribution's RootlessKit, `slirp4netns`, `fuse-overlayfs`, and subordinate-ID tools. Build evidence in each image records the package manager's selected source, the installed Engine package revision, the full installed package list, and the observed binary versions under `/usr/share/strukturpiloten/docker/`.
 
+Debian 11 rootless's native Engine 20.10.5 predates [Moby's OOM-score fix](https://github.com/moby/moby/issues/46563). If its outer workload inherits a positive `oom_score_adj`, starting a nested container can fail with `getting the final child's pid from pipe caused: EOF`. Launch this legacy fixture with a privileged rootful Podman process that can set the outer score to zero; nested Docker commands then keep their default OOM score:
+
+```sh
+sudo podman run --rm --privileged --device /dev/fuse --oom-score-adj=0 \
+  ghcr.io/strukturpiloten/docker-debian-11-rootless:v1.0.0
+```
+
 Both modes declare a separate Docker data-root volume and use only an internal Unix socket. Rootless runs as UID 1000 with subordinate UID/GID ranges and the distribution's RootlessKit. Package-only builds prove package availability, installed binary provenance, and image construction. Publication additionally requires native daemon startup, API compatibility, nested workloads, resource-budget checks and cleanup on every declared architecture. These profiles request AMD64 and ARM64, except Arch, whose official base image provides AMD64 only. Use the immutable release maintenance evidence to establish which exact published digest passed those checks.
