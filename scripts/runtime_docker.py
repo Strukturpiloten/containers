@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import socket
 import time
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
 from scripts.runtime_resource_budgets import (
@@ -198,23 +199,62 @@ def _run_nested_docker(
             "-euc",
             "mkdir -p /tmp/docker-native-bind; echo bind-ok > /tmp/docker-native-bind/marker",
         )
+        _checked_exec(
+            ctx,
+            budget,
+            "diagnostic inherited OOM and namespace limits",
+            container,
+            "sh",
+            "-euc",
+            "for proc in /proc/[0-9]*; do "
+            'name=$(cat "$proc/comm" 2>/dev/null) || continue; '
+            'case "$name" in rootlesskit|dockerd|containerd|containerd-shim*) '
+            'score=$(cat "$proc/oom_score_adj" 2>/dev/null) || continue; '
+            'printf "%s %s %s\n" "${proc##*/}" "$name" "$score";; esac; '
+            "done; "
+            'printf "max_user_namespaces=%s pid_max=%s pids_current=%s\n" '
+            '"$(cat /proc/sys/user/max_user_namespaces)" '
+            '"$(cat /proc/sys/kernel/pid_max)" '
+            '"$(cat /sys/fs/cgroup/pids.current)"',
+        )
         try:
-            _docker(
-                ctx,
-                budget,
-                container,
-                "write named volume in nested container",
-                "run",
-                "--rm",
-                "--user",
-                "0",
-                "--mount",
-                "type=volume,source=docker-native-probe,target=/probe",
-                nested,
-                "sh",
-                "-euc",
-                "echo volume-ok > /probe/marker",
-            )
+            try:
+                _docker(
+                    ctx,
+                    budget,
+                    container,
+                    "write named volume in nested container",
+                    "run",
+                    "--rm",
+                    "--user",
+                    "0",
+                    "--mount",
+                    "type=volume,source=docker-native-probe,target=/probe",
+                    nested,
+                    "sh",
+                    "-euc",
+                    "echo volume-ok > /probe/marker",
+                )
+            except ProbeError:
+                with suppress(ProbeError):
+                    _docker(
+                        ctx,
+                        budget,
+                        container,
+                        "diagnostic named volume with raised OOM score",
+                        "run",
+                        "--rm",
+                        "--oom-score-adj=1000",
+                        "--user",
+                        "0",
+                        "--mount",
+                        "type=volume,source=docker-native-probe,target=/probe",
+                        nested,
+                        "sh",
+                        "-euc",
+                        "echo volume-ok > /probe/marker",
+                    )
+                raise
             marker = _docker(
                 ctx,
                 budget,
