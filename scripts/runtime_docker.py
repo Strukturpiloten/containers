@@ -99,6 +99,24 @@ def run_docker(
     )
     if "Docker version" not in cli:
         raise ProbeError("Docker CLI did not report its version")
+    if mode == "rootless" and ctx.name.startswith("docker-opensuse-"):
+        ctx.podman(
+            "rootless UID mapping helpers use setuid only",
+            "run",
+            "--rm",
+            "--security-opt",
+            "label=disable",
+            *outer_container_limits(),
+            ctx.image_ref,
+            "sh",
+            "-euc",
+            """test "$(cat /usr/share/strukturpiloten/docker/uidmap-helper-mode)" = setuid-only;
+for helper in /usr/bin/newuidmap /usr/bin/newgidmap; do
+    test "$(stat -c '%u:%g %a' "$helper")" = '0:0 4755';
+    test -z "$(getcap "$helper")";
+done;
+echo setuid-only""",
+        )
     if skip_nested or profile.get("nestedRuntime", True) is False:
         ctx.skip("nested Docker runtime", "disabled by CLI" if skip_nested else "disabled in metadata")
         return
