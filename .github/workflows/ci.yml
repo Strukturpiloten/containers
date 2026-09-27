@@ -119,6 +119,7 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
+      max-parallel: 8
       matrix: ${{ fromJSON(needs.plan.outputs.smoke_build_matrix) }}
     steps:
       - name: Check out repository

@@ -908,7 +908,13 @@ def _stage_build_matrix(selected_images: list[JsonMap], stage: int) -> JsonMap:
 
 def _stage_publish_matrix(selected_images: list[JsonMap], stage: int) -> JsonMap:
     entries: list[JsonMap] = [
-        {"name": image["name"], "stage": stage} for image in selected_images if image["level"] == stage
+        {
+            "name": image["name"],
+            "stage": stage,
+            "buildMatrix": _stage_build_matrix([image], stage),
+        }
+        for image in selected_images
+        if image["level"] == stage
     ]
     return {"include": entries}
 

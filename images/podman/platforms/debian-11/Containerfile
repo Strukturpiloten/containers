@@ -2,8 +2,11 @@ ARG DISTRO_IMAGE
 
 FROM ${DISTRO_IMAGE}
 
+# Bullseye is archived; its retired security index references removed packages.
 RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive; \
+    rm -f /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; \
+    printf '%s\n' 'deb [check-valid-until=no] http://archive.debian.org/debian bullseye main' > /etc/apt/sources.list; \
     apt-get update; \
     apt-get --yes upgrade; \
     apt-get install --yes --no-install-recommends ca-certificates crun fuse-overlayfs iproute2 iptables podman procps slirp4netns tar uidmap; \
