@@ -1,0 +1,1980 @@
+{
+  "images": [
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/nextcloud-notifypush",
+      "lifecycle": {
+        "admission": "production",
+        "requiredRuntimeProfiles": [
+          "notifyPush"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "maintained",
+        "supportBoundary": "Repository maintains pinned application inputs and base images; upstream component support requires separate review."
+      },
+      "name": "nextcloud-notifypush",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "notifyPush": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "notifyPush": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/nextcloud-phpfpm",
+      "lifecycle": {
+        "admission": "production",
+        "requiredRuntimeProfiles": [
+          "phpFpm"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "maintained",
+        "supportBoundary": "Repository maintains pinned application inputs and base images; upstream component support requires separate review."
+      },
+      "name": "nextcloud-phpfpm",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "phpFpm": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "phpFpm": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-5.4-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "legacy",
+        "supportBoundary": "Pinned historical Podman source is retained for compatibility; OS refreshes do not patch that engine line."
+      },
+      "name": "podman-5.4-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v5.4.2"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-5.4-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "legacy",
+        "supportBoundary": "Pinned historical Podman source is retained for compatibility; OS refreshes do not patch that engine line."
+      },
+      "name": "podman-5.4-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v5.4.2"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-5.5-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "legacy",
+        "supportBoundary": "Pinned historical Podman source is retained for compatibility; OS refreshes do not patch that engine line."
+      },
+      "name": "podman-5.5-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v5.5.2"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-5.5-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "legacy",
+        "supportBoundary": "Pinned historical Podman source is retained for compatibility; OS refreshes do not patch that engine line."
+      },
+      "name": "podman-5.5-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v5.5.2"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-5.6-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "legacy",
+        "supportBoundary": "Pinned historical Podman source is retained for compatibility; OS refreshes do not patch that engine line."
+      },
+      "name": "podman-5.6-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v5.6.2"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-5.6-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "legacy",
+        "supportBoundary": "Pinned historical Podman source is retained for compatibility; OS refreshes do not patch that engine line."
+      },
+      "name": "podman-5.6-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v5.6.2"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-5.7-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "legacy",
+        "supportBoundary": "Pinned historical Podman source is retained for compatibility; OS refreshes do not patch that engine line."
+      },
+      "name": "podman-5.7-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v5.7.1"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-5.7-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "legacy",
+        "supportBoundary": "Pinned historical Podman source is retained for compatibility; OS refreshes do not patch that engine line."
+      },
+      "name": "podman-5.7-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v5.7.1"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-5.8-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "legacy",
+        "supportBoundary": "Pinned historical Podman source is retained for compatibility; OS refreshes do not patch that engine line."
+      },
+      "name": "podman-5.8-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v5.8.7"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-5.8-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "legacy",
+        "supportBoundary": "Pinned historical Podman source is retained for compatibility; OS refreshes do not patch that engine line."
+      },
+      "name": "podman-5.8-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v5.8.7"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-6.0-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "legacy",
+        "supportBoundary": "Pinned historical Podman source is retained for compatibility; OS refreshes do not patch that engine line."
+      },
+      "name": "podman-6.0-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v6.0.2"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-6.0-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "legacy",
+        "supportBoundary": "Pinned historical Podman source is retained for compatibility; OS refreshes do not patch that engine line."
+      },
+      "name": "podman-6.0-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v6.0.2"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-6.1-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "maintained",
+        "supportBoundary": "Selected source-built Podman line receives repository rebuilds; upstream engine fixes require reviewed source updates."
+      },
+      "name": "podman-6.1-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v6.1.2"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-6.1-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "maintained",
+        "supportBoundary": "Selected source-built Podman line receives repository rebuilds; upstream engine fixes require reviewed source updates."
+      },
+      "name": "podman-6.1-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v6.1.2"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-alpine-3.24-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "maintained",
+        "supportBoundary": "Repository rebuilds refresh distribution packages; vendor support determines installed Podman security maintenance."
+      },
+      "name": "podman-alpine-3.24-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-alpine-3.24-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "maintained",
+        "supportBoundary": "Repository rebuilds refresh distribution packages; vendor support determines installed Podman security maintenance."
+      },
+      "name": "podman-alpine-3.24-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-arch-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "experimental",
+        "supportBoundary": "Rolling distribution compatibility fixture; installed engine and package support must be reviewed for each rebuild."
+      },
+      "name": "podman-arch-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-arch-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "experimental",
+        "supportBoundary": "Rolling distribution compatibility fixture; installed engine and package support must be reviewed for each rebuild."
+      },
+      "name": "podman-arch-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-centos-stream-10-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "maintained",
+        "supportBoundary": "Repository rebuilds refresh distribution packages; vendor support determines installed Podman security maintenance."
+      },
+      "name": "podman-centos-stream-10-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-centos-stream-10-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "maintained",
+        "supportBoundary": "Repository rebuilds refresh distribution packages; vendor support determines installed Podman security maintenance."
+      },
+      "name": "podman-centos-stream-10-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-centos-stream-9-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "maintained",
+        "supportBoundary": "Repository rebuilds refresh distribution packages; vendor support determines installed Podman security maintenance."
+      },
+      "name": "podman-centos-stream-9-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-centos-stream-9-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "maintained",
+        "supportBoundary": "Repository rebuilds refresh distribution packages; vendor support determines installed Podman security maintenance."
+      },
+      "name": "podman-centos-stream-9-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-debian-11-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "legacy",
+        "supportBoundary": "Historical distribution compatibility fixture; vendor security support and installed engine fixes require separate review."
+      },
+      "name": "podman-debian-11-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-debian-11-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "legacy",
+        "supportBoundary": "Historical distribution compatibility fixture; vendor security support and installed engine fixes require separate review."
+      },
+      "name": "podman-debian-11-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-debian-12-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "maintained",
+        "supportBoundary": "Repository rebuilds refresh distribution packages; vendor support determines installed Podman security maintenance."
+      },
+      "name": "podman-debian-12-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-debian-12-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "maintained",
+        "supportBoundary": "Repository rebuilds refresh distribution packages; vendor support determines installed Podman security maintenance."
+      },
+      "name": "podman-debian-12-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-debian-13-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "maintained",
+        "supportBoundary": "Repository rebuilds refresh distribution packages; vendor support determines installed Podman security maintenance."
+      },
+      "name": "podman-debian-13-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-debian-13-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "maintained",
+        "supportBoundary": "Repository rebuilds refresh distribution packages; vendor support determines installed Podman security maintenance."
+      },
+      "name": "podman-debian-13-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-fedora-43-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "legacy",
+        "supportBoundary": "Historical distribution compatibility fixture; vendor security support and installed engine fixes require separate review."
+      },
+      "name": "podman-fedora-43-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-fedora-43-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "legacy",
+        "supportBoundary": "Historical distribution compatibility fixture; vendor security support and installed engine fixes require separate review."
+      },
+      "name": "podman-fedora-43-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-fedora-44-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "maintained",
+        "supportBoundary": "Repository rebuilds refresh distribution packages; vendor support determines installed Podman security maintenance."
+      },
+      "name": "podman-fedora-44-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-fedora-44-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "maintained",
+        "supportBoundary": "Repository rebuilds refresh distribution packages; vendor support determines installed Podman security maintenance."
+      },
+      "name": "podman-fedora-44-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-opensuse-leap-16.0-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "maintained",
+        "supportBoundary": "Repository rebuilds refresh distribution packages; vendor support determines installed Podman security maintenance."
+      },
+      "name": "podman-opensuse-leap-16.0-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-opensuse-leap-16.0-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "maintained",
+        "supportBoundary": "Repository rebuilds refresh distribution packages; vendor support determines installed Podman security maintenance."
+      },
+      "name": "podman-opensuse-leap-16.0-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-opensuse-tumbleweed-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "experimental",
+        "supportBoundary": "Rolling distribution compatibility fixture; installed engine and package support must be reviewed for each rebuild."
+      },
+      "name": "podman-opensuse-tumbleweed-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-opensuse-tumbleweed-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "experimental",
+        "supportBoundary": "Rolling distribution compatibility fixture; installed engine and package support must be reviewed for each rebuild."
+      },
+      "name": "podman-opensuse-tumbleweed-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-ubi-10-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "maintained",
+        "supportBoundary": "Repository rebuilds refresh distribution packages; vendor support determines installed Podman security maintenance."
+      },
+      "name": "podman-ubi-10-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-ubi-10-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "maintained",
+        "supportBoundary": "Repository rebuilds refresh distribution packages; vendor support determines installed Podman security maintenance."
+      },
+      "name": "podman-ubi-10-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-ubi-8-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "legacy",
+        "supportBoundary": "Historical distribution compatibility fixture; vendor security support and installed engine fixes require separate review."
+      },
+      "name": "podman-ubi-8-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-ubi-8-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "legacy",
+        "supportBoundary": "Historical distribution compatibility fixture; vendor security support and installed engine fixes require separate review."
+      },
+      "name": "podman-ubi-8-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-ubi-9-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "maintained",
+        "supportBoundary": "Repository rebuilds refresh distribution packages; vendor support determines installed Podman security maintenance."
+      },
+      "name": "podman-ubi-9-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-ubi-9-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "maintained",
+        "supportBoundary": "Repository rebuilds refresh distribution packages; vendor support determines installed Podman security maintenance."
+      },
+      "name": "podman-ubi-9-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-ubuntu-22.04-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "maintained",
+        "supportBoundary": "Repository rebuilds refresh distribution packages; vendor support determines installed Podman security maintenance."
+      },
+      "name": "podman-ubuntu-22.04-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-ubuntu-22.04-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "maintained",
+        "supportBoundary": "Repository rebuilds refresh distribution packages; vendor support determines installed Podman security maintenance."
+      },
+      "name": "podman-ubuntu-22.04-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-ubuntu-24.04-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "maintained",
+        "supportBoundary": "Repository rebuilds refresh distribution packages; vendor support determines installed Podman security maintenance."
+      },
+      "name": "podman-ubuntu-24.04-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-ubuntu-24.04-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "maintained",
+        "supportBoundary": "Repository rebuilds refresh distribution packages; vendor support determines installed Podman security maintenance."
+      },
+      "name": "podman-ubuntu-24.04-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-ubuntu-26.04-rootful",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "maintained",
+        "supportBoundary": "Repository rebuilds refresh distribution packages; vendor support determines installed Podman security maintenance."
+      },
+      "name": "podman-ubuntu-26.04-rootful",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/podman-ubuntu-26.04-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "podman"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "maintained",
+        "supportBoundary": "Repository rebuilds refresh distribution packages; vendor support determines installed Podman security maintenance."
+      },
+      "name": "podman-ubuntu-26.04-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "podman": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/typo3-phpfpm",
+      "lifecycle": {
+        "admission": "production",
+        "requiredRuntimeProfiles": [
+          "phpFpm"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "maintained",
+        "supportBoundary": "Repository maintains pinned application inputs and base images; upstream component support requires separate review."
+      },
+      "name": "typo3-phpfpm",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "phpFpm": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "phpFpm": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v2.0.0"
+    }
+  ],
+  "schemaVersion": 1
+}

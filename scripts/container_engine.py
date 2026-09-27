@@ -1597,6 +1597,7 @@ def _write_build_result(output_dir: Path, result: _BuildResult) -> Path:
             "componentInputs": result.component_inputs,
             "tags": list(result.tags),
             "rebuilt": True,
+            "buildSucceededAt": dt.datetime.now(dt.UTC).isoformat(),
             "runId": result.run_id,
             "runAttempt": result.run_attempt,
         },

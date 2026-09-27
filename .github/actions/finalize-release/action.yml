@@ -57,6 +57,19 @@ runs:
           --build-result "${RUNNER_TEMP}/image-result/${IMAGE_NAME}-build-result.json" \
           --default-branch "${{ inputs.default-branch }}"
 
+    - name: Record immutable maintenance evidence on release
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        IMAGE_NAME: ${{ steps.release.outputs.image_name }}
+      run: |
+        set -euo pipefail
+
+        uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.release_evidence \
+          --build-result "${RUNNER_TEMP}/image-result/${IMAGE_NAME}-build-result.json" \
+          --output "${RUNNER_TEMP}/image-result/${IMAGE_NAME}-maintenance-evidence.json" \
+          --verify-publication --upload
+
     - name: Upload finalized release result
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:

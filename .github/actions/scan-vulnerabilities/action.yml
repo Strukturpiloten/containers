@@ -1,0 +1,112 @@
+name: Scan image vulnerabilities
+
+description: Compare a built OCI archive with the same architecture of a maintained registry image.
+
+inputs:
+  image:
+    description: Registry image name without tag or digest.
+    required: true
+  architecture:
+    description: linux architecture (amd64 or arm64).
+    required: true
+  candidate-archive:
+    description: OCI archive produced by the architecture build.
+    required: true
+  source-revision:
+    description: Source Git revision expected in the candidate OCI config.
+    required: true
+  baseline-ref:
+    description: Maintained tag for this same image (for example image:major).
+    required: true
+  admission:
+    description: Declared lifecycle admission (production, isolated-test, or disabled).
+    required: true
+  output-dir:
+    description: Directory to write scans, verified identities, report and summary.
+    required: true
+
+outputs:
+  candidate-digest:
+    description: Verified candidate architecture manifest digest from the OCI archive.
+    value: ${{ steps.scan.outputs.candidate-digest }}
+  baseline-digest:
+    description: Verified baseline architecture manifest digest from the maintained index.
+    value: ${{ steps.scan.outputs.baseline-digest }}
+  report-path:
+    description: JSON vulnerability report path.
+    value: ${{ steps.scan.outputs.report-path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install pinned Grype
+      shell: bash
+      run: |
+        set -euo pipefail
+        case "$(uname -m)" in
+          x86_64)
+            machine=amd64
+            expected=3fa2dc4b924621ab65404cf08d0b8438d896d80ab949c9d5a4ca283c36004c9b
+            ;;
+          aarch64)
+            machine=arm64
+            expected=29f0ec7c549ddb0e2b6a0ca714851f7399438afc399b80c12808e065edc9a8f8
+            ;;
+          *) echo "Unsupported Grype host architecture" >&2; exit 2 ;;
+        esac
+        version=0.119.0
+        archive="grype_${version}_linux_${machine}.tar.gz"
+        curl -fsSL "https://github.com/anchore/grype/releases/download/v${version}/${archive}" -o "${RUNNER_TEMP}/${archive}"
+        printf '%s  %s\n' "${expected}" "${RUNNER_TEMP}/${archive}" | sha256sum -c -
+        mkdir -p "${RUNNER_TEMP}/grype-bin"
+        tar -xzf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}/grype-bin" grype
+        printf '%s\n' "${RUNNER_TEMP}/grype-bin" >> "$GITHUB_PATH"
+    - name: Scan and compare verified architecture manifests
+      id: scan
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        ARCHITECTURE: ${{ inputs.architecture }}
+        CANDIDATE_ARCHIVE: ${{ inputs.candidate-archive }}
+        SOURCE_REVISION: ${{ inputs.source-revision }}
+        BASELINE_REF: ${{ inputs.baseline-ref }}
+        ADMISSION: ${{ inputs.admission }}
+        OUTPUT_DIR: ${{ inputs.output-dir }}
+      run: |
+        set -euo pipefail
+        command -v skopeo >/dev/null
+        mkdir -p "$OUTPUT_DIR"
+        python3 -m scripts.scan_sources candidate --archive "$CANDIDATE_ARCHIVE" \
+          --architecture "$ARCHITECTURE" --source-revision "$SOURCE_REVISION" \
+          --output "$OUTPUT_DIR/candidate-source.json"
+        python3 -m scripts.scan_sources baseline --image "$IMAGE" --reference "$BASELINE_REF" \
+          --architecture "$ARCHITECTURE" --output "$OUTPUT_DIR/baseline-source.json"
+        candidate_digest="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["manifestDigest"])' "$OUTPUT_DIR/candidate-source.json")"
+        baseline_digest="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["manifestDigest"])' "$OUTPUT_DIR/baseline-source.json")"
+        grype db update
+        grype version -o json > "$OUTPUT_DIR/grype-version.json"
+        grype db status -o json > "$OUTPUT_DIR/grype-db.json"
+        grype "oci-archive:${CANDIDATE_ARCHIVE}" --platform "linux/${ARCHITECTURE}" -o json > "$OUTPUT_DIR/candidate-grype.json"
+        grype "registry:${IMAGE}@${baseline_digest}" --platform "linux/${ARCHITECTURE}" -o json > "$OUTPUT_DIR/baseline-grype.json"
+        status=0
+        python3 -m scripts.vulnerability \
+          --image "$IMAGE" --architecture "$ARCHITECTURE" \
+          --candidate-digest "$candidate_digest" --baseline-digest "$baseline_digest" \
+          --candidate-source "oci-archive:${CANDIDATE_ARCHIVE}" --admission "$ADMISSION" \
+          --candidate-evidence "$OUTPUT_DIR/candidate-source.json" \
+          --baseline-evidence "$OUTPUT_DIR/baseline-source.json" \
+          --candidate-scan "$OUTPUT_DIR/candidate-grype.json" \
+          --baseline-scan "$OUTPUT_DIR/baseline-grype.json" \
+          --scanner "$OUTPUT_DIR/grype-version.json" --database "$OUTPUT_DIR/grype-db.json" \
+          --exceptions security/vulnerability-exceptions.json \
+          --json-output "$OUTPUT_DIR/vulnerability-report.json" \
+          --summary-output "$OUTPUT_DIR/vulnerability-summary.md" || status=$?
+        if [[ -f "$OUTPUT_DIR/vulnerability-summary.md" ]]; then
+          cat "$OUTPUT_DIR/vulnerability-summary.md" >> "$GITHUB_STEP_SUMMARY"
+        fi
+        {
+          printf 'candidate-digest=%s\n' "$candidate_digest"
+          printf 'baseline-digest=%s\n' "$baseline_digest"
+          printf 'report-path=%s\n' "$OUTPUT_DIR/vulnerability-report.json"
+        } >> "$GITHUB_OUTPUT"
+        exit "$status"
