@@ -46,11 +46,13 @@ case "$distro" in
     fedora-43|fedora-44)
         dnf --assumeyes --refresh upgrade
         dnf --assumeyes install --setopt=install_weak_deps=False \
-            busybox ca-certificates "$engine_package" iproute iptables procps-ng shadow-utils tar
+            busybox ca-certificates "$engine_package" iproute iptables iptables-nft procps-ng shadow-utils tar
         if [ "$mode" = rootless ]; then
             dnf --assumeyes install --setopt=install_weak_deps=False \
                 fuse-overlayfs rootlesskit shadow-utils-subid slirp4netns
         fi
+        alternatives --set iptables /usr/bin/iptables-nft
+        iptables -V | grep -F "(nf_tables)"
         rpm --query --info "$engine_package" > "$provenance/vendor-source"
         rpm --query --queryformat '%{VERSION}-%{RELEASE}.%{ARCH}\n' \
             "$engine_package" > "$provenance/package-version"
