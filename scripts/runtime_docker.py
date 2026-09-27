@@ -1,0 +1,281 @@
+"""Native, bounded Docker daemon checks using the isolated outer Podman context."""
+
+# The synthetic resource names and shell commands are intentionally explicit in evidence.
+# ruff: noqa: EM101, EM102, PLR0915, S108, TRY003
+
+from __future__ import annotations
+
+import json
+import socket
+import time
+from typing import TYPE_CHECKING, Any
+
+from scripts.runtime_tests import ProbeError
+
+MAX_HTTP_RESPONSE = 8192
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from scripts.runtime_tests import RuntimeContext
+
+
+def _wait_http(port: int, marker: bytes, *, timeout: int = 20) -> None:
+    deadline = time.monotonic() + timeout
+    last_result = "no connection"
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=2) as connection:
+                connection.sendall(b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
+                response = bytearray()
+                while len(response) < MAX_HTTP_RESPONSE:
+                    try:
+                        chunk = connection.recv(MAX_HTTP_RESPONSE - len(response))
+                    except TimeoutError:
+                        break
+                    if not chunk:
+                        break
+                    response.extend(chunk)
+                    if marker in response:
+                        return
+            last_result = repr(response[:200])
+        except OSError as error:
+            last_result = str(error)
+        time.sleep(0.5)
+    raise ProbeError(f"published nested Docker port {port} did not serve the synthetic marker: {last_result}")
+
+
+def _docker(ctx: RuntimeContext, container: str, name: str, *args: str) -> str:
+    return ctx.exec(name, container, "docker", *args)
+
+
+def run_docker(
+    ctx: RuntimeContext,
+    profile: dict[str, Any],
+    *,
+    archive: Path,  # noqa: ARG001 - interface shared with other runtime probes
+    allow_privileged: bool,
+    skip_nested: bool,
+) -> None:
+    """Exercise CLI, daemon API, storage, network, mounts, ports, and owned cleanup."""
+    mode = profile["mode"]
+    expected_uid = "1000" if mode == "rootless" else "0"
+    cli = ctx.podman(
+        "Docker CLI, identity and payload provenance",
+        "run",
+        "--rm",
+        "--security-opt",
+        "label=disable",
+        ctx.image_ref,
+        "sh",
+        "-euc",
+        'test "$(id -u)" = "$1"; test -s /usr/share/strukturpiloten/docker/engine-version; '
+        "test -s /usr/share/strukturpiloten/docker/engine-archive-sha256; "
+        "docker --version; dockerd --version",
+        "--",
+        expected_uid,
+    )
+    if "Docker version" not in cli:
+        raise ProbeError("Docker CLI did not report its version")
+    if skip_nested or profile.get("nestedRuntime", True) is False:
+        ctx.skip("nested Docker runtime", "disabled by CLI" if skip_nested else "disabled in metadata")
+        return
+    if profile["outerPrivilege"] == "privileged" and not allow_privileged:
+        ctx.skip("nested Docker runtime", "privileged test requires trusted context")
+        return
+
+    # A Docker archive of the exact built image is a version-pinned, offline fixture.
+    # The inner daemon receives no host Docker socket and the outer launcher stays Podman.
+    fixture = ctx.directory / "docker-native-fixture.tar"
+    ctx.podman(
+        "save synthetic Docker fixture",
+        "save",
+        "--format",
+        "docker-archive",
+        "--output",
+        str(fixture),
+        ctx.image_ref,
+        timeout=180,
+    )
+    outer_args = [
+        "--device",
+        "/dev/fuse",
+        "--volume",
+        f"{fixture}:/tmp/docker-native-fixture.tar:ro",
+        "--publish",
+        "127.0.0.1::18080",
+    ]
+    if profile["outerPrivilege"] == "privileged":
+        outer_args.append("--privileged")
+    else:
+        outer_args.extend(["--security-opt", "apparmor=unconfined"])
+    container = ctx.start("start nested Docker daemon", options=tuple(outer_args))
+    try:
+        ctx.exec(
+            "wait for Docker daemon API",
+            container,
+            "sh",
+            "-euc",
+            "for n in $(seq 1 45); do docker info >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1",
+        )
+        uid = ctx.exec("inspect inner daemon user", container, "id", "-u")
+        ctx.assert_equal("inner daemon user", uid, expected_uid)
+        version_text = _docker(ctx, container, "read Docker API versions", "version", "--format", "{{json .Server}}")
+        version = json.loads(version_text)
+        engine_version = ctx.exec(
+            "read verified Engine version", container, "cat", "/usr/share/strukturpiloten/docker/engine-version"
+        )
+        ctx.assert_equal("daemon Engine version", version["Version"], engine_version)
+        if not version.get("ApiVersion") or not version.get("MinAPIVersion"):
+            raise ProbeError("daemon did not report API version range")
+        info_text = _docker(ctx, container, "inspect Docker storage and security", "info", "--format", "{{json .}}")
+        info = json.loads(info_text)
+        if not info.get("Driver"):
+            raise ProbeError("daemon did not initialize a storage driver")
+        security = [str(value) for value in info.get("SecurityOptions", [])]
+        rootless = any("rootless" in value for value in security)
+        ctx.assert_equal("daemon rootless security", str(rootless).lower(), str(mode == "rootless").lower())
+
+        _docker(ctx, container, "load synthetic nested image", "load", "--input", "/tmp/docker-native-fixture.tar")
+        nested = ctx.image_ref
+        _docker(ctx, container, "create isolated Docker network", "network", "create", "docker-native-probe")
+        _docker(ctx, container, "create isolated Docker volume", "volume", "create", "docker-native-probe")
+        ctx.exec(
+            "create synthetic bind source",
+            container,
+            "sh",
+            "-euc",
+            "mkdir -p /tmp/docker-native-bind; echo bind-ok > /tmp/docker-native-bind/marker",
+        )
+        try:
+            _docker(
+                ctx,
+                container,
+                "write named volume in nested container",
+                "run",
+                "--rm",
+                "--user",
+                "0",
+                "--mount",
+                "type=volume,source=docker-native-probe,target=/probe",
+                nested,
+                "sh",
+                "-euc",
+                "echo volume-ok > /probe/marker",
+            )
+            marker = _docker(
+                ctx,
+                container,
+                "read bind and named volume mounts",
+                "run",
+                "--rm",
+                "--mount",
+                "type=volume,source=docker-native-probe,target=/volume",
+                "--mount",
+                "type=bind,source=/tmp/docker-native-bind,target=/bind,readonly",
+                nested,
+                "sh",
+                "-euc",
+                "cat /volume/marker; cat /bind/marker",
+            )
+            ctx.assert_equal("nested mount content", marker, "volume-ok\nbind-ok")
+            _docker(
+                ctx,
+                container,
+                "start healthy published-port container",
+                "run",
+                "--detach",
+                "--name",
+                "docker-native-web",
+                "--network",
+                "docker-native-probe",
+                "--publish",
+                "18080:8080",
+                "--restart",
+                "unless-stopped",
+                "--health-cmd",
+                "wget -q -O /dev/null http://127.0.0.1:8080/",
+                "--health-interval",
+                "2s",
+                "--health-retries",
+                "3",
+                nested,
+                "sh",
+                "-euc",
+                "cat > /tmp/serve-http <<'EOF'\n"
+                "#!/bin/sh\n"
+                "printf 'HTTP/1.0 200 OK\\r\\nContent-Length: 17\\r\\n\\r\\ndocker-native-ok\\n'\n"
+                "EOF\n"
+                "chmod 0755 /tmp/serve-http; exec busybox nc -lk -p 8080 -e /tmp/serve-http",
+            )
+            ctx.exec(
+                "wait for synthetic HTTP container",
+                container,
+                "sh",
+                "-euc",
+                "for n in $(seq 1 15); do "
+                'test "$(docker inspect --format "{{.State.Health.Status}}" docker-native-web)" = healthy && exit 0; '
+                "sleep 1; done; docker logs docker-native-web; exit 1",
+            )
+            settings = _docker(
+                ctx,
+                container,
+                "read health and restart settings",
+                "inspect",
+                "--format",
+                "{{.HostConfig.RestartPolicy.Name}} {{.Config.Healthcheck.Test}}",
+                "docker-native-web",
+            )
+            if "unless-stopped" not in settings or "wget" not in settings:
+                raise ProbeError(f"nested health/restart settings were not retained: {settings}")
+            _docker(
+                ctx,
+                container,
+                "verify synthetic Docker network DNS",
+                "run",
+                "--rm",
+                "--network",
+                "docker-native-probe",
+                nested,
+                "sh",
+                "-euc",
+                "wget -q -O - http://docker-native-web:8080/ | grep -F docker-native-ok",
+            )
+            outer_port = ctx.port(container, 18080)
+            _wait_http(outer_port, b"docker-native-ok")
+            ctx.checks.append({"name": "host published port", "status": "passed", "port": outer_port})
+        finally:
+            ctx.exec(
+                "remove owned nested Docker resources",
+                container,
+                "sh",
+                "-euc",
+                "docker rm -f docker-native-web >/dev/null 2>&1 || true; "
+                "docker network rm docker-native-probe >/dev/null 2>&1 || true; "
+                "docker volume rm -f docker-native-probe >/dev/null 2>&1 || true; "
+                "rm -rf /tmp/docker-native-bind",
+            )
+            ctx.exec(
+                "verify nested Docker cleanup readback",
+                container,
+                "sh",
+                "-euc",
+                'test -z "$(docker ps -aq --filter name=docker-native-web)"; '
+                "! docker network inspect docker-native-probe >/dev/null 2>&1; "
+                "! docker volume inspect docker-native-probe >/dev/null 2>&1",
+            )
+    finally:
+        try:
+            ctx.logs(container)
+        finally:
+            ctx.podman(
+                "signal owned Docker daemon PID 1",
+                "exec",
+                container,
+                "sh",
+                "-c",
+                "kill -TERM 1",
+                check=False,
+            )
+            ctx.podman("wait for owned Docker daemon exit", "wait", container, timeout=30)
