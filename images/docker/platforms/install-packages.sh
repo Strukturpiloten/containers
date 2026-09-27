@@ -148,12 +148,14 @@ if [ "$mode" = rootless ]; then
             # SUSE grants one file capability to each helper. Combining those caps with
             # setuid leaves the helpers unable to open a root-owned child uid_map.
             for helper in "$(command -v newuidmap)" "$(command -v newgidmap)"; do
-                if [ -n "$(getcap "$helper")" ]; then
+                helper_caps="$(getcap "$helper")"
+                if [ -n "$helper_caps" ]; then
                     setcap -r "$helper"
                 fi
                 chmod 4755 "$helper"
                 test "$(stat -c '%u:%g %a' "$helper")" = '0:0 4755'
-                test -z "$(getcap "$helper")"
+                helper_caps="$(getcap "$helper")"
+                test -z "$helper_caps"
             done
             printf '%s\n' setuid-only > "$provenance/uidmap-helper-mode"
             ;;
