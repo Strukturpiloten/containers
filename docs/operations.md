@@ -98,14 +98,23 @@ Rollback requires an authenticated `skopeo` session with package write access. R
 
 ## Local cleanup and evidence lifetime
 
-The local runtime harness owns an isolated Podman store and removes its task-owned containers and image after a completed check. If a local build is interrupted, identify its exact task-owned store and list its containers before removal. Do not run `podman system prune` against a shared/default store. For a store you explicitly created at the path below, this sequence limits cleanup to that store:
+The local runtime harness owns an isolated Podman store and removes its task-owned containers and image after a completed check. If runtime evidence reports `cleanupError`, resolve it before deleting the store. If a local build is interrupted, identify its exact task-owned store and check for all containers and mounts before removal. Do not run `podman system prune` against a shared/default store. For a store you explicitly created at the path below, this sequence refuses deletion while any container or mount remains in that store:
 
-```sh
+```bash
 state=/tmp/strukturpiloten-build-check
-sudo podman --root "$state/root" --runroot "$state/runroot" \
-  --tmpdir "$state/tmp" ps --all
-# After confirming this store has no running task containers:
-test "$state" = /tmp/strukturpiloten-build-check && sudo rm -rf -- "$state"
+test "$state" = /tmp/strukturpiloten-build-check || exit 1
+containers=$(sudo podman --root "$state/root" --runroot "$state/runroot" \
+  --tmpdir "$state/tmp" ps --all --quiet) || exit 1
+test -z "$containers" || { printf 'store still has containers\n' >&2; exit 1; }
+mounts=$(findmnt --kernel --raw --noheadings --output TARGET) || exit 1
+while IFS= read -r target; do
+  case "$target" in
+    "$state"|"$state"/*)
+      printf 'store still has mount: %s\n' "$target" >&2
+      exit 1 ;;
+  esac
+done <<< "$mounts"
+sudo rm -rf -- "$state"
 ```
 
 Private payload and architecture OCI archive workflow artifacts expire after one day; runtime evidence expires after seven days. Published image digests, release records, and uploaded maintenance evidence are the durable audit trail. The [Podman image guide](../images/podman/README.md#build-and-test-architecture) records one build-only timing and storage measurement, including its host and storage-driver limits.
