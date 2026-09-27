@@ -23,7 +23,7 @@ jobs:
       (github.event.workflow_run.event == 'push' ||
       github.event.workflow_run.event == 'schedule' ||
       github.event.workflow_run.event == 'workflow_dispatch')
-    runs-on: ubuntu-26.04
+    runs-on: <<( config.AMD64_RUNNER )>>
     timeout-minutes: 10
     permissions:
       actions: write

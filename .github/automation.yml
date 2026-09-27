@@ -1,0 +1,7 @@
+# Canonical workflow/tool configuration. Regenerate with container_engine generate-workflow.
+AMD64_RUNNER: ubuntu-26.04
+ARM64_RUNNER: ubuntu-26.04-arm
+PYTHON_VERSION: "3.14"
+UV_VERSION: 0.12.19
+SYFT_VERSION: v1.52.0
+ACTIONLINT_VERSION: 1.7.12

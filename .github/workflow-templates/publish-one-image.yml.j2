@@ -12,9 +12,9 @@ on:
 permissions: {}
 
 env:
-  PYTHON_VERSION: "3.14"
-  SYFT_VERSION: v1.52.0
-  UV_VERSION: 0.12.19
+  PYTHON_VERSION: "<<( config.PYTHON_VERSION )>>"
+  SYFT_VERSION: <<( config.SYFT_VERSION )>>
+  UV_VERSION: <<( config.UV_VERSION )>>
 
 jobs:
   build:
@@ -42,7 +42,7 @@ jobs:
   publish:
     name: Publish image
     needs: build
-    runs-on: ubuntu-26.04
+    runs-on: <<( config.AMD64_RUNNER )>>
     timeout-minutes: 90
     permissions:
       attestations: write
@@ -69,7 +69,7 @@ jobs:
     name: Finalize release
     needs: publish
     if: github.ref_name == github.event.repository.default_branch
-    runs-on: ubuntu-26.04
+    runs-on: <<( config.AMD64_RUNNER )>>
     timeout-minutes: 45
     permissions:
       contents: write

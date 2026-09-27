@@ -12,14 +12,14 @@ concurrency:
 permissions: {}
 
 env:
-  ACTIONLINT_VERSION: 1.7.12
-  PYTHON_VERSION: "3.14"
-  UV_VERSION: 0.12.19
+  ACTIONLINT_VERSION: <<( config.ACTIONLINT_VERSION )>>
+  PYTHON_VERSION: "<<( config.PYTHON_VERSION )>>"
+  UV_VERSION: <<( config.UV_VERSION )>>
 
 jobs:
   validate:
     name: Validate metadata and automation
-    runs-on: ubuntu-26.04
+    runs-on: <<( config.AMD64_RUNNER )>>
     timeout-minutes: 15
     permissions:
       contents: read
@@ -57,7 +57,7 @@ jobs:
   plan:
     name: Plan pull-request builds
     needs: validate
-    runs-on: ubuntu-26.04
+    runs-on: <<( config.AMD64_RUNNER )>>
     timeout-minutes: 15
     permissions:
       contents: read
@@ -166,7 +166,7 @@ jobs:
       - plan
       - smoke-build
       - payloads
-    runs-on: ubuntu-26.04
+    runs-on: <<( config.AMD64_RUNNER )>>
     timeout-minutes: 5
     permissions:
       contents: read

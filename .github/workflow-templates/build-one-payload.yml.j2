@@ -11,8 +11,8 @@ on:
 permissions: {}
 
 env:
-  PYTHON_VERSION: "3.14"
-  UV_VERSION: 0.12.19
+  PYTHON_VERSION: "<<( config.PYTHON_VERSION )>>"
+  UV_VERSION: <<( config.UV_VERSION )>>
 
 jobs:
   build:

@@ -43,14 +43,11 @@ from scripts.promotion import (
     PublicationIdentity,
     require_fresh_promotion,
 )
+from scripts.workflow_config import RUNNERS, load_config
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-RUNNERS = {
-    "amd64": "ubuntu-24.04",
-    "arm64": "ubuntu-24.04-arm",
-}
 
 PUBLISH_WORKFLOW_PATH = Path(".github/workflows/publish-images.yml")
 PUBLISH_WORKFLOW_TEMPLATE_PATH = Path(".github/workflow-templates/publish-images.yml.j2")
@@ -66,6 +63,8 @@ GLOBAL_IMAGE_INPUTS = (
     "scripts/container_engine.py",
     "scripts/policy.py",
     "scripts/build_payloads.py",
+    "scripts/workflow_config.py",
+    ".github/automation.yml",
     "scripts/promotion.py",
 )
 SHA256_DIGEST_LENGTH = 71
@@ -1104,8 +1103,8 @@ def _workflow_environment() -> Environment:
         keep_trailing_newline=True,
         trim_blocks=True,
         lstrip_blocks=True,
-        variable_start_string="[[",
-        variable_end_string="]]",
+        variable_start_string="<<(",
+        variable_end_string=")>>",
         block_start_string="[%",
         block_end_string="%]",
         autoescape=True,
@@ -1116,14 +1115,26 @@ def _workflow_environment() -> Environment:
 def _publish_workflow(stage_count: int) -> str:
     environment = _workflow_environment()
     template = environment.get_template(PUBLISH_WORKFLOW_TEMPLATE_PATH.name)
-    return template.render(stages=list(range(stage_count)), single_stage=stage_count == 1)
+    return template.render(
+        stages=list(range(stage_count)), single_stage=stage_count == 1, config=load_config(_repo_root())
+    )
 
 
 def _command_generate_workflow(args: argparse.Namespace) -> None:
     images = _load_images()
     _validate_images(images)
     stage_count = _stage_count(images)
-    workflows = ((PUBLISH_WORKFLOW_PATH, _publish_workflow(stage_count)),)
+    environment = _workflow_environment()
+    config = load_config(_repo_root())
+    workflows = [
+        (
+            Path(".github/workflows") / path.name.removesuffix(".j2"),
+            environment.get_template(path.name).render(
+                stages=list(range(stage_count)), single_stage=stage_count == 1, config=config
+            ),
+        )
+        for path in sorted((_repo_root() / PUBLISH_WORKFLOW_TEMPLATE_PATH.parent).glob("*.yml.j2"))
+    ]
 
     if args.check:
         stale_paths = [

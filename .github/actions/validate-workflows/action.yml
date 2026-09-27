@@ -1,0 +1,28 @@
+name: Validate workflows
+description: Check workflow syntax with a pinned, checksum-verified actionlint release.
+inputs:
+  version:
+    required: true
+    description: actionlint release version without a leading v.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        ACTIONLINT_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        case "$(uname -m)" in
+          x86_64) arch=amd64 ;;
+          aarch64) arch=arm64 ;;
+          *) echo "Unsupported actionlint architecture" >&2; exit 1 ;;
+        esac
+        scratch="$(mktemp -d "${RUNNER_TEMP}/actionlint.XXXXXXXX")"
+        trap 'rm -rf -- "$scratch"' EXIT
+        archive="actionlint_${ACTIONLINT_VERSION}_linux_${arch}.tar.gz"
+        base="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}"
+        curl --fail --silent --show-error --location "${base}/${archive}" -o "${scratch}/${archive}"
+        curl --fail --silent --show-error --location "${base}/actionlint_${ACTIONLINT_VERSION}_checksums.txt" -o "${scratch}/checksums.txt"
+        (cd "${scratch}" && sha256sum --check --ignore-missing checksums.txt)
+        tar -xzf "${scratch}/${archive}" -C "${scratch}" actionlint
+        "${scratch}/actionlint" -color

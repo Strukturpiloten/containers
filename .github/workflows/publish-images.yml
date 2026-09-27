@@ -8,6 +8,7 @@ on:
       - main
     paths:
       - ".containerignore"
+      - ".github/automation.yml"
       - ".github/actions/**"
       - ".github/renovate.json"
       - ".github/workflow-templates/**"
@@ -46,6 +47,7 @@ concurrency:
 permissions: {}
 
 env:
+  ACTIONLINT_VERSION: 1.7.12
   PYTHON_VERSION: "3.14"
   SYFT_VERSION: v1.52.0
   UV_VERSION: 0.12.19
@@ -53,7 +55,7 @@ env:
 jobs:
   plan:
     name: Plan image builds
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     permissions:
       contents: read
@@ -77,6 +79,11 @@ jobs:
         uses: ./.github/actions/setup-uv
         with:
           version: ${{ env.UV_VERSION }}
+
+      - name: Validate GitHub workflow syntax
+        uses: ./.github/actions/validate-workflows
+        with:
+          version: ${{ env.ACTIONLINT_VERSION }}
 
       - name: Check generated workflow
         shell: bash

@@ -1,0 +1,7 @@
+# GitHub-hosted labels verified in actions/runner-images/README.md.
+# actionlint 1.7.12 predates these labels; remove this compatibility list when
+# its built-in runner inventory includes Ubuntu 26.04 on both architectures.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04
+    - ubuntu-26.04-arm
