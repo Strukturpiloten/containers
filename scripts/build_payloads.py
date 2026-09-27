@@ -119,8 +119,9 @@ def plan_payloads(root: Path, images: list[dict[str, Any]], runners: dict[str, s
         consumer = record.get("consumer")
         if consumer is not None:
             arguments = record["build"]["args"]
-            expected_version = "v" + arguments[consumer["versionArg"]].removeprefix("v")
-            if image.get("version") != expected_version:
+            expected_version = arguments[consumer["versionArg"]].removeprefix("v")
+            image_version = image.get("version")
+            if not isinstance(image_version, str) or image_version.removeprefix("v") != expected_version:
                 _fail(f"Payload {name} version does not match consumer {image['name']}.")
             base_arg = consumer["runtimeBaseArg"]
             image_base = build.get("args", {}).get(base_arg, {}).get("value")

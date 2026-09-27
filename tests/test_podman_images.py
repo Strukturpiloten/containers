@@ -92,6 +92,9 @@ class PodmanImageTests(unittest.TestCase):
         images = [self.source_images[f"podman-5.4-{mode}"] for mode in ROOT_MODES]
         plan = payloads.plan_payloads(REPOSITORY_ROOT, images, {"amd64": "amd", "arm64": "arm"})
         self.assertEqual(len(plan["include"]), 2)
+        normalized = [engine._normalize_image(image, 0) for image in images]
+        normalized_plan = payloads.plan_payloads(REPOSITORY_ROOT, normalized, {"amd64": "amd", "arm64": "arm"})
+        self.assertEqual(len(normalized_plan["include"]), 2)
         for field, value, message in (
             ("version", "v5.4.999", "version"),
             ("base", "registry.fedoraproject.org/fedora-minimal:44@sha256:" + "0" * 64, "runtime base"),
