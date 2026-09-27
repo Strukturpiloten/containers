@@ -138,14 +138,15 @@ Never share a storage volume between Podman versions, OS targets, or root modes.
 
 The exact upstream images use `images/podman/shared/Payload.Containerfile` to compile the shared payload and `images/podman/shared/Containerfile` for each root-mode runtime. Distro-package images use one recipe per OS release under `images/podman/platforms/`; a platform recipe is shared only by its rootful and rootless variants. Package names, account setup, OCI runtime selection, and cgroup behavior therefore cannot leak between Debian, Ubuntu, Fedora, UBI, openSUSE, Alpine, or Arch targets.
 
-For one minor line on one architecture, plan for one source compile plus two Fedora runtime builds. The table is a capacity estimate, **not a measured benchmark**; no native Buildah build was run in this workspace. It helps size CI storage and timeouts until runner measurements replace it.
+A build-only measurement on 2026-09-27 used Podman 6.0.2 with an isolated rootful VFS store on an AMD64 Ryzen 7 5700X3D (16 logical CPUs, 62 GiB RAM). It built the Podman 5.4.2 payload from a cold Fedora Minimal 44 pull, then built rootful and rootless finals from that same local payload. All three builds used `--no-cache`; the final builds reused the already pulled Fedora base. No service or nested-runtime container was started.
 
-| Work for one line and architecture | Approximate wall time | Approximate transient storage |
+| Step, Podman 5.4.2 AMD64 | Measured wall time | Isolated VFS store after step |
 | --- | ---: | ---: |
-| Source payload build and OCI archive | 15–40 minutes | 2–5 GiB builder layers; 50–250 MiB archive |
-| Rootful and rootless final images | 2–8 minutes each | 0.5–1.5 GiB per image during build |
+| Shared payload build | 110.69 s | 3,904,576,704 bytes |
+| Rootful final build | 39.62 s | 5,958,089,588 bytes |
+| Rootless final build | 36.29 s | 8,011,602,918 bytes |
 
-The old two-variant layout compiled the source twice per line and architecture; this layout compiles it once. The final Fedora package refresh still runs twice. To record representative values on an isolated runner, time the `scripts.build_payloads` invocation and both architecture builds, record archive bytes with `du -h`, and compare Buildah storage usage before and after the line. Use a dedicated Buildah store when measuring so unrelated cached layers do not inflate the result.
+The exported payload OCI archive was **41,705,984 bytes**. Store figures are `du -sb` after each completed step, not peak temporary space; the archive was stored outside the VFS store. This is one host and one minor line, not a Buildah CI benchmark or an ARM64/Podman 6 measurement. The new layout removes one source compile for each line and architecture while both final Fedora package refreshes remain. To compare CI cost, record the payload job duration, both architecture job durations, and artifact bytes on the native runner; keep the Buildah store isolated so unrelated layers do not affect storage figures.
 
 Test one image locally on an AMD64 Linux host with Podman and `/dev/fuse`:
 

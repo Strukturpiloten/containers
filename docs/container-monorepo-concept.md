@@ -46,6 +46,9 @@ The important fields are:
 | `build.architectures` | Architectures that must build and publish |
 | `build.runtimeBaseArg` | Build argument that identifies the final runtime base |
 | `build.args` | Pinned image inputs and static build values |
+| `build.payload` | Optional private payload manifest shared by compatible variants in one run |
+| `tests` | Runtime probe profile and privilege boundary for CI |
+| `lifecycle` | Declared support state, admission, review date, and required runtime coverage |
 | `dependencies` | External image pins and internal image edges |
 | `inputs` | Paths that select this image after a source change |
 

@@ -56,6 +56,8 @@ uv run --frozen --python 3.14 python -m scripts.container_engine rollback-image 
 
 The expected current digest guards against an intervening update. This command deliberately bypasses automatic freshness policy for that one alias. Repeat with the then-current digest for each other alias that must move. An ordinary later successful publication can move the alias forward again; cancel any queued old runs during incident handling.
 
+For planning, retries, promotion, rollback, cleanup, and the module map, see the [operations guide](docs/operations.md).
+
 ## Local validation
 
 Run the same non-publishing checks before opening a pull request:

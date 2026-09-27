@@ -50,6 +50,8 @@ produced by the normal publication and finalization jobs.
 
 # Modules
 
+The [operations guide](operations.md#module-map) maps the current planning, payload, runtime, vulnerability, publication, and maintenance modules to their responsibilities.
+
 - `scripts/container_engine.py`: CLI, planning, and workflow orchestration.
 - `scripts/workflow_config.py`: canonical automation settings.
 - `scripts/build_payloads.py`: private payload validation and evidence-bound transfer.
