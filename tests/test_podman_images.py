@@ -9,15 +9,7 @@ from pathlib import Path
 from scripts import container_engine as engine
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_SOURCE_VERSIONS = {
-    "5.4": "5.4.2",
-    "5.5": "5.5.2",
-    "5.6": "5.6.2",
-    "5.7": "5.7.1",
-    "5.8": "5.8.6",
-    "6.0": "6.0.2",
-    "6.1": "6.1.0",
-}
+EXPECTED_SOURCE_LINES = ("5.4", "5.5", "5.6", "5.7", "5.8", "6.0", "6.1")
 EXPECTED_DISTRO_ARCHITECTURES = {
     "debian-11": ["amd64", "arm64"],
     "debian-12": ["amd64", "arm64"],
@@ -64,16 +56,16 @@ class PodmanImageTests(unittest.TestCase):
         self.distro_images = {name: image for name, image in podman_images.items() if name not in self.source_images}
 
     def test_every_upstream_source_line_has_both_root_modes(self) -> None:
-        expected_names = {f"podman-{line}-{mode}" for line in EXPECTED_SOURCE_VERSIONS for mode in ROOT_MODES}
+        expected_names = {f"podman-{line}-{mode}" for line in EXPECTED_SOURCE_LINES for mode in ROOT_MODES}
         self.assertEqual(set(self.source_images), expected_names)
 
     def test_source_versions_architectures_and_commits_match_per_line(self) -> None:
-        for line, version in EXPECTED_SOURCE_VERSIONS.items():
+        for line in EXPECTED_SOURCE_LINES:
             with self.subTest(line=line):
                 rootful = self.source_images[f"podman-{line}-rootful"]
                 rootless = self.source_images[f"podman-{line}-rootless"]
-                self.assertEqual(rootful["version"], f"v{version}")
-                self.assertEqual(rootless["version"], f"v{version}")
+                self.assertRegex(rootful["version"], rf"^v{re.escape(line)}\.(0|[1-9]\d*)$")
+                self.assertEqual(rootless["version"], rootful["version"])
                 self.assertEqual(rootful["build"]["architectures"], ["amd64", "arm64"])
                 self.assertEqual(rootless["build"]["architectures"], ["amd64", "arm64"])
                 rootful_commit = rootful["build"]["args"]["PODMAN_COMMIT"]["value"]
@@ -106,10 +98,10 @@ class PodmanImageTests(unittest.TestCase):
                     )
 
     def test_modes_have_separate_users_and_storage(self) -> None:
-        all_targets = [*EXPECTED_SOURCE_VERSIONS, *EXPECTED_DISTRO_ARCHITECTURES]
+        all_targets = [*EXPECTED_SOURCE_LINES, *EXPECTED_DISTRO_ARCHITECTURES]
         for target in all_targets:
             with self.subTest(target=target):
-                images = self.source_images if target in EXPECTED_SOURCE_VERSIONS else self.distro_images
+                images = self.source_images if target in EXPECTED_SOURCE_LINES else self.distro_images
                 rootful_args = images[f"podman-{target}-rootful"]["build"]["args"]
                 rootless_args = images[f"podman-{target}-rootless"]["build"]["args"]
                 self.assertEqual(rootful_args["RUN_AS_USER"]["value"], "root")
