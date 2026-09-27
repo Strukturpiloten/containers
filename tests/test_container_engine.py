@@ -323,16 +323,30 @@ class InternalDependencyTests(unittest.TestCase):
         self.assertEqual(base_digest, DIGEST)
 
     def test_runtime_base_comes_from_explicit_runtime_argument(self) -> None:
-        images = engine._load_images()
-        image = next(candidate for candidate in images if candidate["name"] == "nextcloud-notifypush")
+        image = {
+            "name": "app",
+            "build": {
+                "runtimeBaseArg": "RUNTIME_IMAGE",
+                "args": {
+                    "BASE_IMAGE": {
+                        "type": "external-image",
+                        "value": f"registry.example.com/builder:1.0.0@sha256:{'b' * 64}",
+                    },
+                    "RUNTIME_IMAGE": {
+                        "type": "external-image",
+                        "value": f"registry.example.com/runtime:1.0.0@{DIGEST}",
+                    },
+                },
+            },
+        }
         _build_args, base_name, base_digest = engine._build_base_args(
             {"images": [image]},
             image,
             self._context(),
             None,
         )
-        self.assertEqual(base_name, "docker.io/alpine:3.24.1")
-        self.assertEqual(base_digest, "sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b")
+        self.assertEqual(base_name, "registry.example.com/runtime:1.0.0")
+        self.assertEqual(base_digest, DIGEST)
 
 
 class ReleaseValidationTests(unittest.TestCase):
