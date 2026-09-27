@@ -49,17 +49,18 @@ runs:
         case "$(uname -m)" in
           x86_64)
             machine=amd64
+            release=v0.119.0
             expected=3fa2dc4b924621ab65404cf08d0b8438d896d80ab949c9d5a4ca283c36004c9b
             ;;
           aarch64)
             machine=arm64
+            release=v0.119.0
             expected=29f0ec7c549ddb0e2b6a0ca714851f7399438afc399b80c12808e065edc9a8f8
             ;;
           *) echo "Unsupported Grype host architecture" >&2; exit 2 ;;
         esac
-        version=0.119.0
-        archive="grype_${version}_linux_${machine}.tar.gz"
-        curl -fsSL "https://github.com/anchore/grype/releases/download/v${version}/${archive}" -o "${RUNNER_TEMP}/${archive}"
+        archive="grype_${release#v}_linux_${machine}.tar.gz"
+        curl -fsSL "https://github.com/anchore/grype/releases/download/${release}/${archive}" -o "${RUNNER_TEMP}/${archive}"
         printf '%s  %s\n' "${expected}" "${RUNNER_TEMP}/${archive}" | sha256sum -c -
         mkdir -p "${RUNNER_TEMP}/grype-bin"
         tar -xzf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}/grype-bin" grype

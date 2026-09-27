@@ -67,6 +67,7 @@ GLOBAL_IMAGE_INPUTS = (
     "scripts/runtime_docker.py",
     "scripts/admission.py",
     "scripts/evidence_gate.py",
+    "scripts/grype_pins.py",
     "scripts/maintenance.py",
     "scripts/release_evidence.py",
     "scripts/scan_sources.py",

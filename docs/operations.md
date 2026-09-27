@@ -60,7 +60,7 @@ Without supplied build and runtime evidence, the catalogue reports those observa
 
 ## Diagnose and retry
 
-Read the failed job and the plan artifact before retrying; first check whether the automatic retry has already started. A failed payload or architecture build needs its source or runner issue fixed, followed by a new build request. Missing or mismatched same-run payload evidence fails closed; a registry tag is never used as a substitute. A failed internal dependency cannot silently switch to a mutable tag.
+For vulnerability policy failures, follow the [scanner triage guide](vulnerability-scanning.md#reproduce-a-scan-locally) before retrying. Read the failed job and the plan artifact before retrying; first check whether the automatic retry has already started. A failed payload or architecture build needs its source or runner issue fixed, followed by a new build request. Missing or mismatched same-run payload evidence fails closed; a registry tag is never used as a substitute. A failed internal dependency cannot silently switch to a mutable tag.
 
 The `retry-failed-publish-jobs.yml` workflow automatically retries only publication or finalization failures on push, schedule, or manual runs. It waits two minutes, checks that the run is still the failed attempt, and stops after the configured attempt limit. It does not retry failed source builds or runtime checks. For a specific recoverable run, inspect it and then retry only failed jobs:
 
@@ -117,7 +117,7 @@ done <<< "$mounts"
 sudo rm -rf -- "$state"
 ```
 
-Private payload and architecture OCI archive workflow artifacts expire after one day; runtime evidence expires after seven days. Published image digests, release records, and uploaded maintenance evidence are the durable audit trail. The [Podman image guide](../images/podman/README.md#build-and-test-architecture) records one build-only timing and storage measurement, including its host and storage-driver limits.
+Private payload, architecture OCI archive, and scanner debug workflow artifacts expire after one day; runtime evidence and normalized vulnerability reports expire after seven days. Published image digests, release records, and uploaded maintenance evidence are the durable audit trail. The [Podman image guide](../images/podman/README.md#build-and-test-architecture) records one build-only timing and storage measurement, including its host and storage-driver limits.
 
 ## Module map
 

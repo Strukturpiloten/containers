@@ -88,7 +88,7 @@ Publishing uses a verify-before-promote sequence:
 
 Only the jobs that need registry, attestation, or release writes receive those permissions. Pull-request jobs have no publishing permissions.
 
-The repository does not yet enforce a vulnerability-scanner policy. That work is tracked separately; an SBOM and signature do not by themselves prove that an image has no known vulnerabilities.
+The repository runs a [Grype vulnerability gate](vulnerability-scanning.md) for every built architecture before publication and maintained-tag promotion. SBOMs and signatures remain separate evidence; neither proves an image has no known vulnerabilities.
 
 ## Release and tag policy
 

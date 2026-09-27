@@ -13,6 +13,20 @@
   "customManagers": [
     {
       "customType": "regex",
+      "description": "Update each Grype release and architecture archive checksum together",
+      "managerFilePatterns": [
+        "/^\\.github\\/actions\\/scan-vulnerabilities\\/action\\.yml$/"
+      ],
+      "matchStrings": [
+        "machine=(?:amd64|arm64)\\n\\s*release=(?<currentValue>v\\d+\\.\\d+\\.\\d+)\\n\\s*expected=(?<currentDigest>[a-f0-9]{64})"
+      ],
+      "depNameTemplate": "anchore/grype",
+      "packageNameTemplate": "anchore/grype",
+      "datasourceTemplate": "github-release-attachments",
+      "versioningTemplate": "semver-coerced"
+    },
+    {
+      "customType": "regex",
       "description": "Track external pinned container image tags and digests in container metadata",
       "managerFilePatterns": [
         "/^images/.+/container\\.yaml$/"
@@ -258,6 +272,14 @@
     "dependencyDashboardApproval": false
   },
   "packageRules": [
+    {
+      "description": "Review both Grype architecture release assets in one update",
+      "matchManagers": ["custom.regex"],
+      "matchDatasources": ["github-release-attachments"],
+      "matchPackageNames": ["anchore/grype"],
+      "groupName": "Grype scanner archives",
+      "automerge": false
+    },
     {
       "description": "Keep GitHub Actions pinned to immutable commits while allowing Renovate updates",
       "matchManagers": [
