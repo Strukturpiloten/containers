@@ -113,7 +113,8 @@ def run_docker(
             """test "$(cat /usr/share/strukturpiloten/docker/uidmap-helper-mode)" = setuid-only;
 for helper in /usr/bin/newuidmap /usr/bin/newgidmap; do
     test "$(stat -c '%u:%g %a' "$helper")" = '0:0 4755';
-    test -z "$(getcap "$helper")";
+    helper_caps="$(getcap "$helper")";
+    test -z "$helper_caps";
 done;
 echo setuid-only""",
         )
