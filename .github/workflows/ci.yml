@@ -17,7 +17,7 @@ env:
 jobs:
   validate:
     name: Validate metadata and automation
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     permissions:
       contents: read
@@ -50,7 +50,7 @@ jobs:
   plan:
     name: Plan pull-request builds
     needs: validate
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     permissions:
       contents: read
@@ -142,7 +142,7 @@ jobs:
       - validate
       - plan
       - smoke-build
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
       contents: read
