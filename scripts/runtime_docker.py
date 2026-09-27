@@ -10,6 +10,11 @@ import socket
 import time
 from typing import TYPE_CHECKING, Any
 
+from scripts.runtime_resource_budgets import (
+    IsolatedStoreDiskBudget,
+    outer_container_limits,
+    verify_outer_container_limits,
+)
 from scripts.runtime_tests import ProbeError
 
 MAX_HTTP_RESPONSE = 8192
@@ -46,8 +51,15 @@ def _wait_http(port: int, marker: bytes, *, timeout: int = 20) -> None:
     raise ProbeError(f"published nested Docker port {port} did not serve the synthetic marker: {last_result}")
 
 
-def _docker(ctx: RuntimeContext, container: str, name: str, *args: str) -> str:
-    return ctx.exec(name, container, "docker", *args)
+def _checked_exec(ctx: RuntimeContext, budget: IsolatedStoreDiskBudget, name: str, container: str, *args: str) -> str:
+    budget.checkpoint()
+    output = ctx.exec(name, container, *args)
+    budget.checkpoint()
+    return output
+
+
+def _docker(ctx: RuntimeContext, budget: IsolatedStoreDiskBudget, container: str, name: str, *args: str) -> str:
+    return _checked_exec(ctx, budget, name, container, "docker", *args)
 
 
 def run_docker(
@@ -67,6 +79,7 @@ def run_docker(
         "--rm",
         "--security-opt",
         "label=disable",
+        *outer_container_limits(),
         ctx.image_ref,
         "sh",
         "-euc",
@@ -92,9 +105,18 @@ def run_docker(
         ctx.skip("nested Docker runtime", "privileged test requires trusted context")
         return
 
+    with IsolatedStoreDiskBudget(ctx) as budget:
+        _run_nested_docker(ctx, profile, expected_uid, budget)
+
+
+def _run_nested_docker(
+    ctx: RuntimeContext, profile: dict[str, Any], expected_uid: str, budget: IsolatedStoreDiskBudget
+) -> None:
+    mode = profile["mode"]
     # A Docker archive of the exact built image is a version-pinned, offline fixture.
     # The inner daemon receives no host Docker socket and the outer launcher stays Podman.
     fixture = ctx.directory / "docker-native-fixture.tar"
+    budget.checkpoint()
     ctx.podman(
         "save synthetic Docker fixture",
         "save",
@@ -105,7 +127,9 @@ def run_docker(
         ctx.image_ref,
         timeout=180,
     )
+    budget.checkpoint()
     outer_args = [
+        *outer_container_limits(),
         "--device",
         "/dev/fuse",
         "--volume",
@@ -117,26 +141,41 @@ def run_docker(
         outer_args.append("--privileged")
     else:
         outer_args.extend(["--security-opt", "apparmor=unconfined"])
+    budget.checkpoint()
     container = ctx.start("start nested Docker daemon", options=tuple(outer_args))
     try:
-        ctx.exec(
+        budget.checkpoint()
+        verify_outer_container_limits(ctx, container)
+        budget.checkpoint()
+        _checked_exec(
+            ctx,
+            budget,
             "wait for Docker daemon API",
             container,
             "sh",
             "-euc",
             "for n in $(seq 1 45); do docker info >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1",
         )
-        uid = ctx.exec("inspect inner daemon user", container, "id", "-u")
+        uid = _checked_exec(ctx, budget, "inspect inner daemon user", container, "id", "-u")
         ctx.assert_equal("inner daemon user", uid, expected_uid)
-        version_text = _docker(ctx, container, "read Docker API versions", "version", "--format", "{{json .Server}}")
+        version_text = _docker(
+            ctx, budget, container, "read Docker API versions", "version", "--format", "{{json .Server}}"
+        )
         version = json.loads(version_text)
-        engine_version = ctx.exec(
-            "read verified Engine version", container, "cat", "/usr/share/strukturpiloten/docker/engine-version"
+        engine_version = _checked_exec(
+            ctx,
+            budget,
+            "read verified Engine version",
+            container,
+            "cat",
+            "/usr/share/strukturpiloten/docker/engine-version",
         )
         ctx.assert_equal("daemon Engine version", version["Version"], engine_version)
         if not version.get("ApiVersion") or not version.get("MinAPIVersion"):
             raise ProbeError("daemon did not report API version range")
-        info_text = _docker(ctx, container, "inspect Docker storage and security", "info", "--format", "{{json .}}")
+        info_text = _docker(
+            ctx, budget, container, "inspect Docker storage and security", "info", "--format", "{{json .}}"
+        )
         info = json.loads(info_text)
         if not info.get("Driver"):
             raise ProbeError("daemon did not initialize a storage driver")
@@ -144,11 +183,15 @@ def run_docker(
         rootless = any("rootless" in value for value in security)
         ctx.assert_equal("daemon rootless security", str(rootless).lower(), str(mode == "rootless").lower())
 
-        _docker(ctx, container, "load synthetic nested image", "load", "--input", "/tmp/docker-native-fixture.tar")
+        _docker(
+            ctx, budget, container, "load synthetic nested image", "load", "--input", "/tmp/docker-native-fixture.tar"
+        )
         nested = ctx.image_ref
-        _docker(ctx, container, "create isolated Docker network", "network", "create", "docker-native-probe")
-        _docker(ctx, container, "create isolated Docker volume", "volume", "create", "docker-native-probe")
-        ctx.exec(
+        _docker(ctx, budget, container, "create isolated Docker network", "network", "create", "docker-native-probe")
+        _docker(ctx, budget, container, "create isolated Docker volume", "volume", "create", "docker-native-probe")
+        _checked_exec(
+            ctx,
+            budget,
             "create synthetic bind source",
             container,
             "sh",
@@ -158,6 +201,7 @@ def run_docker(
         try:
             _docker(
                 ctx,
+                budget,
                 container,
                 "write named volume in nested container",
                 "run",
@@ -173,6 +217,7 @@ def run_docker(
             )
             marker = _docker(
                 ctx,
+                budget,
                 container,
                 "read bind and named volume mounts",
                 "run",
@@ -189,6 +234,7 @@ def run_docker(
             ctx.assert_equal("nested mount content", marker, "volume-ok\nbind-ok")
             _docker(
                 ctx,
+                budget,
                 container,
                 "start healthy published-port container",
                 "run",
@@ -219,7 +265,9 @@ def run_docker(
                 "exec busybox nc -lk -p 8080 -e /tmp/serve-http; "
                 "else exec busybox nc -ll -p 8080 -e /tmp/serve-http; fi",
             )
-            ctx.exec(
+            _checked_exec(
+                ctx,
+                budget,
                 "wait for synthetic HTTP container",
                 container,
                 "sh",
@@ -230,6 +278,7 @@ def run_docker(
             )
             settings = _docker(
                 ctx,
+                budget,
                 container,
                 "read health and restart settings",
                 "inspect",
@@ -241,6 +290,7 @@ def run_docker(
                 raise ProbeError(f"nested health/restart settings were not retained: {settings}")
             _docker(
                 ctx,
+                budget,
                 container,
                 "verify synthetic Docker network DNS",
                 "run",
@@ -252,8 +302,11 @@ def run_docker(
                 "-euc",
                 "busybox wget -q -O - http://docker-native-web:8080/ | grep -F docker-native-ok",
             )
+            budget.checkpoint()
             outer_port = ctx.port(container, 18080)
+            budget.checkpoint()
             _wait_http(outer_port, b"docker-native-ok")
+            budget.checkpoint()
             ctx.checks.append({"name": "host published port", "status": "passed", "port": outer_port})
         finally:
             ctx.exec(
