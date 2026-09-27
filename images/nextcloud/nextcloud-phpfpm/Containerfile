@@ -17,6 +17,11 @@ ARG OCI_URL=""
 ARG OCI_VENDOR=""
 ARG OCI_VERSION=""
 ARG SOURCE_DATE_EPOCH
+ARG PHP_EXTENSION_INSTALLER_IMAGE
+ARG COMPOSER_VERSION
+ARG PHP_APCU_VERSION
+ARG PHP_IMAGICK_VERSION
+ARG PHP_REDIS_VERSION
 LABEL org.opencontainers.image.base.digest="${OCI_BASE_DIGEST}" \
     org.opencontainers.image.base.name="${OCI_BASE_NAME}" \
     org.opencontainers.image.created="${OCI_CREATED}" \
@@ -42,23 +47,37 @@ RUN set -eux; \
     supercronic \
     tzdata; \
     install-php-extensions \
-    @composer \
-    apcu \
+    "@composer-${COMPOSER_VERSION}" \
+    "apcu-${PHP_APCU_VERSION}" \
     exif \
     gd \
     gmp \
-    imagick \
+    "imagick-${PHP_IMAGICK_VERSION}" \
     intl \
     pcntl \
     pdo_mysql \
     pdo_pgsql \
     pgsql \
     phar \
-    redis \
+    "redis-${PHP_REDIS_VERSION}" \
     sodium \
     sysvsem \
     zip; \
     mv "${PHP_INI_DIR}/php.ini-production" "${PHP_INI_DIR}/php.ini"; \
+    test "$(php -r 'echo phpversion("apcu");')" = "${PHP_APCU_VERSION}"; \
+    test "$(php -r 'echo phpversion("imagick");')" = "${PHP_IMAGICK_VERSION}"; \
+    test "$(php -r 'echo phpversion("redis");')" = "${PHP_REDIS_VERSION}"; \
+    test "$(composer --version --no-ansi | awk '{print $3}')" = "${COMPOSER_VERSION}"; \
+    mkdir -p /usr/share/strukturpiloten; \
+    { \
+      printf 'php=%s\n' "$(php -r 'echo PHP_VERSION;')"; \
+      printf 'composer=%s\n' "${COMPOSER_VERSION}"; \
+      printf 'apcu=%s\n' "${PHP_APCU_VERSION}"; \
+      printf 'imagick=%s\n' "${PHP_IMAGICK_VERSION}"; \
+      printf 'redis=%s\n' "${PHP_REDIS_VERSION}"; \
+      printf 'php_extension_installer_image=%s\n' "${PHP_EXTENSION_INSTALLER_IMAGE}"; \
+    } > /usr/share/strukturpiloten/application-components.txt; \
+    apk info -v | sort > /usr/share/strukturpiloten/apk-packages.txt; \
     rm -rf /var/cache/apk/*
 
 ARG PODMAN_NEXTCLOUD_DATA_DIR_CONTAINER
@@ -72,7 +91,4 @@ RUN install -d -m 0777 /home/www-data
 
 EXPOSE 9000
 
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-    CMD php-fpm -t || exit 1
-
-STOPSIGNAL SIGKILL
+STOPSIGNAL SIGQUIT

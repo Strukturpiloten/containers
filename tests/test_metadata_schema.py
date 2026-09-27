@@ -35,6 +35,15 @@ class MetadataSchemaTests(unittest.TestCase):
         with self.assertRaisesRegex(MetadataSchemaError, "does not match"):
             validate_metadata_schema(metadata, schema_path=SCHEMA_PATH, display_path="example")
 
+    def test_runtime_profile_contract_supports_docker_and_rejects_multiple_profiles(self) -> None:
+        metadata = deepcopy(self.example)
+        metadata["tests"] = {"docker": {"mode": "rootless", "outerPrivilege": "privileged"}}
+        validate_metadata_schema(metadata, schema_path=SCHEMA_PATH, display_path="example")
+
+        metadata["tests"]["notifyPush"] = {}
+        with self.assertRaisesRegex(MetadataSchemaError, "too many properties"):
+            validate_metadata_schema(metadata, schema_path=SCHEMA_PATH, display_path="example")
+
     def test_schema_version_is_enforced(self) -> None:
         metadata = deepcopy(self.example)
         metadata["schemaVersion"] = 2

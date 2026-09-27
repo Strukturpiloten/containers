@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import copy
+import json
 import re
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock
 
+from scripts import build_payloads as payloads
 from scripts import container_engine as engine
+from scripts import runtime_tests
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_SOURCE_LINES = ("5.4", "5.5", "5.6", "5.7", "5.8", "6.0", "6.1")
@@ -64,14 +69,103 @@ class PodmanImageTests(unittest.TestCase):
             with self.subTest(line=line):
                 rootful = self.source_images[f"podman-{line}-rootful"]
                 rootless = self.source_images[f"podman-{line}-rootless"]
+                manifest = f"images/podman/payloads/podman-{line}.yaml"
+                record = payloads.load_manifest(REPOSITORY_ROOT, manifest)
+                self.assertEqual(rootful["build"]["payload"], manifest)
+                self.assertEqual(rootless["build"]["payload"], manifest)
+                self.assertEqual(rootful["version"], rootless["version"])
                 self.assertRegex(rootful["version"], rf"^v{re.escape(line)}\.(0|[1-9]\d*)$")
-                self.assertEqual(rootless["version"], rootful["version"])
-                self.assertEqual(rootful["build"]["architectures"], ["amd64", "arm64"])
-                self.assertEqual(rootless["build"]["architectures"], ["amd64", "arm64"])
-                rootful_commit = rootful["build"]["args"]["PODMAN_COMMIT"]["value"]
-                rootless_commit = rootless["build"]["args"]["PODMAN_COMMIT"]["value"]
-                self.assertRegex(rootful_commit, r"^[a-f0-9]{40}$")
-                self.assertEqual(rootless_commit, rootful_commit)
+                self.assertEqual(rootful["version"], "v" + record["build"]["args"]["OCI_VERSION"])
+                self.assertEqual(record["build"]["architectures"], ["amd64", "arm64"])
+                self.assertRegex(record["build"]["args"]["PODMAN_COMMIT"], r"^[a-f0-9]{40}$")
+                for image in (rootful, rootless):
+                    self.assertEqual(image["build"]["architectures"], ["amd64", "arm64"])
+                    self.assertEqual(
+                        image["build"]["args"]["FEDORA_IMAGE"]["value"],
+                        record["build"]["args"]["FEDORA_IMAGE"],
+                    )
+                    self.assertIn(manifest, image["inputs"])
+                    self.assertNotIn("PODMAN_COMMIT", image["build"]["args"])
+                    self.assertNotIn("PODMAN_REPOSITORY", image["build"]["args"])
+
+    def test_source_payload_plan_deduplicates_variants_and_rejects_drift(self) -> None:
+        images = [self.source_images[f"podman-5.4-{mode}"] for mode in ROOT_MODES]
+        plan = payloads.plan_payloads(REPOSITORY_ROOT, images, {"amd64": "amd", "arm64": "arm"})
+        self.assertEqual(len(plan["include"]), 2)
+        normalized = [engine._normalize_image(image, 0) for image in images]
+        normalized_plan = payloads.plan_payloads(REPOSITORY_ROOT, normalized, {"amd64": "amd", "arm64": "arm"})
+        self.assertEqual(len(normalized_plan["include"]), 2)
+        for field, value, message in (
+            ("version", "v5.4.999", "version"),
+            ("base", "registry.fedoraproject.org/fedora-minimal:44@sha256:" + "0" * 64, "runtime base"),
+        ):
+            with self.subTest(field=field):
+                changed = copy.deepcopy(images[0])
+                if field == "version":
+                    changed["version"] = value
+                else:
+                    changed["build"]["args"]["FEDORA_IMAGE"]["value"] = value
+                with self.assertRaisesRegex(payloads.PayloadError, message):
+                    payloads.plan_payloads(REPOSITORY_ROOT, [changed], {"amd64": "amd", "arm64": "arm"})
+
+    def test_source_recipes_keep_runtime_refresh_and_private_payload_boundary(self) -> None:
+        payload_recipe = (REPOSITORY_ROOT / "images/podman/shared/Payload.Containerfile").read_text()
+        runtime_recipe = (REPOSITORY_ROOT / "images/podman/shared/Containerfile").read_text()
+        self.assertIn("FROM scratch AS payload", payload_recipe)
+        self.assertIn("COPY --from=podman-builder /out/ /out/", payload_recipe)
+        self.assertIn("FROM ${BUILD_PAYLOAD_IMAGE} AS compiled-podman", runtime_recipe)
+        self.assertEqual(runtime_recipe.count("FROM ${FEDORA_IMAGE}"), 1)
+        self.assertIn("dnf --assumeyes --refresh upgrade", runtime_recipe)
+        self.assertNotIn("make PREFIX=/usr podman", runtime_recipe)
+        self.assertIn("COPY --from=compiled-podman /out/ /", runtime_recipe)
+
+    def test_renovate_updates_payload_pins_and_consumer_versions_together(self) -> None:
+        config = json.loads((REPOSITORY_ROOT / ".github/renovate.json").read_text())
+        managers = {manager["description"]: manager for manager in config["customManagers"]}
+        source = managers["Track each canonical Podman minor release and immutable source commit"]
+        consumer = managers["Keep rootful and rootless Podman versions aligned with each canonical payload release"]
+        base = managers["Track Fedora base digest for canonical Podman payload builders"]
+        for line in EXPECTED_SOURCE_LINES:
+            with self.subTest(line=line):
+                manifest = REPOSITORY_ROOT / f"images/podman/payloads/podman-{line}.yaml"
+                source_text = manifest.read_text()
+                source_match = re.search(source["matchStrings"][0].replace("(?<", "(?P<"), source_text)
+                base_match = re.search(base["matchStrings"][0].replace("(?<", "(?P<"), source_text)
+                self.assertIsNotNone(source_match)
+                self.assertIsNotNone(base_match)
+                self.assertEqual(source_match.group("major") + "." + source_match.group("minor"), line)
+                for mode in ROOT_MODES:
+                    metadata = REPOSITORY_ROOT / f"images/podman/podman-{line}-{mode}/container.yaml"
+                    consumer_match = re.search(consumer["matchStrings"][0].replace("(?<", "(?P<"), metadata.read_text())
+                    self.assertIsNotNone(consumer_match)
+                    self.assertEqual(consumer_match.group("currentValue"), source_match.group("currentValue"))
+                self.assertTrue(
+                    any(
+                        rule.get("matchDepNames") == [f"podman-{line}"] and rule.get("groupName")
+                        for rule in config["packageRules"]
+                    )
+                )
+
+    def test_renovate_tracks_plain_payload_base_references(self) -> None:
+        config = json.loads((REPOSITORY_ROOT / ".github/renovate.json").read_text())
+        manager = next(
+            item
+            for item in config["customManagers"]
+            if item.get("description") == "Track digest-pinned base images in private payload manifests"
+        )
+        example = "    ALPINE_IMAGE: docker.io/library/alpine:3.24@sha256:" + "a" * 64
+        match = re.search(manager["matchStrings"][0].replace("(?<", "(?P<"), example)
+        self.assertIsNotNone(match)
+        self.assertEqual(match.group("depName"), "docker.io/library/alpine")
+        self.assertEqual(match.group("currentValue"), "3.24")
+        self.assertTrue(re.search(manager["managerFilePatterns"][0][1:-1], "images/docker/upstream/28/payload.yaml"))
+        self.assertTrue(
+            any(
+                rule.get("matchPackageNames") == ["docker.io/library/alpine"]
+                and rule.get("allowedVersions") == r"/^3\.24$/"
+                for rule in config["packageRules"]
+            )
+        )
 
     def test_every_distro_target_has_both_root_modes(self) -> None:
         expected_names = {
@@ -112,15 +206,19 @@ class PodmanImageTests(unittest.TestCase):
                     "/home/podman/.local/share/containers",
                 )
 
-    def test_podman_6_source_images_use_matching_version_2_network_helpers(self) -> None:
+    def test_podman_6_payloads_use_matching_version_2_network_helpers(self) -> None:
         for line in ("6.0", "6.1"):
-            for mode in ROOT_MODES:
-                with self.subTest(line=line, mode=mode):
-                    args = self.source_images[f"podman-{line}-{mode}"]["build"]["args"]
-                    self.assertRegex(args["NETAVARK_VERSION"]["value"], r"^2\.")
-                    self.assertRegex(args["AARDVARK_VERSION"]["value"], r"^2\.")
-                    self.assertRegex(args["NETAVARK_COMMIT"]["value"], r"^[a-f0-9]{40}$")
-                    self.assertRegex(args["AARDVARK_COMMIT"]["value"], r"^[a-f0-9]{40}$")
+            with self.subTest(line=line):
+                manifest = f"images/podman/payloads/podman-{line}.yaml"
+                args = payloads.load_manifest(REPOSITORY_ROOT, manifest)["build"]["args"]
+                self.assertRegex(args["NETAVARK_VERSION"], r"^2\.")
+                self.assertRegex(args["AARDVARK_VERSION"], r"^2\.")
+                self.assertRegex(args["NETAVARK_COMMIT"], r"^[a-f0-9]{40}$")
+                self.assertRegex(args["AARDVARK_COMMIT"], r"^[a-f0-9]{40}$")
+                for mode in ROOT_MODES:
+                    image_args = self.source_images[f"podman-{line}-{mode}"]["build"]["args"]
+                    self.assertNotIn("NETAVARK_VERSION", image_args)
+                    self.assertNotIn("AARDVARK_COMMIT", image_args)
 
     def test_distro_platforms_own_their_recipe_and_runtime_configuration(self) -> None:
         platform_root = REPOSITORY_ROOT / "images/podman/platforms"
@@ -175,80 +273,43 @@ class PodmanImageTests(unittest.TestCase):
         action_directory = REPOSITORY_ROOT / ".github/actions/build-arch-image"
         action = (action_directory / "action.yml").read_text(encoding="utf-8")
         containers_conf = (action_directory / "podman-smoke-containers.conf").read_text(encoding="utf-8")
+        runtime = (REPOSITORY_ROOT / "scripts/runtime_tests.py").read_text(encoding="utf-8")
 
-        for option, variable in (
-            ("root", "HOST_PODMAN_ROOT"),
-            ("runroot", "HOST_PODMAN_RUNROOT"),
-            ("tmpdir", "HOST_PODMAN_TMPDIR"),
-        ):
-            with self.subTest(option=option):
-                self.assertEqual(action.count(f'--{option} "${{{variable}}}"'), 2)
-
-        self.assertNotIn("sudo podman load", action)
-        self.assertNotIn("sudo podman run", action)
-        self.assertEqual(action.count("CONTAINERS_CONF_OVERRIDE:"), 2)
-        self.assertEqual(action.count('sudo env "CONTAINERS_CONF_OVERRIDE=${CONTAINERS_CONF_OVERRIDE}"'), 2)
-        self.assertEqual(action.count('"${host_podman[@]}" tag'), 2)
-        self.assertNotIn('host_podman=(env "CONTAINERS_CONF_OVERRIDE=${CONTAINERS_CONF_OVERRIDE}"', action)
-        self.assertNotIn('"podman-debian-11-rootless"', action)
-        self.assertNotIn('"podman-ubuntu-22.04-rootless"', action)
-        self.assertIn("fromJSON(inputs.entry).podmanMode", action)
-        self.assertIn("fromJSON(inputs.entry).podmanOuterPrivilege", action)
-        self.assertIn("fromJSON(inputs.entry).podmanNestedRuntime", action)
+        self.assertEqual(action.count("python -m scripts.runtime_tests"), 1)
+        self.assertIn("--archive", action)
+        self.assertIn("--evidence", action)
+        self.assertIn("Upload runtime evidence", action)
+        self.assertIn("--root", runtime)
+        self.assertIn("--runroot", runtime)
+        self.assertIn("--tmpdir", runtime)
+        self.assertIn("CONTAINERS_CONF_OVERRIDE", runtime)
         self.assertEqual(action.count("github.event_name != 'pull_request'"), 1)
         self.assertIn("github.event.pull_request.head.repo.full_name == github.repository", action)
-        self.assertEqual(action.count("run_args+=(--privileged)"), 1)
-        self.assertEqual(action.count("run_args+=(--security-opt apparmor=unconfined)"), 1)
-        self.assertNotIn("--cap-add SYS_ADMIN", action)
-        self.assertNotIn("--cap-add MKNOD", action)
-        self.assertIn('nested_image_ids="$(podman images --quiet --no-trunc)"', action)
-        self.assertIn('podman run --rm "${nested_image_ids}" /bin/sh -c "exit 0"', action)
-        self.assertNotIn("/usr/bin/true", action)
-        self.assertIn('test "$(id -u)" -eq "${expected_uid}"', action)
-        self.assertIn('test "$(cat /usr/share/containers/podman-mode)" = "$1"', action)
-        self.assertIn("Host.Security.Rootless", action)
-        self.assertNotIn("--userns=keep-id", action)
-        self.assertNotIn("HOST_INNER_RUNTIME_DIR", action)
+        self.assertIn("--allow-privileged", action)
+        self.assertIn("privileged test requires trusted context", runtime)
+        self.assertIn("nestedRuntime", runtime)
         self.assertIn('lock_type = "file"', containers_conf)
 
-    def test_local_nested_tests_match_the_ci_privilege_boundary(self) -> None:
-        rootful = self.distro_images["podman-ubi-8-rootful"]
-        privileged_rootless = self.distro_images["podman-debian-12-rootless"]
-        unprivileged_rootless = self.source_images["podman-6.1-rootless"]
+    def test_nested_runtime_respects_trusted_privilege_boundary(self) -> None:
+        privileged = self.distro_images["podman-debian-12-rootless"]["tests"]["podman"]
+        unprivileged = self.source_images["podman-6.1-rootless"]["tests"]["podman"]
+        context = MagicMock()
+        context.run.return_value = "podman version"
 
-        rootful_command, rootful_separate_store = engine._local_outer_podman_command(rootful)
-        privileged_command, privileged_separate_store = engine._local_outer_podman_command(privileged_rootless)
-        unprivileged_command, unprivileged_separate_store = engine._local_outer_podman_command(unprivileged_rootless)
+        runtime_tests._podman(context, privileged, archive=Path("test.tar"), allow_privileged=False, skip_nested=False)
+        self.assertEqual(context.run.call_count, 1)
+        context.skip.assert_called_once_with("nested Podman runtime", "privileged test requires trusted context")
 
-        self.assertEqual(Path(rootful_command[0]).name, "sudo")
-        self.assertEqual(rootful_command[1], "-n")
-        self.assertEqual(Path(rootful_command[2]).name, "podman")
-        self.assertTrue(rootful_separate_store)
-        self.assertEqual(privileged_command, rootful_command)
-        self.assertTrue(privileged_separate_store)
-        self.assertEqual(unprivileged_command, rootful_command)
-        self.assertTrue(unprivileged_separate_store)
+        context.reset_mock()
+        runtime_tests._podman(context, privileged, archive=Path("test.tar"), allow_privileged=True, skip_nested=False)
+        self.assertIn("--privileged", context.run.call_args.kwargs["options"])
 
-        privileged_nested = engine._local_nested_podman_command(
-            image=privileged_rootless,
-            local_image="localhost/test:privileged",
-            archive_path=Path("test.tar"),
-            outer_podman=privileged_command,
+        context.reset_mock()
+        runtime_tests._podman(
+            context, unprivileged, archive=Path("test.tar"), allow_privileged=False, skip_nested=False
         )
-        unprivileged_nested = engine._local_nested_podman_command(
-            image=unprivileged_rootless,
-            local_image="localhost/test:unprivileged",
-            archive_path=Path("test.tar"),
-            outer_podman=unprivileged_command,
-        )
-        self.assertEqual(privileged_nested[0], privileged_command[0])
-        self.assertIn("--privileged", privileged_nested)
-        self.assertNotIn("apparmor=unconfined", privileged_nested)
-        self.assertNotIn("--userns=keep-id", privileged_nested)
-        self.assertEqual(unprivileged_nested[0], unprivileged_command[0])
-        self.assertNotIn("--privileged", unprivileged_nested)
-        self.assertIn("apparmor=unconfined", unprivileged_nested)
-        self.assertNotIn("--userns=keep-id", unprivileged_nested)
+        self.assertIn("apparmor=unconfined", context.run.call_args.kwargs["options"])
+        self.assertNotIn("--privileged", context.run.call_args.kwargs["options"])
 
     def test_local_source_build_normalizes_the_metadata_version(self) -> None:
         command = engine._local_podman_build_command(
@@ -257,8 +318,10 @@ class PodmanImageTests(unittest.TestCase):
             local_image="localhost/test:source",
             source_revision="a" * 40,
             source_timestamp=1_700_000_000,
+            payload_image="localhost/podman-5.4:local",
         )
 
+        self.assertIn("BUILD_PAYLOAD_IMAGE=localhost/podman-5.4:local", command)
         self.assertIn("OCI_VERSION=5.4.2", command)
         self.assertNotIn("OCI_VERSION=v5.4.2", command)
 

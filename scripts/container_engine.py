@@ -5,13 +5,14 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import fnmatch
+import hashlib
 import http
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -24,6 +25,7 @@ from typing import TYPE_CHECKING, Any, NoReturn, cast
 import yaml
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
+from scripts import build_payloads
 from scripts.metadata_schema import MetadataSchemaError, validate_metadata_schema
 from scripts.policy import (
     canonical_build_tag,
@@ -33,14 +35,18 @@ from scripts.policy import (
     semver_tags,
     unique_tags,
 )
+from scripts.promotion import (
+    REVISION_ANNOTATION,
+    RUN_ATTEMPT_ANNOTATION,
+    RUN_ID_ANNOTATION,
+    PublicationIdentity,
+    require_fresh_promotion,
+)
+from scripts.workflow_config import RUNNERS, load_config
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-RUNNERS = {
-    "amd64": "ubuntu-24.04",
-    "arm64": "ubuntu-24.04-arm",
-}
 
 PUBLISH_WORKFLOW_PATH = Path(".github/workflows/publish-images.yml")
 PUBLISH_WORKFLOW_TEMPLATE_PATH = Path(".github/workflow-templates/publish-images.yml.j2")
@@ -53,8 +59,24 @@ GLOBAL_IMAGE_INPUTS = (
     ".github/actions/build-arch-image/**",
     ".github/actions/finalize-release/**",
     ".github/actions/publish-image/**",
+    ".github/actions/scan-vulnerabilities/**",
+    "security/**",
     "scripts/container_engine.py",
+    "scripts/runtime_tests.py",
+    "scripts/oci_artifacts.py",
+    "scripts/runtime_docker.py",
+    "scripts/admission.py",
+    "scripts/evidence_gate.py",
+    "scripts/grype_pins.py",
+    "scripts/maintenance.py",
+    "scripts/release_evidence.py",
+    "scripts/scan_sources.py",
+    "scripts/vulnerability.py",
     "scripts/policy.py",
+    "scripts/build_payloads.py",
+    "scripts/workflow_config.py",
+    ".github/automation.yml",
+    "scripts/promotion.py",
 )
 SHA256_DIGEST_LENGTH = 71
 GIT_SHA_LENGTH = 40
@@ -89,7 +111,10 @@ class _BuildResult:
     source_revision: str
     index_digest: str
     architecture_digests: dict[str, str]
+    component_inputs: dict[str, Any]
     tags: Sequence[str]
+    run_id: str
+    run_attempt: str
 
 
 @dataclass(frozen=True)
@@ -607,7 +632,9 @@ def _validate_inputs(metadata_file: str, image: JsonMap) -> None:
         _fail(f"{metadata_file} inputs must be non-empty strings.")
 
     build = _image_build(image)
-    required_paths = (metadata_file, str(build["containerfile"]))
+    required_paths = [metadata_file, str(build["containerfile"])]
+    if "payload" in build:
+        required_paths.append(str(build["payload"]))
     for required_path in required_paths:
         if not any(_input_matches(str(pattern), required_path) for pattern in image_inputs):
             _fail(f"{metadata_file} inputs do not include required build path {required_path}.")
@@ -626,7 +653,24 @@ def _podman_test(image: JsonMap) -> JsonMap | None:
     return _json_map(tests.get("podman")) if tests is not None else None
 
 
+def _validate_docker_tests(metadata_file: str, image: JsonMap) -> None:
+    name = str(image.get("name", ""))
+    tests = _json_map(image.get("tests")) or {}
+    docker_test = _json_map(tests.get("docker"))
+    if name.startswith("docker-"):
+        if docker_test is None:
+            _fail(f"{metadata_file} must declare tests.docker.")
+        expected_mode = "rootless" if name.endswith("-rootless") else "rootful" if name.endswith("-rootful") else None
+        if expected_mode is None or docker_test.get("mode") != expected_mode:
+            _fail(f"{metadata_file} tests.docker.mode must match the image name suffix.")
+        if expected_mode == "rootful" and docker_test.get("outerPrivilege") != "privileged":
+            _fail(f"{metadata_file} rootful Docker tests require a privileged outer container.")
+    elif docker_test is not None:
+        _fail(f"{metadata_file} declares a Docker test profile for a non-Docker image.")
+
+
 def _validate_tests(metadata_file: str, image: JsonMap) -> None:
+    _validate_docker_tests(metadata_file, image)
     name = str(image.get("name", ""))
     podman_test = _podman_test(image)
     if not name.startswith("podman-"):
@@ -680,6 +724,10 @@ def _validate_images(images: list[JsonMap]) -> None:
         _validate_image(image, image_names)
 
     _topological_levels(images)
+    try:
+        build_payloads.plan_payloads(_repo_root(), images, RUNNERS)
+    except build_payloads.PayloadError as error:
+        _fail(str(error))
 
 
 def _dependency_names(image: JsonMap) -> list[str]:
@@ -871,10 +919,19 @@ def _normalize_image(image: JsonMap, level: int) -> JsonMap:
             "architectures": build["architectures"],
             "runtimeBaseArg": build["runtimeBaseArg"],
             "args": build.get("args", {}),
+            **({"payload": build["payload"]} if "payload" in build else {}),
         },
         "tests": image.get("tests", {}),
         "dependencies": image.get("dependencies", {"internal": [], "external": []}),
     }
+
+
+def _matrix_payload_fields(image: JsonMap) -> JsonMap:
+    manifest = _image_build(image).get("payload")
+    if manifest is None:
+        return {}
+    record = build_payloads.load_manifest(_repo_root(), str(manifest))
+    return {"payloadName": record["name"]}
 
 
 def _matrix_image_test_fields(image: JsonMap) -> JsonMap:
@@ -900,6 +957,7 @@ def _stage_build_matrix(selected_images: list[JsonMap], stage: int) -> JsonMap:
                 "runner": RUNNERS[architecture],
                 "stage": stage,
                 **_matrix_image_test_fields(image),
+                **_matrix_payload_fields(image),
             }
             for architecture in _image_architectures(image)
         )
@@ -929,6 +987,7 @@ def _smoke_build_matrix(selected_images: list[JsonMap]) -> JsonMap:
                 "runner": RUNNERS[architecture],
                 "stage": image["level"],
                 **_matrix_image_test_fields(image),
+                **_matrix_payload_fields(image),
             }
             for architecture in _image_architectures(image)
         )
@@ -974,6 +1033,7 @@ def _build_plan(images: list[JsonMap], options: PlanOptions) -> JsonMap:
         "images": selected_images,
         "smokeBuildMatrix": _smoke_build_matrix(selected_images),
         "stageMatrices": stage_matrices,
+        "payloadMatrix": build_payloads.plan_payloads(_repo_root(), selected_images, RUNNERS),
         "selection": {
             "scope": options.scope,
             "target": options.target or "",
@@ -987,7 +1047,10 @@ def _build_plan(images: list[JsonMap], options: PlanOptions) -> JsonMap:
 
 
 def _github_outputs(plan: JsonMap) -> str:
+    payload_matrix = plan.get("payloadMatrix", {"include": []})
     outputs = [
+        f"has_payloads={'true' if payload_matrix['include'] else 'false'}",
+        f"payload_matrix={json.dumps(payload_matrix, separators=(',', ':'))}",
         f"has_builds={'true' if plan['hasImages'] else 'false'}",
         f"smoke_build_matrix={json.dumps(plan['smokeBuildMatrix'], separators=(',', ':'))}",
     ]
@@ -1071,8 +1134,8 @@ def _workflow_environment() -> Environment:
         keep_trailing_newline=True,
         trim_blocks=True,
         lstrip_blocks=True,
-        variable_start_string="[[",
-        variable_end_string="]]",
+        variable_start_string="<<(",
+        variable_end_string=")>>",
         block_start_string="[%",
         block_end_string="%]",
         autoescape=True,
@@ -1083,14 +1146,26 @@ def _workflow_environment() -> Environment:
 def _publish_workflow(stage_count: int) -> str:
     environment = _workflow_environment()
     template = environment.get_template(PUBLISH_WORKFLOW_TEMPLATE_PATH.name)
-    return template.render(stages=list(range(stage_count)), single_stage=stage_count == 1)
+    return template.render(
+        stages=list(range(stage_count)), single_stage=stage_count == 1, config=load_config(_repo_root())
+    )
 
 
 def _command_generate_workflow(args: argparse.Namespace) -> None:
     images = _load_images()
     _validate_images(images)
     stage_count = _stage_count(images)
-    workflows = ((PUBLISH_WORKFLOW_PATH, _publish_workflow(stage_count)),)
+    environment = _workflow_environment()
+    config = load_config(_repo_root())
+    workflows = [
+        (
+            Path(".github/workflows") / path.name.removesuffix(".j2"),
+            environment.get_template(path.name).render(
+                stages=list(range(stage_count)), single_stage=stage_count == 1, config=config
+            ),
+        )
+        for path in sorted((_repo_root() / PUBLISH_WORKFLOW_TEMPLATE_PATH.parent).glob("*.yml.j2"))
+    ]
 
     if args.check:
         stale_paths = [
@@ -1252,6 +1327,12 @@ def _build_base_args(
     return build_args, base_name, base_digest
 
 
+def _require_checkout_revision(source_revision: str) -> None:
+    checkout_revision = _run([_tool("git"), "-C", str(_repo_root()), "rev-parse", "HEAD"], capture_stdout=True).strip()
+    if checkout_revision != source_revision:
+        _fail(f"Build source revision {source_revision} does not match checkout HEAD {checkout_revision}.")
+
+
 def _source_timestamp(source_revision: str) -> tuple[int, str]:
     if len(source_revision) != GIT_SHA_LENGTH or not set(source_revision.lower()) <= LOWERCASE_HEX_DIGITS:
         _fail(f"Build source must be a full Git commit SHA: {source_revision}.")
@@ -1269,16 +1350,21 @@ def _source_timestamp(source_revision: str) -> tuple[int, str]:
     return timestamp, created
 
 
-def _local_podman_build_command(
+def _local_podman_build_command(  # noqa: PLR0913 - the local image, source identity and payload are independent inputs.
     image: JsonMap,
     *,
     architecture: str,
     local_image: str,
     source_revision: str,
     source_timestamp: int,
+    payload_image: str | None = None,
 ) -> list[str]:
     build = _image_build(image)
     build_args: list[str] = []
+    if build.get("payload"):
+        if payload_image is None:
+            _fail(f"Image {image['name']} requires a local payload build.")
+        build_args.extend(_build_arg("BUILD_PAYLOAD_IMAGE", payload_image))
     for arg_name, arg_definition in _json_map_items(_image_build_args(image)):
         definition = _json_map(arg_definition)
         if definition is not None:
@@ -1323,7 +1409,7 @@ def _local_podman_build_command(
         architecture,
         "--format",
         "oci",
-        "--pull=always",
+        "--pull=missing" if payload_image else "--pull=always",
         "--no-cache",
         "--timestamp",
         str(source_timestamp),
@@ -1336,63 +1422,51 @@ def _local_podman_build_command(
     ]
 
 
-def _local_outer_podman_command(image: JsonMap) -> tuple[list[str], bool]:
-    podman_test = _podman_test(image)
-    if podman_test is None:
-        _fail(f"Image {image['name']} has no Podman test profile.")
-
-    return [_tool("sudo"), "-n", _tool("podman")], True
-
-
-def _local_nested_podman_command(
-    *,
-    image: JsonMap,
-    local_image: str,
-    archive_path: Path,
-    outer_podman: Sequence[str],
-) -> list[str]:
-    podman_test = _podman_test(image)
-    if podman_test is None:
-        _fail(f"Image {image['name']} has no Podman test profile.")
-
-    run_args = [
-        *outer_podman,
-        "run",
-        "--rm",
-        "--device",
-        "/dev/fuse",
-        "--security-opt",
-        "label=disable",
-        "--volume",
-        f"{archive_path}:/tmp/nested-image.tar:ro",
+def _build_local_payload(image: JsonMap, architecture: str, source_timestamp: int, podman: str) -> str | None:
+    manifest = _image_build(image).get("payload")
+    if not manifest:
+        return None
+    try:
+        record = build_payloads.load_manifest(_repo_root(), str(manifest))
+    except build_payloads.PayloadError as error:
+        _fail(str(error))
+    payload_image = f"localhost/{record['name']}:local-{os.getpid()}-{architecture}"
+    payload_build = record["build"]
+    payload_arguments = {
+        **payload_build.get("args", {}),
+        **payload_build.get("architectureArgs", {}).get(architecture, {}),
+    }
+    command = [
+        podman,
+        "build",
+        "--arch",
+        architecture,
+        "--format",
+        "oci",
+        "--pull=always",
+        "--no-cache",
+        "--timestamp",
+        str(source_timestamp),
     ]
-    outer_privilege = str(podman_test["outerPrivilege"])
-    if outer_privilege == "privileged":
-        run_args.append("--privileged")
-    elif outer_privilege == "unprivileged":
-        run_args.extend(["--security-opt", "apparmor=unconfined"])
-    else:
-        _fail(f"Unsupported Podman outer privilege profile: {outer_privilege}.")
-
-    script = r"""
-case "$1" in
-  rootless) expected_uid=1000; expected_rootless=true ;;
-  rootful) expected_uid=0; expected_rootless=false ;;
-  *) printf 'Unsupported Podman mode: %s\n' "$1" >&2; exit 1 ;;
-esac
-test "$(id -u)" -eq "${expected_uid}"
-test "$(podman info --format '{{.Host.Security.Rootless}}')" = "${expected_rootless}"
-podman load --input /tmp/nested-image.tar >/dev/null
-nested_image_ids="$(podman images --quiet --no-trunc)"
-test -n "${nested_image_ids}"
-test "$(printf '%s\n' "${nested_image_ids}" | wc -l)" -eq 1
-podman run --rm "${nested_image_ids}" /bin/sh -c 'exit 0'
-""".strip()
-    run_args.extend([local_image, "sh", "-euc", script, "--", str(podman_test["mode"])])
-    return run_args
+    for key, value in sorted(payload_arguments.items()):
+        command.extend(_build_arg(key, value))
+    command.extend(
+        [
+            "--tag",
+            payload_image,
+            "--file",
+            str(_repo_root() / payload_build["containerfile"]),
+            str(_repo_root() / payload_build["context"]),
+        ]
+    )
+    _run(command)
+    return payload_image
 
 
 def _command_test_podman_image(args: argparse.Namespace) -> None:
+    """Build locally, then use the same metadata-driven runtime harness as CI."""
+    from scripts.runtime_tests import run as run_runtime  # noqa: PLC0415
+
     images = _load_images()
     _validate_images(images)
     image = next((candidate for candidate in images if candidate["name"] == args.image), None)
@@ -1403,20 +1477,14 @@ def _command_test_podman_image(args: argparse.Namespace) -> None:
     if architecture not in _image_architectures(image):
         _fail(f"Image {args.image} does not support architecture {architecture}.")
 
-    source_revision = _run(
-        [_tool("git"), "-C", str(_repo_root()), "rev-parse", "HEAD"],
-        capture_stdout=True,
-    ).strip()
+    source_revision = _run([_tool("git"), "-C", str(_repo_root()), "rev-parse", "HEAD"], capture_stdout=True).strip()
     source_timestamp, _created = _source_timestamp(source_revision)
     local_image = f"localhost/{args.image}:local-{os.getpid()}"
     podman = _tool("podman")
-    podman_test = _podman_test(image)
-    if podman_test is None:
-        _fail(f"Image {args.image} has no Podman test profile.")
-    outer_podman = [podman]
-    separate_outer_store = False
-
+    evidence = args.evidence or f"{args.image}-{architecture}-runtime-evidence.json"
+    payload_image: str | None = None
     try:
+        payload_image = _build_local_payload(image, architecture, source_timestamp, podman)
         _write_stdout(f"Building {args.image} for local linux/{architecture} testing.")
         _run(
             _local_podman_build_command(
@@ -1425,69 +1493,46 @@ def _command_test_podman_image(args: argparse.Namespace) -> None:
                 local_image=local_image,
                 source_revision=source_revision,
                 source_timestamp=source_timestamp,
+                payload_image=payload_image,
             )
         )
-        _run(
-            [
-                podman,
-                "run",
-                "--rm",
-                "--security-opt",
-                "label=disable",
-                local_image,
-                "sh",
-                "-euc",
-                """
-case "$1" in
-  rootless) expected_uid=1000 ;;
-  rootful) expected_uid=0 ;;
-  *) printf 'Unsupported Podman mode: %s\\n' "$1" >&2; exit 1 ;;
-esac
-test "$(id -u)" -eq "${expected_uid}"
-test "$(cat /usr/share/containers/podman-mode)" = "$1"
-podman --version
-""".strip(),
-                "--",
-                str(podman_test["mode"]),
-            ]
+        result = run_runtime(
+            argparse.Namespace(
+                metadata=None,
+                image_name=args.image,
+                image_ref=local_image,
+                archive=None,
+                arch=architecture,
+                evidence=evidence,
+                allow_privileged=True,
+                skip_nested=args.skip_nested,
+                sudo=False,
+                no_sudo=False,
+                timeout=45,
+            )
         )
-
-        nested_runtime = bool(podman_test.get("nestedRuntime", True))
-        if not args.skip_nested and nested_runtime:
-            outer_podman, separate_outer_store = _local_outer_podman_command(image)
-            with tempfile.TemporaryDirectory(prefix="strukturpiloten-podman-test-") as temporary_directory:
-                archive_path = Path(temporary_directory) / f"{args.image}-{architecture}.tar"
-                _run([podman, "save", "--format", "oci-archive", "--output", str(archive_path), local_image])
-                if separate_outer_store:
-                    _run([*outer_podman, "load", "--quiet", "--input", str(archive_path)])
-                _run(
-                    _local_nested_podman_command(
-                        image=image,
-                        local_image=local_image,
-                        archive_path=archive_path,
-                        outer_podman=outer_podman,
-                    )
-                )
-        elif not args.skip_nested:
-            _write_stdout(f"Nested runtime check is disabled by the test profile for {args.image}.")
-        _write_stdout(f"Local Podman checks passed for {args.image} ({architecture}).")
+        if result["status"] != "passed":
+            _fail(f"Runtime checks failed for {args.image}: {result.get('error', 'see evidence')}")
+        _write_stdout(f"Local runtime checks passed for {args.image} ({architecture}); evidence: {evidence}.")
     finally:
-        if separate_outer_store:
-            subprocess.run(  # noqa: S603
-                [*outer_podman, "image", "rm", "--force", local_image],
+        if payload_image is not None:
+            subprocess.run(  # noqa: S603 - remove only the task-owned local payload image.
+                [podman, "image", "rm", "--force", payload_image],
                 check=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                timeout=30,
             )
         subprocess.run(  # noqa: S603
             [podman, "image", "rm", "--force", local_image],
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            timeout=30,
         )
 
 
-def _command_build_arch_image(args: argparse.Namespace) -> None:
+def _command_build_arch_image(args: argparse.Namespace) -> None:  # noqa: PLR0915 - build identity and OCI labels require separate checks.
     image_name, architecture = _entry(args.entry_json, require_arch=True)
     if architecture is None:
         _fail("Architecture is required for architecture builds.")
@@ -1496,6 +1541,7 @@ def _command_build_arch_image(args: argparse.Namespace) -> None:
     plan = _load_json(Path(args.plan))
     image = _plan_image(plan, image_name)
     source_revision = str(plan.get("sourceRevision", ""))
+    _require_checkout_revision(source_revision)
     source_timestamp, created = _source_timestamp(source_revision)
     architectures = _image_architectures(image)
     if architecture not in architectures:
@@ -1513,6 +1559,17 @@ def _command_build_arch_image(args: argparse.Namespace) -> None:
         dependency_results_dir,
         use_published_dependency_fallback=args.use_published_dependency_fallback,
     )
+    payload_manifest = _image_build(image).get("payload")
+    if payload_manifest:
+        if not args.payload_dir:
+            _fail(f"Image {image_name} requires same-run payload artifacts.")
+        try:
+            payload_image = build_payloads.import_payload(
+                _repo_root(), str(payload_manifest), architecture, source_revision, Path(args.payload_dir)
+            )
+        except build_payloads.PayloadError as error:
+            _fail(str(error))
+        build_args.extend(_build_arg("BUILD_PAYLOAD_IMAGE", payload_image))
     oci_labels = _oci_labels()
 
     command = [
@@ -1523,7 +1580,7 @@ def _command_build_arch_image(args: argparse.Namespace) -> None:
         architecture,
         "--format",
         "oci",
-        "--pull-always",
+        "--pull-always=false" if payload_manifest else "--pull-always",
         "--timestamp",
         str(source_timestamp),
     ]
@@ -1587,6 +1644,55 @@ def _architecture_digests(raw_manifest: str, architectures: Sequence[str]) -> di
     return digests
 
 
+def _component_inputs(image: JsonMap) -> dict[str, Any]:
+    """Capture consumer and payload inputs alongside published digest evidence."""
+    build = _image_build(image)
+    specifications = _json_map(build.get("args"))
+    if specifications is None:
+        _fail(f"Image {image['name']} has invalid build arguments.")
+    inputs: dict[str, Any] = {}
+    for name, candidate in _json_map_items(specifications):
+        specification = _json_map(candidate)
+        if specification is None or not isinstance(specification.get("value"), str):
+            _fail(f"Image {image['name']} has an invalid value for {name}.")
+        inputs[name] = specification["value"]
+
+    manifest = build.get("payload")
+    if manifest is not None:
+        if not isinstance(manifest, str):
+            _fail(f"Image {image['name']} has an invalid payload manifest path.")
+        try:
+            record = build_payloads.load_manifest(_repo_root(), manifest)
+            manifest_sha256 = build_payloads.sha256(build_payloads.repository_path(_repo_root(), manifest))
+        except build_payloads.PayloadError as error:
+            _fail(str(error))
+        payload_build = record["build"]
+        architectures = _image_architectures(image)
+        if set(architectures) - set(payload_build["architectures"]):
+            _fail(f"Payload {record['name']} does not support every architecture of {image['name']}.")
+        architecture_args = payload_build.get("architectureArgs", {})
+        inputs["payload"] = {
+            "name": record["name"],
+            "manifest": manifest,
+            "manifestSha256": manifest_sha256,
+            "args": dict(payload_build.get("args", {})),
+            "architectureArgs": {
+                architecture: dict(architecture_args.get(architecture, {})) for architecture in architectures
+            },
+            "provenance": record["provenance"],
+        }
+    return inputs
+
+
+def _require_payload_publication_source(plan: JsonMap, image: JsonMap, revision: str) -> None:
+    """Bind payload provenance to the same checked-out revision used by builds."""
+    if _image_build(image).get("payload") is None:
+        return
+    if plan.get("sourceRevision") != revision:
+        _fail("Payload publication plan source does not match the workflow revision.")
+    _require_checkout_revision(revision)
+
+
 def _write_build_result(output_dir: Path, result: _BuildResult) -> Path:
     build_result = output_dir / f"{result.image_name}-build-result.json"
     _write_json(
@@ -1598,14 +1704,98 @@ def _write_build_result(output_dir: Path, result: _BuildResult) -> Path:
             "sourceRevision": result.source_revision,
             "indexDigest": result.index_digest,
             "architectureDigests": result.architecture_digests,
+            "componentInputs": result.component_inputs,
             "tags": list(result.tags),
             "rebuilt": True,
+            "buildSucceededAt": dt.datetime.now(dt.UTC).isoformat(),
+            "runId": result.run_id,
+            "runAttempt": result.run_attempt,
         },
     )
     return build_result
 
 
-def _command_publish_image(args: argparse.Namespace) -> None:
+def _annotate_oci_layout(layout_dir: Path, annotations: dict[str, str]) -> None:
+    """Stamp the multiarch index in a local OCI layout before its registry copy."""
+    layout_index_path = layout_dir / "index.json"
+    layout_index = _load_json(layout_index_path)
+    descriptors = _json_list(layout_index.get("manifests"))
+    if descriptors is None or len(descriptors) != 1:
+        _fail(f"OCI layout {layout_dir} must contain exactly one publication index.")
+    descriptor = _json_map(descriptors[0])
+    if descriptor is None or descriptor.get("mediaType") != "application/vnd.oci.image.index.v1+json":
+        _fail(f"OCI layout {layout_dir} does not contain an OCI image index.")
+    digest = descriptor.get("digest")
+    if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        _fail(f"OCI layout {layout_dir} has an invalid index digest.")
+    blob_dir = layout_dir / "blobs" / "sha256"
+    index_path = blob_dir / digest.removeprefix("sha256:")
+    index = _load_json(index_path)
+    if _json_list(index.get("manifests")) is None:
+        _fail(f"OCI layout {layout_dir} has no multiarch index entries.")
+    recorded = _json_map(index.get("annotations")) or {}
+    index["annotations"] = {**recorded, **annotations}
+    content = json.dumps(index, separators=(",", ":"), ensure_ascii=False).encode()
+    new_digest = hashlib.sha256(content).hexdigest()
+    (blob_dir / new_digest).write_bytes(content)
+    descriptor["digest"] = f"sha256:{new_digest}"
+    descriptor["size"] = len(content)
+    _write_json(layout_index_path, layout_index)
+
+
+def _oci_layout_index_raw(layout_dir: Path) -> str:
+    """Read and verify the annotated multiarch index in a local OCI layout."""
+    layout = _load_json(layout_dir / "index.json")
+    descriptors = _json_list(layout.get("manifests"))
+    if descriptors is None or len(descriptors) != 1:
+        _fail(f"OCI layout {layout_dir} must contain exactly one index descriptor.")
+    descriptor = _json_map(descriptors[0])
+    digest = descriptor.get("digest") if descriptor is not None else None
+    if not isinstance(digest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+        _fail(f"OCI layout {layout_dir} has an invalid index digest.")
+    raw = (layout_dir / "blobs" / "sha256" / digest.removeprefix("sha256:")).read_bytes()
+    if hashlib.sha256(raw).hexdigest() != digest.removeprefix("sha256:"):
+        _fail(f"OCI layout {layout_dir} index failed digest verification.")
+    return raw.decode("utf-8")
+
+
+def _reusable_immutable_publication(
+    command_prefix: Sequence[str],
+    image_ref: str,
+    source_revision: str,
+    architecture_digests: dict[str, str],
+    context: _GitHubContext,
+) -> tuple[str, PublicationIdentity, str, str] | None:
+    """Reuse a prior same-run publication only when its immutable image contents match."""
+    if context.event_name != "push":
+        return None
+    immutable_reference = f"{image_ref}:sha-{source_revision}"
+    digest = _remote_digest(command_prefix, immutable_reference)
+    if digest is None:
+        return None
+    reference = f"{image_ref}@{digest}"
+    annotations = _registry_annotations(command_prefix, reference)
+    identity = _publication_identity(annotations, reference)
+    execution = PublicationIdentity.from_values(context.run_id, context.run_attempt)
+    if (
+        identity.run_id != execution.run_id
+        or identity.run_attempt > execution.run_attempt
+        or annotations.get(REVISION_ANNOTATION) != source_revision
+    ):
+        _fail(f"Immutable registry tag {immutable_reference} belongs to another publication.")
+    canonical = canonical_build_tag(
+        sha=source_revision, run_id=str(identity.run_id), run_attempt=str(identity.run_attempt)
+    )
+    if _remote_digest(command_prefix, f"{image_ref}:{canonical}") != digest:
+        _fail(f"Immutable registry tag {immutable_reference} has no matching canonical publication.")
+    raw_manifest = _run_external([*command_prefix, "inspect", "--raw", f"docker://{reference}"], capture_stdout=True)
+    existing_architectures = _architecture_digests(raw_manifest, list(architecture_digests))
+    if existing_architectures != architecture_digests:
+        _fail(f"Immutable registry tag {immutable_reference} has different architecture contents.")
+    return digest, identity, canonical, raw_manifest
+
+
+def _command_publish_image(args: argparse.Namespace) -> None:  # noqa: PLR0915
     image_name, _architecture = _entry(args.entry_json, require_arch=False)
     context = _github_context(require_token=True)
     if context.token is None:
@@ -1613,6 +1803,7 @@ def _command_publish_image(args: argparse.Namespace) -> None:
 
     plan = _load_json(Path(args.plan))
     image = _plan_image(plan, image_name)
+    _require_payload_publication_source(plan, image, context.sha)
     architectures = _image_architectures(image)
     archives_dir = Path(args.archives_dir)
     output_dir = Path(args.output_dir)
@@ -1660,6 +1851,7 @@ def _command_publish_image(args: argparse.Namespace) -> None:
                 ]
             )
 
+        layout_dir = output_dir / f"{image_name}-oci-layout"
         _run_external(
             [
                 sudo,
@@ -1670,27 +1862,56 @@ def _command_publish_image(args: argparse.Namespace) -> None:
                 "--format",
                 "oci",
                 manifest_name,
-                f"docker://{image_ref}:{canonical_tag}",
+                f"oci:{layout_dir}:publication",
             ]
         )
-
-        raw_manifest = _run_external(
-            [sudo, skopeo, "inspect", "--raw", f"docker://{image_ref}:{canonical_tag}"],
-            capture_stdout=True,
+        _run([sudo, "chown", "-R", f"{os.getuid()}:{os.getgid()}", str(layout_dir)])
+        _annotate_oci_layout(
+            layout_dir,
+            {
+                RUN_ID_ANNOTATION: context.run_id,
+                RUN_ATTEMPT_ANNOTATION: context.run_attempt,
+                REVISION_ANNOTATION: context.sha,
+            },
         )
+        local_architecture_digests = _architecture_digests(_oci_layout_index_raw(layout_dir), architectures)
+        command_prefix = [sudo, skopeo]
+        reuse = _reusable_immutable_publication(
+            command_prefix, image_ref, context.sha, local_architecture_digests, context
+        )
+        if reuse is None:
+            _run_external(
+                [
+                    sudo,
+                    skopeo,
+                    "copy",
+                    "--all",
+                    "--format",
+                    "oci",
+                    "--preserve-digests",
+                    f"oci:{layout_dir}:publication",
+                    f"docker://{image_ref}:{canonical_tag}",
+                ]
+            )
+            raw_manifest = _run_external(
+                [sudo, skopeo, "inspect", "--raw", f"docker://{image_ref}:{canonical_tag}"],
+                capture_stdout=True,
+            )
+            index_digest = _remote_digest(command_prefix, f"{image_ref}:{canonical_tag}")
+            if index_digest is None:
+                _fail(f"Canonical registry tag {image_ref}:{canonical_tag} is unavailable.")
+            source_identity = PublicationIdentity.from_values(context.run_id, context.run_attempt)
+        else:
+            index_digest, source_identity, canonical_tag, raw_manifest = reuse
+            tags = unique_tags([canonical_tag, *tags[1:]])
+            _write_stdout(f"Reused immutable publication {image_ref}@{index_digest} from {source_identity}.")
         (output_dir / f"{image_name}-index.json").write_text(raw_manifest, encoding="utf-8")
-        index_digest = _run_external(
-            [
-                sudo,
-                skopeo,
-                "inspect",
-                "--format",
-                "{{.Digest}}",
-                f"docker://{image_ref}:{canonical_tag}",
-            ],
-            capture_stdout=True,
-        ).strip()
         architecture_digests = _architecture_digests(raw_manifest, architectures)
+        if architecture_digests != local_architecture_digests:
+            _fail(f"Published image {image_ref}@{index_digest} does not match built architecture contents.")
+        source_identity = _validate_publication_source(
+            command_prefix, image_ref, index_digest, context, expected_identity=source_identity
+        )
 
         syft = _tool("syft")
         _run_external(
@@ -1720,7 +1941,10 @@ def _command_publish_image(args: argparse.Namespace) -> None:
                 source_revision=str(plan.get("sourceRevision", context.sha)),
                 index_digest=index_digest,
                 architecture_digests=architecture_digests,
+                component_inputs=_component_inputs(image),
                 tags=tags,
+                run_id=str(source_identity.run_id),
+                run_attempt=str(source_identity.run_attempt),
             ),
         )
         _write_github_outputs(
@@ -1851,6 +2075,117 @@ def _create_github_release(
         _fail(f"GitHub release creation failed for {release_tag}: {error.reason}.")
 
 
+def _registry_labels(command_prefix: Sequence[str], reference: str) -> JsonMap:
+    raw = _run_external(
+        [*command_prefix, "inspect", "--config", f"docker://{reference}"],
+        capture_stdout=True,
+    )
+    try:
+        image_config = _json_map(json.loads(raw))
+    except json.JSONDecodeError:
+        image_config = None
+    config = _json_map(image_config.get("config")) if image_config is not None else None
+    labels = _json_map(config.get("Labels")) if config is not None else None
+    if labels is None:
+        _fail(f"Registry image {reference} has no OCI labels.")
+    return labels
+
+
+def _registry_annotations(command_prefix: Sequence[str], reference: str) -> JsonMap:
+    raw = _run_external([*command_prefix, "inspect", "--raw", f"docker://{reference}"], capture_stdout=True)
+    try:
+        manifest = _json_map(json.loads(raw))
+    except json.JSONDecodeError:
+        manifest = None
+    if manifest is None:
+        _fail(f"Registry returned an invalid OCI index for {reference}.")
+    annotations = _json_map(manifest.get("annotations"))
+    return annotations if annotations is not None else {}
+
+
+def _publication_identity(annotations: JsonMap, reference: str) -> PublicationIdentity:
+    try:
+        return PublicationIdentity.from_annotations(annotations)
+    except ValueError as error:
+        _fail(f"Cannot establish publication freshness for {reference}: {error}")
+
+
+def _validate_publication_source(
+    command_prefix: Sequence[str],
+    image_ref: str,
+    digest: str,
+    context: _GitHubContext,
+    *,
+    expected_identity: PublicationIdentity | None = None,
+) -> PublicationIdentity:
+    annotations = _registry_annotations(command_prefix, f"{image_ref}@{digest}")
+    identity = _publication_identity(annotations, f"{image_ref}@{digest}")
+    execution = PublicationIdentity.from_values(context.run_id, context.run_attempt)
+    expected = expected_identity or execution
+    if expected.run_id != execution.run_id or expected.run_attempt > execution.run_attempt:
+        _fail(f"Publication identity {expected} does not belong to this workflow execution {execution}.")
+    if identity != expected:
+        _fail(f"Publication identity {identity} does not belong to workflow run {expected}.")
+    if annotations.get(REVISION_ANNOTATION) != context.sha:
+        _fail(f"Publication source {image_ref}@{digest} does not match workflow revision {context.sha}.")
+    canonical = canonical_build_tag(sha=context.sha, run_id=str(expected.run_id), run_attempt=str(expected.run_attempt))
+    if _remote_digest(command_prefix, f"{image_ref}:{canonical}") != digest:
+        _fail(f"Canonical registry tag {image_ref}:{canonical} does not point to {digest}.")
+    return identity
+
+
+def _preflight_promotion(  # noqa: PLR0913
+    command_prefix: Sequence[str],
+    image_ref: str,
+    digest: str,
+    *,
+    tags: Sequence[str],
+    identity: PublicationIdentity,
+    source_revision: str,
+    immutable_tag: str | None = None,
+) -> dict[str, str | None]:
+    """Inspect every target before making any maintained alias changes."""
+    existing: dict[str, str | None] = {}
+    for tag in tags:
+        target = f"{image_ref}:{tag}"
+        current_digest = _remote_digest(command_prefix, target)
+        existing[tag] = current_digest
+        if current_digest is None or current_digest == digest:
+            continue
+        if tag == immutable_tag:
+            _fail(f"Refusing to overwrite immutable registry tag {target} ({current_digest}).")
+        annotations = _registry_annotations(command_prefix, target)
+        if RUN_ID_ANNOTATION not in annotations and RUN_ATTEMPT_ANNOTATION not in annotations:
+            labels = _registry_labels(command_prefix, target)
+            previous_revision = labels.get("org.opencontainers.image.revision")
+            if not isinstance(previous_revision, str) or not _git_is_strict_ancestor(
+                previous_revision, source_revision
+            ):
+                _fail(
+                    f"Cannot establish publication freshness for legacy registry tag {target}; "
+                    "its source revision must be a strict ancestor."
+                )
+            continue
+        current_identity = _publication_identity(annotations, target)
+        try:
+            require_fresh_promotion(candidate=identity, existing=current_identity, same_digest=False)
+        except ValueError as error:
+            _fail(f"Refusing stale promotion of {target}: {error}")
+    return existing
+
+
+def _git_is_strict_ancestor(earlier: str, later: str) -> bool:
+    if earlier == later or not re.fullmatch(r"[0-9a-f]{40}", earlier):
+        return False
+    result = subprocess.run(  # noqa: S603
+        [_tool("git"), "-C", str(_repo_root()), "merge-base", "--is-ancestor", earlier, later],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    return result.returncode == 0
+
+
 def _command_promote_image(args: argparse.Namespace) -> None:
     context = _github_context(require_token=False)
     digest = args.digest
@@ -1865,34 +2200,98 @@ def _command_promote_image(args: argparse.Namespace) -> None:
     )
     command_prefix = [_tool("sudo"), _tool("skopeo")]
     immutable_tag = f"sha-{context.sha}" if context.event_name == "push" else None
+    build_result = _load_json(Path(args.build_result)) if args.build_result else None
+    expected_identity = None
+    if build_result is not None:
+        try:
+            expected_identity = PublicationIdentity.from_values(
+                str(build_result.get("runId", "")), str(build_result.get("runAttempt", ""))
+            )
+        except ValueError as error:
+            _fail(f"Build result has an invalid publication identity: {error}")
+    identity = _validate_publication_source(
+        command_prefix, args.image, digest, context, expected_identity=expected_identity
+    )
+    if build_result is not None and (
+        build_result.get("image") != args.image
+        or build_result.get("indexDigest") != digest
+        or build_result.get("sourceRevision") != context.sha
+        or build_result.get("runId") != str(identity.run_id)
+        or build_result.get("runAttempt") != str(identity.run_attempt)
+    ):
+        _fail(f"Build result does not match publication identity for {args.image}.")
+    existing = _preflight_promotion(
+        command_prefix,
+        args.image,
+        digest,
+        tags=tags,
+        identity=identity,
+        source_revision=context.sha,
+        immutable_tag=immutable_tag,
+    )
 
     for tag in tags:
         target = f"{args.image}:{tag}"
-        existing_digest = _remote_digest(command_prefix, target)
+        existing_digest = existing[tag]
         if existing_digest == digest:
             _write_stdout(f"Registry tag {target} already points to {digest}.")
             continue
-        if tag == immutable_tag and existing_digest is not None:
-            _fail(f"Refusing to overwrite immutable registry tag {target} ({existing_digest}).")
 
         _run_external(
             [
                 *command_prefix,
                 "copy",
                 "--all",
+                "--format",
+                "oci",
+                "--preserve-digests",
                 f"docker://{args.image}@{digest}",
                 f"docker://{target}",
             ]
         )
         _write_stdout(f"Promoted {target} to {digest}.")
 
-    if args.build_result:
+    if args.build_result and build_result is not None:
         build_result_path = Path(args.build_result)
-        build_result = _load_json(build_result_path)
         recorded_tags = _string_list(build_result.get("tags", [])) or []
         build_result["tags"] = unique_tags([*recorded_tags, *tags])
         _write_json(build_result_path, build_result)
     _write_github_outputs({"promoted_tags": ",".join(tags)})
+
+
+def _command_rollback_image(args: argparse.Namespace) -> None:
+    """Explicit, compare-and-swap override for an operator-controlled rollback."""
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", args.tag) or args.tag.startswith(("sha-", "run-")):
+        _fail(f"Rollback target must be a maintained registry tag: {args.tag}.")
+    for value in (args.digest, args.expected_current_digest):
+        if not value.startswith("sha256:") or len(value) != SHA256_DIGEST_LENGTH:
+            _fail(f"Invalid image index digest: {value}.")
+    if not args.reason.strip():
+        _fail("A rollback reason is required.")
+    command_prefix = [_tool("skopeo")]
+    source = f"{args.image}@{args.digest}"
+    target = f"{args.image}:{args.tag}"
+    if _remote_digest(command_prefix, source) != args.digest:
+        _fail(f"Rollback source {source} is unavailable.")
+    current = _remote_digest(command_prefix, target)
+    if current != args.expected_current_digest:
+        _fail(f"Rollback target {target} changed: expected {args.expected_current_digest}, found {current}.")
+    if current == args.digest:
+        _write_stdout(f"Rollback target {target} already points to {args.digest}.")
+        return
+    _run_external(
+        [
+            *command_prefix,
+            "copy",
+            "--all",
+            "--format",
+            "oci",
+            "--preserve-digests",
+            f"docker://{source}",
+            f"docker://{target}",
+        ]
+    )
+    _write_stdout(f"Rolled back {target} to {args.digest}. Reason: {args.reason}")
 
 
 def _command_validate(_args: argparse.Namespace) -> None:
@@ -1942,6 +2341,18 @@ def _validated_release_build_result(
         _fail(f"Build result for {image_name} does not match metadata version {version}.")
     if source_revision != context.sha:
         _fail(f"Build result for {image_name} does not match workflow revision {context.sha}.")
+    try:
+        published_identity = PublicationIdentity.from_values(
+            str(build_result.get("runId", "")), str(build_result.get("runAttempt", ""))
+        )
+        execution_identity = PublicationIdentity.from_values(context.run_id, context.run_attempt)
+    except ValueError:
+        _fail(f"Build result for {image_name} has an invalid run identity.")
+    if (
+        published_identity.run_id != execution_identity.run_id
+        or published_identity.run_attempt > execution_identity.run_attempt
+    ):
+        _fail(f"Build result for {image_name} does not match workflow run identity.")
     if (
         not isinstance(index_digest, str)
         or not index_digest.startswith("sha256:")
@@ -1953,14 +2364,7 @@ def _validated_release_build_result(
 
 def _inspect_release_source(skopeo: str, image_ref: str, index_digest: str) -> JsonMap:
     source_reference = f"{image_ref}@{index_digest}"
-    config_raw = _run_external(
-        [skopeo, "inspect", "--config", f"docker://{source_reference}"],
-        capture_stdout=True,
-    )
-    image_config = _json_map(json.loads(config_raw))
-    config = _json_map(image_config.get("config")) if image_config is not None else None
-    labels = _json_map(config.get("Labels")) if config is not None else None
-    return {"Digest": index_digest, "Labels": labels}
+    return {"Digest": index_digest, "Labels": _registry_labels([skopeo], source_reference)}
 
 
 def _ensure_release_record(
@@ -1993,11 +2397,11 @@ def _ensure_release_record(
 def _promote_release_tags(
     command_prefix: Sequence[str],
     candidate: _ReleaseCandidate,
-    existing_exact_digest: str | None,
+    existing: dict[str, str | None],
 ) -> None:
     for tag in candidate.tags:
         target = f"{candidate.image_ref}:{tag}"
-        existing_digest = existing_exact_digest if tag == candidate.tags[0] else _remote_digest(command_prefix, target)
+        existing_digest = existing[tag]
         if existing_digest == candidate.index_digest:
             _write_stdout(f"Maintained tag {target} already points to {candidate.index_digest}.")
             continue
@@ -2006,6 +2410,9 @@ def _promote_release_tags(
                 *command_prefix,
                 "copy",
                 "--all",
+                "--format",
+                "oci",
+                "--preserve-digests",
                 f"docker://{candidate.image_ref}@{candidate.index_digest}",
                 f"docker://{target}",
             ]
@@ -2037,6 +2444,12 @@ def _command_finalize_release(args: argparse.Namespace) -> None:
         source_revision=source_revision,
         version=version,
     )
+    published_identity = PublicationIdentity.from_values(str(build_result["runId"]), str(build_result["runAttempt"]))
+    identity = _validate_publication_source(
+        [skopeo], image_ref, index_digest, context, expected_identity=published_identity
+    )
+    if build_result.get("runId") != str(identity.run_id) or build_result.get("runAttempt") != str(identity.run_attempt):
+        _fail(f"Build result for {image_name} does not match immutable image identity.")
     candidate = _ReleaseCandidate(
         image_name=image_name,
         image_ref=image_ref,
@@ -2046,8 +2459,18 @@ def _command_finalize_release(args: argparse.Namespace) -> None:
         tags=release_tags,
     )
     command_prefix = [skopeo]
+    existing = _preflight_promotion(
+        command_prefix,
+        image_ref,
+        index_digest,
+        tags=release_tags,
+        identity=identity,
+        source_revision=source_revision,
+    )
     existing_exact_digest = _ensure_release_record(context, candidate, command_prefix)
-    _promote_release_tags(command_prefix, candidate, existing_exact_digest)
+    if existing_exact_digest != existing[release_tags[0]]:
+        _fail(f"Registry tag {image_ref}:{release_tags[0]} changed during release preparation.")
+    _promote_release_tags(command_prefix, candidate, existing)
 
     release_tag = _release_tag(image_name, version)
     recorded_tags = _string_list(build_result.get("tags", [])) or []
@@ -2088,6 +2511,7 @@ def _validate_release_inspection(
 
 
 def _command_plan(args: argparse.Namespace) -> None:
+    _require_checkout_revision(args.sha)
     images = _load_images()
     _validate_images(images)
     options = PlanOptions(
@@ -2152,6 +2576,7 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     build_arch_parser.add_argument("--entry-json", required=True)
     build_arch_parser.add_argument("--output-dir", required=True)
     build_arch_parser.add_argument("--dependency-results-dir")
+    build_arch_parser.add_argument("--payload-dir")
     build_arch_parser.add_argument("--use-published-dependency-fallback", action="store_true")
     build_arch_parser.set_defaults(func=_command_build_arch_image)
 
@@ -2159,6 +2584,7 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     local_test_parser.add_argument("--image", required=True)
     local_test_parser.add_argument("--architecture", choices=sorted(RUNNERS), default="amd64")
     local_test_parser.add_argument("--skip-nested", action="store_true")
+    local_test_parser.add_argument("--evidence", help="write structured per-architecture runtime evidence here")
     local_test_parser.set_defaults(func=_command_test_podman_image)
 
     publish_parser = subparsers.add_parser("publish-image")
@@ -2175,6 +2601,14 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     promote_parser.add_argument("--default-branch", required=True)
     promote_parser.add_argument("--build-result")
     promote_parser.set_defaults(func=_command_promote_image)
+
+    rollback_parser = subparsers.add_parser("rollback-image")
+    rollback_parser.add_argument("--image", required=True)
+    rollback_parser.add_argument("--tag", required=True)
+    rollback_parser.add_argument("--digest", required=True)
+    rollback_parser.add_argument("--expected-current-digest", required=True)
+    rollback_parser.add_argument("--reason", required=True)
+    rollback_parser.set_defaults(func=_command_rollback_image)
 
     generate_workflow_parser = subparsers.add_parser("generate-workflow")
     generate_workflow_parser.add_argument("--check", action="store_true")

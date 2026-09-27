@@ -1,0 +1,64 @@
+# yaml-language-server: $schema=../../../container.schema.json
+schemaVersion: 1
+name: docker-debian-12-rootless
+version: v1.0.0
+image: ghcr.io/strukturpiloten/docker-debian-12-rootless
+title: Docker Engine Debian 12 rootless
+description: Native Debian 12 docker.io package with rootless Docker daemon for isolated compatibility tests
+tests:
+  docker:
+    mode: rootless
+    outerPrivilege: privileged
+    nestedRuntime: true
+build:
+  context: .
+  containerfile: images/docker/platforms/Containerfile
+  architectures:
+  - amd64
+  - arm64
+  runtimeBaseArg: DISTRO_IMAGE
+  args:
+    DISTRO_IMAGE:
+      value: docker.io/library/debian:12@sha256:f37a335e82bca302e955fa39f9dfe28f1be618f016f8a2b56318e5a5111afc26
+      type: external-image
+    DISTRO_ID:
+      value: debian-12
+      type: static
+    ENGINE_PACKAGE:
+      value: docker.io
+      type: static
+    RUN_AS_USER:
+      value: 1000:1000
+      type: static
+    HOME_DIR:
+      value: /home/docker
+      type: static
+    RUNTIME_DIR:
+      value: /run/user/1000
+      type: static
+    DOCKER_HOST_VALUE:
+      value: unix:///run/user/1000/docker.sock
+      type: static
+    STORAGE_PATH:
+      value: /home/docker/.local/share/docker
+      type: static
+dependencies:
+  internal: []
+  external:
+  - name: debian-12
+    image: docker.io/library/debian
+    arg: DISTRO_IMAGE
+inputs:
+- images/docker/docker-debian-12-rootless/**
+- images/docker/platforms/Containerfile
+- images/docker/platforms/install-packages.sh
+- images/docker/platforms/start-distro.sh
+- shared/oci-labels.env
+lifecycle:
+  state: maintained
+  admission: isolated-test
+  reviewAfter: '2026-10-27'
+  supportBoundary: Vendor package revisions can advance with repository updates; image shares runner kernel and host security
+    policy.
+  requiredRuntimeProfiles:
+  - docker

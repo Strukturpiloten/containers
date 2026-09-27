@@ -6,6 +6,14 @@ image: ghcr.io/strukturpiloten/podman-arch-rootless
 title: Arch Linux Podman rootless
 description: Arch Linux distro-packaged Podman rootless compatibility image for CI
 
+lifecycle:
+  state: experimental
+  admission: isolated-test
+  reviewAfter: "2026-12-31"
+  supportBoundary: "Rolling distribution compatibility fixture; installed engine and package support must be reviewed for each rebuild."
+  requiredRuntimeProfiles:
+    - podman
+
 tests:
   podman:
     mode: rootless

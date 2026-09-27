@@ -6,7 +6,7 @@
 
 - The process runs as Alpine's unprivileged `guest` user (UID 405).
 - The service listens on TCP port 7867.
-- The default command is `/notify_push /nextcloud/config/config.php`.
+- The default command is `/usr/local/bin/notify_push /nextcloud/config/config.php`.
 - Mount the Nextcloud configuration so that the default path is readable, or replace the command with the required config path.
 
 Example:
@@ -18,8 +18,10 @@ podman run --rm \
   ghcr.io/strukturpiloten/nextcloud-notifypush:v1.0.0
 ```
 
+CI also starts the server with a temporary SQLite database and synthetic Redis/Nextcloud endpoints, then verifies a WebSocket upgrade. This confirms startup and HTTP interaction; a deployment still needs working Redis, database, and Nextcloud services for push delivery.
+
 ## Build and updates
 
-The multi-stage build compiles the metadata-pinned upstream `notify_push` tag for the target musl architecture, then copies only the binary into a digest-pinned Alpine runtime. Git, Rust, and build artifacts are not present in the final image.
+The multi-stage build verifies the metadata-pinned upstream `notify_push` tag against its immutable commit, requires the upstream `Cargo.lock` with `cargo build --locked`, and compiles for the target musl architecture. Git, Rust, and build artifacts are absent from the final image. The image keeps `/usr/share/strukturpiloten/application-components.txt` with the upstream commit, lockfile hash, and actual Rust/Cargo versions; its build and runtime Alpine package lists are beside it.
 
-`container.yaml` is authoritative for the upstream version, builder, runtime base, architectures, and Strukturpiloten image version. Renovate proposes supported input updates, and the daily rebuild refreshes Alpine packages. Use a maintained tag plus digest for automated updates or a digest alone for an immutable artifact.
+`container.yaml` is authoritative for the paired upstream version and commit, builder, runtime base, architectures, and Strukturpiloten image version. Renovate proposes a version and commit together. Daily rebuilds refresh Alpine packages without silently moving the application source or locked Rust dependencies. Use a maintained tag plus digest for automated updates or a digest alone for an immutable artifact.

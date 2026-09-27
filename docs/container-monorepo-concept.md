@@ -46,6 +46,9 @@ The important fields are:
 | `build.architectures` | Architectures that must build and publish |
 | `build.runtimeBaseArg` | Build argument that identifies the final runtime base |
 | `build.args` | Pinned image inputs and static build values |
+| `build.payload` | Optional private payload manifest shared by compatible variants in one run |
+| `tests` | Runtime probe profile and privilege boundary for CI |
+| `lifecycle` | Declared support state, admission, review date, and required runtime coverage |
 | `dependencies` | External image pins and internal image edges |
 | `inputs` | Paths that select this image after a source change |
 
@@ -85,7 +88,7 @@ Publishing uses a verify-before-promote sequence:
 
 Only the jobs that need registry, attestation, or release writes receive those permissions. Pull-request jobs have no publishing permissions.
 
-The repository does not yet enforce a vulnerability-scanner policy. That work is tracked separately; an SBOM and signature do not by themselves prove that an image has no known vulnerabilities.
+The repository runs a [Grype vulnerability gate](vulnerability-scanning.md) for every built architecture before publication and maintained-tag promotion. SBOMs and signatures remain separate evidence; neither proves an image has no known vulnerabilities.
 
 ## Release and tag policy
 
@@ -106,15 +109,15 @@ Maintained pointers:
 
 Maintained SemVer tags intentionally move after a successful daily security rebuild. This lets a readable version line receive supported base-image and package fixes. Consumers that require byte-for-byte immutability pin the digest. Consumers that want maintenance use a tag plus digest and automate reviewed digest updates.
 
-Release finalization is idempotent. It refuses conflicting exact registry or Git tags and can reconcile a partially completed workflow without replacing an immutable source identity.
+Release finalization is idempotent. It refuses conflicting exact registry or Git tags and can reconcile a partially completed workflow without replacing an immutable source identity. Each published OCI index records its GitHub run ID, attempt, and source revision. Before moving any maintained tag, the workflow checks every target's publication identity and refuses to replace an equal or newer publication with a different digest.
 
-Transient publication failures have two bounded recovery layers. Idempotent registry reads, pushes, promotions, and SBOM scans make one initial attempt plus two retries, with a 120-second pause between attempts. Builds, validation, and smoke tests are not retried. If a trusted `push`, scheduled, or manually dispatched publication run still fails, the retry workflow waits 120 seconds and asks GitHub to rerun only failed jobs and their dependants. It never reruns successful jobs, excludes pull requests, and stops after two automatic reruns.
+Transient publication failures have two bounded recovery layers. Idempotent registry reads, pushes, promotions, and SBOM scans make one initial attempt plus two retries, with a 120-second pause between attempts. Builds, validation, and smoke tests are not retried. If a trusted `push`, scheduled, or manually dispatched run still fails solely in publication or finalization jobs, the retry workflow waits 120 seconds and asks GitHub to rerun those failed jobs and their dependants. Validation, build, and test failures do not trigger automatic reruns. It never reruns successful jobs, excludes pull requests, and stops after two automatic reruns.
 
 ## Update policy
 
 Renovate reads external image references from `container.yaml`, commit-pinned GitHub Actions, Python dependencies, and selected build tools. Narrow, compatible digest and patch updates may automerge only after required CI passes. Major, incompatible, and compatibility-line changes remain review decisions.
 
-Renovate updates repository inputs; it does not update installed packages that come from a distro repository during a build. The daily no-cache rebuild and package-manager upgrade are responsible for those updates. Distro compatibility image base tags stay on their declared OS release while Renovate refreshes their pinned digests.
+Renovate updates repository inputs; it does not update installed packages that come from a distro repository during a build. The daily no-cache rebuild and package-manager upgrade are responsible for those OS security updates. Application inputs move only through reviewed metadata changes: notify_push has a paired version and immutable commit plus a locked Cargo graph; PHP images pin Composer and externally released extensions. Images record actual tool/component versions and installed OS package lists under `/usr/share/strukturpiloten/`. Build results tie declared component inputs to the source revision and exact per-architecture image digests, while registry SBOM attestations describe the packages in each published architecture. Distro compatibility image base tags stay on their declared OS release while Renovate refreshes their pinned digests.
 
 An old compatibility target is not automatically secure forever. Its documentation must identify vendor support boundaries. Once an OS or application line stops receiving fixes, retain it only when its testing value justifies the risk, label it as legacy, and run it in isolated CI without unrelated secrets.
 

@@ -27,8 +27,8 @@ runs:
         install_dir="${RUNNER_TEMP}/uv-bin"
 
         mkdir -p "${install_dir}"
-        curl -sSfL "${base_url}/${archive}" -o "${RUNNER_TEMP}/${archive}"
-        curl -sSfL "${base_url}/${archive}.sha256" -o "${RUNNER_TEMP}/${archive}.sha256"
+        curl --retry 3 --retry-delay 2 --retry-all-errors -sSfL "${base_url}/${archive}" -o "${RUNNER_TEMP}/${archive}"
+        curl --retry 3 --retry-delay 2 --retry-all-errors -sSfL "${base_url}/${archive}.sha256" -o "${RUNNER_TEMP}/${archive}.sha256"
         (cd "${RUNNER_TEMP}" && sha256sum -c "${archive}.sha256")
         tar -xzf "${RUNNER_TEMP}/${archive}" -C "${install_dir}" --strip-components=1
         echo "${install_dir}" >> "${GITHUB_PATH}"

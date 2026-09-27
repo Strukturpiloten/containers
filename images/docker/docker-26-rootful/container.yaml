@@ -1,0 +1,46 @@
+# yaml-language-server: $schema=../../../container.schema.json
+schemaVersion: 1
+name: docker-26-rootful
+version: v26.1.4
+image: ghcr.io/strukturpiloten/docker-26-rootful
+title: Docker Engine 26 rootful
+description: Upstream Docker Engine 26.1.4 static payload on maintained Alpine, rootful daemon
+tests:
+  docker:
+    mode: rootful
+    outerPrivilege: privileged
+    nestedRuntime: true
+build:
+  context: .
+  containerfile: images/docker/upstream/rootful.Containerfile
+  architectures:
+  - amd64
+  - arm64
+  runtimeBaseArg: ALPINE_IMAGE
+  payload: images/docker/upstream/26/payload.yaml
+  args:
+    ALPINE_IMAGE:
+      value: docker.io/library/alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+      type: external-image
+dependencies:
+  internal: []
+  external:
+  - name: alpine
+    image: docker.io/library/alpine
+    arg: ALPINE_IMAGE
+inputs:
+- images/docker/docker-26-rootful/**
+- images/docker/upstream/26/payload.yaml
+- images/docker/upstream/payload.Containerfile
+- images/docker/upstream/fetch-payload.sh
+- images/docker/upstream/rootful.Containerfile
+- images/docker/upstream/start-rootful.sh
+- shared/oci-labels.env
+lifecycle:
+  state: legacy
+  admission: isolated-test
+  reviewAfter: '2026-10-27'
+  supportBoundary: Pinned static Engine and bundled dependencies are not patched by Alpine OS rebuilds; isolated compatibility
+    fixture only.
+  requiredRuntimeProfiles:
+  - docker

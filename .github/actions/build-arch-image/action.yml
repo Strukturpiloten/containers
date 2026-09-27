@@ -44,6 +44,13 @@ runs:
         path: ${{ runner.temp }}/dependency-results
         merge-multiple: true
 
+    - name: Download same-run payload
+      if: fromJSON(inputs.entry).payloadName != ''
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      with:
+        name: payload-${{ fromJSON(inputs.entry).payloadName }}-${{ fromJSON(inputs.entry).arch }}
+        path: ${{ runner.temp }}/payload
+
     - name: Build image archive
       id: build
       shell: bash
@@ -61,135 +68,100 @@ runs:
           --plan "${RUNNER_TEMP}/container-build-plan/build-plan.json" \
           --entry-json '${{ inputs.entry }}' \
           --dependency-results-dir "${RUNNER_TEMP}/dependency-results" \
+          --payload-dir "${RUNNER_TEMP}/payload" \
           "${fallback_args[@]}" \
           --output-dir "${RUNNER_TEMP}/oci-archives"
 
-    - name: Smoke-test Podman CLI
-      if: startsWith(fromJSON(inputs.entry).name, 'podman-')
+    - name: Verify image runtime
       shell: bash
       env:
-        CONTAINERS_CONF_OVERRIDE: ${{ github.action_path }}/podman-smoke-containers.conf
-        HOST_PODMAN_ROOT: ${{ runner.temp }}/podman-smoke/root
-        HOST_PODMAN_RUNROOT: ${{ runner.temp }}/podman-smoke/runroot
-        HOST_PODMAN_TMPDIR: ${{ runner.temp }}/podman-smoke/tmp
         IMAGE_ARCH: ${{ steps.build.outputs.arch }}
         IMAGE_NAME: ${{ steps.build.outputs.image_name }}
         IMAGE_PATH: ${{ steps.build.outputs.archive_path }}
-        PODMAN_MODE: ${{ fromJSON(inputs.entry).podmanMode }}
+        TRUSTED_RUNTIME: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       run: |
         set -euo pipefail
 
-        image_ref="localhost/${IMAGE_NAME}:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${IMAGE_ARCH}"
-        sudo mkdir -p "${HOST_PODMAN_ROOT}" "${HOST_PODMAN_RUNROOT}" "${HOST_PODMAN_TMPDIR}"
-        host_podman=(
-          sudo env "CONTAINERS_CONF_OVERRIDE=${CONTAINERS_CONF_OVERRIDE}"
-          podman
-          --root "${HOST_PODMAN_ROOT}"
-          --runroot "${HOST_PODMAN_RUNROOT}"
-          --tmpdir "${HOST_PODMAN_TMPDIR}"
-        )
-        "${host_podman[@]}" load --quiet --input "${IMAGE_PATH}"
-        mapfile -t loaded_images < <("${host_podman[@]}" images --quiet --no-trunc)
-        if (( ${#loaded_images[@]} != 1 )); then
-          printf 'Expected one loaded image, found %s.\n' "${#loaded_images[@]}" >&2
-          exit 1
+        mkdir -p "${RUNNER_TEMP}/runtime-evidence"
+        runtime_args=()
+        if [ "${TRUSTED_RUNTIME}" = "true" ]; then
+          runtime_args+=(--allow-privileged)
         fi
-        "${host_podman[@]}" tag "${loaded_images[0]}" "${image_ref}"
-        "${host_podman[@]}" run --rm --security-opt label=disable "${image_ref}" sh -euc '
-          case "$1" in
-            rootless) expected_uid=1000 ;;
-            rootful) expected_uid=0 ;;
-            *) printf "Unsupported Podman mode: %s\n" "$1" >&2; exit 1 ;;
-          esac
-          test "$(id -u)" -eq "${expected_uid}"
-          test "$(cat /usr/share/containers/podman-mode)" = "$1"
-          podman --version
-        ' -- "${PODMAN_MODE}"
+        uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.runtime_tests \
+          --image-name "${IMAGE_NAME}" \
+          --archive "${IMAGE_PATH}" \
+          --arch "${IMAGE_ARCH}" \
+          --evidence "${RUNNER_TEMP}/runtime-evidence/${IMAGE_NAME}-${IMAGE_ARCH}.json" \
+          --sudo "${runtime_args[@]}"
 
-    - name: Smoke-test trusted nested Podman runtime
-      if: >-
-        startsWith(fromJSON(inputs.entry).name, 'podman-') &&
-        fromJSON(inputs.entry).podmanNestedRuntime &&
-        (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    - name: Upload runtime evidence
+      if: always() && steps.build.outcome == 'success'
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ steps.build.outputs.image_name }}-${{ steps.build.outputs.arch }}-runtime-evidence
+        path: ${{ runner.temp }}/runtime-evidence/${{ steps.build.outputs.image_name }}-${{ steps.build.outputs.arch }}.json
+        if-no-files-found: error
+        retention-days: 7
+
+    - name: Resolve declared scan admission
+      id: scan-policy
       shell: bash
       env:
-        CONTAINERS_CONF_OVERRIDE: ${{ github.action_path }}/podman-smoke-containers.conf
-        HOST_PODMAN_ROOT: ${{ runner.temp }}/podman-nested/root
-        HOST_PODMAN_RUNROOT: ${{ runner.temp }}/podman-nested/runroot
-        HOST_PODMAN_TMPDIR: ${{ runner.temp }}/podman-nested/tmp
         IMAGE_ARCH: ${{ steps.build.outputs.arch }}
         IMAGE_NAME: ${{ steps.build.outputs.image_name }}
-        IMAGE_PATH: ${{ steps.build.outputs.archive_path }}
-        PODMAN_MODE: ${{ fromJSON(inputs.entry).podmanMode }}
-        PODMAN_OUTER_PRIVILEGE: ${{ fromJSON(inputs.entry).podmanOuterPrivilege }}
       run: |
         set -euo pipefail
 
-        image_ref="localhost/${IMAGE_NAME}:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${IMAGE_ARCH}"
-        run_args=(
-          --rm
-          --device /dev/fuse
-          --security-opt label=disable
-          --volume "${IMAGE_PATH}:/tmp/nested-image.tar:ro"
-        )
-        if [ "${PODMAN_OUTER_PRIVILEGE}" = "privileged" ]; then
-          # The inner process still uses the image's configured rootful/rootless user.
-          # Privilege belongs only to this disposable outer compatibility-test container.
-          run_args+=(--privileged)
-        elif [ "${PODMAN_OUTER_PRIVILEGE}" = "unprivileged" ]; then
-          # Rootless Podman gains mount privileges inside its user namespace, but the
-          # outer AppArmor profile still rejects the storage bind mount on Ubuntu runners.
-          run_args+=(--security-opt apparmor=unconfined)
-        else
-          printf 'Unsupported Podman outer privilege profile: %s\n' "${PODMAN_OUTER_PRIVILEGE}" >&2
-          exit 1
+        uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.admission \
+          --name "$IMAGE_NAME" --architecture "$IMAGE_ARCH" \
+          --plan "${RUNNER_TEMP}/container-build-plan/build-plan.json" \
+          --output "${RUNNER_TEMP}/scan-policy.json" --github-output "$GITHUB_OUTPUT"
+
+    - name: Scan image vulnerabilities
+      id: scan
+      uses: ./.github/actions/scan-vulnerabilities
+      with:
+        image: ${{ steps.scan-policy.outputs.image }}
+        architecture: ${{ steps.build.outputs.arch }}
+        candidate-archive: ${{ steps.build.outputs.archive_path }}
+        source-revision: ${{ steps.scan-policy.outputs.sourceRevision }}
+        baseline-ref: ${{ steps.scan-policy.outputs.baselineRef }}
+        admission: ${{ steps.scan-policy.outputs.admission }}
+        registry-token: ${{ github.token }}
+        output-dir: ${{ runner.temp }}/vulnerability-evidence
+
+    - name: Upload scanner debug evidence
+      if: always() && steps.build.outcome == 'success'
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ steps.build.outputs.image_name }}-${{ steps.build.outputs.arch }}-scan-debug
+        path: ${{ runner.temp }}/vulnerability-evidence/
+        if-no-files-found: warn
+        retention-days: 1
+
+    - name: Retain vulnerability report for publication
+      if: always() && steps.build.outcome == 'success'
+      shell: bash
+      env:
+        IMAGE_ARCH: ${{ steps.build.outputs.arch }}
+        IMAGE_NAME: ${{ steps.build.outputs.image_name }}
+      run: |
+        set -euo pipefail
+
+        report="${RUNNER_TEMP}/vulnerability-evidence/vulnerability-report.json"
+        if [[ -f "$report" ]]; then
+          mkdir -p "${RUNNER_TEMP}/scan-reports"
+          cp "$report" "${RUNNER_TEMP}/scan-reports/${IMAGE_NAME}-${IMAGE_ARCH}-vulnerability-report.json"
         fi
 
-        sudo mkdir -p "${HOST_PODMAN_ROOT}" "${HOST_PODMAN_RUNROOT}" "${HOST_PODMAN_TMPDIR}"
-        host_podman=(
-          sudo env "CONTAINERS_CONF_OVERRIDE=${CONTAINERS_CONF_OVERRIDE}"
-          podman
-          --root "${HOST_PODMAN_ROOT}"
-          --runroot "${HOST_PODMAN_RUNROOT}"
-          --tmpdir "${HOST_PODMAN_TMPDIR}"
-        )
-        "${host_podman[@]}" load --quiet --input "${IMAGE_PATH}"
-        mapfile -t loaded_images < <("${host_podman[@]}" images --quiet --no-trunc)
-        if (( ${#loaded_images[@]} != 1 )); then
-          printf 'Expected one loaded image, found %s.\n' "${#loaded_images[@]}" >&2
-          exit 1
-        fi
-        "${host_podman[@]}" tag "${loaded_images[0]}" "${image_ref}"
-        "${host_podman[@]}" run "${run_args[@]}" "${image_ref}" sh -euc '
-          case "$1" in
-            rootless)
-              expected_uid=1000
-              expected_rootless=true
-              ;;
-            rootful)
-              expected_uid=0
-              expected_rootless=false
-              ;;
-            *)
-              printf "Unsupported Podman mode: %s\n" "$1" >&2
-              exit 1
-              ;;
-          esac
-          test "$(id -u)" -eq "${expected_uid}"
-          test "$(podman info --format "{{.Host.Security.Rootless}}")" = "${expected_rootless}"
-          podman load --input /tmp/nested-image.tar >/dev/null
-          nested_image_ids="$(podman images --quiet --no-trunc)"
-          if [ -z "${nested_image_ids}" ]; then
-            nested_image_count=0
-          else
-            nested_image_count="$(printf "%s\n" "${nested_image_ids}" | wc -l)"
-          fi
-          if [ "${nested_image_count}" -ne 1 ]; then
-            printf "Expected one nested image, found %s.\n" "${nested_image_count}" >&2
-            exit 1
-          fi
-          podman run --rm "${nested_image_ids}" /bin/sh -c "exit 0"
-        ' -- "${PODMAN_MODE}"
+    - name: Upload vulnerability report
+      if: always() && steps.build.outcome == 'success'
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ steps.build.outputs.image_name }}-${{ steps.build.outputs.arch }}-vulnerability-report
+        path: ${{ runner.temp }}/scan-reports/${{ steps.build.outputs.image_name }}-${{ steps.build.outputs.arch }}-vulnerability-report.json
+        if-no-files-found: warn
+        retention-days: 7
 
     - name: Upload architecture image archive
       if: inputs.upload-archive == 'true'

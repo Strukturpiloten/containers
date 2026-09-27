@@ -40,7 +40,7 @@ class PublicationIsolationTests(unittest.TestCase):
         self.assertNotIn("if", jobs["publish"])
         self.assertFalse(jobs["build"]["strategy"]["fail-fast"])
         self.assertLessEqual(jobs["build"]["strategy"]["max-parallel"], 2)
-        self.assertEqual(jobs["build"]["permissions"], {"contents": "read"})
+        self.assertEqual(jobs["build"]["permissions"], {"contents": "read", "packages": "read"})
 
     def test_later_stages_can_try_independent_images_after_a_failure(self) -> None:
         jobs = yaml.safe_load(engine._publish_workflow(2))["jobs"]

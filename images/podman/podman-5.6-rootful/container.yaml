@@ -6,6 +6,14 @@ image: ghcr.io/strukturpiloten/podman-5.6-rootful
 title: Podman 5.6 rootful
 description: Podman 5.6 rootful nested-container image built from source on Fedora
 
+lifecycle:
+  state: legacy
+  admission: isolated-test
+  reviewAfter: "2026-12-31"
+  supportBoundary: "Pinned historical Podman source is retained for compatibility; OS refreshes do not patch that engine line."
+  requiredRuntimeProfiles:
+    - podman
+
 tests:
   podman:
     mode: rootful
@@ -14,18 +22,13 @@ tests:
 build:
   context: .
   containerfile: images/podman/shared/Containerfile
+  payload: images/podman/payloads/podman-5.6.yaml
   architectures: [amd64, arm64]
   runtimeBaseArg: FEDORA_IMAGE
   args:
     FEDORA_IMAGE:
       value: registry.fedoraproject.org/fedora-minimal:44@sha256:eeac878460ca077301befe60ba603186b12af7ff45a58ee9aeafefbcf4c26f10
       type: external-image
-    PODMAN_COMMIT:
-      value: 9dd5e1ed33830612bc200d7a13db00af6ab865a4
-      type: static
-    PODMAN_REPOSITORY:
-      value: https://github.com/podman-container-tools/podman.git
-      type: static
     HOME_DIR: {value: /root, type: static}
     RUN_AS_USER: {value: root, type: static}
     RUNTIME_DIR: {value: /run, type: static}
@@ -41,4 +44,5 @@ dependencies:
 inputs:
   - images/podman/podman-5.6-rootful/**
   - images/podman/shared/**
+  - images/podman/payloads/podman-5.6.yaml
   - shared/oci-labels.env

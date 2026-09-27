@@ -6,6 +6,14 @@ image: ghcr.io/strukturpiloten/podman-ubi-8-rootless
 title: Red Hat UBI 8 Podman rootless
 description: Red Hat UBI 8 distro-packaged Podman rootless compatibility image for CI
 
+lifecycle:
+  state: legacy
+  admission: isolated-test
+  reviewAfter: "2026-12-31"
+  supportBoundary: "Historical distribution compatibility fixture; vendor security support and installed engine fixes require separate review."
+  requiredRuntimeProfiles:
+    - podman
+
 tests:
   podman:
     mode: rootless

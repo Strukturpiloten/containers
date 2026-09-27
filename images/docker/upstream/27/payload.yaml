@@ -1,0 +1,36 @@
+schemaVersion: 1
+name: docker-27-payload
+build:
+  context: .
+  containerfile: images/docker/upstream/payload.Containerfile
+  architectures:
+  - amd64
+  - arm64
+  args:
+    ALPINE_IMAGE: docker.io/library/alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+    ENGINE_VERSION: 27.5.1
+  architectureArgs:
+    amd64:
+      DOCKER_ARCH: x86_64
+      ENGINE_SHA256: 4f798b3ee1e0140eab5bf30b0edc4e84f4cdb53255a429dc3bbae9524845d640
+      ROOTLESS_SHA256: 40aef06990b062eab77dd1ad0dd642b5d5a7267032d406b8d080325d0d764a7f
+    arm64:
+      DOCKER_ARCH: aarch64
+      ENGINE_SHA256: e6b53725a73763ab3f988c73f8772eaed429754c1a579db5ff11f21990fd1817
+      ROOTLESS_SHA256: b4265acdc6aba3a0893361a6e32b47197fb2cd7d3b979bc27f1aff2dbfd14c59
+provenance:
+  payloadKind: verified-upstream-static-archives
+  engineArchive: https://download.docker.com/linux/static/stable/{dockerArch}/docker-27.5.1.tgz
+  rootlessArchive: https://download.docker.com/linux/static/stable/{dockerArch}/docker-rootless-extras-27.5.1.tgz
+  engine: 27.5.1
+  cli: 27.5.1
+  containerd: 1.7.25
+  runc: 1.2.4
+  rootlesskit: 2.3.2
+  sourceRevision:
+    dockerd: 4c9b3b0
+    cli: 9f9e405
+    containerd: bcc810d6b9066471b0b6fa75f557a15a1cbf31bb
+    runc: 6c52b3f
+  note: Static archives embed historical dependencies; updating Alpine does not patch
+    them.

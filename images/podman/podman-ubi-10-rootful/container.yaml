@@ -6,6 +6,14 @@ image: ghcr.io/strukturpiloten/podman-ubi-10-rootful
 title: Red Hat UBI 10 Podman rootful
 description: Red Hat UBI 10 distro-packaged Podman rootful compatibility image for CI
 
+lifecycle:
+  state: maintained
+  admission: isolated-test
+  reviewAfter: "2026-12-31"
+  supportBoundary: "Repository rebuilds refresh distribution packages; vendor support determines installed Podman security maintenance."
+  requiredRuntimeProfiles:
+    - podman
+
 tests:
   podman:
     mode: rootful

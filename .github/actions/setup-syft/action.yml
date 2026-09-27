@@ -21,8 +21,8 @@ runs:
         checksums="syft_${version_without_prefix}_checksums.txt"
         base_url="https://github.com/anchore/syft/releases/download/${SYFT_VERSION}"
 
-        curl -sSfL "${base_url}/${archive}" -o "${archive}"
-        curl -sSfL "${base_url}/${checksums}" -o "${checksums}"
+        curl --retry 3 --retry-delay 2 --retry-all-errors -sSfL "${base_url}/${archive}" -o "${archive}"
+        curl --retry 3 --retry-delay 2 --retry-all-errors -sSfL "${base_url}/${checksums}" -o "${checksums}"
         grep "  ${archive}$" "${checksums}" | sha256sum -c -
         tar -xzf "${archive}" syft
         sudo install -m 0755 syft /usr/local/bin/syft

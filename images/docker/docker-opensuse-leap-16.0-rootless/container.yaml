@@ -1,0 +1,64 @@
+# yaml-language-server: $schema=../../../container.schema.json
+schemaVersion: 1
+name: docker-opensuse-leap-16.0-rootless
+version: v1.0.0
+image: ghcr.io/strukturpiloten/docker-opensuse-leap-16.0-rootless
+title: Docker Engine openSUSE Leap 16.0 rootless
+description: Native openSUSE Leap 16.0 docker package with rootless Docker daemon for isolated compatibility tests
+tests:
+  docker:
+    mode: rootless
+    outerPrivilege: privileged
+    nestedRuntime: true
+build:
+  context: .
+  containerfile: images/docker/platforms/Containerfile
+  architectures:
+  - amd64
+  - arm64
+  runtimeBaseArg: DISTRO_IMAGE
+  args:
+    DISTRO_IMAGE:
+      value: registry.opensuse.org/opensuse/leap:16.0@sha256:5bc9e1242fc2c92dbbcaf4db5e2eadad062c4c0434550c53822201f18799d55a
+      type: external-image
+    DISTRO_ID:
+      value: opensuse-leap-16.0
+      type: static
+    ENGINE_PACKAGE:
+      value: docker
+      type: static
+    RUN_AS_USER:
+      value: 1000:1000
+      type: static
+    HOME_DIR:
+      value: /home/docker
+      type: static
+    RUNTIME_DIR:
+      value: /run/user/1000
+      type: static
+    DOCKER_HOST_VALUE:
+      value: unix:///run/user/1000/docker.sock
+      type: static
+    STORAGE_PATH:
+      value: /home/docker/.local/share/docker
+      type: static
+dependencies:
+  internal: []
+  external:
+  - name: opensuse-leap-16.0
+    image: registry.opensuse.org/opensuse/leap
+    arg: DISTRO_IMAGE
+inputs:
+- images/docker/docker-opensuse-leap-16.0-rootless/**
+- images/docker/platforms/Containerfile
+- images/docker/platforms/install-packages.sh
+- images/docker/platforms/start-distro.sh
+- shared/oci-labels.env
+lifecycle:
+  state: maintained
+  admission: isolated-test
+  reviewAfter: '2026-10-27'
+  supportBoundary: Vendor package revisions can advance with repository updates; image shares runner kernel and host security
+    policy.
+  requiredRuntimeProfiles:
+  - docker

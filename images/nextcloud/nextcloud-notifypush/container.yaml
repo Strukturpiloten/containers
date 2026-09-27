@@ -6,6 +6,17 @@ image: ghcr.io/strukturpiloten/nextcloud-notifypush
 title: Nextcloud notify_push
 description: Nextcloud notify_push binary built from source with a minimal Alpine runtime
 
+tests:
+  notifyPush: {}
+
+lifecycle:
+  state: maintained
+  admission: production
+  reviewAfter: "2026-12-31"
+  supportBoundary: "Repository maintains pinned application inputs and base images; upstream component support requires separate review."
+  requiredRuntimeProfiles:
+    - notifyPush
+
 build:
   context: .
   containerfile: images/nextcloud/nextcloud-notifypush/Containerfile
@@ -25,6 +36,9 @@ build:
       type: static
     NOTIFYPUSH_VERSION:
       value: v1.4.1
+      type: static
+    NOTIFYPUSH_COMMIT:
+      value: 3cbef8d0abd401bfa1ce4c39428fc445059654bc
       type: static
 
 dependencies:

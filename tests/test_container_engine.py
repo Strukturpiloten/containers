@@ -450,6 +450,7 @@ class PromotionTests(unittest.TestCase):
         with (
             patch.object(engine, "_github_context", return_value=context),
             patch.object(engine, "_tool", side_effect=lambda name: name),
+            patch.object(engine, "_validate_publication_source", return_value=engine.PublicationIdentity(100, 1)),
             patch.object(engine, "_remote_digest", return_value=f"sha256:{'b' * 64}"),
             patch.object(engine, "_run") as run,
             self.assertRaisesRegex(engine.ContainerEngineError, "Refusing to overwrite immutable registry tag"),
@@ -478,6 +479,7 @@ class PromotionTests(unittest.TestCase):
         with (
             patch.object(engine, "_github_context", return_value=context),
             patch.object(engine, "_tool", side_effect=lambda name: name),
+            patch.object(engine, "_validate_publication_source", return_value=engine.PublicationIdentity(100, 1)),
             patch.object(engine, "_remote_digest", return_value=None),
             patch.object(engine, "_write_github_outputs") as outputs,
             patch.object(engine, "_run") as run,
@@ -508,7 +510,19 @@ class PromotionTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as temporary_directory:
             build_result_path = Path(temporary_directory) / "example-build-result.json"
-            build_result_path.write_text(json.dumps({"tags": ["run-100-1"]}), encoding="utf-8")
+            build_result_path.write_text(
+                json.dumps(
+                    {
+                        "image": "ghcr.io/strukturpiloten/example",
+                        "indexDigest": DIGEST,
+                        "sourceRevision": "c" * 40,
+                        "runId": "100",
+                        "runAttempt": "1",
+                        "tags": ["run-100-1"],
+                    }
+                ),
+                encoding="utf-8",
+            )
             args = SimpleNamespace(
                 image="ghcr.io/strukturpiloten/example",
                 digest=DIGEST,
@@ -518,6 +532,7 @@ class PromotionTests(unittest.TestCase):
             with (
                 patch.object(engine, "_github_context", return_value=context),
                 patch.object(engine, "_tool", side_effect=lambda name: name),
+                patch.object(engine, "_validate_publication_source", return_value=engine.PublicationIdentity(100, 1)),
                 patch.object(engine, "_remote_digest", return_value=None),
                 patch.object(engine, "_write_github_outputs"),
                 patch.object(engine, "_run"),
@@ -570,6 +585,8 @@ class AutomaticReleaseTests(unittest.TestCase):
                     "sourceRevision": "c" * 40,
                     "indexDigest": DIGEST,
                     "tags": ["run-100-1-sha-source", "main", "latest"],
+                    "runId": "100",
+                    "runAttempt": "1",
                 }
             ),
             encoding="utf-8",
@@ -607,6 +624,7 @@ class AutomaticReleaseTests(unittest.TestCase):
                 patch.object(engine, "_create_github_release", return_value={"id": 1}) as create_release,
                 patch.object(engine, "_git_tag_revision", return_value=None),
                 patch.object(engine, "_tool", side_effect=lambda name: name),
+                patch.object(engine, "_validate_publication_source", return_value=engine.PublicationIdentity(100, 1)),
                 patch.object(engine, "_remote_digest", return_value=None),
                 patch.object(engine, "_run", side_effect=self._run) as run,
                 patch.object(engine, "_write_github_outputs") as outputs,
@@ -653,6 +671,16 @@ class AutomaticReleaseTests(unittest.TestCase):
                 patch.object(engine, "_github_release", return_value={"id": 1}),
                 patch.object(engine, "_create_github_release") as create_release,
                 patch.object(engine, "_tool", side_effect=lambda name: name),
+                patch.object(engine, "_validate_publication_source", return_value=engine.PublicationIdentity(100, 1)),
+                patch.object(
+                    engine,
+                    "_preflight_promotion",
+                    return_value={
+                        "v1.0.0": f"sha256:{'b' * 64}",
+                        "v1.0": f"sha256:{'b' * 64}",
+                        "v1": f"sha256:{'b' * 64}",
+                    },
+                ),
                 patch.object(engine, "_remote_digest", return_value=f"sha256:{'b' * 64}"),
                 patch.object(engine, "_run", side_effect=self._run) as run,
                 patch.object(engine, "_write_github_outputs"),
@@ -673,6 +701,16 @@ class AutomaticReleaseTests(unittest.TestCase):
                 patch.object(engine, "_create_github_release") as create_release,
                 patch.object(engine, "_git_tag_revision", return_value=None),
                 patch.object(engine, "_tool", side_effect=lambda name: name),
+                patch.object(engine, "_validate_publication_source", return_value=engine.PublicationIdentity(100, 1)),
+                patch.object(
+                    engine,
+                    "_preflight_promotion",
+                    return_value={
+                        "v1.0.0": f"sha256:{'b' * 64}",
+                        "v1.0": f"sha256:{'b' * 64}",
+                        "v1": f"sha256:{'b' * 64}",
+                    },
+                ),
                 patch.object(engine, "_remote_digest", return_value=f"sha256:{'b' * 64}"),
                 patch.object(engine, "_run", side_effect=self._run),
                 self.assertRaisesRegex(engine.ContainerEngineError, "Refusing to claim existing registry tag"),

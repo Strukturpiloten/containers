@@ -6,6 +6,14 @@ image: ghcr.io/strukturpiloten/podman-opensuse-tumbleweed-rootful
 title: openSUSE Tumbleweed Podman rootful
 description: openSUSE Tumbleweed distro-packaged Podman rootful compatibility image for CI
 
+lifecycle:
+  state: experimental
+  admission: isolated-test
+  reviewAfter: "2026-12-31"
+  supportBoundary: "Rolling distribution compatibility fixture; installed engine and package support must be reviewed for each rebuild."
+  requiredRuntimeProfiles:
+    - podman
+
 tests:
   podman:
     mode: rootful

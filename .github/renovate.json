@@ -1,360 +1,935 @@
 {
-    "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-    "extends": [
-        "config:recommended",
-        "helpers:pinGitHubActionDigests"
-    ],
-    "baseBranchPatterns": [
-        "$default"
-    ],
-    "ignorePaths": [
-        "images/_example/**"
-    ],
-    "customManagers": [
-        {
-            "customType": "regex",
-            "description": "Track external pinned container image tags and digests in container metadata",
-            "managerFilePatterns": [
-                "/^images\/.+\/container\\.yaml$/"
-            ],
-            "matchStrings": [
-                "value:\\s*(?<depName>[^:@\\s]+(?:\\/[^:@\\s]+)*):(?<currentValue>[^@\\s]+)(?:@(?<currentDigest>sha256:[a-f0-9]+))?\\s*\\n\\s*type:\\s*external-image"
-            ],
-            "datasourceTemplate": "docker"
-        },
-        {
-            "customType": "regex",
-            "description": "Track pinned uv version in GitHub workflows, composite actions and workflow templates",
-            "managerFilePatterns": [
-                "/^\\.github\/(?:workflows\/[^\/]+|actions\/[^\/]+\/action|workflow-templates\/.+)\\.ya?ml(?:\\.j2)?$/"
-            ],
-            "matchStrings": [
-                "UV_VERSION:\\s*(?<currentValue>v?\\d+\\.\\d+\\.\\d+)"
-            ],
-            "depNameTemplate": "astral-sh/uv",
-            "packageNameTemplate": "astral-sh/uv",
-            "datasourceTemplate": "github-releases",
-            "versioningTemplate": "semver-coerced"
-        },
-        {
-            "customType": "regex",
-            "description": "Track NOTIFYPUSH_VERSION in container metadata",
-            "managerFilePatterns": [
-                "/^images\/nextcloud\/nextcloud-notifypush\/container\\.yaml$/"
-            ],
-            "matchStrings": [
-                "NOTIFYPUSH_VERSION:\\s*\\n\\s*value:\\s*(?<currentValue>v?\\d+\\.\\d+\\.\\d+)"
-            ],
-            "depNameTemplate": "nextcloud/notify_push",
-            "packageNameTemplate": "nextcloud/notify_push",
-            "datasourceTemplate": "github-releases",
-            "versioningTemplate": "semver-coerced"
-        },
-        {
-            "customType": "regex",
-            "description": "Track each fixed Podman minor line and its immutable source commit",
-            "managerFilePatterns": [
-                "/^images\\/podman\\/podman-\\d+\\.\\d+-(?:rootful|rootless)\\/container\\.yaml$/"
-            ],
-            "matchStrings": [
-                "version:\\s*v(?<currentValue>(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+))[\\s\\S]*?PODMAN_COMMIT:\\s*\\n\\s*value:\\s*(?<currentDigest>[a-f0-9]{40})"
-            ],
-            "depNameTemplate": "podman-{{{major}}}.{{{minor}}}",
-            "packageNameTemplate": "podman-container-tools/podman",
-            "datasourceTemplate": "github-tags",
-            "extractVersionTemplate": "^v(?<version>.+)$",
-            "versioningTemplate": "semver"
-        },
-        {
-            "customType": "regex",
-            "description": "Track Netavark for Podman 6 with an immutable source commit",
-            "managerFilePatterns": [
-                "/^images\\/podman\\/podman-6\\.\\d+-(?:rootful|rootless)\\/container\\.yaml$/"
-            ],
-            "matchStrings": [
-                "NETAVARK_VERSION:\\s*\\{value:\\s*(?<currentValue>\\d+\\.\\d+\\.\\d+),[\\s\\S]*?NETAVARK_COMMIT:\\s*\\{value:\\s*(?<currentDigest>[a-f0-9]{40}),"
-            ],
-            "depNameTemplate": "containers/netavark",
-            "packageNameTemplate": "containers/netavark",
-            "datasourceTemplate": "github-tags",
-            "extractVersionTemplate": "^v(?<version>.+)$",
-            "versioningTemplate": "semver"
-        },
-        {
-            "customType": "regex",
-            "description": "Track Aardvark DNS for Podman 6 with an immutable source commit",
-            "managerFilePatterns": [
-                "/^images\\/podman\\/podman-6\\.\\d+-(?:rootful|rootless)\\/container\\.yaml$/"
-            ],
-            "matchStrings": [
-                "AARDVARK_VERSION:\\s*\\{value:\\s*(?<currentValue>\\d+\\.\\d+\\.\\d+),[\\s\\S]*?AARDVARK_COMMIT:\\s*\\{value:\\s*(?<currentDigest>[a-f0-9]{40}),"
-            ],
-            "depNameTemplate": "containers/aardvark-dns",
-            "packageNameTemplate": "containers/aardvark-dns",
-            "datasourceTemplate": "github-tags",
-            "extractVersionTemplate": "^v(?<version>.+)$",
-            "versioningTemplate": "semver"
-        },
-        {
-            "customType": "regex",
-            "description": "Track pinned Syft binary releases in GitHub workflows and workflow templates",
-            "managerFilePatterns": [
-                "/^\\.github\/(?:workflows\/[^\/]+|workflow-templates\/.+)\\.ya?ml(?:\\.j2)?$/"
-            ],
-            "matchStrings": [
-                "SYFT_VERSION:\\s*(?<currentValue>v?\\d+\\.\\d+\\.\\d+)"
-            ],
-            "depNameTemplate": "anchore/syft",
-            "packageNameTemplate": "anchore/syft",
-            "datasourceTemplate": "github-releases",
-            "versioningTemplate": "semver-coerced"
-        }
-    ],
-    "github-actions": {
-        "managerFilePatterns": [
-            "/(^|/)(workflow-templates|\\.(?:github|gitea|forgejo)/(?:workflows|actions))/.+\\.ya?ml$/",
-            "/(^|/)action\\.ya?ml$/",
-            "/^\\.github/workflow-templates/.+\\.ya?ml\\.j2$/"
-        ]
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "baseBranchPatterns": [
+    "$default"
+  ],
+  "ignorePaths": [
+    "images/_example/**"
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Update each Grype release and architecture archive checksum together",
+      "managerFilePatterns": [
+        "/^\\.github\\/actions\\/scan-vulnerabilities\\/action\\.yml$/"
+      ],
+      "matchStrings": [
+        "machine=(?:amd64|arm64)\\n\\s*release=(?<currentValue>v\\d+\\.\\d+\\.\\d+)\\n\\s*expected=(?<currentDigest>[a-f0-9]{64})"
+      ],
+      "depNameTemplate": "anchore/grype",
+      "packageNameTemplate": "anchore/grype",
+      "datasourceTemplate": "github-release-attachments",
+      "versioningTemplate": "semver-coerced"
     },
-    "vulnerabilityAlerts": {
-        "enabled": true,
-        "schedule": [],
-        "dependencyDashboardApproval": false
+    {
+      "customType": "regex",
+      "description": "Track external pinned container image tags and digests in container metadata",
+      "managerFilePatterns": [
+        "/^images/.+/container\\.yaml$/"
+      ],
+      "matchStrings": [
+        "value:\\s*(?<depName>[^:@\\s]+(?:\\/[^:@\\s]+)*):(?<currentValue>[^@\\s]+)(?:@(?<currentDigest>sha256:[a-f0-9]+))?\\s*\\n\\s*type:\\s*external-image"
+      ],
+      "datasourceTemplate": "docker"
     },
-    "packageRules": [
-        {
-            "description": "Keep GitHub Actions pinned to immutable commits while allowing Renovate updates",
-            "matchManagers": [
-                "github-actions"
-            ],
-            "pinDigests": true
-        },
-        {
-            "description": "Do not append a digest to the Cosign release input; the installer action itself remains commit-pinned",
-            "matchManagers": [
-                "github-actions"
-            ],
-            "matchPackageNames": [
-                "sigstore/cosign"
-            ],
-            "pinDigests": false
-        },
-        {
-            "description": "Use a readable topic for uv updates",
-            "matchManagers": [
-                "custom.regex"
-            ],
-            "matchPackageNames": [
-                "astral-sh/uv"
-            ],
-            "commitMessageTopic": "uv"
-        },
-        {
-            "description": "Use a readable topic for Cosign updates",
-            "matchPackageNames": [
-                "sigstore/cosign"
-            ],
-            "commitMessageTopic": "cosign"
-        },
-        {
-            "description": "Use a readable topic for Syft updates",
-            "matchManagers": [
-                "custom.regex"
-            ],
-            "matchPackageNames": [
-                "anchore/syft"
-            ],
-            "commitMessageTopic": "syft"
-        },
-        {
-            "description": "Squash-merge pinned container digest updates after required CI",
-            "matchManagers": [
-                "custom.regex"
-            ],
-            "matchDatasources": [
-                "docker"
-            ],
-            "matchUpdateTypes": [
-                "digest"
-            ],
-            "automerge": true,
-            "automergeType": "pr",
-            "automergeStrategy": "squash",
-            "platformAutomerge": true
-        },
-        {
-            "description": "Squash-merge patch updates for externally pinned container images after required CI",
-            "matchManagers": [
-                "custom.regex"
-            ],
-            "matchDatasources": [
-                "docker"
-            ],
-            "matchUpdateTypes": [
-                "patch"
-            ],
-            "automerge": true,
-            "automergeType": "pr",
-            "automergeStrategy": "squash",
-            "platformAutomerge": true
-        },
-        {
-            "description": "Keep source-built Podman images on stable Fedora 44 while allowing digest refreshes",
-            "matchManagers": [
-                "custom.regex"
-            ],
-            "matchFileNames": [
-                "/^images\\/podman\\/podman-\\d+\\.\\d+-(?:rootful|rootless)\\/container\\.yaml$/"
-            ],
-            "matchPackageNames": [
-                "registry.fedoraproject.org/fedora-minimal"
-            ],
-            "matchDatasources": [
-                "docker"
-            ],
-            "allowedVersions": "/^44$/"
-        },
-        {
-            "description": "Keep distro compatibility images on their declared OS release while allowing digest refreshes",
-            "matchFileNames": [
-                "/^images\\/podman\\/podman-(?:alpine|arch|centos|debian|fedora|opensuse|ubi|ubuntu)-.+\\/container\\.yaml$/"
-            ],
-            "matchDatasources": [
-                "docker"
-            ],
-            "matchUpdateTypes": [
-                "major",
-                "minor",
-                "patch"
-            ],
-            "enabled": false
-        },
-        {
-            "description": "Squash-merge tested notify_push patch updates after required CI",
-            "matchManagers": [
-                "custom.regex"
-            ],
-            "matchPackageNames": [
-                "nextcloud/notify_push"
-            ],
-            "matchUpdateTypes": [
-                "patch"
-            ],
-            "automerge": true,
-            "automergeType": "pr",
-            "automergeStrategy": "squash",
-            "platformAutomerge": true
-        },
-        {
-            "description": "Keep Podman 5.4 on its declared compatibility line",
-            "matchDepNames": ["podman-5.4"],
-            "allowedVersions": "/^5\\.4\\./"
-        },
-        {
-            "description": "Keep Podman 5.5 on its declared compatibility line",
-            "matchDepNames": ["podman-5.5"],
-            "allowedVersions": "/^5\\.5\\./"
-        },
-        {
-            "description": "Keep Podman 5.6 on its declared compatibility line",
-            "matchDepNames": ["podman-5.6"],
-            "allowedVersions": "/^5\\.6\\./"
-        },
-        {
-            "description": "Keep Podman 5.7 on its declared compatibility line",
-            "matchDepNames": ["podman-5.7"],
-            "allowedVersions": "/^5\\.7\\./"
-        },
-        {
-            "description": "Keep Podman 5.8 on its declared compatibility line",
-            "matchDepNames": ["podman-5.8"],
-            "allowedVersions": "/^5\\.8\\./"
-        },
-        {
-            "description": "Keep Podman 6.0 on its declared compatibility line",
-            "matchDepNames": ["podman-6.0"],
-            "allowedVersions": "/^6\\.0\\./"
-        },
-        {
-            "description": "Keep Podman 6.1 on its declared compatibility line",
-            "matchDepNames": ["podman-6.1"],
-            "allowedVersions": "/^6\\.1\\./"
-        },
-        {
-            "description": "Squash-merge tested Podman patch releases for each fixed minor line",
-            "matchDepNames": ["/^podman-/"],
-            "matchUpdateTypes": ["patch"],
-            "automerge": true,
-            "automergeType": "pr",
-            "automergeStrategy": "squash",
-            "platformAutomerge": true
-        },
-        {
-            "description": "Update Podman 6 networking helpers together",
-            "matchPackageNames": [
-                "containers/aardvark-dns",
-                "containers/netavark"
-            ],
-            "groupName": "Podman 6 networking helpers"
-        },
-        {
-            "description": "Squash-merge tested patch updates for Podman 6 networking helpers",
-            "matchPackageNames": [
-                "containers/aardvark-dns",
-                "containers/netavark"
-            ],
-            "matchUpdateTypes": ["patch"],
-            "automerge": true,
-            "automergeType": "pr",
-            "automergeStrategy": "squash",
-            "platformAutomerge": true
-        },
-        {
-            "description": "Squash-merge tested Python automation dependency updates",
-            "matchPackageNames": [
-                "jinja2",
-                "jsonschema",
-                "pyyaml",
-                "ruff"
-            ],
-            "matchUpdateTypes": [
-                "minor",
-                "patch"
-            ],
-            "automerge": true,
-            "automergeType": "pr",
-            "automergeStrategy": "squash",
-            "platformAutomerge": true
-        },
-        {
-            "description": "Squash-merge patch updates for commit-pinned GitHub Actions after required CI",
-            "matchManagers": [
-                "github-actions"
-            ],
-            "matchUpdateTypes": [
-                "patch"
-            ],
-            "automerge": true,
-            "automergeType": "pr",
-            "automergeStrategy": "squash",
-            "platformAutomerge": true
-        },
-        {
-            "description": "Squash-merge minor and patch updates for selected build tooling",
-            "matchPackageNames": [
-                "anchore/syft",
-                "astral-sh/uv",
-                "sigstore/cosign"
-            ],
-            "matchUpdateTypes": [
-                "minor",
-                "patch"
-            ],
-            "automerge": true,
-            "automergeType": "pr",
-            "automergeStrategy": "squash",
-            "platformAutomerge": true
-        }
+    {
+      "customType": "regex",
+      "description": "Track digest-pinned base images in private payload manifests",
+      "managerFilePatterns": [
+        "/^images\\/.+\\/payload\\.yaml$/"
+      ],
+      "matchStrings": [
+        "(?:^|\\n)\\s*[A-Z][A-Z0-9_]*_IMAGE:\\s*(?<depName>[^:@\\s]+):(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[a-f0-9]{64})"
+      ],
+      "datasourceTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "description": "Track pinned uv version in GitHub workflows, composite actions and workflow templates",
+      "managerFilePatterns": [
+        "/^\\.github/(?:workflows/[^/]+|actions/[^/]+/action|workflow-templates/.+)\\.ya?ml(?:\\.j2)?$/",
+        "/^\\.github/automation\\.yml$/"
+      ],
+      "matchStrings": [
+        "UV_VERSION:\\s*(?<currentValue>v?\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "astral-sh/uv",
+      "packageNameTemplate": "astral-sh/uv",
+      "datasourceTemplate": "github-releases",
+      "versioningTemplate": "semver-coerced"
+    },
+    {
+      "customType": "regex",
+      "description": "Track each canonical Podman minor release and immutable source commit",
+      "managerFilePatterns": [
+        "/^images\\/podman\\/payloads\\/podman-\\d+\\.\\d+\\.yaml$/"
+      ],
+      "matchStrings": [
+        "OCI_VERSION:\\s*(?<currentValue>(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+))[\\s\\S]*?PODMAN_COMMIT:\\s*(?<currentDigest>[a-f0-9]{40})"
+      ],
+      "depNameTemplate": "podman-{{{major}}}.{{{minor}}}",
+      "packageNameTemplate": "podman-container-tools/podman",
+      "datasourceTemplate": "github-tags",
+      "extractVersionTemplate": "^v(?<version>.+)$",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "description": "Track Netavark for Podman 6 with an immutable source commit",
+      "managerFilePatterns": [
+        "/^images\\/podman\\/payloads\\/podman-6\\.\\d+\\.yaml$/"
+      ],
+      "matchStrings": [
+        "NETAVARK_VERSION:\\s*(?<currentValue>\\d+\\.\\d+\\.\\d+)[\\s\\S]*?NETAVARK_COMMIT:\\s*(?<currentDigest>[a-f0-9]{40})"
+      ],
+      "depNameTemplate": "containers/netavark",
+      "packageNameTemplate": "containers/netavark",
+      "datasourceTemplate": "github-tags",
+      "extractVersionTemplate": "^v(?<version>.+)$",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "description": "Track Aardvark DNS for Podman 6 with an immutable source commit",
+      "managerFilePatterns": [
+        "/^images\\/podman\\/payloads\\/podman-6\\.\\d+\\.yaml$/"
+      ],
+      "matchStrings": [
+        "AARDVARK_VERSION:\\s*(?<currentValue>\\d+\\.\\d+\\.\\d+)[\\s\\S]*?AARDVARK_COMMIT:\\s*(?<currentDigest>[a-f0-9]{40})"
+      ],
+      "depNameTemplate": "containers/aardvark-dns",
+      "packageNameTemplate": "containers/aardvark-dns",
+      "datasourceTemplate": "github-tags",
+      "extractVersionTemplate": "^v(?<version>.+)$",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "description": "Keep rootful and rootless Podman versions aligned with each canonical payload release",
+      "managerFilePatterns": [
+        "/^images\\/podman\\/podman-\\d+\\.\\d+-(?:rootful|rootless)\\/container\\.yaml$/"
+      ],
+      "matchStrings": [
+        "version:\\s*v(?<currentValue>(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+))"
+      ],
+      "depNameTemplate": "podman-{{{major}}}.{{{minor}}}",
+      "packageNameTemplate": "podman-container-tools/podman",
+      "datasourceTemplate": "github-tags",
+      "extractVersionTemplate": "^v(?<version>.+)$",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "description": "Track Fedora base digest for canonical Podman payload builders",
+      "managerFilePatterns": [
+        "/^images\\/podman\\/payloads\\/podman-\\d+\\.\\d+\\.yaml$/"
+      ],
+      "matchStrings": [
+        "FEDORA_IMAGE:\\s*(?<depName>[^:@\\s]+):(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[a-f0-9]{64})"
+      ],
+      "datasourceTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "description": "Track pinned Syft binary releases in GitHub workflows and workflow templates",
+      "managerFilePatterns": [
+        "/^\\.github/(?:workflows/[^/]+|workflow-templates/.+)\\.ya?ml(?:\\.j2)?$/",
+        "/^\\.github/automation\\.yml$/"
+      ],
+      "matchStrings": [
+        "SYFT_VERSION:\\s*(?<currentValue>v?\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "anchore/syft",
+      "packageNameTemplate": "anchore/syft",
+      "datasourceTemplate": "github-releases",
+      "versioningTemplate": "semver-coerced"
+    },
+    {
+      "customType": "regex",
+      "description": "Update canonical native runner configuration alongside generated workflow labels",
+      "managerFilePatterns": [
+        "/^\\.github/automation\\.yml$/"
+      ],
+      "matchStrings": [
+        "(?:AMD64|ARM64)_RUNNER:\\s*ubuntu-(?<currentValue>[^\\s]+)"
+      ],
+      "depNameTemplate": "ubuntu",
+      "datasourceTemplate": "github-runners",
+      "versioningTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "description": "Keep pinned action references in Jinja workflow sources synchronized with generated workflows",
+      "managerFilePatterns": [
+        "/^\\.github/workflow-templates/.+\\.yml\\.j2$/"
+      ],
+      "matchStrings": [
+        "uses:\\s*(?<depName>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@(?<currentDigest>[a-f0-9]{40})\\s+#\\s*(?<currentValue>v?\\d+\\.\\d+\\.\\d+)"
+      ],
+      "datasourceTemplate": "github-tags",
+      "versioningTemplate": "semver-coerced"
+    },
+    {
+      "customType": "regex",
+      "description": "Track workflow validator in canonical config and generated workflows",
+      "managerFilePatterns": [
+        "/^\\.github/automation\\.yml$/",
+        "/^\\.github/workflows/.+\\.yml$/"
+      ],
+      "matchStrings": [
+        "ACTIONLINT_VERSION:\\s*(?<currentValue>v?\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "rhysd/actionlint",
+      "datasourceTemplate": "github-releases",
+      "versioningTemplate": "semver-coerced"
+    },
+    {
+      "customType": "regex",
+      "description": "Track the notify_push release tag and immutable source commit together",
+      "managerFilePatterns": [
+        "/^images/nextcloud/nextcloud-notifypush/container\\.yaml$/"
+      ],
+      "matchStrings": [
+        "NOTIFYPUSH_VERSION:\\s*\\n\\s*value:\\s*v(?<currentValue>\\d+\\.\\d+\\.\\d+)[\\s\\S]*?NOTIFYPUSH_COMMIT:\\s*\\n\\s*value:\\s*(?<currentDigest>[a-f0-9]{40})"
+      ],
+      "depNameTemplate": "nextcloud/notify_push",
+      "packageNameTemplate": "nextcloud/notify_push",
+      "datasourceTemplate": "github-tags",
+      "versioningTemplate": "semver",
+      "extractVersionTemplate": "^v(?<version>.+)$"
+    },
+    {
+      "customType": "regex",
+      "description": "Track exact PHP_APCU_VERSION in PHP image metadata",
+      "managerFilePatterns": [
+        "/^images\\/(?:nextcloud\\/nextcloud-phpfpm|typo3\\/typo3-phpfpm)\\/container\\.yaml$/"
+      ],
+      "matchStrings": [
+        "PHP_APCU_VERSION:\\s*\\n\\s*value:\\s*(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "krakjoe/apcu",
+      "packageNameTemplate": "krakjoe/apcu",
+      "datasourceTemplate": "github-tags",
+      "versioningTemplate": "semver",
+      "extractVersionTemplate": "^v(?<version>.+)$"
+    },
+    {
+      "customType": "regex",
+      "description": "Track exact PHP_IMAGICK_VERSION in PHP image metadata",
+      "managerFilePatterns": [
+        "/^images\\/(?:nextcloud\\/nextcloud-phpfpm|typo3\\/typo3-phpfpm)\\/container\\.yaml$/"
+      ],
+      "matchStrings": [
+        "PHP_IMAGICK_VERSION:\\s*\\n\\s*value:\\s*(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "Imagick/imagick",
+      "packageNameTemplate": "Imagick/imagick",
+      "datasourceTemplate": "github-tags",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "description": "Track exact PHP_REDIS_VERSION in PHP image metadata",
+      "managerFilePatterns": [
+        "/^images\\/(?:nextcloud\\/nextcloud-phpfpm|typo3\\/typo3-phpfpm)\\/container\\.yaml$/"
+      ],
+      "matchStrings": [
+        "PHP_REDIS_VERSION:\\s*\\n\\s*value:\\s*(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "phpredis/phpredis",
+      "packageNameTemplate": "phpredis/phpredis",
+      "datasourceTemplate": "github-tags",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "description": "Track exact COMPOSER_VERSION in PHP image metadata",
+      "managerFilePatterns": [
+        "/^images\\/(?:nextcloud\\/nextcloud-phpfpm|typo3\\/typo3-phpfpm)\\/container\\.yaml$/"
+      ],
+      "matchStrings": [
+        "COMPOSER_VERSION:\\s*\\n\\s*value:\\s*(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "composer/composer",
+      "packageNameTemplate": "composer/composer",
+      "datasourceTemplate": "github-releases",
+      "versioningTemplate": "semver"
+    }
+  ],
+  "github-actions": {
+    "managerFilePatterns": [
+      "/(^|/)(workflow-templates|\\.(?:github|gitea|forgejo)/(?:workflows|actions))/.+\\.ya?ml$/",
+      "/(^|/)action\\.ya?ml$/"
     ]
+  },
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "schedule": [],
+    "dependencyDashboardApproval": false
+  },
+  "packageRules": [
+    {
+      "description": "Review both Grype architecture release assets in one update",
+      "matchManagers": ["custom.regex"],
+      "matchDatasources": ["github-release-attachments"],
+      "matchPackageNames": ["anchore/grype"],
+      "groupName": "Grype scanner archives",
+      "automerge": false
+    },
+    {
+      "description": "Keep GitHub Actions pinned to immutable commits while allowing Renovate updates",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "pinDigests": true
+    },
+    {
+      "description": "Do not append a digest to the Cosign release input; the installer action itself remains commit-pinned",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchPackageNames": [
+        "sigstore/cosign"
+      ],
+      "pinDigests": false
+    },
+    {
+      "description": "Use a readable topic for uv updates",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchPackageNames": [
+        "astral-sh/uv"
+      ],
+      "commitMessageTopic": "uv"
+    },
+    {
+      "description": "Use a readable topic for Cosign updates",
+      "matchPackageNames": [
+        "sigstore/cosign"
+      ],
+      "commitMessageTopic": "cosign"
+    },
+    {
+      "description": "Use a readable topic for Syft updates",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchPackageNames": [
+        "anchore/syft"
+      ],
+      "commitMessageTopic": "syft"
+    },
+    {
+      "description": "Squash-merge pinned container digest updates after required CI",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "automerge": true,
+      "automergeType": "pr",
+      "automergeStrategy": "squash",
+      "platformAutomerge": true
+    },
+    {
+      "description": "Squash-merge patch updates for externally pinned container images after required CI",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchUpdateTypes": [
+        "patch"
+      ],
+      "automerge": true,
+      "automergeType": "pr",
+      "automergeStrategy": "squash",
+      "platformAutomerge": true
+    },
+    {
+      "description": "Keep source-built Podman images on stable Fedora 44 while allowing digest refreshes",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchFileNames": [
+        "/^images\\/podman\\/podman-\\d+\\.\\d+-(?:rootful|rootless)\\/container\\.yaml$/",
+        "/^images\\/podman\\/payloads\\/podman-\\d+\\.\\d+\\.yaml$/"
+      ],
+      "matchPackageNames": [
+        "registry.fedoraproject.org/fedora-minimal"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "allowedVersions": "/^44$/"
+    },
+    {
+      "description": "Keep distro compatibility images on their declared OS release while allowing digest refreshes",
+      "matchFileNames": [
+        "/^images\\/podman\\/podman-(?:alpine|arch|centos|debian|fedora|opensuse|ubi|ubuntu)-.+\\/container\\.yaml$/",
+        "/^images\\/docker\\/docker-(?:alpine|arch|debian|fedora|opensuse|ubuntu)(?:-.+)?-(?:rootful|rootless)\\/container\\.yaml$/"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchUpdateTypes": [
+        "major",
+        "minor",
+        "patch"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "Squash-merge tested notify_push patch updates after required CI",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchPackageNames": [
+        "nextcloud/notify_push"
+      ],
+      "matchUpdateTypes": [
+        "patch"
+      ],
+      "automerge": true,
+      "automergeType": "pr",
+      "automergeStrategy": "squash",
+      "platformAutomerge": true
+    },
+    {
+      "description": "Keep Podman 5.4 on its declared compatibility line",
+      "matchDepNames": [
+        "podman-5.4"
+      ],
+      "allowedVersions": "/^5\\.4\\./"
+    },
+    {
+      "description": "Keep Podman 5.5 on its declared compatibility line",
+      "matchDepNames": [
+        "podman-5.5"
+      ],
+      "allowedVersions": "/^5\\.5\\./"
+    },
+    {
+      "description": "Keep Podman 5.6 on its declared compatibility line",
+      "matchDepNames": [
+        "podman-5.6"
+      ],
+      "allowedVersions": "/^5\\.6\\./"
+    },
+    {
+      "description": "Keep Podman 5.7 on its declared compatibility line",
+      "matchDepNames": [
+        "podman-5.7"
+      ],
+      "allowedVersions": "/^5\\.7\\./"
+    },
+    {
+      "description": "Keep Podman 5.8 on its declared compatibility line",
+      "matchDepNames": [
+        "podman-5.8"
+      ],
+      "allowedVersions": "/^5\\.8\\./"
+    },
+    {
+      "description": "Keep Podman 6.0 on its declared compatibility line",
+      "matchDepNames": [
+        "podman-6.0"
+      ],
+      "allowedVersions": "/^6\\.0\\./"
+    },
+    {
+      "description": "Keep Podman 6.1 on its declared compatibility line",
+      "matchDepNames": [
+        "podman-6.1"
+      ],
+      "allowedVersions": "/^6\\.1\\./"
+    },
+    {
+      "description": "Squash-merge tested Podman patch releases for each fixed minor line",
+      "matchDepNames": [
+        "/^podman-/"
+      ],
+      "matchUpdateTypes": [
+        "patch"
+      ],
+      "automerge": true,
+      "automergeType": "pr",
+      "automergeStrategy": "squash",
+      "platformAutomerge": true
+    },
+    {
+      "description": "Update Podman 6 networking helpers together",
+      "matchPackageNames": [
+        "containers/aardvark-dns",
+        "containers/netavark"
+      ],
+      "groupName": "Podman 6 networking helpers"
+    },
+    {
+      "description": "Squash-merge tested patch updates for Podman 6 networking helpers",
+      "matchPackageNames": [
+        "containers/aardvark-dns",
+        "containers/netavark"
+      ],
+      "matchUpdateTypes": [
+        "patch"
+      ],
+      "automerge": true,
+      "automergeType": "pr",
+      "automergeStrategy": "squash",
+      "platformAutomerge": true
+    },
+    {
+      "description": "Squash-merge tested Python automation dependency updates",
+      "matchPackageNames": [
+        "jinja2",
+        "jsonschema",
+        "pyyaml",
+        "ruff"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "automerge": true,
+      "automergeType": "pr",
+      "automergeStrategy": "squash",
+      "platformAutomerge": true
+    },
+    {
+      "description": "Squash-merge patch updates for commit-pinned GitHub Actions after required CI",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchUpdateTypes": [
+        "patch"
+      ],
+      "automerge": true,
+      "automergeType": "pr",
+      "automergeStrategy": "squash",
+      "platformAutomerge": true
+    },
+    {
+      "description": "Squash-merge minor and patch updates for selected build tooling",
+      "matchPackageNames": [
+        "anchore/syft",
+        "astral-sh/uv",
+        "sigstore/cosign"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "automerge": true,
+      "automergeType": "pr",
+      "automergeStrategy": "squash",
+      "platformAutomerge": true
+    },
+    {
+      "description": "Upgrade native Ubuntu runners together through canonical configuration and generated workflows",
+      "matchDatasources": [
+        "github-runners"
+      ],
+      "matchPackageNames": [
+        "ubuntu"
+      ],
+      "groupName": "GitHub Ubuntu runners"
+    },
+    {
+      "description": "Keep workflow template action updates in the same group as generated workflow action updates",
+      "matchManagers": [
+        "github-actions",
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "github-tags"
+      ],
+      "groupName": "GitHub Actions",
+      "matchUpdateTypes": [
+        "digest",
+        "pinDigest",
+        "patch"
+      ],
+      "matchFileNames": [
+        ".github/workflows/**",
+        ".github/actions/**",
+        ".github/workflow-templates/**"
+      ]
+    },
+    {
+      "description": "PHP extension and Composer version updates require human review",
+      "matchPackageNames": [
+        "krakjoe/apcu",
+        "Imagick/imagick",
+        "phpredis/phpredis",
+        "composer/composer"
+      ],
+      "automerge": false
+    },
+    {
+      "description": "Group compatible patch and digest updates for nextcloud-notifypush",
+      "matchFileNames": [
+        "/^images\\/(?:nextcloud|typo3)\\/nextcloud-notifypush\\/container\\.yaml$/"
+      ],
+      "matchUpdateTypes": [
+        "patch",
+        "digest"
+      ],
+      "groupName": "nextcloud-notifypush patch and digest inputs"
+    },
+    {
+      "description": "Group compatible patch and digest updates for nextcloud-phpfpm",
+      "matchFileNames": [
+        "/^images\\/(?:nextcloud|typo3)\\/nextcloud-phpfpm\\/container\\.yaml$/"
+      ],
+      "matchUpdateTypes": [
+        "patch",
+        "digest"
+      ],
+      "groupName": "nextcloud-phpfpm patch and digest inputs"
+    },
+    {
+      "description": "Group compatible patch and digest updates for typo3-phpfpm",
+      "matchFileNames": [
+        "/^images\\/(?:nextcloud|typo3)\\/typo3-phpfpm\\/container\\.yaml$/"
+      ],
+      "matchUpdateTypes": [
+        "patch",
+        "digest"
+      ],
+      "groupName": "typo3-phpfpm patch and digest inputs"
+    },
+    {
+      "description": "Update Podman 5.4 payload and both consumer versions together",
+      "matchDepNames": [
+        "podman-5.4"
+      ],
+      "groupName": "Podman 5.4 release"
+    },
+    {
+      "description": "Update Podman 5.5 payload and both consumer versions together",
+      "matchDepNames": [
+        "podman-5.5"
+      ],
+      "groupName": "Podman 5.5 release"
+    },
+    {
+      "description": "Update Podman 5.6 payload and both consumer versions together",
+      "matchDepNames": [
+        "podman-5.6"
+      ],
+      "groupName": "Podman 5.6 release"
+    },
+    {
+      "description": "Update Podman 5.7 payload and both consumer versions together",
+      "matchDepNames": [
+        "podman-5.7"
+      ],
+      "groupName": "Podman 5.7 release"
+    },
+    {
+      "description": "Update Podman 5.8 payload and both consumer versions together",
+      "matchDepNames": [
+        "podman-5.8"
+      ],
+      "groupName": "Podman 5.8 release"
+    },
+    {
+      "description": "Update Podman 6.0 payload and both consumer versions together",
+      "matchDepNames": [
+        "podman-6.0"
+      ],
+      "groupName": "Podman 6.0 release"
+    },
+    {
+      "description": "Update Podman 6.1 payload and both consumer versions together",
+      "matchDepNames": [
+        "podman-6.1"
+      ],
+      "groupName": "Podman 6.1 release"
+    },
+    {
+      "description": "Update source Podman Fedora base in payloads and both runtime variants together",
+      "matchPackageNames": [
+        "registry.fedoraproject.org/fedora-minimal"
+      ],
+      "matchFileNames": [
+        "/^images\\/podman\\/payloads\\/podman-\\d+\\.\\d+\\.yaml$/",
+        "/^images\\/podman\\/podman-\\d+\\.\\d+-(?:rootful|rootless)\\/container\\.yaml$/"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "groupName": "Podman Fedora 44 base"
+    },
+    {
+      "description": "Keep upstream Docker payloads and runtime images on Alpine 3.24 while allowing digest refreshes",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchFileNames": [
+        "/^images\\/docker\\/upstream\\/.+\\/payload\\.yaml$/",
+        "/^images\\/docker\\/docker-\\d+(?:\\.\\d+)?-(?:rootful|rootless)\\/container\\.yaml$/"
+      ],
+      "matchPackageNames": [
+        "docker.io/library/alpine"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "allowedVersions": "/^3\\.24$/"
+    },
+    {
+      "description": "Update Docker Alpine base digests in payloads and runtime variants together",
+      "matchPackageNames": [
+        "docker.io/library/alpine"
+      ],
+      "matchFileNames": [
+        "/^images\\/docker\\/upstream\\/.+\\/payload\\.yaml$/",
+        "/^images\\/docker\\/docker-\\d+(?:\\.\\d+)?-(?:rootful|rootless)\\/container\\.yaml$/"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "groupName": "Docker Alpine 3.24 base"
+    },
+    {
+      "description": "Update Docker Alpine 3.24 distro base digest for both root modes together",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "docker.io/library/alpine"
+      ],
+      "matchFileNames": [
+        "/^images\\/docker\\/docker-alpine-3\\.24-(?:rootful|rootless)\\/container\\.yaml$/"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "groupName": "Docker Alpine 3.24 distro base"
+    },
+    {
+      "description": "Update Docker Arch distro base digest for both root modes together",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "docker.io/library/archlinux"
+      ],
+      "matchFileNames": [
+        "/^images\\/docker\\/docker-arch-(?:rootful|rootless)\\/container\\.yaml$/"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "groupName": "Docker Arch distro base"
+    },
+    {
+      "description": "Update Docker Debian 11 distro base digest for both root modes together",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "docker.io/library/debian"
+      ],
+      "matchFileNames": [
+        "/^images\\/docker\\/docker-debian-11-(?:rootful|rootless)\\/container\\.yaml$/"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "groupName": "Docker Debian 11 distro base"
+    },
+    {
+      "description": "Update Docker Debian 12 distro base digest for both root modes together",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "docker.io/library/debian"
+      ],
+      "matchFileNames": [
+        "/^images\\/docker\\/docker-debian-12-(?:rootful|rootless)\\/container\\.yaml$/"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "groupName": "Docker Debian 12 distro base"
+    },
+    {
+      "description": "Update Docker Debian 13 distro base digest for both root modes together",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "docker.io/library/debian"
+      ],
+      "matchFileNames": [
+        "/^images\\/docker\\/docker-debian-13-(?:rootful|rootless)\\/container\\.yaml$/"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "groupName": "Docker Debian 13 distro base"
+    },
+    {
+      "description": "Update Docker Fedora 43 distro base digest for both root modes together",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "registry.fedoraproject.org/fedora"
+      ],
+      "matchFileNames": [
+        "/^images\\/docker\\/docker-fedora-43-(?:rootful|rootless)\\/container\\.yaml$/"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "groupName": "Docker Fedora 43 distro base"
+    },
+    {
+      "description": "Update Docker Fedora 44 distro base digest for both root modes together",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "registry.fedoraproject.org/fedora"
+      ],
+      "matchFileNames": [
+        "/^images\\/docker\\/docker-fedora-44-(?:rootful|rootless)\\/container\\.yaml$/"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "groupName": "Docker Fedora 44 distro base"
+    },
+    {
+      "description": "Update Docker openSUSE Leap 16.0 distro base digest for both root modes together",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "registry.opensuse.org/opensuse/leap"
+      ],
+      "matchFileNames": [
+        "/^images\\/docker\\/docker-opensuse-leap-16\\.0-(?:rootful|rootless)\\/container\\.yaml$/"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "groupName": "Docker openSUSE Leap 16.0 distro base"
+    },
+    {
+      "description": "Update Docker openSUSE Tumbleweed distro base digest for both root modes together",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "registry.opensuse.org/opensuse/tumbleweed"
+      ],
+      "matchFileNames": [
+        "/^images\\/docker\\/docker-opensuse-tumbleweed-(?:rootful|rootless)\\/container\\.yaml$/"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "groupName": "Docker openSUSE Tumbleweed distro base"
+    },
+    {
+      "description": "Update Docker Ubuntu 22.04 distro base digest for both root modes together",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "docker.io/library/ubuntu"
+      ],
+      "matchFileNames": [
+        "/^images\\/docker\\/docker-ubuntu-22\\.04-(?:rootful|rootless)\\/container\\.yaml$/"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "groupName": "Docker Ubuntu 22.04 distro base"
+    },
+    {
+      "description": "Update Docker Ubuntu 24.04 distro base digest for both root modes together",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "docker.io/library/ubuntu"
+      ],
+      "matchFileNames": [
+        "/^images\\/docker\\/docker-ubuntu-24\\.04-(?:rootful|rootless)\\/container\\.yaml$/"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "groupName": "Docker Ubuntu 24.04 distro base"
+    },
+    {
+      "description": "Update Docker Ubuntu 26.04 distro base digest for both root modes together",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "docker.io/library/ubuntu"
+      ],
+      "matchFileNames": [
+        "/^images\\/docker\\/docker-ubuntu-26\\.04-(?:rootful|rootless)\\/container\\.yaml$/"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "groupName": "Docker Ubuntu 26.04 distro base"
+    }
+  ]
 }
