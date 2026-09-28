@@ -6,7 +6,7 @@ The catalogue schema validates the declaration fields and observation envelope. 
 
 Markdown exports remain publicly retrievable, but `robots.txt` asks compliant search crawlers to skip `/markdown/` to reduce duplicate crawling. The linked HTML pages are the primary search documents. This does not guarantee deindexing, and it does not restrict direct access to the exports.
 
-The documentation site publishes machine-readable catalogue data alongside the human-readable pages. The intended canonical site is https://containers.strukturpiloten.de/; these endpoints become available after GitHub Pages, the custom domain, and DNS are configured.
+The documentation site at **https://containers.strukturpiloten.de/** publishes machine-readable catalogue data alongside its human-readable pages.
 
 | Path | Content |
 | --- | --- |

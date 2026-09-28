@@ -1,6 +1,6 @@
 # Documentation site operations
 
-The intended public URL is **https://containers.strukturpiloten.de/**. The site is generated from the repository's declarations and an optional, timestamped registry observation. The registry snapshot is published at `/data/registry-snapshot.json`; an observation should only be described as verified when its status and source say so. The live domain and Pages deployment must be checked after setup; the URL in this file is the intended address, not proof of a live site.
+The public documentation URL is **https://containers.strukturpiloten.de/**. The site is generated from the repository's declarations and an optional, timestamped registry observation. The registry snapshot is published at `/data/registry-snapshot.json`; an observation should only be described as verified when its status and source say so. Check the live domain, HTTPS, and Pages deployment after configuration changes.
 
 ## One-time GitHub Pages and DNS setup
 
@@ -10,7 +10,9 @@ In the DNS zone for `strukturpiloten.de`, create this record:
 
 | Type | Name / host | Target / value |
 | --- | --- | --- |
-| CNAME | `containers` | `strukturpiloten.github.io` |
+| CNAME | `containers` | `strukturpiloten.github.io.` |
+
+The final dot makes the target an absolute DNS name. Include it when the provider otherwise appends your zone name; the target must not end with `github.io.strukturpiloten.de`. Providers that normalize fully qualified names may omit the dot in their display.
 
 Do not add a URL, path, port, or IP address as the CNAME target. If another record already uses the `containers` name, replace that conflicting record. Wait for DNS propagation and GitHub's certificate issuance, then enable **Enforce HTTPS** in Pages settings. Verify the CNAME with `dig +short CNAME containers.strukturpiloten.de` and the site with `curl -I https://containers.strukturpiloten.de/`. The response should be successful and use HTTPS. Check `https://containers.strukturpiloten.de/data/registry-snapshot.json` separately after the first successful refresh.
 
