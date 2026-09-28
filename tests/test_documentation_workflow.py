@@ -40,6 +40,13 @@ class DocumentationWorkflowTests(unittest.TestCase):
         self.assertIn("--snapshot", str(jobs["build"]["steps"]))
         self.assertEqual(jobs["build"]["steps"][0]["with"]["fetch-depth"], 0)
 
+    def test_site_build_checkout_fetches_shared_documentation_submodule(self) -> None:
+        jobs = self.workflow["jobs"]
+        self.assertNotIn("submodules", jobs["gate"]["steps"][0]["with"])
+        submodules = jobs["build"]["steps"][0]["with"]["submodules"]
+        self.assertIsInstance(submodules, bool)
+        self.assertTrue(submodules)
+
     def test_documentation_only_pushes_do_not_enter_publish_workflow(self) -> None:
         publish = yaml.safe_load(Path(".github/workflows/publish-images.yml").read_text(encoding="utf-8"))
         paths = publish[True]["push"]["paths"]
