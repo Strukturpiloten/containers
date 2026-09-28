@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import copy
 import datetime as dt
 import hashlib
 import json
@@ -16,6 +17,7 @@ import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
+from http import HTTPStatus
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +38,10 @@ MAX_CONFIG_BYTES = 4 * 1024 * 1024
 
 class ObservationError(ValueError):
     """A registry response cannot support the proposed observation."""
+
+
+class TransientGitHubReadError(ObservationError):
+    """A temporary GitHub read failure cannot disprove earlier verified evidence."""
 
 
 def _now() -> dt.datetime:
@@ -223,9 +229,17 @@ def _github_json(url: str, *, token: str | None, timeout: int, accept: str = "ap
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
             return response.read()
+    except urllib.error.HTTPError as error:
+        msg = f"GitHub evidence request failed: {error}."
+        if (
+            error.code in {HTTPStatus.REQUEST_TIMEOUT, HTTPStatus.TOO_MANY_REQUESTS}
+            or error.code >= HTTPStatus.INTERNAL_SERVER_ERROR
+        ):
+            raise TransientGitHubReadError(msg) from error
+        raise ObservationError(msg) from error
     except (urllib.error.URLError, TimeoutError) as error:
         msg = f"GitHub evidence request failed: {error}."
-        raise ObservationError(msg) from error
+        raise TransientGitHubReadError(msg) from error
 
 
 def _release_proof(  # noqa: C901, PLR0912, PLR0913, PLR0915
@@ -410,8 +424,14 @@ def _declaration_alignment(metadata: dict[str, Any], asset: dict[str, Any]) -> d
     return {"status": "different" if differences else "matched", "differences": differences}
 
 
-def _observe_one(  # noqa: C901
-    metadata: dict[str, Any], registry: PublicRegistry, repository: str, token: str | None, timeout: int
+def _observe_one(  # noqa: C901, PLR0913
+    metadata: dict[str, Any],
+    registry: PublicRegistry,
+    repository: str,
+    token: str | None,
+    timeout: int,
+    *,
+    prior: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     name, image = metadata["name"], metadata["image"]
     observed_at = _now().isoformat()
@@ -460,6 +480,17 @@ def _observe_one(  # noqa: C901
             token=token,
             timeout=timeout,
         )
+    except TransientGitHubReadError as error:
+        previous_latest = prior.get("latest") if prior and prior.get("image") == image else None
+        if (
+            prior
+            and prior.get("status") in {"observed", "stale"}
+            and isinstance(previous_latest, dict)
+            and previous_latest.get("digest") == digest
+            and previous_latest.get("evidence", {}).get("status") == "verified"
+        ):
+            raise
+        evidence = {"status": "unavailable", "reason": str(error)[:MAX_ERROR]}
     except (ObservationError, ValueError, KeyError, TypeError) as error:
         evidence = {"status": "unavailable", "reason": str(error)[:MAX_ERROR]}
     else:
@@ -502,7 +533,7 @@ def _fallback(
     metadata: dict[str, Any], prior: dict[str, Any] | None, error: Exception, now: dt.datetime
 ) -> dict[str, Any]:
     result = (
-        dict(prior)
+        copy.deepcopy(prior)
         if prior and prior.get("image") == metadata["image"] and prior.get("status") in {"observed", "stale"}
         else {
             "name": metadata["name"],
@@ -512,6 +543,12 @@ def _fallback(
             "tags": None,
         }
     )
+    if result["latest"] is not None:
+        result["latest"]["declarationAlignment"] = {
+            "status": "unknown",
+            "reason": "Current declarations could not be compared with a freshly verified release asset.",
+            "differences": [],
+        }
     observed_at = result["observedAt"]
     result.update(
         {
@@ -550,7 +587,12 @@ def collect(
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     rows: list[dict[str, Any]] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(_observe_one, image, client, repository, token, timeout): image for image in images}
+        futures = {
+            executor.submit(
+                _observe_one, image, client, repository, token, timeout, prior=prior.get(image["name"])
+            ): image
+            for image in images
+        }
         for future in concurrent.futures.as_completed(futures):
             image = futures[future]
             try:

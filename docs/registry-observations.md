@@ -38,7 +38,8 @@ the observed image. The publisher's consistency gate checks attached runtime
 and vulnerability scan records. These states do not claim signature or
 provenance verification; those fields remain `unknown`. If the release cannot
 be read or matched, the registry observation remains visible while evidence is
-`unavailable` with a reason.
+`unavailable` with a reason, except for the same-digest transient read failure
+described below.
 
 `latest.declarationAlignment` separately compares the verified live release
 with the current `container.yaml`: image version, runnable architectures,
@@ -46,13 +47,23 @@ build arguments, and payload manifest SHA-256 where present. `matched` means
 those declarations agree. `different` includes field-level published and
 declared values, such as a base-image digest updated after the latest image
 publication. The release evidence remains verified for its observed digest
-when the declaration has advanced. `unknown` means there is no verified
-release asset from which to compare build inputs.
+when the declaration has advanced. `unknown` means no current comparison with
+a verified release asset could be made.
 
-Each image refresh succeeds or fails independently. On failure, a previous
-observation for the same image is kept as `stale` with its original
-`observedAt`, updated `ageSeconds`, and `refreshFailed` reason. Without a prior
-observation the image is `unavailable`. Consumers should show these states and
-never treat an old digest as a current registry check. The command validates
+Each image refresh succeeds or fails independently. On a registry failure, a
+previous observation for the same image is kept as `stale` with its original
+`observedAt`, updated `ageSeconds`, and `refreshFailed` reason. A transient
+GitHub release read failure also retains the **whole prior observation** only
+when the freshly inspected `latest` digest equals the prior digest and the
+prior evidence was verified. The retained digest, tags, release proof, and
+`publishedAt` retain their earlier meaning; `observedAt` is not advanced to
+the attempted refresh time. Its `declarationAlignment` becomes `unknown`
+because current declarations cannot be compared with the unavailable release
+asset. A changed digest, missing release, or proof mismatch never restores
+prior evidence: the fresh registry observation instead reports evidence as
+`unavailable`. Without a prior observation, a registry failure makes the image
+`unavailable`, while a GitHub release read failure leaves a fresh registry
+observation with unavailable evidence. Consumers should show these states and
+never treat a stale digest as a current registry check. The command validates
 the resulting file against [the snapshot schema](registry-snapshot.schema.json)
 and does not alter the checked-in catalogue.

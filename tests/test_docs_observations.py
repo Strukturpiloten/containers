@@ -6,6 +6,7 @@ import copy
 import datetime as dt
 import json
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 from scripts import docs_observations as observations
@@ -75,7 +76,99 @@ def observed_row() -> dict:
     }
 
 
+def verified_row() -> dict:
+    """Return a previous observation with verified immutable release evidence."""
+    row = observed_row()
+    row["latest"]["publishedAt"] = NOW
+    row["latest"]["evidence"] = {
+        "status": "verified",
+        "releaseUrl": None,
+        "assetUrl": None,
+        "assetDigest": CONFIG_DIGEST,
+        "buildSucceededAt": NOW,
+        "runtime": "verified",
+        "scan": "verified",
+        "signature": "unknown",
+        "provenance": "unknown",
+    }
+    row["latest"]["declarationAlignment"] = {"status": "matched", "differences": []}
+    return row
+
+
 class ObservationTests(unittest.TestCase):
+    def _collect_with_previous(self, prior: dict | None, registry: FakeRegistry | None = None) -> dict:
+        previous = (
+            {"schemaVersion": 1, "repository": "Strukturpiloten/containers", "generatedAt": NOW, "images": [prior]}
+            if prior
+            else None
+        )
+        with (
+            patch.object(observations.container_engine, "_load_images", return_value=[METADATA]),
+            patch.object(observations.container_engine, "_validate_images"),
+            patch.object(observations, "_platforms", return_value=[PLATFORM]),
+        ):
+            return observations.collect(previous=previous, registry=registry or FakeRegistry(), workers=1)["images"][0]
+
+    def test_transient_github_500_retains_same_digest_verified_observation_as_stale(self) -> None:
+        prior = verified_row()
+        failure = urllib.error.HTTPError("https://api.github.com/", 500, "server error", {}, None)
+        with patch.object(observations.urllib.request, "urlopen", side_effect=failure):
+            row = self._collect_with_previous(prior)
+        self.assertEqual(row["status"], "stale")
+        self.assertEqual(row["observedAt"], prior["observedAt"])
+        self.assertTrue(row["refreshFailed"])
+        self.assertIn("500", row["refreshError"])
+        self.assertEqual(row["latest"]["evidence"], prior["latest"]["evidence"])
+        self.assertEqual(row["latest"]["publishedAt"], prior["latest"]["publishedAt"])
+        self.assertEqual(row["latest"]["declarationAlignment"]["status"], "unknown")
+        self.assertEqual(prior["latest"]["declarationAlignment"]["status"], "matched")
+
+    def test_transient_github_500_does_not_restore_proof_for_changed_digest(self) -> None:
+        class ChangedRegistry(FakeRegistry):
+            def raw(self, image: str, selector: str, *, expected: str | None = None) -> tuple[str, dict]:
+                digest, index = super().raw(image, selector, expected=expected)
+                return (OTHER_DIGEST if selector == ":latest" else digest), index
+
+        failure = urllib.error.HTTPError("https://api.github.com/", 500, "server error", {}, None)
+        with patch.object(observations.urllib.request, "urlopen", side_effect=failure):
+            row = self._collect_with_previous(verified_row(), ChangedRegistry())
+        self.assertEqual(row["status"], "observed")
+        self.assertEqual(row["latest"]["digest"], OTHER_DIGEST)
+        self.assertEqual(row["latest"]["evidence"]["status"], "unavailable")
+        self.assertIsNone(row["latest"]["publishedAt"])
+
+    def test_missing_or_mismatched_release_never_restores_prior_proof(self) -> None:
+        for failure in (
+            urllib.error.HTTPError("https://api.github.com/", 404, "not found", {}, None),
+            observations.ObservationError("Evidence asset digest mismatch."),
+        ):
+            with self.subTest(failure=failure):
+                if isinstance(failure, urllib.error.HTTPError):
+                    context = patch.object(observations.urllib.request, "urlopen", side_effect=failure)
+                else:
+                    context = patch.object(observations, "_release_proof", side_effect=failure)
+                with context:
+                    row = self._collect_with_previous(verified_row())
+                self.assertEqual(row["status"], "observed")
+                self.assertEqual(row["latest"]["evidence"]["status"], "unavailable")
+                self.assertIsNone(row["latest"]["publishedAt"])
+
+    def test_transient_github_500_without_prior_keeps_fresh_registry_observation(self) -> None:
+        failure = urllib.error.HTTPError("https://api.github.com/", 500, "server error", {}, None)
+        with patch.object(observations.urllib.request, "urlopen", side_effect=failure):
+            row = self._collect_with_previous(None)
+        self.assertEqual(row["status"], "observed")
+        self.assertEqual(row["latest"]["evidence"]["status"], "unavailable")
+
+    def test_registry_fallback_clears_old_alignment_without_mutating_previous(self) -> None:
+        prior = verified_row()
+        row = observations._fallback(
+            METADATA, prior, observations.ObservationError("registry failed"), dt.datetime.now(dt.UTC)
+        )
+        self.assertEqual(row["status"], "stale")
+        self.assertEqual(row["latest"]["declarationAlignment"]["status"], "unknown")
+        self.assertEqual(prior["latest"]["declarationAlignment"]["status"], "matched")
+
     def test_current_aliases_and_historical_digest_are_separate(self) -> None:
         with (
             patch.object(observations, "_platforms", return_value=[PLATFORM]),
@@ -133,7 +226,7 @@ class ObservationTests(unittest.TestCase):
     def test_partial_refresh_keeps_success_separate(self) -> None:
         second = {**METADATA, "name": "other", "image": "ghcr.io/strukturpiloten/other"}
 
-        def refresh(image: dict, *_args: object) -> dict:
+        def refresh(image: dict, *_args: object, **_kwargs: object) -> dict:
             if image["name"] == "other":
                 msg = "missing"
                 raise observations.ObservationError(msg)

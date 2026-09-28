@@ -206,7 +206,7 @@ def index_markdown(report: dict[str, Any]) -> str:
         count = len(by_family[family])
         lines.append(
             f'<a class="family-card" href="#{family}-images"><strong>{FAMILY_LABELS[family]}</strong>'
-            f"<span>{count} declared images</span></a>"
+            f"<span>{count} declared {'image' if count == 1 else 'images'}</span></a>"
         )
     lines += [
         "</div>",
