@@ -76,6 +76,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
           ref: main
+          submodules: true
       - name: Wait for publication when a push also changes image inputs
         id: scope
         shell: bash
