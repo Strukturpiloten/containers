@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import copy
 import datetime as dt
 import html
 import json
 from collections import defaultdict
 from typing import Any
 
+from scripts import container_engine, docs_observations
 from scripts.maintenance import lifecycle_for
 from scripts.policy import semver_tags
 
@@ -86,6 +88,26 @@ def _php_base_version(metadata: dict[str, Any]) -> str | None:
     return base.split("@", 1)[0].rsplit(":", 1)[-1]
 
 
+def _current_observation(observed: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
+    """Keep artifact proof while checking whether saved alignment is current."""
+    result = copy.deepcopy(observed)
+    latest = result.get("latest")
+    alignment = latest.get("declarationAlignment") if isinstance(latest, dict) else None
+    if not isinstance(alignment, dict) or alignment.get("status") not in {"matched", "different"}:
+        return result
+    try:
+        fingerprint = docs_observations.declaration_fingerprint(metadata)
+    except container_engine.ContainerEngineError, KeyError, TypeError, ValueError:
+        fingerprint = None
+    if alignment.get("declarationFingerprint") != fingerprint or fingerprint is None:
+        latest["declarationAlignment"] = {
+            "status": "unknown",
+            "reason": "Saved comparison is not bound to current declaration inputs.",
+            "differences": [],
+        }
+    return result
+
+
 def catalogue(  # noqa: C901 - each declaration and observation needs its own identity check.
     images: list[dict[str, Any]], snapshot: dict[str, Any] | None, *, source_revision: str
 ) -> dict[str, Any]:
@@ -118,6 +140,8 @@ def catalogue(  # noqa: C901 - each declaration and observation needs its own id
         if observed is not None and observed.get("image") != image:
             msg = f"Registry observation for {name} names a different image."
             raise ValueError(msg)
+        if observed is not None:
+            observed = _current_observation(observed, metadata)
         distribution = _distribution(name, family)
         metadata_path = metadata.get("metadataFile", f"images/{family}/{name}/container.yaml")
         if not isinstance(metadata_path, str) or not metadata_path.startswith("images/"):

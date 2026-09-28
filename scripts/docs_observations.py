@@ -395,8 +395,29 @@ def _release_proof(  # noqa: C901, PLR0912, PLR0913, PLR0915
     return proof, evidence
 
 
+def _declaration_inputs(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Select exactly the current declaration fields compared with a release."""
+    return {
+        "version": metadata["version"],
+        "architectures": sorted(metadata["build"]["architectures"]),
+        "buildInputs": container_engine._component_inputs(metadata),  # noqa: SLF001
+    }
+
+
+def _declaration_inputs_and_fingerprint(metadata: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    inputs = _declaration_inputs(metadata)
+    raw = json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode()
+    return inputs, _digest(raw)
+
+
+def declaration_fingerprint(metadata: dict[str, Any]) -> str:
+    """Bind a saved comparison to its version, architectures, and build inputs."""
+    return _declaration_inputs_and_fingerprint(metadata)[1]
+
+
 def _declaration_alignment(metadata: dict[str, Any], asset: dict[str, Any]) -> dict[str, Any]:
     """Compare today's declaration with the separately verified live release."""
+    current, fingerprint = _declaration_inputs_and_fingerprint(metadata)
     differences = []
 
     def add(field: str, published: object, declared: object) -> None:
@@ -408,10 +429,9 @@ def _declaration_alignment(metadata: dict[str, Any], asset: dict[str, Any]) -> d
 
         differences.append({"field": field, "published": display(published)[:500], "declared": display(declared)[:500]})
 
-    add("version", f"v{asset['version']}", metadata["version"])
-    add("architectures", sorted(asset["architectureDigests"]), sorted(metadata["build"]["architectures"]))
+    add("version", f"v{asset['version']}", current["version"])
+    add("architectures", sorted(asset["architectureDigests"]), current["architectures"])
     recorded = asset.get("componentInputs")
-    current = container_engine._component_inputs(metadata)  # noqa: SLF001
 
     def compare(field: str, published: object, declared: object) -> None:
         if isinstance(published, dict) and isinstance(declared, dict):
@@ -420,8 +440,12 @@ def _declaration_alignment(metadata: dict[str, Any], asset: dict[str, Any]) -> d
         else:
             add(field, published, declared)
 
-    compare("buildInputs", recorded, current)
-    return {"status": "different" if differences else "matched", "differences": differences}
+    compare("buildInputs", recorded, current["buildInputs"])
+    return {
+        "status": "different" if differences else "matched",
+        "differences": differences,
+        "declarationFingerprint": fingerprint,
+    }
 
 
 def _observe_one(  # noqa: C901, PLR0913

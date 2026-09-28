@@ -400,11 +400,30 @@ class ObservationTests(unittest.TestCase):
             return_value={"payload": {"manifestSha256": "sha256:new"}},
         ):
             alignment = observations._declaration_alignment(metadata, asset)
+            expected_fingerprint = observations.declaration_fingerprint(metadata)
         self.assertEqual(alignment["status"], "different")
         self.assertEqual(
             {item["field"] for item in alignment["differences"]},
             {"version", "architectures", "buildInputs.payload.manifestSha256"},
         )
+        self.assertEqual(alignment["declarationFingerprint"], expected_fingerprint)
+        row = observed_row()
+        row["latest"]["declarationAlignment"] = alignment
+        observations.validate(
+            {"schemaVersion": 1, "repository": "Strukturpiloten/containers", "generatedAt": NOW, "images": [row]}
+        )
+
+    def test_declaration_fingerprint_binds_compared_inputs_only(self) -> None:
+        metadata = copy.deepcopy(METADATA)
+        with patch.object(observations.container_engine, "_component_inputs", return_value={"BASE": "old"}):
+            original = observations.declaration_fingerprint(metadata)
+            metadata["title"] = "Unrelated documentation title"
+            self.assertEqual(observations.declaration_fingerprint(metadata), original)
+            metadata["version"] = "v2.0.0"
+            self.assertNotEqual(observations.declaration_fingerprint(metadata), original)
+        metadata["version"] = METADATA["version"]
+        with patch.object(observations.container_engine, "_component_inputs", return_value={"BASE": "new"}):
+            self.assertNotEqual(observations.declaration_fingerprint(metadata), original)
 
     def test_schema_rejects_claimed_publication_time(self) -> None:
         row = observed_row()

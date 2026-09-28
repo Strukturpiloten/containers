@@ -51,6 +51,7 @@
         {"type": "object", "additionalProperties": false,
          "required": ["status", "differences"],
          "properties": {"status": {"enum": ["matched", "different"]},
+                        "declarationFingerprint": {"$ref": "#/$defs/digest"},
                         "differences": {"type": "array", "items": {"type": "object",
                           "additionalProperties": false, "required": ["field", "published", "declared"],
                           "properties": {"field": {"type": "string"}, "published": {"type": "string"},

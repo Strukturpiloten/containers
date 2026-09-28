@@ -50,6 +50,14 @@ publication. The release evidence remains verified for its observed digest
 when the declaration has advanced. `unknown` means no current comparison with
 a verified release asset could be made.
 
+An alignment of `matched` or `different` carries a
+`declarationFingerprint` of the compared version, sorted architectures, and
+build inputs. In a saved snapshot, the result describes declarations at the
+time of collection. When a later site build uses that snapshot with different
+declarations, or an older snapshot without the fingerprint, the catalogue
+shows alignment as `unknown`. This does not change the snapshot's observed
+digest, immutable release evidence, or publication timestamp.
+
 Each image refresh succeeds or fails independently. On a registry failure, a
 previous observation for the same image is kept as `stale` with its original
 `observedAt`, updated `ageSeconds`, and `refreshFailed` reason. A transient
