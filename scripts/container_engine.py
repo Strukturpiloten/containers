@@ -810,11 +810,6 @@ def _changed_files(before: str | None, sha: str, event_name: str) -> list[str] |
 
 
 def _input_matches(pattern: str, file_path: str) -> bool:
-    # Input globs deliberately cover whole image and shared runtime directories.
-    # Documentation beside those inputs is not copied into an image.
-    parts = Path(file_path).parts
-    if parts and parts[0] in {"images", "shared"} and (parts[-1] == "README.md" or "docs" in parts[1:-1]):
-        return False
     if pattern.endswith("/**"):
         base = pattern.removesuffix("/**")
         return file_path == base or file_path.startswith(f"{base}/")
@@ -1384,6 +1379,7 @@ def _local_podman_build_command(  # noqa: PLR0913 - the local image, source iden
 
     labels = _oci_labels()
     created = dt.datetime.fromtimestamp(source_timestamp, tz=dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    documentation_path = Path(str(image["metadataFile"])).parent.as_posix()
     build_args.extend(_build_arg("OCI_BASE_DIGEST", base_digest))
     build_args.extend(_build_arg("OCI_BASE_NAME", base_name))
     build_args.extend(_build_arg("OCI_CREATED", created))
@@ -1391,7 +1387,7 @@ def _local_podman_build_command(  # noqa: PLR0913 - the local image, source iden
     build_args.extend(
         _build_arg(
             "OCI_DOCUMENTATION",
-            f"https://containers.strukturpiloten.de/images/{image['name']}/",
+            f"https://github.com/Strukturpiloten/containers/tree/{source_revision}/{documentation_path}",
         )
     )
     build_args.extend(_build_arg("OCI_LICENSES", labels["OCI_LICENSES"]))
@@ -1536,7 +1532,7 @@ def _command_test_podman_image(args: argparse.Namespace) -> None:
         )
 
 
-def _command_build_arch_image(args: argparse.Namespace) -> None:
+def _command_build_arch_image(args: argparse.Namespace) -> None:  # noqa: PLR0915 - build identity and OCI labels require separate checks.
     image_name, architecture = _entry(args.entry_json, require_arch=True)
     if architecture is None:
         _fail("Architecture is required for architecture builds.")
@@ -1597,10 +1593,11 @@ def _command_build_arch_image(args: argparse.Namespace) -> None:
     command.extend(_build_arg("OCI_BASE_NAME", base_name))
     command.extend(_build_arg("OCI_CREATED", created))
     command.extend(_build_arg("OCI_DESCRIPTION", str(image["description"])))
+    documentation_path = Path(str(image["metadataFile"])).parent.as_posix()
     command.extend(
         _build_arg(
             "OCI_DOCUMENTATION",
-            f"https://containers.strukturpiloten.de/images/{image_name}/",
+            f"{context.server_url}/{context.repository}/tree/{source_revision}/{documentation_path}",
         )
     )
     command.extend(_build_arg("OCI_LICENSES", oci_labels["OCI_LICENSES"]))
