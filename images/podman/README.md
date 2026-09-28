@@ -21,9 +21,9 @@ Every target has separate `-rootful` and `-rootless` images. Rootful/rootless de
 | 5.5 | `podman-5.5-{rootful,rootless}` | 5.5.2 | Fedora Minimal 44 | Upstream tag; no distro Podman patches | AMD64, ARM64 | Yes | Yes |
 | 5.6 | `podman-5.6-{rootful,rootless}` | 5.6.2 | Fedora Minimal 44 | Upstream tag; no distro Podman patches | AMD64, ARM64 | Yes | Yes |
 | 5.7 | `podman-5.7-{rootful,rootless}` | 5.7.1 | Fedora Minimal 44 | Upstream tag; no distro Podman patches | AMD64, ARM64 | Yes | Yes |
-| 5.8 | `podman-5.8-{rootful,rootless}` | 5.8.6 | Fedora Minimal 44 | Upstream tag; no distro Podman patches | AMD64, ARM64 | Yes | Yes |
+| 5.8 | `podman-5.8-{rootful,rootless}` | 5.8.7 | Fedora Minimal 44 | Upstream tag; no distro Podman patches | AMD64, ARM64 | Yes | Yes |
 | 6.0 | `podman-6.0-{rootful,rootless}` | 6.0.2 | Fedora Minimal 44 | Upstream tag; no distro Podman patches | AMD64, ARM64 | Yes | Yes |
-| 6.1 | `podman-6.1-{rootful,rootless}` | 6.1.0 | Fedora Minimal 44 | Upstream tag; no distro Podman patches | AMD64, ARM64 | Yes | Yes |
+| 6.1 | `podman-6.1-{rootful,rootless}` | 6.1.2 | Fedora Minimal 44 | Upstream tag; no distro Podman patches | AMD64, ARM64 | Yes | Yes |
 
 The upstream source recipes compile one private OCI payload per Podman minor line and architecture. Both root modes consume the same-run payload archive after its revision, manifest hash, and archive hash have been verified. The payload is never published. Podman, Netavark, and Aardvark DNS sources are pinned to verified commits in `images/podman/payloads/`. Each final image starts from its own digest-pinned Fedora Minimal 44 base, refreshes Fedora packages, then copies only the compiled output. “No distro Podman patches” applies to the Podman source, not the Fedora runtime dependencies.
 
@@ -63,7 +63,7 @@ Rocky Linux and AlmaLinux are intentionally not duplicated; the UBI targets cove
 
 ## Versions, tags, and inspection
 
-For upstream-source images, the image version equals the exact Podman release, such as `v6.1.0`.
+For upstream-source images, the image version equals the exact Podman release, such as `v6.1.2`.
 
 For distro-package images, `v1.0.0` is the version of the Strukturpiloten image contract. It does not freeze the distro's Podman RPM/APK/DEB revision. Daily rebuilds can update that native revision without changing the image contract version.
 
@@ -124,7 +124,7 @@ podman run --rm \
   --device /dev/fuse \
   --security-opt label=disable \
   --volume podman-6.1-rootful:/var/lib/containers \
-  ghcr.io/strukturpiloten/podman-6.1-rootful:v6.1.0 \
+  ghcr.io/strukturpiloten/podman-6.1-rootful:v6.1.2 \
   podman run --rm quay.io/libpod/alpine:latest echo nested-rootful
 ```
 

@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://containers.strukturpiloten.de/registry-snapshot.schema.json",
+  "title": "Separate observed registry publication snapshot",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "repository", "generatedAt", "images"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "repository": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
+    "generatedAt": {"type": "string", "format": "date-time"},
+    "images": {"type": "array", "items": {"$ref": "#/$defs/image"}}
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "timestamp": {"type": "string", "format": "date-time"},
+    "platform": {
+      "type": "object", "additionalProperties": false,
+      "required": ["architecture", "manifestDigest", "configDigest", "labels", "configCreatedAt"],
+      "properties": {
+        "architecture": {"enum": ["amd64", "arm64"]},
+        "manifestDigest": {"$ref": "#/$defs/digest"},
+        "configDigest": {"$ref": "#/$defs/digest"},
+        "labels": {"type": "object", "additionalProperties": {"type": "string"}},
+        "configCreatedAt": {"type": ["string", "null"]}
+      }
+    },
+    "evidence": {
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["status", "reason"],
+         "properties": {"status": {"enum": ["unknown", "unavailable"]}, "reason": {"type": "string"}}},
+        {"type": "object", "additionalProperties": false,
+         "required": ["status", "releaseUrl", "assetUrl", "assetDigest", "buildSucceededAt", "runtime", "scan", "signature", "provenance"],
+         "properties": {
+           "status": {"const": "verified"},
+           "releaseUrl": {"type": ["string", "null"]},
+           "assetUrl": {"type": ["string", "null"]},
+           "assetDigest": {"$ref": "#/$defs/digest"},
+           "buildSucceededAt": {"$ref": "#/$defs/timestamp"},
+           "runtime": {"const": "verified"}, "scan": {"const": "verified"},
+           "signature": {"const": "unknown"}, "provenance": {"const": "unknown"}
+         }}
+      ]
+    },
+    "latest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["digest", "reference", "sourceRevision", "runId", "runAttempt", "publishedAt", "platforms", "evidence"],
+      "properties": {
+        "digest": {"$ref": "#/$defs/digest"}, "reference": {"type": "string"},
+        "sourceRevision": {"type": ["string", "null"]},
+        "runId": {"type": ["string", "null"]}, "runAttempt": {"type": ["string", "null"]},
+        "publishedAt": {"type": "null"},
+        "platforms": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/platform"}},
+        "evidence": {"$ref": "#/$defs/evidence"}
+      }
+    },
+    "history": {
+      "type": "object", "additionalProperties": false, "required": ["digest", "tags"],
+      "properties": {"digest": {"$ref": "#/$defs/digest"},
+                     "tags": {"type": "array", "minItems": 1, "items": {"type": "string"}}}
+    },
+    "tags": {
+      "type": "object", "additionalProperties": false,
+      "required": ["listed", "currentAliases", "history", "unresolved"],
+      "properties": {
+        "listed": {"type": "array", "items": {"type": "string"}},
+        "currentAliases": {"type": "array", "items": {"type": "string"}},
+        "history": {"type": "array", "items": {"$ref": "#/$defs/history"}},
+        "unresolved": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "image": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "image", "status", "observedAt", "stale", "refreshFailed", "refreshError", "ageSeconds", "latest", "tags"],
+      "properties": {
+        "name": {"type": "string"}, "image": {"type": "string"},
+        "status": {"enum": ["observed", "stale", "unavailable"]},
+        "observedAt": {"oneOf": [{"$ref": "#/$defs/timestamp"}, {"type": "null"}]},
+        "stale": {"type": "boolean"}, "refreshFailed": {"type": "boolean"},
+        "refreshError": {"type": ["string", "null"]},
+        "ageSeconds": {"type": ["integer", "null"], "minimum": 0},
+        "latest": {"oneOf": [{"$ref": "#/$defs/latest"}, {"type": "null"}]},
+        "tags": {"oneOf": [{"$ref": "#/$defs/tags"}, {"type": "null"}]}
+      },
+      "allOf": [
+        {"if": {"properties": {"status": {"const": "observed"}}},
+         "then": {"properties": {"stale": {"const": false}, "refreshFailed": {"const": false},
+                                   "latest": {"$ref": "#/$defs/latest"}, "tags": {"$ref": "#/$defs/tags"}}}},
+        {"if": {"properties": {"status": {"const": "stale"}}},
+         "then": {"properties": {"stale": {"const": true}, "refreshFailed": {"const": true},
+                                   "latest": {"$ref": "#/$defs/latest"}, "tags": {"$ref": "#/$defs/tags"}}}}
+      ]
+    }
+  }
+}

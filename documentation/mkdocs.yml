@@ -1,0 +1,25 @@
+site_name: Strukturpiloten Containers
+site_url: https://containers.strukturpiloten.de/
+site_description: Discover Docker and Podman compatibility images and Nextcloud and TYPO3 runtimes, with version, architecture, support, and publication evidence.
+repo_url: https://github.com/Strukturpiloten/containers
+repo_name: Strukturpiloten/containers
+use_directory_urls: true
+theme:
+  name: null
+  custom_dir: theme
+plugins: []
+markdown_extensions:
+  - tables
+  - fenced_code
+  - toc:
+      permalink: true
+  - attr_list
+validation:
+  nav:
+    omitted_files: ignore
+    not_found: warn
+  links:
+    not_found: warn
+    anchors: warn
+    absolute_links: relative_to_docs
+    unrecognized_links: warn

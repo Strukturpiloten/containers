@@ -136,6 +136,31 @@ class PlanningTests(unittest.TestCase):
             ):
                 self.assertEqual(engine._selected_image_names(self.images, _options()), set())
 
+    def test_image_shared_directory_documentation_does_not_select_builds(self) -> None:
+        self.images[0]["inputs"].append("images/podman/shared/**")
+        self.images[0]["inputs"].append("shared/container-utilities/**")
+        documentation_files = (
+            "images/podman/shared/README.md",
+            "images/podman/shared/docs/usage.md",
+            "shared/container-utilities/README.md",
+            "shared/container-utilities/docs/usage.md",
+            "scripts/documentation.py",
+            "scripts/docs_catalogue.py",
+            "scripts/docs_observations.py",
+            "scripts/docs_site.py",
+        )
+        for changed_file in documentation_files:
+            with (
+                self.subTest(changed_file=changed_file),
+                patch.object(engine, "_changed_files", return_value=[changed_file]),
+            ):
+                self.assertEqual(engine._selected_image_names(self.images, _options()), set())
+
+        with patch.object(engine, "_changed_files", return_value=["images/podman/shared/Containerfile"]):
+            self.assertEqual(engine._selected_image_names(self.images, _options()), {"base"})
+        with patch.object(engine, "_changed_files", return_value=["shared/container-utilities/check.sh"]):
+            self.assertEqual(engine._selected_image_names(self.images, _options()), {"base"})
+
     def test_unavailable_diff_uses_safe_full_rebuild(self) -> None:
         with patch.object(engine, "_changed_files", return_value=None):
             self.assertEqual(engine._selected_image_names(self.images, _options()), {"base", "app"})

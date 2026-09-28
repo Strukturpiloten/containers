@@ -1,0 +1,17 @@
+# Choosing an image
+
+Start with the task, then pick the exact image and architecture from the [catalogue](image-catalogue.md). `container.yaml` is authoritative for a declared image. Its lifecycle `admission` is a policy classification, not proof that a registry image exists or that a deployment is safe.
+
+| Need | Image family | What it includes and omits |
+| --- | --- | --- |
+| Test Docker daemon, CLI, API, and nested containers | [Docker Engine](../images/docker/README.md) | Separate rootful/rootless images from exact upstream lines or distribution packages; no host Docker socket, Compose, or Buildx. Isolated compatibility fixture. |
+| Test Podman CLI, package behavior, and nested containers | [Podman](../images/podman/README.md) | Exact upstream-source lines or distro packages; separate rootful/rootless images. Host kernel, booted systemd, and host security policy are outside the fixture. |
+| Supply PHP-FPM for a Nextcloud deployment | [Nextcloud PHP-FPM](../images/nextcloud/nextcloud-phpfpm/README.md) | PHP, extensions, and utilities; application code, web server, configuration, cron, and data come from your stack. |
+| Run Nextcloud push delivery | [Nextcloud notify_push](../images/nextcloud/nextcloud-notifypush/README.md) | notify_push service; requires Nextcloud configuration, database, Redis, and routing integration. |
+| Supply PHP-FPM for a TYPO3 deployment | [TYPO3 PHP-FPM](../images/typo3/typo3-phpfpm/README.md) | PHP, extensions, and utilities; TYPO3 source, web server, configuration, cron, and data come from your stack. |
+
+For Docker and Podman, choose upstream-source images when the exact engine line matters; choose distro-package images when the vendor package revision, helpers, and distribution userspace matter. Distro packages can advance on rebuild without a change to this repository's `v1.0.0` image contract. The image name's `rootful` or `rootless` suffix describes the *inner* engine identity. It does not describe the trust level of the outer container. These images are compatibility fixtures, not production container hosts.
+
+For Podman, upstream-source, Debian, Ubuntu, Fedora, CentOS Stream, Alpine, and Arch rootless profiles exercise nested `podman run` in the documented test boundary. UBI and openSUSE rootless profiles only check build and CLI/package behavior because their subordinate-ID helpers reject the second nested namespace. See the [coverage table](../images/podman/README.md#automated-nested-runtime-coverage) and the image's metadata. Debian 11 targets are historical fixtures; rebuilding them cannot restore vendor security maintenance. The Debian 11 Docker rootless image also needs `--oom-score-adj=0` in its outer privileged Podman invocation for nested containers.
+
+Select an architecture that is declared for the image; Arch compatibility images are AMD64-only. Then verify a published digest and matching native runtime evidence for that architecture. An image may declare `production` admission yet have `unknown` evidence in the generated catalogue. Check its [maintenance evidence](maintenance-evidence.md) and the [support boundaries](security-and-support.md). When kernel, systemd, cgroup delegation, SELinux/AppArmor, or actual host security behavior is what you need to test, use a VM or dedicated host test instead of these nested fixtures.

@@ -1,0 +1,7 @@
+# Security reporting
+
+For a potential vulnerability that contains exploit details, credentials, or other sensitive information, use GitHub's **Report a vulnerability** action on the repository Security tab **if it is available**. That action opens a private advisory visible to maintainers. Private vulnerability reporting is not currently enabled for this repository; do not include sensitive details in a public issue while it is unavailable. Maintainers should enable GitHub private vulnerability reporting to provide a direct private route. This repository does not publish a verified security email address.
+
+For non-sensitive bugs, outdated dependencies, documentation errors, or compatibility gaps, use [GitHub Issues](https://github.com/Strukturpiloten/containers/issues). Include the affected image name, architecture, exact tag and digest, observed behavior, and relevant logs with secrets removed. Refer to the [security and support guide](docs/security-and-support.md) for scope and evidence.
+
+Container images include upstream software under its own maintenance and licensing terms. Historical Docker and Podman compatibility fixtures intentionally retain old engine or operating-system behavior and are not production container hosts. The repository's vulnerability admission checks, SBOMs, signatures, and runtime evidence reduce uncertainty but do not guarantee that an image is free of vulnerabilities or suitable for a particular deployment. Verify the image digest and its [maintenance evidence](docs/maintenance-evidence.md) before use.

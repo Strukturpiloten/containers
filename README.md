@@ -1,66 +1,48 @@
 # Strukturpiloten Containers
 
-This repository builds and publishes the public container images maintained by Strukturpiloten. Image definitions, dependency pins, release versions, build inputs, and architecture support live with the image they describe. GitHub Actions validates that metadata and handles builds, signing, attestations, and releases.
+Container image definitions for application stacks and isolated compatibility tests, with published artifacts at `ghcr.io/strukturpiloten/<image-name>`.
 
-## Image catalog
+Browse the [complete image catalogue](docs/image-catalogue.md) for every declared image, lifecycle state, and evidence status; each image's metadata declares its architectures. Each image also has its own page at `https://containers.strukturpiloten.de/images/<image-name>/` when the documentation site is published. The catalogue distinguishes declared images from confirmed registry availability; an `unknown` build or registry status is not a successful publication.
 
-| Family | Images | Architectures | Documentation |
-| --- | --- | --- | --- |
-| Podman | Exact upstream Podman 5.4–6.1 and distro-packaged compatibility images, each rootful and rootless | AMD64 and ARM64; Arch is AMD64-only | [Podman compatibility images](images/podman/README.md) |
-| Nextcloud | `nextcloud-phpfpm`, `nextcloud-notifypush` | AMD64, ARM64 | [PHP-FPM](images/nextcloud/nextcloud-phpfpm/README.md), [notify_push](images/nextcloud/nextcloud-notifypush/README.md) |
-| TYPO3 | `typo3-phpfpm` | AMD64, ARM64 | [TYPO3 PHP-FPM](images/typo3/typo3-phpfpm/README.md) |
-
-Published image names use `ghcr.io/strukturpiloten/<image-name>`.
-
-## Repository contract
-
-- `images/<family>/<image>/container.yaml` is the source of truth for one published image.
-- `container.schema.json` defines the metadata format. Repository validation adds dependency-graph, build-path, digest-pinning, and version-progression checks.
-- Containerfiles use the repository root as their build context. Shared runtime files belong under `shared/` or a family-specific shared directory.
-- External base images are pinned by digest. Renovate proposes digest and supported dependency updates through pull requests.
-- Internal image dependencies use exact digests and build in topological stages. Independent images remain in stage 0 and build in parallel.
-- Static OCI label values shared by every image live in `shared/oci-labels.env`; image-specific title, description, version, source revision, and documentation URL come from the build plan.
-
-The current architecture and maintenance rules are described in [Container repository architecture](docs/container-monorepo-concept.md).
-
-## Builds and releases
-
-Pull requests run validation and smoke-build affected images without publishing. The stable `Required CI` job is intended for the repository ruleset.
-
-Merges to `main` build affected images and reverse dependencies. A daily scheduled run rebuilds every scheduled image without cache so supported base distributions and installed packages can contribute security fixes even when no repository file changed. Manual runs may select all images, one image, or an image family; normal operation does not require manual releases.
-
-After a build succeeds, the workflow publishes an immutable run tag, inspects the manifest, creates SBOMs, signs the image, and attaches provenance and SBOM attestations. Only then does it update maintained tags and automatically create any missing image-scoped GitHub Release declared by `container.yaml`.
-
-Maintained tag promotion checks the image's publication run ID and attempt against every existing target before making any changes. A retry of an older run cannot move a newer tag backwards; a retry of the same digest is harmless. For images published before this identity was recorded, the first promotion is accepted only when the existing image's source revision is a strict ancestor of the new revision. A same-revision legacy rebuild needs an operator decision.
-
-### Tag behavior
-
-| Reference | Mutability | Intended use |
+| Family | Choose it for | Start here |
 | --- | --- | --- |
-| OCI digest (`sha256:…`) | Immutable | Reproducible deployments and rollback |
-| `run-<run>-<attempt>-sha-<commit>` | Immutable | Audit trail for one workflow attempt |
-| `sha-<commit>` | Immutable | Verified image built from one repository commit |
-| branch and `latest` | Maintained | Follow successful rebuilds on that branch |
-| `vX.Y.Z`, `vX.Y`, `vX` | Maintained | Follow the declared compatibility line, including security rebuilds |
+| [Docker Engine](images/docker/README.md) | Testing real Docker daemon and API behavior across upstream lines and distribution packages | `docker-29-rootful`, `docker-debian-12-rootless` |
+| [Podman](images/podman/README.md) | Testing Podman behavior across exact upstream lines and distribution packages | `podman-6.1-rootless`, `podman-debian-12-rootful` |
+| [Nextcloud PHP-FPM](images/nextcloud/nextcloud-phpfpm/README.md) | Supplying a PHP-FPM runtime to a Nextcloud application stack | `nextcloud-phpfpm` |
+| [Nextcloud notify_push](images/nextcloud/nextcloud-notifypush/README.md) | Running the Nextcloud push service alongside an existing stack | `nextcloud-notifypush` |
+| [TYPO3 PHP-FPM](images/typo3/typo3-phpfpm/README.md) | Supplying a PHP-FPM runtime to a TYPO3 application stack | `typo3-phpfpm` |
 
-Consumers should use a readable maintained tag together with a digest, for example `v1.2.3@sha256:…`, and let Renovate update the digest when the maintained tag moves. Running workloads still require a pull and redeploy or a configured auto-update policy.
+Docker and Podman images are isolated compatibility fixtures. They share the runner kernel and need the outer runtime privileges documented for each profile; they are not production container hosts. The PHP-FPM images provide a runtime, not Nextcloud or TYPO3 application code. See [choosing an image](docs/choosing-images.md) before selecting a tag.
 
-To intentionally roll back a maintained tag, first authenticate `skopeo` to GHCR, record the current tag digest, and choose the previously verified immutable image digest. Run one tag at a time, recording the reason in the command output:
+## Use an image
+
+Find the image in the [catalogue](docs/image-catalogue.md), read its family guide and image metadata, then verify that its registry digest and required runtime evidence exist. For a quick inspection of a published image:
 
 ```sh
-uv run --frozen --python 3.14 python -m scripts.container_engine rollback-image \
-  --image ghcr.io/strukturpiloten/IMAGE --tag latest \
-  --digest sha256:PREVIOUS_DIGEST --expected-current-digest sha256:CURRENT_DIGEST \
-  --reason 'incident reference and reason'
+podman pull ghcr.io/strukturpiloten/nextcloud-notifypush:v1.0.0
+podman image inspect ghcr.io/strukturpiloten/nextcloud-notifypush:v1.0.0
 ```
 
-The expected current digest guards against an intervening update. This command deliberately bypasses automatic freshness policy for that one alias. Repeat with the then-current digest for each other alias that must move. An ordinary later successful publication can move the alias forward again; cancel any queued old runs during incident handling.
+The image version is a release of this repository's image contract. It is not necessarily the version of every installed component; for example, the TYPO3 PHP-FPM image does not contain TYPO3 itself. Maintained tags, including exact SemVer tags, can move after a reviewed rebuild. For a reproducible deployment, record the manifest digest and use a readable tag with that digest, such as `ghcr.io/strukturpiloten/nextcloud-notifypush:v1.0.0@sha256:<verified-index-digest>`. Read [tags and versions](docs/tags-and-versions.md) for inspection and update steps.
 
-For planning, retries, promotion, rollback, cleanup, and the module map, see the [operations guide](docs/operations.md).
+## Documentation
+
+- [Documentation index](docs/index.md) and [getting started](docs/getting-started.md)
+- [Choosing images](docs/choosing-images.md), [tags and versions](docs/tags-and-versions.md), and [security and support](docs/security-and-support.md)
+- [Contributing](CONTRIBUTING.md) and [build and release operations](docs/operations.md)
+- [Maintenance evidence](docs/maintenance-evidence.md) and [vulnerability scanning](docs/vulnerability-scanning.md)
+
+The intended documentation domain is `https://containers.strukturpiloten.de/`. Until DNS and site publication are complete, the linked repository files are the source of truth.
+
+## Repository and releases
+
+Each `images/<family>/<image>/container.yaml` declares one image, including its version, architectures, build inputs, lifecycle policy, and runtime checks. `container.schema.json` defines the metadata format. Image builds use the repository root as context; shared runtime files live under `shared/` or a family-specific shared directory. External base images are pinned by digest, and Renovate proposes reviewed updates. Internal image dependencies use exact digests and build in topological stages. Static common OCI label values live in `shared/oci-labels.env`.
+
+Pull requests run validation, selected builds, runtime probes, and vulnerability admission checks. Publishing jobs verify the multi-architecture image, create SBOMs, signatures, and attestations, then promote maintained tags and create image-scoped releases. The [operations guide](docs/operations.md) covers planning, publication, rollback, and recovery. The [maintenance evidence guide](docs/maintenance-evidence.md) explains how to verify a published digest against runtime and scan evidence.
 
 ## Local validation
 
-Run the same non-publishing checks before opening a pull request:
+Run the repository checks before opening a pull request:
 
 ```sh
 uv run --frozen --python 3.14 ruff format --check .
@@ -70,17 +52,11 @@ uv run --frozen --python 3.14 python -m scripts.container_engine validate
 uv run --frozen --python 3.14 python -m scripts.container_engine generate-workflow --check
 ```
 
-Podman compatibility images also provide a single-image build and nested-runtime check:
+For a single Podman compatibility profile on a Linux host with Podman and `/dev/fuse`:
 
 ```sh
 uv run --frozen --python 3.14 python -m scripts.container_engine test-podman-image \
   --image podman-debian-12-rootless
 ```
 
-This requires a Linux host with Podman and `/dev/fuse`. Rootful profiles are loaded into rootful Podman with `sudo -n`; rootless profiles use the host user's rootless Podman so subordinate-ID mappings remain nested correctly. Configure passwordless permission for rootful checks or use `--skip-nested`. See the [Podman image documentation](images/podman/README.md#build-and-test-architecture) for the trust and fidelity boundaries.
-
-When image metadata changes the internal dependency depth, regenerate the checked-in publishing workflow:
-
-```sh
-uv run --frozen --python 3.14 python -m scripts.container_engine generate-workflow
-```
+The nested check requires the privilege boundary described in the [Podman guide](images/podman/README.md#build-and-test-architecture). Use `--skip-nested` for only a build and CLI check. When image metadata changes internal dependency depth, regenerate the checked-in workflow with `uv run --frozen --python 3.14 python -m scripts.container_engine generate-workflow`.

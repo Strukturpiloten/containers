@@ -20,6 +20,8 @@ podman run --rm \
 
 CI also starts the server with a temporary SQLite database and synthetic Redis/Nextcloud endpoints, then verifies a WebSocket upgrade. This confirms startup and HTTP interaction; a deployment still needs working Redis, database, and Nextcloud services for push delivery.
 
+Keep the configuration mount read-only and accessible to UID 405. Route the service through the consuming stack's reverse proxy and configure Nextcloud's push endpoint to reach it; the sample port publication is suitable only for a controlled test environment. The image tag is this repository's image contract version, while `/usr/share/strukturpiloten/application-components.txt` records the upstream notify_push version and source commit.
+
 ## Build and updates
 
 The multi-stage build verifies the metadata-pinned upstream `notify_push` tag against its immutable commit, requires the upstream `Cargo.lock` with `cargo build --locked`, and compiles for the target musl architecture. Git, Rust, and build artifacts are absent from the final image. The image keeps `/usr/share/strukturpiloten/application-components.txt` with the upstream commit, lockfile hash, and actual Rust/Cargo versions; its build and runtime Alpine package lists are beside it.

@@ -56,6 +56,8 @@ jobs:
           uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine generate-workflow --check
           uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.maintenance --check \
             --json-output docs/image-catalogue.json --markdown-output docs/image-catalogue.md
+          uv run --frozen --group docs --python "${PYTHON_VERSION}" python -m scripts.documentation \
+            --output "${RUNNER_TEMP}/docs-preview"
 
   plan:
     name: Plan pull-request builds
