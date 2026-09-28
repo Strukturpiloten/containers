@@ -140,6 +140,18 @@ class PublicationScenarios(unittest.TestCase):
             self.assertEqual(descriptor["digest"], f"sha256:{hashlib.sha256(content).hexdigest()}")
             self.assertEqual(json.loads(content)["annotations"], _annotations(100, 2))
 
+    def test_multiarch_package_description_retains_documentation_url_within_ghcr_limit(self) -> None:
+        annotations = engine._publication_metadata_annotations({"description": "x" * 600}, "example")
+        documentation_url = "https://containers.strukturpiloten.de/images/example/"
+        description = annotations["org.opencontainers.image.description"]
+        self.assertEqual(len(description), engine.GHCR_DESCRIPTION_LIMIT)
+        self.assertTrue(description.endswith(f"Documentation: {documentation_url}"))
+        self.assertEqual(annotations["org.opencontainers.image.documentation"], documentation_url)
+        self.assertEqual(
+            annotations["org.opencontainers.image.source"], "https://github.com/Strukturpiloten/containers"
+        )
+        self.assertEqual(annotations["org.opencontainers.image.licenses"], "AGPL-3.0-only")
+
     def test_index_annotations_identify_rerun_independent_of_archives(self) -> None:
         raw_index = json.dumps({"schemaVersion": 2, "manifests": [], "annotations": _annotations(100, 2)})
         context = engine._GitHubContext(
@@ -216,7 +228,12 @@ class PublicationScenarios(unittest.TestCase):
         )
         raw_index = json.dumps({"manifests": [{"platform": {"os": "linux", "architecture": "amd64"}, "digest": NEW}]})
         canonical = engine.canonical_build_tag(sha=REVISION, run_id="100", run_attempt="1")
-        image = {"image": IMAGE, "version": "v1.0.0", "build": {"args": {}}}
+        image = {
+            "image": IMAGE,
+            "description": "Example compatibility image",
+            "version": "v1.0.0",
+            "build": {"args": {}},
+        }
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             archives = root / "archives"
@@ -243,7 +260,7 @@ class PublicationScenarios(unittest.TestCase):
                 patch.object(engine, "_image_architectures", return_value=["amd64"]),
                 patch.object(engine, "_tool", side_effect=lambda name: name),
                 patch.object(engine, "_run"),
-                patch.object(engine, "_annotate_oci_layout"),
+                patch.object(engine, "_annotate_oci_layout") as annotate,
                 patch.object(engine, "_oci_layout_index_raw", return_value=raw_index),
                 patch.object(engine, "_remote_digest", side_effect=digest),
                 patch.object(engine, "_registry_annotations", return_value=_annotations(100, 1)),
@@ -260,6 +277,15 @@ class PublicationScenarios(unittest.TestCase):
             self.assertEqual(result["indexDigest"], OLD)
             self.assertEqual(result["runAttempt"], "1")
             self.assertEqual(result["architectureDigests"], {"amd64": NEW})
+            index_annotations = annotate.call_args.args[1]
+            self.assertEqual(
+                index_annotations["org.opencontainers.image.description"],
+                "Example compatibility image Documentation: https://containers.strukturpiloten.de/images/example/",
+            )
+            self.assertEqual(
+                index_annotations["org.opencontainers.image.documentation"],
+                "https://containers.strukturpiloten.de/images/example/",
+            )
             self.assertEqual(outputs.call_args.args[0]["canonical_tag"], canonical)
             self.assertFalse(any("copy" in call.args[0] for call in external.call_args_list))
             promote_args = SimpleNamespace(

@@ -51,6 +51,7 @@ if TYPE_CHECKING:
 PUBLISH_WORKFLOW_PATH = Path(".github/workflows/publish-images.yml")
 PUBLISH_WORKFLOW_TEMPLATE_PATH = Path(".github/workflow-templates/publish-images.yml.j2")
 OCI_LABELS_ENV_PATH = Path("shared/oci-labels.env")
+GHCR_DESCRIPTION_LIMIT = 512
 CONTAINER_SCHEMA_PATH = Path("container.schema.json")
 IMAGES_GLOB = "images/**/container.yaml"
 EXCLUDED_IMAGE_DIR = "_example"
@@ -1746,6 +1747,23 @@ def _annotate_oci_layout(layout_dir: Path, annotations: dict[str, str]) -> None:
     _write_json(layout_index_path, layout_index)
 
 
+def _publication_metadata_annotations(image: JsonMap, image_name: str) -> dict[str, str]:
+    """Add package-page description and portable metadata to the multiarch index."""
+    documentation_url = f"https://containers.strukturpiloten.de/images/{image_name}/"
+    suffix = f" Documentation: {documentation_url}"
+    available = GHCR_DESCRIPTION_LIMIT - len(suffix)
+    if available < 1:
+        _fail(f"Documentation URL for {image_name} leaves no room for a package description.")
+    description = str(image["description"])[:available].rstrip() + suffix
+    labels = _oci_labels()
+    return {
+        "org.opencontainers.image.description": description,
+        "org.opencontainers.image.documentation": documentation_url,
+        "org.opencontainers.image.source": labels["OCI_SOURCE"],
+        "org.opencontainers.image.licenses": labels["OCI_LICENSES"],
+    }
+
+
 def _oci_layout_index_raw(layout_dir: Path) -> str:
     """Read and verify the annotated multiarch index in a local OCI layout."""
     layout = _load_json(layout_dir / "index.json")
@@ -1875,6 +1893,7 @@ def _command_publish_image(args: argparse.Namespace) -> None:  # noqa: PLR0915
                 RUN_ID_ANNOTATION: context.run_id,
                 RUN_ATTEMPT_ANNOTATION: context.run_attempt,
                 REVISION_ANNOTATION: context.sha,
+                **_publication_metadata_annotations(image, image_name),
             },
         )
         local_architecture_digests = _architecture_digests(_oci_layout_index_raw(layout_dir), architectures)
