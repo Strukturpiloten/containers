@@ -374,8 +374,17 @@ def image_markdown(row: dict[str, Any]) -> str:  # noqa: C901, PLR0912, PLR0915 
                 f"sudo podman run --rm --detach --name nested-docker --privileged --device /dev/fuse"
                 f" --security-opt label=disable{oom} {ref}"
             ),
-            "sudo podman exec nested-docker docker info",
+            "ready=0",
+            "for attempt in $(seq 1 30); do",
+            "  if sudo podman exec nested-docker docker info >/dev/null 2>&1; then ready=1; break; fi",
+            "  sleep 2",
+            "done",
+            (
+                'if [ "$ready" -eq 1 ]; then sudo podman exec nested-docker docker info; '
+                "else sudo podman logs nested-docker; fi"
+            ),
             "sudo podman stop nested-docker",
+            'test "$ready" -eq 1',
             "```",
             "",
             "This fixture does not use the host Docker socket. Read the detailed guide for nested workloads.",
@@ -450,6 +459,7 @@ def image_markdown(row: dict[str, Any]) -> str:  # noqa: C901, PLR0912, PLR0915 
     lines += ["## Evidence and timestamps", ""]
     if isinstance(latest, dict):
         evidence = latest.get("evidence", {})
+        alignment = latest.get("declarationAlignment", {"status": "unknown", "differences": []})
         built_at = evidence.get("buildSucceededAt") if evidence.get("status") == "verified" else "unknown"
         lines += [
             "| Field | Observed value |",
@@ -459,8 +469,27 @@ def image_markdown(row: dict[str, Any]) -> str:  # noqa: C901, PLR0912, PLR0915 
             f"| Published | {_markdown(latest.get('publishedAt') or 'unknown')} |",
             f"| Registry checked | {_markdown(observation.get('observedAt') or 'unknown')} |",
             f"| Evidence | {_markdown(evidence.get('status', 'unknown'))} |",
+            f"| Compared with current declarations | {_markdown(alignment.get('status', 'unknown'))} |",
             "",
         ]
+        if alignment.get("status") == "different":
+            lines += [
+                (
+                    "The published artifact differs from the current repository declarations. "
+                    "Its release evidence applies to the observed digest; "
+                    "it does not prove that pending inputs are published."
+                ),
+                "",
+                "| Input | Published | Currently declared |",
+                "| --- | --- | --- |",
+            ]
+            lines += [
+                f"| {_markdown(item['field'])} | {_markdown(item['published'])} | {_markdown(item['declared'])} |"
+                for item in alignment.get("differences", [])
+            ]
+            lines.append("")
+        elif alignment.get("status") == "unknown":
+            lines += ["Comparison with current repository inputs is unknown.", ""]
         if evidence.get("status") == "verified":
             lines += [
                 (

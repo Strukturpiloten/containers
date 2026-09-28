@@ -233,14 +233,12 @@ def _release_proof(  # noqa: C901, PLR0912, PLR0913, PLR0915
     repository: str,
     name: str,
     image: str,
-    declared_version: str,
-    declared_inputs: dict[str, Any],
     digest: str,
     index: dict[str, Any],
     platforms: list[dict[str, Any]],
     token: str | None,
     timeout: int,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """Prove a release asset is immutable and bound to this runnable image."""
     annotations = index.get("annotations")
     if not isinstance(annotations, dict):
@@ -256,9 +254,6 @@ def _release_proof(  # noqa: C901, PLR0912, PLR0913, PLR0915
         msg = "Architecture version labels differ or are missing."
         raise ObservationError(msg)
     version = versions.pop()
-    if version != declared_version.removeprefix("v"):
-        msg = "Published version label differs from canonical metadata."
-        raise ObservationError(msg)
     if any(row["labels"].get(REVISION_ANNOTATION) != source for row in platforms):
         msg = "Architecture revision labels differ from index."
         raise ObservationError(msg)
@@ -346,7 +341,6 @@ def _release_proof(  # noqa: C901, PLR0912, PLR0913, PLR0915
         or evidence.get("indexDigest") != digest
         or evidence.get("runId") != str(identity.run_id)
         or evidence.get("runAttempt") != str(identity.run_attempt)
-        or evidence.get("componentInputs") != declared_inputs
         or evidence.get("architectureDigests")
         != {key: value["manifestDigest"] for key, value in expected_mapping.items()}
         or evidence.get("publicationMapping") != expected_mapping
@@ -367,7 +361,7 @@ def _release_proof(  # noqa: C901, PLR0912, PLR0913, PLR0915
         runtime=evidence.get("runtimeEvidence", []),
         scans=evidence.get("scanReports", []),
     )
-    return {
+    proof = {
         "status": "verified",
         "releaseUrl": release.get("html_url"),
         "assetUrl": asset.get("browser_download_url"),
@@ -378,9 +372,39 @@ def _release_proof(  # noqa: C901, PLR0912, PLR0913, PLR0915
         "signature": "unknown",
         "provenance": "unknown",
     }
+    return proof, evidence
 
 
-def _observe_one(
+def _declaration_alignment(metadata: dict[str, Any], asset: dict[str, Any]) -> dict[str, Any]:
+    """Compare today's declaration with the separately verified live release."""
+    differences = []
+
+    def add(field: str, published: object, declared: object) -> None:
+        if published == declared:
+            return
+
+        def display(value: object) -> str:
+            return value if isinstance(value, str) else json.dumps(value, sort_keys=True)
+
+        differences.append({"field": field, "published": display(published)[:500], "declared": display(declared)[:500]})
+
+    add("version", f"v{asset['version']}", metadata["version"])
+    add("architectures", sorted(asset["architectureDigests"]), sorted(metadata["build"]["architectures"]))
+    recorded = asset.get("componentInputs")
+    current = container_engine._component_inputs(metadata)  # noqa: SLF001
+
+    def compare(field: str, published: object, declared: object) -> None:
+        if isinstance(published, dict) and isinstance(declared, dict):
+            for key in sorted(set(published) | set(declared)):
+                compare(f"{field}.{key}", published.get(key), declared.get(key))
+        else:
+            add(field, published, declared)
+
+    compare("buildInputs", recorded, current)
+    return {"status": "different" if differences else "matched", "differences": differences}
+
+
+def _observe_one(  # noqa: C901
     metadata: dict[str, Any], registry: PublicRegistry, repository: str, token: str | None, timeout: int
 ) -> dict[str, Any]:
     name, image = metadata["name"], metadata["image"]
@@ -391,9 +415,6 @@ def _observe_one(
         raise ObservationError(msg)
     digest, index = registry.raw(image, ":latest")
     platforms = _platforms(registry, image, index)
-    if {row["architecture"] for row in platforms} != set(metadata["build"]["architectures"]):
-        msg = "Runnable architectures differ from canonical metadata."
-        raise ObservationError(msg)
     annotations = index.get("annotations") if isinstance(index.get("annotations"), dict) else {}
     source = annotations.get(REVISION_ANNOTATION)
     if source is not None and (not isinstance(source, str) or REVISION.fullmatch(source) is None):
@@ -416,13 +437,16 @@ def _observe_one(
     current = sorted(grouped.pop(digest))
     history = [{"digest": key, "tags": sorted(value)} for key, value in sorted(grouped.items())]
     evidence: dict[str, Any] = {"status": "unknown", "reason": "No matching immutable release checked."}
+    alignment: dict[str, Any] = {
+        "status": "unknown",
+        "reason": "No verified release to compare with declaration.",
+        "differences": [],
+    }
     try:
-        evidence = _release_proof(
+        evidence, asset = _release_proof(
             repository=repository,
             name=name,
             image=image,
-            declared_version=metadata["version"],
-            declared_inputs=container_engine._component_inputs(metadata),  # noqa: SLF001
             digest=digest,
             index=index,
             platforms=platforms,
@@ -431,6 +455,11 @@ def _observe_one(
         )
     except (ObservationError, ValueError, KeyError, TypeError) as error:
         evidence = {"status": "unavailable", "reason": str(error)[:MAX_ERROR]}
+    else:
+        try:
+            alignment = _declaration_alignment(metadata, asset)
+        except (container_engine.ContainerEngineError, KeyError, TypeError, ValueError) as error:
+            alignment = {"status": "unknown", "reason": str(error)[:MAX_ERROR], "differences": []}
     latest = {
         "digest": digest,
         "reference": f"{image}@{digest}",
@@ -440,6 +469,7 @@ def _observe_one(
         "publishedAt": None,  # Exact runnable-image publication time is not in OCI metadata.
         "platforms": platforms,
         "evidence": evidence,
+        "declarationAlignment": alignment,
     }
     return {
         "name": name,
@@ -533,7 +563,7 @@ def collect(
     return result
 
 
-def validate(snapshot: dict[str, Any]) -> None:  # noqa: C901, PLR0912
+def validate(snapshot: dict[str, Any]) -> None:  # noqa: C901, PLR0912, PLR0915
     """Validate the separate publication snapshot before a website consumes it."""
     schema = json.loads((ROOT / "docs/registry-snapshot.schema.json").read_text(encoding="utf-8"))
     errors = sorted(Draft202012Validator(schema).iter_errors(snapshot), key=lambda error: list(map(str, error.path)))
@@ -585,6 +615,12 @@ def validate(snapshot: dict[str, Any]) -> None:  # noqa: C901, PLR0912
         architectures = [platform["architecture"] for platform in latest["platforms"]]
         if len(architectures) != len(set(architectures)):
             msg = "Snapshot has duplicate runnable architectures."
+            raise ObservationError(msg)
+        alignment = latest["declarationAlignment"]
+        if (alignment["status"] == "matched" and alignment["differences"]) or (
+            alignment["status"] == "different" and not alignment["differences"]
+        ):
+            msg = "Declaration alignment status contradicts differences."
             raise ObservationError(msg)
         if latest["sourceRevision"] is not None and any(
             platform["labels"].get(REVISION_ANNOTATION) != latest["sourceRevision"] for platform in latest["platforms"]

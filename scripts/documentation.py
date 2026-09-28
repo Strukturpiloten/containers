@@ -246,7 +246,9 @@ def build(output: Path, *, snapshot_path: Path | None = None) -> int:
         if snapshot is not None:
             _json(source / "data/registry-snapshot.json", snapshot)
         _write(source / "CNAME", "containers.strukturpiloten.de")
-        _write(source / "robots.txt", f"User-agent: *\nAllow: /\n\nSitemap: {SITE_URL}sitemap.xml")
+        _write(
+            source / "robots.txt", f"User-agent: *\nAllow: /\nDisallow: /markdown/\n\nSitemap: {SITE_URL}sitemap.xml"
+        )
         llms = (
             "# Strukturpiloten Containers\n\n> Public OCI image catalogue and documentation. "
             "This optional navigation file is not a search ranking guarantee.\n\n"

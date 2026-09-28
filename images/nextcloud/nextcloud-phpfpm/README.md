@@ -25,6 +25,8 @@ podman stop nextcloud-phpfpm
 
 This checks PHP-FPM startup only. A real Nextcloud deployment also needs its application-writable directories and persistent data mounted with suitable permissions, a web server, database, Redis if configured, and separate cron scheduling. Do not publish FastCGI port 9000 directly to the internet. The image version describes this PHP runtime contract; inspect `/usr/share/strukturpiloten/application-components.txt` and the SBOM for installed versions.
 
+For an existing application project, the [Compose integration guide](../../../docs/application-compose.md) shows private FastCGI networking, mounts, and image digest updates. Follow the [artifact verification guide](../../../docs/verify-artifacts.md) before promoting a reviewed digest.
+
 ## Build and updates
 
 `container.yaml` is authoritative for the PHP runtime, extension-installer image, architectures, data path, and Strukturpiloten image version. Both external images are digest-pinned. Composer, APCu, Imagick, and Redis have exact versions in `container.yaml`; their Renovate updates require maintainer review and build validation. The image verifies their installed versions and records them, the installer image reference, and the installed Alpine package list under `/usr/share/strukturpiloten/`. Daily rebuilds refresh Alpine packages while retaining those application pins and the selected PHP base.

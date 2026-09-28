@@ -69,6 +69,7 @@ def observed_row() -> dict:
             "publishedAt": None,
             "platforms": [PLATFORM],
             "evidence": {"status": "unavailable", "reason": "No release"},
+            "declarationAlignment": {"status": "unknown", "reason": "No verified release.", "differences": []},
         },
         "tags": {"listed": ["latest"], "currentAliases": ["latest"], "history": [], "unresolved": []},
     }
@@ -78,9 +79,7 @@ class ObservationTests(unittest.TestCase):
     def test_current_aliases_and_historical_digest_are_separate(self) -> None:
         with (
             patch.object(observations, "_platforms", return_value=[PLATFORM]),
-            patch.object(
-                observations, "_release_proof", return_value={"status": "unavailable", "reason": "No release"}
-            ),
+            patch.object(observations, "_release_proof", side_effect=observations.ObservationError("No release")),
         ):
             row = observations._observe_one(METADATA, FakeRegistry(), "Strukturpiloten/containers", None, 5)
         self.assertEqual(row["tags"]["currentAliases"], ["latest", "main", "v1", "v1.2.3"])
@@ -202,34 +201,65 @@ class ObservationTests(unittest.TestCase):
                 repository="Strukturpiloten/containers",
                 name="example",
                 image=IMAGE,
-                declared_version="v1.2.3",
-                declared_inputs={},
                 digest=INDEX_DIGEST,
                 index=INDEX,
                 platforms=[PLATFORM],
                 token=None,
                 timeout=5,
             )
-        asset["publicationMapping"]["amd64"]["configDigest"] = CONFIG_DIGEST
-        raw = json.dumps(asset).encode()
-        release["assets"][0]["size"] = len(raw)
-        release["assets"][0]["digest"] = observations._digest(raw)
+
+    def test_verified_live_release_can_differ_from_current_declaration(self) -> None:
+        metadata = copy.deepcopy(METADATA)
+        metadata["build"]["args"] = {"DISTRO_IMAGE": {"value": "base@sha256:new"}}
+        asset = {
+            "version": "1.2.3",
+            "architectureDigests": {"amd64": MANIFEST_DIGEST},
+            "componentInputs": {"DISTRO_IMAGE": "base@sha256:old"},
+        }
+        proof = {
+            "status": "verified",
+            "releaseUrl": None,
+            "assetUrl": None,
+            "assetDigest": CONFIG_DIGEST,
+            "buildSucceededAt": NOW,
+            "runtime": "verified",
+            "scan": "verified",
+            "signature": "unknown",
+            "provenance": "unknown",
+        }
         with (
-            patch.object(observations, "_github_json", side_effect=response),
-            self.assertRaisesRegex(observations.ObservationError, "does not match registry"),
+            patch.object(observations, "_platforms", return_value=[PLATFORM]),
+            patch.object(observations, "_release_proof", return_value=(proof, asset)),
         ):
-            observations._release_proof(
-                repository="Strukturpiloten/containers",
-                name="example",
-                image=IMAGE,
-                declared_version="v1.2.3",
-                declared_inputs={"payload": {"manifestSha256": "changed"}},
-                digest=INDEX_DIGEST,
-                index=INDEX,
-                platforms=[PLATFORM],
-                token=None,
-                timeout=5,
-            )
+            row = observations._observe_one(metadata, FakeRegistry(), "Strukturpiloten/containers", None, 5)
+        self.assertEqual(row["latest"]["evidence"]["status"], "verified")
+        alignment = row["latest"]["declarationAlignment"]
+        self.assertEqual(alignment["status"], "different")
+        self.assertEqual(
+            alignment["differences"],
+            [{"field": "buildInputs.DISTRO_IMAGE", "published": "base@sha256:old", "declared": "base@sha256:new"}],
+        )
+
+    def test_alignment_reports_version_architecture_and_payload_hash(self) -> None:
+        metadata = copy.deepcopy(METADATA)
+        metadata["version"] = "v2.0.0"
+        metadata["build"]["architectures"] = ["amd64", "arm64"]
+        asset = {
+            "version": "1.2.3",
+            "architectureDigests": {"amd64": MANIFEST_DIGEST},
+            "componentInputs": {"payload": {"manifestSha256": "sha256:old"}},
+        }
+        with patch.object(
+            observations.container_engine,
+            "_component_inputs",
+            return_value={"payload": {"manifestSha256": "sha256:new"}},
+        ):
+            alignment = observations._declaration_alignment(metadata, asset)
+        self.assertEqual(alignment["status"], "different")
+        self.assertEqual(
+            {item["field"] for item in alignment["differences"]},
+            {"version", "architectures", "buildInputs.payload.manifestSha256"},
+        )
 
     def test_schema_rejects_claimed_publication_time(self) -> None:
         row = observed_row()

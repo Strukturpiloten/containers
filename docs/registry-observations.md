@@ -30,13 +30,20 @@ as publication time.
 Release evidence is `verified` only when a published immutable maintenance
 release, its Git tag, unique asset, image name, version, source revision, run
 identity, index digest, architecture manifest digests, and config digests match
-the observed image. Recorded build inputs, including a payload manifest SHA-256
-when present, must also match the current canonical declaration. The publisher's
-consistency gate checks attached runtime
+the observed image. The publisher's consistency gate checks attached runtime
 and vulnerability scan records. These states do not claim signature or
 provenance verification; those fields remain `unknown`. If the release cannot
 be read or matched, the registry observation remains visible while evidence is
 `unavailable` with a reason.
+
+`latest.declarationAlignment` separately compares the verified live release
+with the current `container.yaml`: image version, runnable architectures,
+build arguments, and payload manifest SHA-256 where present. `matched` means
+those declarations agree. `different` includes field-level published and
+declared values, such as a base-image digest updated after the latest image
+publication. The release evidence remains verified for its observed digest
+when the declaration has advanced. `unknown` means there is no verified
+release asset from which to compare build inputs.
 
 Each image refresh succeeds or fails independently. On failure, a previous
 observation for the same image is kept as `stale` with its original

@@ -24,6 +24,18 @@ skopeo inspect --raw docker://ghcr.io/strukturpiloten/nextcloud-notifypush:v1.0.
 
 A tag only describes its current target. GitHub's image-scoped source-version release records the original declared version; a later rebuild of the same version receives a separate `<imageName>/maintenance/<runId>-<runAttempt>` release with durable evidence. Do not treat one source-version release date as the date of every retained-version rebuild.
 
+## Dated registry examples
+
+A public registry inspection on **2026-09-28 at 07:42 UTC** resolved these aliases. This is a point-in-time tag observation, not a promise about their current targets or proof that each historical digest still receives maintenance. The full observations and evidence state are in the [registry snapshot](registry-observations.md); re-resolve any tag before using it.
+
+| Image | Aliases at the observed `latest` digest | Older resolved alias and digest |
+| --- | --- | --- |
+| `podman-5.8-rootless` | `latest`, `main`, `v5`, `v5.8`, `v5.8.7` → `sha256:7c5089a0895c9ba0a14876bc0369356cf368729975006ab037189a29e1d5d9ba` | `v5.8.6` → `sha256:1b29f88f2c58be615b7e74b58c2ede683115c934645a6d9573a10d701e74a2f7` |
+| `podman-6.1-rootless` | `latest`, `main`, `v6`, `v6.1`, `v6.1.2` → `sha256:ee22811400ea82b31f0c3bf4f6530ff50465faa87bf9e201856e83b6e36ce58a` | `v6.1.0` → `sha256:5fe9b8068a8e40de1189b23434ba3e2b84ff4e3b576fe2a844e25582ad6b181e` |
+| `typo3-phpfpm` | `latest`, `main`, `v2`, `v2.0`, `v2.0.0` → `sha256:151bb805aec2a184b59626fe989613034f2547e754cca0ae00634868d213a491` | Earlier `v1.0.0`, `v1.0.1`, and `v1.0.2` each resolved to a different digest from the former image repository. |
+
+For TYPO3, `v2.0.0` is the current PHP-FPM **image** contract line. It does not mean TYPO3 2.0.0 is installed; the runtime has no TYPO3 application code. The historical `v1.*` aliases remain registry history and are not moved by this monorepo's release automation. Exact digest pinning preserves an old artifact but does not confer ongoing security support.
+
 ## Read timestamps correctly
 
 | Field or event | Meaning |

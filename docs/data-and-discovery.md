@@ -1,5 +1,11 @@
 # Catalogue data and discovery
 
+`latest.declarationAlignment` independently compares the published version, architectures, build arguments, and payload checksum with current repository declarations. `matched` reports those fields agree, `different` lists the differences, and `unknown` means no comparison was supported. A matching release proof can still describe an older published artifact while newer declarations are awaiting publication; do not confuse valid evidence for a digest with evidence that the current source inputs have been published.
+
+The catalogue schema validates the declaration fields and observation envelope. Validate nested tag, digest, platform, and evidence fields using the image-entry definitions in `/data/registry-snapshot.schema.json` as well; the catalogue's envelope validation alone does not prove their consistency. Both documents identify their schema version. A future incompatible version requires an explicit consumer update.
+
+Markdown exports remain publicly retrievable, but `robots.txt` asks compliant search crawlers to skip `/markdown/` to reduce duplicate crawling. The linked HTML pages are the primary search documents. This does not guarantee deindexing, and it does not restrict direct access to the exports.
+
 The documentation site publishes machine-readable catalogue data alongside the human-readable pages. The intended canonical site is https://containers.strukturpiloten.de/; these endpoints become available after GitHub Pages, the custom domain, and DNS are configured.
 
 | Path | Content |

@@ -112,7 +112,7 @@ The exact upstream rootless images use the narrower unprivileged outer profile b
 | Upstream-source, Debian, Ubuntu, Fedora, CentOS Stream, Alpine, and Arch rootless profiles | Yes | Yes | Their `newuidmap`/`newgidmap` path works inside the nested test boundary. |
 | UBI 8, 9, and 10 plus openSUSE Leap and Tumbleweed rootless profiles | Yes | No | Their subordinate-ID helpers reject writing the second nested user namespace's `uid_map`. Replacing those helpers would stop testing the distribution package environment. |
 
-These rootless images remain useful for package, CLI, filesystem, and inspection compatibility. Test operations that must create their Podman user namespace on a UBI or openSUSE host in a VM or dedicated runner instead of another container. Every exception is explicit in the image's `tests.podman.nestedRuntime` metadata; CI does not infer it from an image name.
+These rootless images remain useful for package, CLI, filesystem, and inspection compatibility. Test operations that must create their Podman user namespace on a UBI or openSUSE host in a VM or dedicated runner instead of another container. [Issue #179](https://github.com/Strukturpiloten/containers/issues/179) records the subordinate-ID helper limitation. Every exception is explicit in the image's `tests.podman.nestedRuntime` metadata; CI does not infer it from an image name.
 
 ### Rootful example
 
