@@ -18,6 +18,10 @@ The repository **About** website URL should be `https://containers.strukturpilot
 
 ## Build and refresh
 
+The repository administrator owns Pages configuration and deployment access. The DNS-zone administrator owns the `containers` CNAME and any verification records. An organization owner can additionally verify the domain in the organization's Pages settings: use the exact TXT name and challenge value GitHub supplies and retain that record after verification. Do not invent a challenge value or replace the website CNAME with the TXT record.
+
+After launch, optionally verify `containers.strukturpiloten.de` in Google Search Console using the account that will maintain the site. A domain property requires the TXT record supplied by Search Console; a URL-prefix property offers other verification methods. Submit `https://containers.strukturpiloten.de/sitemap.xml` and inspect a catalogue and image URL. Indexing and inclusion in AI search results are controlled by the search provider and are not guaranteed. Important content is static HTML; JSON and Markdown exports are additional representations.
+
 Pull requests run the documentation generator in the existing `Validate containers` CI workflow. That build uses checked-in declarations only and validates the site without registry network access or deployment credentials:
 
 ```sh
