@@ -1,6 +1,6 @@
 # Security reporting
 
-For a potential vulnerability that contains exploit details, credentials, or other sensitive information, use GitHub's **Report a vulnerability** action on the repository Security tab **if it is available**. That action opens a private advisory visible to maintainers. Private vulnerability reporting is not currently enabled for this repository; do not include sensitive details in a public issue while it is unavailable. Maintainers should enable GitHub private vulnerability reporting to provide a direct private route. This repository does not publish a verified security email address.
+Report potential vulnerabilities privately through [GitHub’s vulnerability reporting form](https://github.com/Strukturpiloten/containers/security/advisories/new), also available as **Report a vulnerability** on the repository’s Security tab. Reports are shared privately with the maintainers. Do not post exploit details, credentials, or other sensitive information in public issues.
 
 For non-sensitive bugs, outdated dependencies, documentation errors, or compatibility gaps, use [GitHub Issues](https://github.com/Strukturpiloten/containers/issues). Include the affected image name, architecture, exact tag and digest, observed behavior, and relevant logs with secrets removed. Refer to the [security and support guide](docs/security-and-support.md) for scope and evidence.
 
