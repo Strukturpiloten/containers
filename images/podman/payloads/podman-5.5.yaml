@@ -7,7 +7,7 @@ build:
   - amd64
   - arm64
   args:
-    FEDORA_IMAGE: registry.fedoraproject.org/fedora-minimal:44@sha256:eeac878460ca077301befe60ba603186b12af7ff45a58ee9aeafefbcf4c26f10
+    FEDORA_IMAGE: registry.fedoraproject.org/fedora-minimal:44@sha256:77dae00ae95866fe18f1ee83f2eed8f1e92db3da0dd8396e35f900f050eb9e40
     OCI_VERSION: 5.5.2
     PODMAN_COMMIT: e7d8226745ba07a64b7176a7f128e4ef53225a0e
     PODMAN_REPOSITORY: https://github.com/podman-container-tools/podman.git
