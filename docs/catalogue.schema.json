@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://containers.strukturpiloten.de/data/catalogue.schema.json",
+  "title": "Strukturpiloten declared image catalogue",
+  "description": "Metadata is declared in the repository. The optional observation comes from a separate timestamped registry snapshot and may be stale or unavailable.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "sourceRevision", "generatedAt", "canonicalUrl", "images"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "sourceRevision": {"type": "string"},
+    "generatedAt": {"type": ["string", "null"], "format": "date-time"},
+    "canonicalUrl": {"const": "https://containers.strukturpiloten.de"},
+    "images": {"type": "array", "items": {"$ref": "#/$defs/image"}}
+  },
+  "$defs": {
+    "lifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "admission", "supportBoundary", "reviewAfter", "requiredRuntimeProfiles"],
+      "properties": {
+        "state": {"enum": ["maintained", "legacy", "experimental", "unknown"]},
+        "admission": {"enum": ["production", "isolated-test", "disabled", "unknown"]},
+        "supportBoundary": {"type": "string"},
+        "reviewAfter": {"type": ["string", "null"], "format": "date"},
+        "requiredRuntimeProfiles": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "observation": {
+      "type": "object",
+      "required": ["name", "image", "status", "observedAt", "stale", "refreshFailed", "refreshError", "ageSeconds", "latest", "tags"],
+      "properties": {
+        "name": {"type": "string"},
+        "image": {"type": "string"},
+        "status": {"enum": ["observed", "stale", "unavailable"]},
+        "observedAt": {"type": ["string", "null"], "format": "date-time"},
+        "stale": {"type": "boolean"},
+        "refreshFailed": {"type": "boolean"},
+        "refreshError": {"type": ["string", "null"]},
+        "ageSeconds": {"type": ["integer", "null"], "minimum": 0},
+        "latest": {"type": ["object", "null"]},
+        "tags": {"type": ["object", "null"]}
+      }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name", "image", "description", "title", "family", "imageVersion",
+        "softwareVersion", "phpBaseTag", "rootMode", "architectures",
+        "distribution", "baseImage", "lifecycle", "declaredTags", "runtimeTests",
+        "docsUrl", "guideUrl", "sourceUrl", "packageUrl", "metadataPath",
+        "observation"
+      ],
+      "properties": {
+        "name": {"type": "string"},
+        "image": {"type": "string"},
+        "description": {"type": "string"},
+        "title": {"type": "string"},
+        "family": {"enum": ["docker", "podman", "nextcloud", "typo3"]},
+        "imageVersion": {"type": "string"},
+        "softwareVersion": {"type": ["string", "null"]},
+        "phpBaseTag": {"type": ["string", "null"]},
+        "rootMode": {"enum": ["rootful", "rootless", "not-applicable"]},
+        "architectures": {"type": "array", "items": {"enum": ["amd64", "arm64"]}},
+        "distribution": {"type": ["string", "null"]},
+        "baseImage": {"type": ["string", "null"]},
+        "lifecycle": {"$ref": "#/$defs/lifecycle"},
+        "declaredTags": {"type": "array", "items": {"type": "string"}},
+        "runtimeTests": {"type": "object"},
+        "docsUrl": {"type": "string", "format": "uri"},
+        "guideUrl": {"type": "string", "format": "uri"},
+        "sourceUrl": {"type": "string", "format": "uri"},
+        "packageUrl": {"type": "string", "format": "uri"},
+        "metadataPath": {"type": "string"},
+        "observation": {"oneOf": [{"$ref": "#/$defs/observation"}, {"type": "null"}]}
+      }
+    }
+  }
+}

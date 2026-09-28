@@ -21,9 +21,9 @@ Every target has separate `-rootful` and `-rootless` images. Rootful/rootless de
 | 5.5 | `podman-5.5-{rootful,rootless}` | 5.5.2 | Fedora Minimal 44 | Upstream tag; no distro Podman patches | AMD64, ARM64 | Yes | Yes |
 | 5.6 | `podman-5.6-{rootful,rootless}` | 5.6.2 | Fedora Minimal 44 | Upstream tag; no distro Podman patches | AMD64, ARM64 | Yes | Yes |
 | 5.7 | `podman-5.7-{rootful,rootless}` | 5.7.1 | Fedora Minimal 44 | Upstream tag; no distro Podman patches | AMD64, ARM64 | Yes | Yes |
-| 5.8 | `podman-5.8-{rootful,rootless}` | 5.8.6 | Fedora Minimal 44 | Upstream tag; no distro Podman patches | AMD64, ARM64 | Yes | Yes |
+| 5.8 | `podman-5.8-{rootful,rootless}` | 5.8.7 | Fedora Minimal 44 | Upstream tag; no distro Podman patches | AMD64, ARM64 | Yes | Yes |
 | 6.0 | `podman-6.0-{rootful,rootless}` | 6.0.2 | Fedora Minimal 44 | Upstream tag; no distro Podman patches | AMD64, ARM64 | Yes | Yes |
-| 6.1 | `podman-6.1-{rootful,rootless}` | 6.1.0 | Fedora Minimal 44 | Upstream tag; no distro Podman patches | AMD64, ARM64 | Yes | Yes |
+| 6.1 | `podman-6.1-{rootful,rootless}` | 6.1.2 | Fedora Minimal 44 | Upstream tag; no distro Podman patches | AMD64, ARM64 | Yes | Yes |
 
 The upstream source recipes compile one private OCI payload per Podman minor line and architecture. Both root modes consume the same-run payload archive after its revision, manifest hash, and archive hash have been verified. The payload is never published. Podman, Netavark, and Aardvark DNS sources are pinned to verified commits in `images/podman/payloads/`. Each final image starts from its own digest-pinned Fedora Minimal 44 base, refreshes Fedora packages, then copies only the compiled output. “No distro Podman patches” applies to the Podman source, not the Fedora runtime dependencies.
 
@@ -63,7 +63,7 @@ Rocky Linux and AlmaLinux are intentionally not duplicated; the UBI targets cove
 
 ## Versions, tags, and inspection
 
-For upstream-source images, the image version equals the exact Podman release, such as `v6.1.0`.
+For upstream-source images, the image version equals the exact Podman release, such as `v6.1.2`.
 
 For distro-package images, `v1.0.0` is the version of the Strukturpiloten image contract. It does not freeze the distro's Podman RPM/APK/DEB revision. Daily rebuilds can update that native revision without changing the image contract version.
 
@@ -112,7 +112,7 @@ The exact upstream rootless images use the narrower unprivileged outer profile b
 | Upstream-source, Debian, Ubuntu, Fedora, CentOS Stream, Alpine, and Arch rootless profiles | Yes | Yes | Their `newuidmap`/`newgidmap` path works inside the nested test boundary. |
 | UBI 8, 9, and 10 plus openSUSE Leap and Tumbleweed rootless profiles | Yes | No | Their subordinate-ID helpers reject writing the second nested user namespace's `uid_map`. Replacing those helpers would stop testing the distribution package environment. |
 
-These rootless images remain useful for package, CLI, filesystem, and inspection compatibility. Test operations that must create their Podman user namespace on a UBI or openSUSE host in a VM or dedicated runner instead of another container. Every exception is explicit in the image's `tests.podman.nestedRuntime` metadata; CI does not infer it from an image name.
+These rootless images remain useful for package, CLI, filesystem, and inspection compatibility. Test operations that must create their Podman user namespace on a UBI or openSUSE host in a VM or dedicated runner instead of another container. [Issue #179](https://github.com/Strukturpiloten/containers/issues/179) records the subordinate-ID helper limitation. Every exception is explicit in the image's `tests.podman.nestedRuntime` metadata; CI does not infer it from an image name.
 
 ### Rootful example
 
@@ -124,7 +124,7 @@ podman run --rm \
   --device /dev/fuse \
   --security-opt label=disable \
   --volume podman-6.1-rootful:/var/lib/containers \
-  ghcr.io/strukturpiloten/podman-6.1-rootful:v6.1.0 \
+  ghcr.io/strukturpiloten/podman-6.1-rootful:v6.1.2 \
   podman run --rm quay.io/libpod/alpine:latest echo nested-rootful
 ```
 

@@ -674,3 +674,4 @@ __marimo__/
 # Project specific additions
 
 !shared/oci-labels.env
+/_site/

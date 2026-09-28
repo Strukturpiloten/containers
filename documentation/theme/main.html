@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ page.title | e }} · Strukturpiloten Containers</title>
+  <meta name="description" content="{{ page.meta.description | default(config.site_description) | e }}">
+  <link rel="canonical" href="{{ page.canonical_url | e }}">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Strukturpiloten Containers">
+  <meta property="og:title" content="{{ page.title | e }}">
+  <meta property="og:description" content="{{ page.meta.description | default(config.site_description) | e }}">
+  <meta property="og:url" content="{{ page.canonical_url | e }}">
+  <meta name="color-scheme" content="light">
+  <link rel="icon" href="{{ 'assets/favicon.svg' | url }}" type="image/svg+xml">
+  <link rel="stylesheet" href="{{ 'assets/site.css' | url }}">
+  <script src="{{ 'assets/site.js' | url }}" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#content">Skip to content</a>
+  <header class="site-header">
+    <a class="brand" href="{{ '' | url }}" aria-label="Strukturpiloten Containers home"><span class="brand-mark" aria-hidden="true">▦</span><span>STRUKTURPILOTEN<span class="brand-subtitle">Containers</span></span></a>
+    <nav aria-label="Main navigation">
+      <a href="{{ '' | url }}">Images</a>
+      <a href="{{ 'guides/getting-started/' | url }}">Get started</a>
+      <a href="{{ 'guides/' | url }}">Documentation</a>
+      <a class="external-link" href="{{ config.repo_url }}">GitHub <span aria-hidden="true">↗</span></a>
+    </nav>
+  </header>
+  <div class="page-shell{% if page.meta.catalogue %} catalogue-page{% endif %}">
+    {% if not page.meta.catalogue %}
+    <aside class="page-sidebar">
+      <a href="{{ '' | url }}" class="back-link">← All images</a>
+      {% if page.toc %}<nav aria-label="On this page"><p class="eyebrow">On this page</p><ul>{% for item in page.toc %}{% for child in item.children %}<li><a href="{{ child.url }}">{{ child.title }}</a></li>{% endfor %}{% endfor %}</ul></nav>{% endif %}
+      <div class="sidebar-links"><a href="{{ 'guides/tags-and-versions/' | url }}">Understand versions & tags</a><a href="{{ 'guides/security-and-support/' | url }}">Security & support</a><a href="{{ 'guides/data-and-discovery/' | url }}">JSON & Markdown exports</a></div>
+    </aside>
+    {% endif %}
+    <main id="content" tabindex="-1">
+      <article>{{ page.content }}</article>
+      <div class="page-meta">
+        {% if page.meta.source_url %}<a href="{{ page.meta.source_url | e }}">View source ↗</a>{% endif %}
+        {% if page.meta.markdown_url %}<a href="{{ page.meta.markdown_url | e }}">Read as Markdown</a>{% endif %}
+        {% if page.meta.updated %}<span>Source updated <time datetime="{{ page.meta.updated | e }}">{{ page.meta.updated[:10] }}</time></span>{% endif %}
+      </div>
+    </main>
+  </div>
+  <footer class="site-footer"><span>Strukturpiloten · Public OCI images</span><nav aria-label="Footer"><a href="{{ 'data/catalogue.json' | url }}">Catalogue JSON</a><a href="{{ 'guides/security-and-support/' | url }}">Security</a><a href="{{ 'guides/contributing/' | url }}">Contribute</a><a href="{{ config.repo_url }}">Source code ↗</a></nav></footer>
+</body>
+</html>
