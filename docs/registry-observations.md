@@ -22,10 +22,14 @@ package-list permission is not required.
 `latest.platforms` includes labels only after the raw index, architecture
 manifest, and exact GHCR config bytes pass digest checks. `observedAt` records
 when the collector read the registry; `configCreatedAt` is an image build label.
-`publishedAt` remains `null` because neither identifies the exact time the
-runnable image was published. A verified maintenance asset may separately
-provide `buildSucceededAt`, which is a build success time and is not relabelled
-as publication time.
+`publishedAt` is recorded prospectively when a workflow copies at least one
+maintained alias and then reads back every selected maintained alias at the
+verified index digest. It is carried by the matching immutable maintenance
+asset. Existing historical assets without that field remain `null`; an
+already-current alias on a retry does not create a guessed timestamp. This
+time is distinct from the initial immutable index upload and from the later
+release-asset publication. `buildSucceededAt` is a separate build success
+time and is never relabelled as publication time.
 
 Release evidence is `verified` only when a published immutable maintenance
 release, its Git tag, unique asset, image name, version, source revision, run

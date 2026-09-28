@@ -42,7 +42,7 @@ For TYPO3, `v2.0.0` is the current PHP-FPM **image** contract line. It does not 
 | --- | --- |
 | Source commit time | When the source revision was committed; not a container build time. |
 | `buildSucceededAt` | When the recorded build succeeded. |
-| `publishedAt` | When a verified image was published, if recorded by publication evidence. |
+| `publishedAt` | When selected maintained aliases first finished promotion and readback for the verified digest, if recorded by a matching immutable maintenance asset. Historical unknowns remain null. |
 | Package or release activity | When an upstream package, repository, or GitHub release changed; not proof this image was rebuilt or pulled. |
 | `observedAt` | When a registry reference was checked; the mutable tag can move later. |
 

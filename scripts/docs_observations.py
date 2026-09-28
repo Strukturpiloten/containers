@@ -321,6 +321,12 @@ def _release_proof(  # noqa: C901, PLR0912, PLR0913, PLR0915
         msg = "Maintenance evidence has no build success time."
         raise ObservationError(msg)
     _timestamp(build_succeeded_at)
+    if "publishedAt" in evidence:
+        published_at = evidence["publishedAt"]
+        if not isinstance(published_at, str):
+            msg = "Maintenance evidence has an invalid publication time."
+            raise ObservationError(msg)
+        _timestamp(published_at)
     expected_mapping = {
         row["architecture"]: {
             "architecture": row["architecture"],
@@ -442,6 +448,7 @@ def _observe_one(  # noqa: C901
         "reason": "No verified release to compare with declaration.",
         "differences": [],
     }
+    published_at: str | None = None
     try:
         evidence, asset = _release_proof(
             repository=repository,
@@ -456,6 +463,7 @@ def _observe_one(  # noqa: C901
     except (ObservationError, ValueError, KeyError, TypeError) as error:
         evidence = {"status": "unavailable", "reason": str(error)[:MAX_ERROR]}
     else:
+        published_at = asset.get("publishedAt")
         try:
             alignment = _declaration_alignment(metadata, asset)
         except (container_engine.ContainerEngineError, KeyError, TypeError, ValueError) as error:
@@ -466,7 +474,7 @@ def _observe_one(  # noqa: C901
         "sourceRevision": source,
         "runId": annotations.get("io.github.strukturpiloten.publish.run-id"),
         "runAttempt": annotations.get("io.github.strukturpiloten.publish.run-attempt"),
-        "publishedAt": None,  # Exact runnable-image publication time is not in OCI metadata.
+        "publishedAt": published_at,
         "platforms": platforms,
         "evidence": evidence,
         "declarationAlignment": alignment,
@@ -595,6 +603,11 @@ def validate(snapshot: dict[str, Any]) -> None:  # noqa: C901, PLR0912, PLR0915
         if latest["reference"] != f"{row['image']}@{latest['digest']}":
             msg = "Snapshot image reference does not match digest."
             raise ObservationError(msg)
+        if latest["publishedAt"] is not None:
+            _timestamp(latest["publishedAt"])
+            if latest["evidence"]["status"] != "verified":
+                msg = "Publication time requires a matching verified release."
+                raise ObservationError(msg)
         if not row["observedAt"] or not isinstance(row["ageSeconds"], int):
             msg = "Observed image lacks a timestamp or age."
             raise ObservationError(msg)

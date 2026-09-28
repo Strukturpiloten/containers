@@ -167,6 +167,7 @@ class ObservationTests(unittest.TestCase):
                 "amd64": {"architecture": "amd64", "manifestDigest": MANIFEST_DIGEST, "configDigest": OTHER_DIGEST}
             },
             "buildSucceededAt": NOW,
+            "publishedAt": "2026-09-27T12:34:56+00:00",
         }
         raw = json.dumps(asset).encode()
         release = {
@@ -196,6 +197,57 @@ class ObservationTests(unittest.TestCase):
         with (
             patch.object(observations, "_github_json", side_effect=response),
             self.assertRaisesRegex(observations.ObservationError, "does not match registry"),
+        ):
+            observations._release_proof(
+                repository="Strukturpiloten/containers",
+                name="example",
+                image=IMAGE,
+                digest=INDEX_DIGEST,
+                index=INDEX,
+                platforms=[PLATFORM],
+                token=None,
+                timeout=5,
+            )
+        with (
+            patch.object(observations, "_github_json", side_effect=response),
+            patch.object(observations, "_platforms", return_value=[PLATFORM]),
+        ):
+            mismatched = observations._observe_one(METADATA, FakeRegistry(), "Strukturpiloten/containers", None, 5)
+        self.assertIsNone(mismatched["latest"]["publishedAt"])
+        self.assertEqual(mismatched["latest"]["evidence"]["status"], "unavailable")
+
+        asset["publicationMapping"]["amd64"]["configDigest"] = CONFIG_DIGEST
+        raw = json.dumps(asset).encode()
+        release["assets"][0]["size"] = len(raw)
+        release["assets"][0]["digest"] = observations._digest(raw)
+        with (
+            patch.object(observations, "_github_json", side_effect=response),
+            patch.object(observations.release_evidence, "_require_complete"),
+        ):
+            proof, fetched_asset = observations._release_proof(
+                repository="Strukturpiloten/containers",
+                name="example",
+                image=IMAGE,
+                digest=INDEX_DIGEST,
+                index=INDEX,
+                platforms=[PLATFORM],
+                token=None,
+                timeout=5,
+            )
+        with (
+            patch.object(observations, "_release_proof", return_value=(proof, fetched_asset)),
+            patch.object(observations, "_platforms", return_value=[PLATFORM]),
+        ):
+            row = observations._observe_one(METADATA, FakeRegistry(), "Strukturpiloten/containers", None, 5)
+        self.assertEqual(row["latest"]["publishedAt"], asset["publishedAt"])
+
+        asset["publishedAt"] = "2026-09-27T12:34:56"
+        raw = json.dumps(asset).encode()
+        release["assets"][0]["size"] = len(raw)
+        release["assets"][0]["digest"] = observations._digest(raw)
+        with (
+            patch.object(observations, "_github_json", side_effect=response),
+            self.assertRaisesRegex(observations.ObservationError, "timezone"),
         ):
             observations._release_proof(
                 repository="Strukturpiloten/containers",
@@ -265,7 +317,7 @@ class ObservationTests(unittest.TestCase):
         row = observed_row()
         row["latest"]["publishedAt"] = NOW
         snapshot = {"schemaVersion": 1, "repository": "Strukturpiloten/containers", "generatedAt": NOW, "images": [row]}
-        with self.assertRaisesRegex(observations.ObservationError, "Invalid registry snapshot"):
+        with self.assertRaisesRegex(observations.ObservationError, "Publication time requires"):
             observations.validate(snapshot)
 
     def test_snapshot_rejects_reference_digest_mismatch(self) -> None:
