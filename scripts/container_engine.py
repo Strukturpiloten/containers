@@ -51,6 +51,7 @@ if TYPE_CHECKING:
 PUBLISH_WORKFLOW_PATH = Path(".github/workflows/publish-images.yml")
 PUBLISH_WORKFLOW_TEMPLATE_PATH = Path(".github/workflow-templates/publish-images.yml.j2")
 OCI_LABELS_ENV_PATH = Path("shared/oci-labels.env")
+GHCR_DESCRIPTION_LIMIT = 512
 CONTAINER_SCHEMA_PATH = Path("container.schema.json")
 IMAGES_GLOB = "images/**/container.yaml"
 EXCLUDED_IMAGE_DIR = "_example"
@@ -810,6 +811,11 @@ def _changed_files(before: str | None, sha: str, event_name: str) -> list[str] |
 
 
 def _input_matches(pattern: str, file_path: str) -> bool:
+    # Input globs deliberately cover whole image and shared runtime directories.
+    # Documentation beside those inputs is not copied into an image.
+    parts = Path(file_path).parts
+    if parts and parts[0] in {"images", "shared"} and (parts[-1] == "README.md" or "docs" in parts[1:-1]):
+        return False
     if pattern.endswith("/**"):
         base = pattern.removesuffix("/**")
         return file_path == base or file_path.startswith(f"{base}/")
@@ -1379,7 +1385,6 @@ def _local_podman_build_command(  # noqa: PLR0913 - the local image, source iden
 
     labels = _oci_labels()
     created = dt.datetime.fromtimestamp(source_timestamp, tz=dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    documentation_path = Path(str(image["metadataFile"])).parent.as_posix()
     build_args.extend(_build_arg("OCI_BASE_DIGEST", base_digest))
     build_args.extend(_build_arg("OCI_BASE_NAME", base_name))
     build_args.extend(_build_arg("OCI_CREATED", created))
@@ -1387,7 +1392,7 @@ def _local_podman_build_command(  # noqa: PLR0913 - the local image, source iden
     build_args.extend(
         _build_arg(
             "OCI_DOCUMENTATION",
-            f"https://github.com/Strukturpiloten/containers/tree/{source_revision}/{documentation_path}",
+            f"https://containers.strukturpiloten.de/images/{image['name']}/",
         )
     )
     build_args.extend(_build_arg("OCI_LICENSES", labels["OCI_LICENSES"]))
@@ -1532,7 +1537,7 @@ def _command_test_podman_image(args: argparse.Namespace) -> None:
         )
 
 
-def _command_build_arch_image(args: argparse.Namespace) -> None:  # noqa: PLR0915 - build identity and OCI labels require separate checks.
+def _command_build_arch_image(args: argparse.Namespace) -> None:
     image_name, architecture = _entry(args.entry_json, require_arch=True)
     if architecture is None:
         _fail("Architecture is required for architecture builds.")
@@ -1593,11 +1598,10 @@ def _command_build_arch_image(args: argparse.Namespace) -> None:  # noqa: PLR091
     command.extend(_build_arg("OCI_BASE_NAME", base_name))
     command.extend(_build_arg("OCI_CREATED", created))
     command.extend(_build_arg("OCI_DESCRIPTION", str(image["description"])))
-    documentation_path = Path(str(image["metadataFile"])).parent.as_posix()
     command.extend(
         _build_arg(
             "OCI_DOCUMENTATION",
-            f"{context.server_url}/{context.repository}/tree/{source_revision}/{documentation_path}",
+            f"https://containers.strukturpiloten.de/images/{image_name}/",
         )
     )
     command.extend(_build_arg("OCI_LICENSES", oci_labels["OCI_LICENSES"]))
@@ -1743,6 +1747,23 @@ def _annotate_oci_layout(layout_dir: Path, annotations: dict[str, str]) -> None:
     _write_json(layout_index_path, layout_index)
 
 
+def _publication_metadata_annotations(image: JsonMap, image_name: str) -> dict[str, str]:
+    """Add package-page description and portable metadata to the multiarch index."""
+    documentation_url = f"https://containers.strukturpiloten.de/images/{image_name}/"
+    suffix = f" Documentation: {documentation_url}"
+    available = GHCR_DESCRIPTION_LIMIT - len(suffix)
+    if available < 1:
+        _fail(f"Documentation URL for {image_name} leaves no room for a package description.")
+    description = str(image["description"])[:available].rstrip() + suffix
+    labels = _oci_labels()
+    return {
+        "org.opencontainers.image.description": description,
+        "org.opencontainers.image.documentation": documentation_url,
+        "org.opencontainers.image.source": labels["OCI_SOURCE"],
+        "org.opencontainers.image.licenses": labels["OCI_LICENSES"],
+    }
+
+
 def _oci_layout_index_raw(layout_dir: Path) -> str:
     """Read and verify the annotated multiarch index in a local OCI layout."""
     layout = _load_json(layout_dir / "index.json")
@@ -1872,6 +1893,7 @@ def _command_publish_image(args: argparse.Namespace) -> None:  # noqa: PLR0915
                 RUN_ID_ANNOTATION: context.run_id,
                 RUN_ATTEMPT_ANNOTATION: context.run_attempt,
                 REVISION_ANNOTATION: context.sha,
+                **_publication_metadata_annotations(image, image_name),
             },
         )
         local_architecture_digests = _architecture_digests(_oci_layout_index_raw(layout_dir), architectures)
@@ -2186,7 +2208,7 @@ def _git_is_strict_ancestor(earlier: str, later: str) -> bool:
     return result.returncode == 0
 
 
-def _command_promote_image(args: argparse.Namespace) -> None:
+def _command_promote_image(args: argparse.Namespace) -> None:  # noqa: C901, PLR0912
     context = _github_context(require_token=False)
     digest = args.digest
     if not digest.startswith("sha256:") or len(digest) != SHA256_DIGEST_LENGTH:
@@ -2220,6 +2242,16 @@ def _command_promote_image(args: argparse.Namespace) -> None:
         or build_result.get("runAttempt") != str(identity.run_attempt)
     ):
         _fail(f"Build result does not match publication identity for {args.image}.")
+    recorded_publication_time = build_result.get("publishedAt") if build_result is not None else None
+    if recorded_publication_time is not None:
+        if not isinstance(recorded_publication_time, str):
+            _fail("Build result has an invalid publishedAt timestamp.")
+        try:
+            parsed_publication_time = dt.datetime.fromisoformat(recorded_publication_time)
+        except ValueError:
+            _fail("Build result has an invalid publishedAt timestamp.")
+        if parsed_publication_time.tzinfo is None:
+            _fail("Build result publishedAt timestamp must include a timezone.")
     existing = _preflight_promotion(
         command_prefix,
         args.image,
@@ -2230,6 +2262,7 @@ def _command_promote_image(args: argparse.Namespace) -> None:
         immutable_tag=immutable_tag,
     )
 
+    promoted_maintained = False
     for tag in tags:
         target = f"{args.image}:{tag}"
         existing_digest = existing[tag]
@@ -2250,11 +2283,20 @@ def _command_promote_image(args: argparse.Namespace) -> None:
             ]
         )
         _write_stdout(f"Promoted {target} to {digest}.")
+        if tag != immutable_tag:
+            promoted_maintained = True
+
+    if promoted_maintained:
+        for tag in tags:
+            if tag != immutable_tag and _remote_digest(command_prefix, f"{args.image}:{tag}") != digest:
+                _fail(f"Maintained registry tag {args.image}:{tag} did not resolve to {digest} after promotion.")
 
     if args.build_result and build_result is not None:
         build_result_path = Path(args.build_result)
         recorded_tags = _string_list(build_result.get("tags", [])) or []
         build_result["tags"] = unique_tags([*recorded_tags, *tags])
+        if promoted_maintained and recorded_publication_time is None:
+            build_result["publishedAt"] = dt.datetime.now(dt.UTC).isoformat()
         _write_json(build_result_path, build_result)
     _write_github_outputs({"promoted_tags": ",".join(tags)})
 

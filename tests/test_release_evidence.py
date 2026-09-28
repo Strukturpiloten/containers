@@ -144,6 +144,26 @@ class FakeGitHub:
 
 
 class ReleaseEvidenceTests(unittest.TestCase):
+    def test_prospective_publication_time_is_optional_and_timezone_aware(self) -> None:
+        historical = record(BUILD, release_origin_revision="d" * 40)
+        self.assertNotIn("publishedAt", historical)
+        timestamp = "2026-09-27T12:34:56+00:00"
+        prospective = record({**BUILD, "publishedAt": timestamp}, release_origin_revision="d" * 40)
+        self.assertEqual(prospective["publishedAt"], timestamp)
+        for invalid in ("2026-09-27T12:34:56", "not-a-date", 42):
+            with self.subTest(invalid=invalid), self.assertRaises(ReleaseEvidenceError):
+                record({**BUILD, "publishedAt": invalid}, release_origin_revision="d" * 40)
+
+    def test_immutable_retry_keeps_prior_publication_time(self) -> None:
+        prior = record({**BUILD, "publishedAt": "2026-09-27T12:34:56+00:00"}, release_origin_revision="d" * 40)
+        retry = record({**BUILD, "buildSucceededAt": "2026-09-27T13:00:00+00:00"}, release_origin_revision="d" * 40)
+        original = json.dumps(prior).encode()
+        api = FakeGitHub(prior, original, published=True)
+        with patch("scripts.release_evidence._github_request", side_effect=api):
+            canonical = publish(retry, json.dumps(retry).encode(), repository="org/repo", token=BUILD["runId"])
+        self.assertEqual(canonical, original)
+        self.assertEqual(json.loads(canonical)["publishedAt"], prior["publishedAt"])
+
     def test_later_rebuild_does_not_claim_original_release_source(self) -> None:
         evidence = record(BUILD, release_origin_revision="d" * 40)
         self.assertEqual(evidence["releaseOriginRevision"], "d" * 40)

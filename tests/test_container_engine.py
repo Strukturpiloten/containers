@@ -136,6 +136,31 @@ class PlanningTests(unittest.TestCase):
             ):
                 self.assertEqual(engine._selected_image_names(self.images, _options()), set())
 
+    def test_image_shared_directory_documentation_does_not_select_builds(self) -> None:
+        self.images[0]["inputs"].append("images/podman/shared/**")
+        self.images[0]["inputs"].append("shared/container-utilities/**")
+        documentation_files = (
+            "images/podman/shared/README.md",
+            "images/podman/shared/docs/usage.md",
+            "shared/container-utilities/README.md",
+            "shared/container-utilities/docs/usage.md",
+            "scripts/documentation.py",
+            "scripts/docs_catalogue.py",
+            "scripts/docs_observations.py",
+            "scripts/docs_site.py",
+        )
+        for changed_file in documentation_files:
+            with (
+                self.subTest(changed_file=changed_file),
+                patch.object(engine, "_changed_files", return_value=[changed_file]),
+            ):
+                self.assertEqual(engine._selected_image_names(self.images, _options()), set())
+
+        with patch.object(engine, "_changed_files", return_value=["images/podman/shared/Containerfile"]):
+            self.assertEqual(engine._selected_image_names(self.images, _options()), {"base"})
+        with patch.object(engine, "_changed_files", return_value=["shared/container-utilities/check.sh"]):
+            self.assertEqual(engine._selected_image_names(self.images, _options()), {"base"})
+
     def test_unavailable_diff_uses_safe_full_rebuild(self) -> None:
         with patch.object(engine, "_changed_files", return_value=None):
             self.assertEqual(engine._selected_image_names(self.images, _options()), {"base", "app"})
@@ -480,7 +505,7 @@ class PromotionTests(unittest.TestCase):
             patch.object(engine, "_github_context", return_value=context),
             patch.object(engine, "_tool", side_effect=lambda name: name),
             patch.object(engine, "_validate_publication_source", return_value=engine.PublicationIdentity(100, 1)),
-            patch.object(engine, "_remote_digest", return_value=None),
+            patch.object(engine, "_remote_digest", side_effect=[None, None, DIGEST, DIGEST]),
             patch.object(engine, "_write_github_outputs") as outputs,
             patch.object(engine, "_run") as run,
         ):
@@ -533,7 +558,7 @@ class PromotionTests(unittest.TestCase):
                 patch.object(engine, "_github_context", return_value=context),
                 patch.object(engine, "_tool", side_effect=lambda name: name),
                 patch.object(engine, "_validate_publication_source", return_value=engine.PublicationIdentity(100, 1)),
-                patch.object(engine, "_remote_digest", return_value=None),
+                patch.object(engine, "_remote_digest", side_effect=[None, None, DIGEST, DIGEST]),
                 patch.object(engine, "_write_github_outputs"),
                 patch.object(engine, "_run"),
             ):
@@ -665,6 +690,9 @@ class AutomaticReleaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             result_path = Path(temporary_directory) / "nextcloud-phpfpm-build-result.json"
             self._build_result(result_path)
+            original = json.loads(result_path.read_text(encoding="utf-8"))
+            original["publishedAt"] = "2026-09-27T12:34:56+00:00"
+            result_path.write_text(json.dumps(original), encoding="utf-8")
             args = SimpleNamespace(image="nextcloud-phpfpm", build_result=str(result_path), default_branch="main")
             with (
                 patch.object(engine, "_github_context", return_value=self._context()),
@@ -686,9 +714,11 @@ class AutomaticReleaseTests(unittest.TestCase):
                 patch.object(engine, "_write_github_outputs"),
             ):
                 engine._command_finalize_release(args)
+            finalized = json.loads(result_path.read_text(encoding="utf-8"))
 
         create_release.assert_not_called()
         self.assertEqual(len([call for call in run.call_args_list if "copy" in call.args[0]]), 3)
+        self.assertEqual(finalized["publishedAt"], original["publishedAt"])
 
     def test_unowned_exact_tag_collision_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

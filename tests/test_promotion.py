@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import json
 import tempfile
@@ -28,6 +29,87 @@ def _annotations(run_id: int, attempt: int = 1, revision: str = REVISION) -> dic
 
 
 class PublicationScenarios(unittest.TestCase):
+    def _promote_with_state(
+        self, *, initial: dict[str, str | None], published_at: str | None = None, copy_updates: bool = True
+    ) -> dict:
+        context = engine._GitHubContext(
+            actor="actor",
+            event_name="push",
+            ref_name="main",
+            repository="Strukturpiloten/containers",
+            run_attempt="1",
+            run_id="100",
+            server_url="https://github.com",
+            sha=REVISION,
+            token=None,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            result_path = Path(directory) / "build-result.json"
+            result = {
+                "image": IMAGE,
+                "indexDigest": OLD,
+                "sourceRevision": REVISION,
+                "runId": "100",
+                "runAttempt": "1",
+                "tags": [],
+            }
+            if published_at is not None:
+                result["publishedAt"] = published_at
+            result_path.write_text(json.dumps(result), encoding="utf-8")
+            args = SimpleNamespace(image=IMAGE, digest=OLD, build_result=str(result_path), default_branch="main")
+            state = dict(initial)
+
+            def copy(command: list[str], **_kwargs: object) -> str:
+                if copy_updates:
+                    state[command[-1].removeprefix("docker://")] = OLD
+                return ""
+
+            with (
+                patch.object(engine, "_github_context", return_value=context),
+                patch.object(engine, "_tool", side_effect=lambda name: name),
+                patch.object(engine, "_validate_publication_source", return_value=PublicationIdentity(100, 1)),
+                patch.object(
+                    engine,
+                    "_preflight_promotion",
+                    return_value={
+                        tag: state[f"{IMAGE}:{tag}"]
+                        for tag in engine.promotion_tags(
+                            event_name="push", ref_name="main", default_branch="main", sha=REVISION
+                        )
+                    },
+                ),
+                patch.object(engine, "_remote_digest", side_effect=lambda _prefix, reference: state[reference]),
+                patch.object(engine, "_run_external", side_effect=copy),
+                patch.object(engine, "_write_github_outputs"),
+            ):
+                engine._command_promote_image(args)
+            return json.loads(result_path.read_text(encoding="utf-8"))
+
+    def test_first_maintained_promotion_records_time_after_digest_readback(self) -> None:
+        initial = {f"{IMAGE}:sha-{REVISION}": OLD, f"{IMAGE}:main": NEW, f"{IMAGE}:latest": NEW}
+        result = self._promote_with_state(initial=initial)
+        self.assertIsNotNone(dt.datetime.fromisoformat(result["publishedAt"]).tzinfo)
+
+    def test_already_current_retry_keeps_recorded_time_or_unknown(self) -> None:
+        initial = {f"{IMAGE}:sha-{REVISION}": OLD, f"{IMAGE}:main": OLD, f"{IMAGE}:latest": OLD}
+        self.assertNotIn("publishedAt", self._promote_with_state(initial=initial))
+        original = "2026-09-27T12:34:56+00:00"
+        self.assertEqual(self._promote_with_state(initial=initial, published_at=original)["publishedAt"], original)
+
+    def test_immutable_source_tag_alone_does_not_claim_maintained_publication(self) -> None:
+        initial = {f"{IMAGE}:sha-{REVISION}": None, f"{IMAGE}:main": OLD, f"{IMAGE}:latest": OLD}
+        self.assertNotIn("publishedAt", self._promote_with_state(initial=initial))
+
+    def test_promotion_readback_failure_does_not_record_time(self) -> None:
+        initial = {f"{IMAGE}:sha-{REVISION}": OLD, f"{IMAGE}:main": NEW, f"{IMAGE}:latest": NEW}
+        with self.assertRaisesRegex(engine.ContainerEngineError, "did not resolve"):
+            self._promote_with_state(initial=initial, copy_updates=False)
+
+    def test_invalid_existing_publication_time_is_rejected(self) -> None:
+        initial = {f"{IMAGE}:sha-{REVISION}": OLD, f"{IMAGE}:main": OLD, f"{IMAGE}:latest": OLD}
+        with self.assertRaisesRegex(engine.ContainerEngineError, "timezone"):
+            self._promote_with_state(initial=initial, published_at="2026-09-27T12:34:56")
+
     def test_local_oci_index_records_publication_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             layout = Path(directory)
@@ -57,6 +139,18 @@ class PublicationScenarios(unittest.TestCase):
             self.assertEqual(descriptor["size"], len(content))
             self.assertEqual(descriptor["digest"], f"sha256:{hashlib.sha256(content).hexdigest()}")
             self.assertEqual(json.loads(content)["annotations"], _annotations(100, 2))
+
+    def test_multiarch_package_description_retains_documentation_url_within_ghcr_limit(self) -> None:
+        annotations = engine._publication_metadata_annotations({"description": "x" * 600}, "example")
+        documentation_url = "https://containers.strukturpiloten.de/images/example/"
+        description = annotations["org.opencontainers.image.description"]
+        self.assertEqual(len(description), engine.GHCR_DESCRIPTION_LIMIT)
+        self.assertTrue(description.endswith(f"Documentation: {documentation_url}"))
+        self.assertEqual(annotations["org.opencontainers.image.documentation"], documentation_url)
+        self.assertEqual(
+            annotations["org.opencontainers.image.source"], "https://github.com/Strukturpiloten/containers"
+        )
+        self.assertEqual(annotations["org.opencontainers.image.licenses"], "AGPL-3.0-only")
 
     def test_index_annotations_identify_rerun_independent_of_archives(self) -> None:
         raw_index = json.dumps({"schemaVersion": 2, "manifests": [], "annotations": _annotations(100, 2)})
@@ -134,7 +228,12 @@ class PublicationScenarios(unittest.TestCase):
         )
         raw_index = json.dumps({"manifests": [{"platform": {"os": "linux", "architecture": "amd64"}, "digest": NEW}]})
         canonical = engine.canonical_build_tag(sha=REVISION, run_id="100", run_attempt="1")
-        image = {"image": IMAGE, "version": "v1.0.0", "build": {"args": {}}}
+        image = {
+            "image": IMAGE,
+            "description": "Example compatibility image",
+            "version": "v1.0.0",
+            "build": {"args": {}},
+        }
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             archives = root / "archives"
@@ -161,7 +260,7 @@ class PublicationScenarios(unittest.TestCase):
                 patch.object(engine, "_image_architectures", return_value=["amd64"]),
                 patch.object(engine, "_tool", side_effect=lambda name: name),
                 patch.object(engine, "_run"),
-                patch.object(engine, "_annotate_oci_layout"),
+                patch.object(engine, "_annotate_oci_layout") as annotate,
                 patch.object(engine, "_oci_layout_index_raw", return_value=raw_index),
                 patch.object(engine, "_remote_digest", side_effect=digest),
                 patch.object(engine, "_registry_annotations", return_value=_annotations(100, 1)),
@@ -178,6 +277,15 @@ class PublicationScenarios(unittest.TestCase):
             self.assertEqual(result["indexDigest"], OLD)
             self.assertEqual(result["runAttempt"], "1")
             self.assertEqual(result["architectureDigests"], {"amd64": NEW})
+            index_annotations = annotate.call_args.args[1]
+            self.assertEqual(
+                index_annotations["org.opencontainers.image.description"],
+                "Example compatibility image Documentation: https://containers.strukturpiloten.de/images/example/",
+            )
+            self.assertEqual(
+                index_annotations["org.opencontainers.image.documentation"],
+                "https://containers.strukturpiloten.de/images/example/",
+            )
             self.assertEqual(outputs.call_args.args[0]["canonical_tag"], canonical)
             self.assertFalse(any("copy" in call.args[0] for call in external.call_args_list))
             promote_args = SimpleNamespace(

@@ -1,12 +1,12 @@
 # Catalogue data and discovery
 
-`latest.declarationAlignment` independently compares the published version, architectures, build arguments, and payload checksum with current repository declarations. `matched` reports those fields agree, `different` lists the differences, and `unknown` means no comparison was supported. A matching release proof can still describe an older published artifact while newer declarations are awaiting publication; do not confuse valid evidence for a digest with evidence that the current source inputs have been published.
+`latest.declarationAlignment` independently compares the published version, architectures, build arguments, and payload checksum with repository declarations. `matched` reports those fields agree, `different` lists the differences, and `unknown` means no current comparison was supported. Saved snapshots bind a comparison to the declaration inputs used at collection; a later catalogue build reports `unknown` if those inputs changed or an older snapshot lacks that binding. A matching release proof can still describe an older published artifact while newer declarations are awaiting publication; do not confuse valid evidence for a digest with evidence that the current source inputs have been published.
 
 The catalogue schema validates the declaration fields and observation envelope. Validate nested tag, digest, platform, and evidence fields using the image-entry definitions in `/data/registry-snapshot.schema.json` as well; the catalogue's envelope validation alone does not prove their consistency. Both documents identify their schema version. A future incompatible version requires an explicit consumer update.
 
 Markdown exports remain publicly retrievable, but `robots.txt` asks compliant search crawlers to skip `/markdown/` to reduce duplicate crawling. The linked HTML pages are the primary search documents. This does not guarantee deindexing, and it does not restrict direct access to the exports.
 
-The documentation site publishes machine-readable catalogue data alongside the human-readable pages. The intended canonical site is https://containers.strukturpiloten.de/; these endpoints become available after GitHub Pages, the custom domain, and DNS are configured.
+The documentation site at **https://containers.strukturpiloten.de/** publishes machine-readable catalogue data alongside its human-readable pages.
 
 | Path | Content |
 | --- | --- |
@@ -25,3 +25,5 @@ The snapshot's per-image status can be observed, stale, or unavailable. An obser
 For automation, read the schemas, check schemaVersion, match an exact image name and architecture, and require an observation with a digest and the evidence level your workflow needs. Pin the resulting image@sha256:<index-digest> and review later digest updates. A mutable SemVer tag can move on a maintenance rebuild without changing the declared image version. Distribution-installed Docker and Podman revisions can also change on rebuild. The TYPO3 and Nextcloud PHP-FPM image versions describe PHP runtime contracts, not bundled application versions; those applications are supplied by the consuming stack.
 
 The root /llms.txt provides a concise navigation list for text-oriented readers. Markdown exports are alternate representations of the same published documentation. They do not replace digest verification or provide any guarantee of search or AI ranking. Use the [image catalogue](image-catalogue.md) for browsing and [maintenance evidence](maintenance-evidence.md) for the proof behind a published artifact.
+
+Published multi-architecture indexes include the image description and canonical reference URL in `org.opencontainers.image.description`, which GitHub uses for the package-page description. The dedicated `org.opencontainers.image.documentation` annotation and per-architecture image label carry the same reference URL for OCI clients. GitHub renders its description as text and controls whether the URL is clickable. These values appear after normal publication; existing immutable image versions retain their original metadata.

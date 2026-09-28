@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import copy
 import datetime as dt
 import hashlib
 import json
@@ -16,6 +17,7 @@ import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
+from http import HTTPStatus
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +38,10 @@ MAX_CONFIG_BYTES = 4 * 1024 * 1024
 
 class ObservationError(ValueError):
     """A registry response cannot support the proposed observation."""
+
+
+class TransientGitHubReadError(ObservationError):
+    """A temporary GitHub read failure cannot disprove earlier verified evidence."""
 
 
 def _now() -> dt.datetime:
@@ -223,9 +229,17 @@ def _github_json(url: str, *, token: str | None, timeout: int, accept: str = "ap
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
             return response.read()
+    except urllib.error.HTTPError as error:
+        msg = f"GitHub evidence request failed: {error}."
+        if (
+            error.code in {HTTPStatus.REQUEST_TIMEOUT, HTTPStatus.TOO_MANY_REQUESTS}
+            or error.code >= HTTPStatus.INTERNAL_SERVER_ERROR
+        ):
+            raise TransientGitHubReadError(msg) from error
+        raise ObservationError(msg) from error
     except (urllib.error.URLError, TimeoutError) as error:
         msg = f"GitHub evidence request failed: {error}."
-        raise ObservationError(msg) from error
+        raise TransientGitHubReadError(msg) from error
 
 
 def _release_proof(  # noqa: C901, PLR0912, PLR0913, PLR0915
@@ -321,6 +335,12 @@ def _release_proof(  # noqa: C901, PLR0912, PLR0913, PLR0915
         msg = "Maintenance evidence has no build success time."
         raise ObservationError(msg)
     _timestamp(build_succeeded_at)
+    if "publishedAt" in evidence:
+        published_at = evidence["publishedAt"]
+        if not isinstance(published_at, str):
+            msg = "Maintenance evidence has an invalid publication time."
+            raise ObservationError(msg)
+        _timestamp(published_at)
     expected_mapping = {
         row["architecture"]: {
             "architecture": row["architecture"],
@@ -375,8 +395,29 @@ def _release_proof(  # noqa: C901, PLR0912, PLR0913, PLR0915
     return proof, evidence
 
 
+def _declaration_inputs(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Select exactly the current declaration fields compared with a release."""
+    return {
+        "version": metadata["version"],
+        "architectures": sorted(metadata["build"]["architectures"]),
+        "buildInputs": container_engine._component_inputs(metadata),  # noqa: SLF001
+    }
+
+
+def _declaration_inputs_and_fingerprint(metadata: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    inputs = _declaration_inputs(metadata)
+    raw = json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode()
+    return inputs, _digest(raw)
+
+
+def declaration_fingerprint(metadata: dict[str, Any]) -> str:
+    """Bind a saved comparison to its version, architectures, and build inputs."""
+    return _declaration_inputs_and_fingerprint(metadata)[1]
+
+
 def _declaration_alignment(metadata: dict[str, Any], asset: dict[str, Any]) -> dict[str, Any]:
     """Compare today's declaration with the separately verified live release."""
+    current, fingerprint = _declaration_inputs_and_fingerprint(metadata)
     differences = []
 
     def add(field: str, published: object, declared: object) -> None:
@@ -388,10 +429,9 @@ def _declaration_alignment(metadata: dict[str, Any], asset: dict[str, Any]) -> d
 
         differences.append({"field": field, "published": display(published)[:500], "declared": display(declared)[:500]})
 
-    add("version", f"v{asset['version']}", metadata["version"])
-    add("architectures", sorted(asset["architectureDigests"]), sorted(metadata["build"]["architectures"]))
+    add("version", f"v{asset['version']}", current["version"])
+    add("architectures", sorted(asset["architectureDigests"]), current["architectures"])
     recorded = asset.get("componentInputs")
-    current = container_engine._component_inputs(metadata)  # noqa: SLF001
 
     def compare(field: str, published: object, declared: object) -> None:
         if isinstance(published, dict) and isinstance(declared, dict):
@@ -400,12 +440,22 @@ def _declaration_alignment(metadata: dict[str, Any], asset: dict[str, Any]) -> d
         else:
             add(field, published, declared)
 
-    compare("buildInputs", recorded, current)
-    return {"status": "different" if differences else "matched", "differences": differences}
+    compare("buildInputs", recorded, current["buildInputs"])
+    return {
+        "status": "different" if differences else "matched",
+        "differences": differences,
+        "declarationFingerprint": fingerprint,
+    }
 
 
-def _observe_one(  # noqa: C901
-    metadata: dict[str, Any], registry: PublicRegistry, repository: str, token: str | None, timeout: int
+def _observe_one(  # noqa: C901, PLR0913
+    metadata: dict[str, Any],
+    registry: PublicRegistry,
+    repository: str,
+    token: str | None,
+    timeout: int,
+    *,
+    prior: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     name, image = metadata["name"], metadata["image"]
     observed_at = _now().isoformat()
@@ -442,6 +492,7 @@ def _observe_one(  # noqa: C901
         "reason": "No verified release to compare with declaration.",
         "differences": [],
     }
+    published_at: str | None = None
     try:
         evidence, asset = _release_proof(
             repository=repository,
@@ -453,9 +504,21 @@ def _observe_one(  # noqa: C901
             token=token,
             timeout=timeout,
         )
+    except TransientGitHubReadError as error:
+        previous_latest = prior.get("latest") if prior and prior.get("image") == image else None
+        if (
+            prior
+            and prior.get("status") in {"observed", "stale"}
+            and isinstance(previous_latest, dict)
+            and previous_latest.get("digest") == digest
+            and previous_latest.get("evidence", {}).get("status") == "verified"
+        ):
+            raise
+        evidence = {"status": "unavailable", "reason": str(error)[:MAX_ERROR]}
     except (ObservationError, ValueError, KeyError, TypeError) as error:
         evidence = {"status": "unavailable", "reason": str(error)[:MAX_ERROR]}
     else:
+        published_at = asset.get("publishedAt")
         try:
             alignment = _declaration_alignment(metadata, asset)
         except (container_engine.ContainerEngineError, KeyError, TypeError, ValueError) as error:
@@ -466,7 +529,7 @@ def _observe_one(  # noqa: C901
         "sourceRevision": source,
         "runId": annotations.get("io.github.strukturpiloten.publish.run-id"),
         "runAttempt": annotations.get("io.github.strukturpiloten.publish.run-attempt"),
-        "publishedAt": None,  # Exact runnable-image publication time is not in OCI metadata.
+        "publishedAt": published_at,
         "platforms": platforms,
         "evidence": evidence,
         "declarationAlignment": alignment,
@@ -494,7 +557,7 @@ def _fallback(
     metadata: dict[str, Any], prior: dict[str, Any] | None, error: Exception, now: dt.datetime
 ) -> dict[str, Any]:
     result = (
-        dict(prior)
+        copy.deepcopy(prior)
         if prior and prior.get("image") == metadata["image"] and prior.get("status") in {"observed", "stale"}
         else {
             "name": metadata["name"],
@@ -504,6 +567,12 @@ def _fallback(
             "tags": None,
         }
     )
+    if result["latest"] is not None:
+        result["latest"]["declarationAlignment"] = {
+            "status": "unknown",
+            "reason": "Current declarations could not be compared with a freshly verified release asset.",
+            "differences": [],
+        }
     observed_at = result["observedAt"]
     result.update(
         {
@@ -542,7 +611,12 @@ def collect(
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     rows: list[dict[str, Any]] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(_observe_one, image, client, repository, token, timeout): image for image in images}
+        futures = {
+            executor.submit(
+                _observe_one, image, client, repository, token, timeout, prior=prior.get(image["name"])
+            ): image
+            for image in images
+        }
         for future in concurrent.futures.as_completed(futures):
             image = futures[future]
             try:
@@ -595,6 +669,11 @@ def validate(snapshot: dict[str, Any]) -> None:  # noqa: C901, PLR0912, PLR0915
         if latest["reference"] != f"{row['image']}@{latest['digest']}":
             msg = "Snapshot image reference does not match digest."
             raise ObservationError(msg)
+        if latest["publishedAt"] is not None:
+            _timestamp(latest["publishedAt"])
+            if latest["evidence"]["status"] != "verified":
+                msg = "Publication time requires a matching verified release."
+                raise ObservationError(msg)
         if not row["observedAt"] or not isinstance(row["ageSeconds"], int):
             msg = "Observed image lacks a timestamp or age."
             raise ObservationError(msg)

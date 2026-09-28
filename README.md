@@ -2,7 +2,7 @@
 
 Container image definitions for application stacks and isolated compatibility tests, with published artifacts at `ghcr.io/strukturpiloten/<image-name>`.
 
-Browse the [complete image catalogue](docs/image-catalogue.md) for every declared image, lifecycle state, and evidence status; each image's metadata declares its architectures. Each image also has its own page at `https://containers.strukturpiloten.de/images/<image-name>/` when the documentation site is published. The catalogue distinguishes declared images from confirmed registry availability; an `unknown` build or registry status is not a successful publication.
+Browse the [image catalogue](https://containers.strukturpiloten.de/) for every image, its purpose, architectures, lifecycle, and registry observations. Each image has a permanent reference page. The [repository catalogue](docs/image-catalogue.md) provides the deterministic declarations used by CI. An `unknown` build or registry status does not mean publication succeeded.
 
 | Family | Choose it for | Start here |
 | --- | --- | --- |
@@ -32,7 +32,7 @@ The image version is a release of this repository's image contract. It is not ne
 - [Contributing](CONTRIBUTING.md) and [build and release operations](docs/operations.md)
 - [Maintenance evidence](docs/maintenance-evidence.md) and [vulnerability scanning](docs/vulnerability-scanning.md)
 
-The intended documentation domain is `https://containers.strukturpiloten.de/`. Until DNS and site publication are complete, the linked repository files are the source of truth.
+The documentation is published at **https://containers.strukturpiloten.de/**. The linked repository guides remain available alongside the website.
 
 ## Repository and releases
 

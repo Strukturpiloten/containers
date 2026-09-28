@@ -177,7 +177,7 @@ def _require_complete(  # noqa: PLR0913, C901
             raise ReleaseEvidenceError(msg)
 
 
-def record(  # noqa: C901, PLR0912, PLR0913
+def record(  # noqa: C901, PLR0912, PLR0913, PLR0915
     build_result: dict[str, Any],
     *,
     release_origin_revision: str,
@@ -219,6 +219,19 @@ def record(  # noqa: C901, PLR0912, PLR0913
     ):
         msg = "Finalized build result is incomplete or invalid."
         raise ReleaseEvidenceError(msg)
+    published_at = build_result.get("publishedAt")
+    if published_at is not None:
+        if not isinstance(published_at, str):
+            msg = "Published time must be an ISO timestamp with a timezone."
+            raise ReleaseEvidenceError(msg)
+        try:
+            parsed_publication_time = datetime.fromisoformat(published_at)
+        except ValueError as error:
+            msg = "Published time must be a valid ISO timestamp."
+            raise ReleaseEvidenceError(msg) from error
+        if parsed_publication_time.tzinfo is None:
+            msg = "Published time must include a timezone."
+            raise ReleaseEvidenceError(msg)
     runtime = runtime_evidence or []
     scans = scan_reports or []
     published = published_configs or {}
@@ -271,7 +284,7 @@ def record(  # noqa: C901, PLR0912, PLR0913
             ):
                 msg = f"{label} archive configuration does not match published configuration."
                 raise ReleaseEvidenceError(msg)
-    return {
+    result = {
         "schemaVersion": 1,
         "imageName": name,
         "image": image,
@@ -291,6 +304,9 @@ def record(  # noqa: C901, PLR0912, PLR0913
         "runtimeEvidence": runtime,
         "scanReports": scans,
     }
+    if published_at is not None:
+        result["publishedAt"] = published_at
+    return result
 
 
 def asset_name(evidence: dict[str, Any]) -> str:
@@ -301,8 +317,8 @@ def asset_name(evidence: dict[str, Any]) -> str:
     )
 
 
-def _same_evidence_payload(existing: bytes, expected: bytes) -> bool:
-    """Allow a retry to retain its original build timestamp, but no changed evidence."""
+def _same_evidence_payload(existing: bytes, expected: bytes) -> bool:  # noqa: C901, PLR0911
+    """Retain original build and publication times on an otherwise identical retry."""
     try:
         old = json.loads(existing)
         new = json.loads(expected)
@@ -317,6 +333,18 @@ def _same_evidence_payload(existing: bytes, expected: bytes) -> bool:
         if any(datetime.fromisoformat(value).tzinfo is None for value in timestamps):
             return False
     except ValueError:
+        return False
+    old_publication = old.pop("publishedAt", None)
+    new_publication = new.pop("publishedAt", None)
+    if old_publication is not None:
+        if not isinstance(old_publication, str):
+            return False
+        try:
+            if datetime.fromisoformat(old_publication).tzinfo is None:
+                return False
+        except ValueError:
+            return False
+    if new_publication is not None and new_publication != old_publication:
         return False
     return old == new
 

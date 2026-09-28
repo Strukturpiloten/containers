@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from jsonschema import Draft202012Validator
 
+from scripts import docs_observations
 from scripts.docs_catalogue import catalogue, image_markdown, index_markdown
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -73,7 +75,60 @@ def _snapshot_row() -> dict:
     }
 
 
+def _verified_alignment_row() -> dict:
+    row = _snapshot_row()
+    row["latest"]["publishedAt"] = "2026-09-28T11:30:00+00:00"
+    row["latest"]["evidence"] = {
+        "status": "verified",
+        "releaseUrl": None,
+        "assetUrl": None,
+        "assetDigest": DIGEST,
+        "buildSucceededAt": "2026-09-28T11:00:00+00:00",
+        "runtime": "verified",
+        "scan": "verified",
+        "signature": "unknown",
+        "provenance": "unknown",
+    }
+    row["latest"]["declarationAlignment"] = {
+        "status": "matched",
+        "differences": [],
+        "declarationFingerprint": docs_observations.declaration_fingerprint(PODMAN),
+    }
+    return row
+
+
 class DocsCatalogueTests(unittest.TestCase):
+    def test_matching_declaration_fingerprint_preserves_current_alignment(self) -> None:
+        observation = _verified_alignment_row()
+        report = catalogue([PODMAN], {"schemaVersion": 1, "images": [observation]}, source_revision="c" * 40)
+        latest = report["images"][0]["observation"]["latest"]
+        self.assertEqual(latest["declarationAlignment"]["status"], "matched")
+        self.assertEqual(latest["evidence"], observation["latest"]["evidence"])
+
+    def test_changed_or_legacy_declarations_invalidate_only_alignment(self) -> None:
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy):
+                observation = _verified_alignment_row()
+                metadata = {**PODMAN, "version": "v6.2.0"}
+                if legacy:
+                    del observation["latest"]["declarationAlignment"]["declarationFingerprint"]
+                    metadata = PODMAN
+                report = catalogue([metadata], {"schemaVersion": 1, "images": [observation]}, source_revision="c" * 40)
+                latest = report["images"][0]["observation"]["latest"]
+                self.assertEqual(latest["declarationAlignment"]["status"], "unknown")
+                self.assertEqual(latest["evidence"], observation["latest"]["evidence"])
+                self.assertEqual(latest["digest"], observation["latest"]["digest"])
+                self.assertEqual(latest["publishedAt"], observation["latest"]["publishedAt"])
+                self.assertEqual(observation["latest"]["declarationAlignment"]["status"], "matched")
+
+    def test_unrecomputable_fingerprint_invalidates_only_alignment(self) -> None:
+        observation = _verified_alignment_row()
+        with patch.object(docs_observations, "declaration_fingerprint", side_effect=ValueError("inputs missing")):
+            report = catalogue([PODMAN], {"schemaVersion": 1, "images": [observation]}, source_revision="c" * 40)
+        latest = report["images"][0]["observation"]["latest"]
+        self.assertEqual(latest["declarationAlignment"]["status"], "unknown")
+        self.assertEqual(latest["evidence"]["status"], "verified")
+
     def test_declarations_without_snapshot_do_not_claim_registry_success(self) -> None:
         report = catalogue([PODMAN], None, source_revision="b" * 40)
         row = report["images"][0]
