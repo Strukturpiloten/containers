@@ -31,14 +31,20 @@ def _matches_path(patterns: list[str], path: str) -> bool:
     return any(re.search(pattern[1:-1], path) is not None for pattern in patterns)
 
 
-def _matching_group_rules(rules: list[dict], path: str, package: str) -> list[dict]:
+def _matching_group_rules(
+    rules: list[dict], path: str, package: str, current_value: str, update_type: str = "digest"
+) -> list[dict]:
     return [
         rule
         for rule in rules
-        if rule.get("groupName", "").startswith("Docker ")
-        and _matches_path(rule["matchFileNames"], path)
+        if rule.get("groupName")
+        and ("matchFileNames" not in rule or _matches_path(rule["matchFileNames"], path))
         and package in rule.get("matchPackageNames", [package])
-        and "digest" in rule.get("matchUpdateTypes", [])
+        and package in rule.get("matchDepNames", [package])
+        and ("matchCurrentValue" not in rule or re.search(rule["matchCurrentValue"][1:-1], current_value))
+        and update_type in rule.get("matchUpdateTypes", [update_type])
+        and "custom.regex" in rule.get("matchManagers", ["custom.regex"])
+        and "docker" in rule.get("matchDatasources", ["docker"])
     ]
 
 
@@ -98,7 +104,8 @@ class DockerRenovateTests(unittest.TestCase):
                     package = base.split(":", 1)[0]
                     pair_bases.add(base)
                     self.assertTrue(_matches_path(freeze["matchFileNames"], path))
-                    matches = _matching_group_rules(self.rules, path, package)
+                    current_value = base.split(":", 1)[1].split("@", 1)[0]
+                    matches = _matching_group_rules(self.rules, path, package, current_value)
                     self.assertEqual(len(matches), 1)
                     self.assertEqual(matches[0].get("matchManagers"), ["custom.regex"])
                     self.assertEqual(matches[0].get("matchDatasources"), ["docker"])
@@ -124,7 +131,47 @@ class DockerRenovateTests(unittest.TestCase):
                 self.assertTrue(_matches_path(group["matchFileNames"], path))
         self.assertFalse(_matches_path(pin["matchFileNames"], distro))
         self.assertFalse(_matches_path(group["matchFileNames"], distro))
-        self.assertEqual(len(_matching_group_rules(self.rules, distro, "docker.io/library/alpine")), 1)
+        self.assertEqual(len(_matching_group_rules(self.rules, distro, "docker.io/library/alpine", "3.24")), 1)
+
+    def test_shared_distro_digest_group_is_the_final_match_for_both_families(self) -> None:
+        for distro in DISTROS:
+            expected_group = None
+            expected_image = None
+            for family in ("docker", "podman"):
+                for mode in MODES:
+                    with self.subTest(distro=distro, family=family, mode=mode):
+                        path = f"images/{family}/{family}-{distro}-{mode}/container.yaml"
+                        metadata = yaml.safe_load((ROOT / path).read_text(encoding="utf-8"))
+                        image = metadata["build"]["args"]["DISTRO_IMAGE"]["value"].split("@", 1)[0]
+                        package, current_value = image.rsplit(":", 1)
+                        matches = _matching_group_rules(self.rules, path, package, current_value)
+                        self.assertEqual(len(matches), 1)
+                        self.assertTrue(matches[-1]["groupName"].endswith("distro base"))
+                        self.assertEqual(matches[-1]["matchCurrentValue"], f"/^{re.escape(current_value)}$/")
+                        self.assertEqual(_matching_group_rules(self.rules, path, package, "other-tag"), [])
+                        self.assertEqual(_matching_group_rules(self.rules, path, f"{package}-other", current_value), [])
+                        self.assertEqual(_matching_group_rules(self.rules, path, package, current_value, "patch"), [])
+                        if expected_group is None:
+                            expected_group = matches[-1]["groupName"]
+                            expected_image = image
+                        self.assertEqual(matches[-1]["groupName"], expected_group)
+                        self.assertEqual(image, expected_image)
+
+        for distro, other_version in (("debian-11", "12"), ("fedora-43", "44"), ("ubuntu-22.04", "24.04")):
+            with self.subTest(distro=distro, other_version=other_version):
+                path = f"images/podman/podman-{distro}-rootful/container.yaml"
+                metadata = yaml.safe_load((ROOT / path).read_text(encoding="utf-8"))
+                image = metadata["build"]["args"]["DISTRO_IMAGE"]["value"]
+                package = image.split(":", 1)[0]
+                self.assertEqual(_matching_group_rules(self.rules, path, package, other_version), [])
+
+    def test_source_fedora_minimal_keeps_its_separate_group(self) -> None:
+        path = "images/podman/podman-5.4-rootful/container.yaml"
+        metadata = yaml.safe_load((ROOT / path).read_text(encoding="utf-8"))
+        image = metadata["build"]["args"]["FEDORA_IMAGE"]["value"].split("@", 1)[0]
+        package, current_value = image.rsplit(":", 1)
+        matches = _matching_group_rules(self.rules, path, package, current_value)
+        self.assertEqual([rule["groupName"] for rule in matches], ["Podman Fedora 44 base"])
 
 
 if __name__ == "__main__":

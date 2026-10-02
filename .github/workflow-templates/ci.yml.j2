@@ -3,6 +3,8 @@ name: Validate containers
 
 on:
   pull_request:
+  merge_group:
+    types: [checks_requested]
   workflow_dispatch:
 
 concurrency:
@@ -42,7 +44,7 @@ jobs:
       - name: Validate repository
         shell: bash
         env:
-          BEFORE: ${{ github.event.pull_request.base.sha || '' }}
+          BEFORE: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || '' }}
         run: |
           set -euo pipefail
 
@@ -85,7 +87,7 @@ jobs:
       - name: Create build plan
         shell: bash
         env:
-          BEFORE: ${{ github.event.pull_request.base.sha || '' }}
+          BEFORE: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || '' }}
           BUILD_SCOPE: all
           BUILD_TARGET: ""
           REF_NAME: ${{ github.head_ref || github.ref_name }}

@@ -15,6 +15,27 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class PullRequestSourceIdentityTests(unittest.TestCase):
+    def test_merge_queue_runs_required_ci_against_the_queue_revision(self) -> None:
+        workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+        # PyYAML's YAML 1.1 loader treats the unquoted workflow key 'on' as True.
+        self.assertEqual(workflow[True]["merge_group"]["types"], ["checks_requested"])
+        for job in ("validate", "plan"):
+            with self.subTest(job=job):
+                step = next(step for step in workflow["jobs"][job]["steps"] if "BEFORE" in step.get("env", {}))
+                self.assertEqual(
+                    step["env"]["BEFORE"],
+                    "${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || '' }}",
+                )
+                if job == "plan":
+                    self.assertEqual(step["env"]["SOURCE_SHA"], "${{ github.sha }}")
+        required = workflow["jobs"]["required-ci"]
+        self.assertEqual(required["name"], "Required CI")
+        self.assertEqual(required["if"], "${{ always() }}")
+        self.assertEqual(set(required["needs"]), {"validate", "plan", "payloads", "smoke-build"})
+        self.assertEqual(workflow["permissions"], {})
+        for job in workflow["jobs"].values():
+            self.assertNotIn("write", job.get("permissions", {}).values())
+
     def test_pr_plan_and_payload_use_merge_sha_without_overriding_checkout_ref(self) -> None:
         paths = (
             (".github/workflow-templates/ci.yml.j2", "SOURCE_SHA: ${{ github.sha }}"),

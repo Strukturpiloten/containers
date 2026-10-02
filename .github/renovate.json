@@ -704,7 +704,7 @@
       "groupName": "Docker Alpine 3.24 base"
     },
     {
-      "description": "Update Docker Alpine 3.24 distro base digest for both root modes together",
+      "description": "Update Docker and Podman Alpine 3.24 distro base digest for both root modes together",
       "matchManagers": [
         "custom.regex"
       ],
@@ -714,8 +714,9 @@
       "matchPackageNames": [
         "docker.io/library/alpine"
       ],
+      "matchCurrentValue": "/^3\\.24$/",
       "matchFileNames": [
-        "/^images\\/docker\\/docker-alpine-3\\.24-(?:rootful|rootless)\\/container\\.yaml$/"
+        "/^images\\/(?:docker\\/docker|podman\\/podman)-alpine-3\\.24-(?:rootful|rootless)\\/container\\.yaml$/"
       ],
       "matchUpdateTypes": [
         "digest"
@@ -723,7 +724,7 @@
       "groupName": "Docker Alpine 3.24 distro base"
     },
     {
-      "description": "Update Docker Arch distro base digest for both root modes together",
+      "description": "Update Docker and Podman Arch distro base digest for both root modes together",
       "matchManagers": [
         "custom.regex"
       ],
@@ -733,8 +734,9 @@
       "matchPackageNames": [
         "docker.io/library/archlinux"
       ],
+      "matchCurrentValue": "/^base$/",
       "matchFileNames": [
-        "/^images\\/docker\\/docker-arch-(?:rootful|rootless)\\/container\\.yaml$/"
+        "/^images\\/(?:docker\\/docker|podman\\/podman)-arch-(?:rootful|rootless)\\/container\\.yaml$/"
       ],
       "matchUpdateTypes": [
         "digest"
@@ -742,7 +744,7 @@
       "groupName": "Docker Arch distro base"
     },
     {
-      "description": "Update Docker Debian 11 distro base digest for both root modes together",
+      "description": "Update Docker and Podman Debian 11 distro base digest for both root modes together",
       "matchManagers": [
         "custom.regex"
       ],
@@ -752,8 +754,9 @@
       "matchPackageNames": [
         "docker.io/library/debian"
       ],
+      "matchCurrentValue": "/^11$/",
       "matchFileNames": [
-        "/^images\\/docker\\/docker-debian-11-(?:rootful|rootless)\\/container\\.yaml$/"
+        "/^images\\/(?:docker\\/docker|podman\\/podman)-debian-11-(?:rootful|rootless)\\/container\\.yaml$/"
       ],
       "matchUpdateTypes": [
         "digest"
@@ -761,7 +764,7 @@
       "groupName": "Docker Debian 11 distro base"
     },
     {
-      "description": "Update Docker Debian 12 distro base digest for both root modes together",
+      "description": "Update Docker and Podman Debian 12 distro base digest for both root modes together",
       "matchManagers": [
         "custom.regex"
       ],
@@ -771,8 +774,9 @@
       "matchPackageNames": [
         "docker.io/library/debian"
       ],
+      "matchCurrentValue": "/^12$/",
       "matchFileNames": [
-        "/^images\\/docker\\/docker-debian-12-(?:rootful|rootless)\\/container\\.yaml$/"
+        "/^images\\/(?:docker\\/docker|podman\\/podman)-debian-12-(?:rootful|rootless)\\/container\\.yaml$/"
       ],
       "matchUpdateTypes": [
         "digest"
@@ -780,7 +784,7 @@
       "groupName": "Docker Debian 12 distro base"
     },
     {
-      "description": "Update Docker Debian 13 distro base digest for both root modes together",
+      "description": "Update Docker and Podman Debian 13 distro base digest for both root modes together",
       "matchManagers": [
         "custom.regex"
       ],
@@ -790,8 +794,9 @@
       "matchPackageNames": [
         "docker.io/library/debian"
       ],
+      "matchCurrentValue": "/^13$/",
       "matchFileNames": [
-        "/^images\\/docker\\/docker-debian-13-(?:rootful|rootless)\\/container\\.yaml$/"
+        "/^images\\/(?:docker\\/docker|podman\\/podman)-debian-13-(?:rootful|rootless)\\/container\\.yaml$/"
       ],
       "matchUpdateTypes": [
         "digest"
@@ -799,7 +804,7 @@
       "groupName": "Docker Debian 13 distro base"
     },
     {
-      "description": "Update Docker Fedora 43 distro base digest for both root modes together",
+      "description": "Update Docker and Podman Fedora 43 distro base digest for both root modes together",
       "matchManagers": [
         "custom.regex"
       ],
@@ -809,8 +814,9 @@
       "matchPackageNames": [
         "registry.fedoraproject.org/fedora"
       ],
+      "matchCurrentValue": "/^43$/",
       "matchFileNames": [
-        "/^images\\/docker\\/docker-fedora-43-(?:rootful|rootless)\\/container\\.yaml$/"
+        "/^images\\/(?:docker\\/docker|podman\\/podman)-fedora-43-(?:rootful|rootless)\\/container\\.yaml$/"
       ],
       "matchUpdateTypes": [
         "digest"
@@ -818,7 +824,7 @@
       "groupName": "Docker Fedora 43 distro base"
     },
     {
-      "description": "Update Docker Fedora 44 distro base digest for both root modes together",
+      "description": "Update Docker and Podman Fedora 44 distro base digest for both root modes together",
       "matchManagers": [
         "custom.regex"
       ],
@@ -828,8 +834,9 @@
       "matchPackageNames": [
         "registry.fedoraproject.org/fedora"
       ],
+      "matchCurrentValue": "/^44$/",
       "matchFileNames": [
-        "/^images\\/docker\\/docker-fedora-44-(?:rootful|rootless)\\/container\\.yaml$/"
+        "/^images\\/(?:docker\\/docker|podman\\/podman)-fedora-44-(?:rootful|rootless)\\/container\\.yaml$/"
       ],
       "matchUpdateTypes": [
         "digest"
@@ -837,7 +844,7 @@
       "groupName": "Docker Fedora 44 distro base"
     },
     {
-      "description": "Update Docker openSUSE Leap 16.0 distro base digest for both root modes together",
+      "description": "Update Docker and Podman openSUSE Leap 16.0 distro base digest for both root modes together",
       "matchManagers": [
         "custom.regex"
       ],
@@ -847,8 +854,9 @@
       "matchPackageNames": [
         "registry.opensuse.org/opensuse/leap"
       ],
+      "matchCurrentValue": "/^16\\.0$/",
       "matchFileNames": [
-        "/^images\\/docker\\/docker-opensuse-leap-16\\.0-(?:rootful|rootless)\\/container\\.yaml$/"
+        "/^images\\/(?:docker\\/docker|podman\\/podman)-opensuse-leap-16\\.0-(?:rootful|rootless)\\/container\\.yaml$/"
       ],
       "matchUpdateTypes": [
         "digest"
@@ -856,7 +864,7 @@
       "groupName": "Docker openSUSE Leap 16.0 distro base"
     },
     {
-      "description": "Update Docker openSUSE Tumbleweed distro base digest for both root modes together",
+      "description": "Update Docker and Podman openSUSE Tumbleweed distro base digest for both root modes together",
       "matchManagers": [
         "custom.regex"
       ],
@@ -866,8 +874,9 @@
       "matchPackageNames": [
         "registry.opensuse.org/opensuse/tumbleweed"
       ],
+      "matchCurrentValue": "/^latest$/",
       "matchFileNames": [
-        "/^images\\/docker\\/docker-opensuse-tumbleweed-(?:rootful|rootless)\\/container\\.yaml$/"
+        "/^images\\/(?:docker\\/docker|podman\\/podman)-opensuse-tumbleweed-(?:rootful|rootless)\\/container\\.yaml$/"
       ],
       "matchUpdateTypes": [
         "digest"
@@ -875,7 +884,7 @@
       "groupName": "Docker openSUSE Tumbleweed distro base"
     },
     {
-      "description": "Update Docker Ubuntu 22.04 distro base digest for both root modes together",
+      "description": "Update Docker and Podman Ubuntu 22.04 distro base digest for both root modes together",
       "matchManagers": [
         "custom.regex"
       ],
@@ -885,8 +894,9 @@
       "matchPackageNames": [
         "docker.io/library/ubuntu"
       ],
+      "matchCurrentValue": "/^22\\.04$/",
       "matchFileNames": [
-        "/^images\\/docker\\/docker-ubuntu-22\\.04-(?:rootful|rootless)\\/container\\.yaml$/"
+        "/^images\\/(?:docker\\/docker|podman\\/podman)-ubuntu-22\\.04-(?:rootful|rootless)\\/container\\.yaml$/"
       ],
       "matchUpdateTypes": [
         "digest"
@@ -894,7 +904,7 @@
       "groupName": "Docker Ubuntu 22.04 distro base"
     },
     {
-      "description": "Update Docker Ubuntu 24.04 distro base digest for both root modes together",
+      "description": "Update Docker and Podman Ubuntu 24.04 distro base digest for both root modes together",
       "matchManagers": [
         "custom.regex"
       ],
@@ -904,8 +914,9 @@
       "matchPackageNames": [
         "docker.io/library/ubuntu"
       ],
+      "matchCurrentValue": "/^24\\.04$/",
       "matchFileNames": [
-        "/^images\\/docker\\/docker-ubuntu-24\\.04-(?:rootful|rootless)\\/container\\.yaml$/"
+        "/^images\\/(?:docker\\/docker|podman\\/podman)-ubuntu-24\\.04-(?:rootful|rootless)\\/container\\.yaml$/"
       ],
       "matchUpdateTypes": [
         "digest"
@@ -913,7 +924,7 @@
       "groupName": "Docker Ubuntu 24.04 distro base"
     },
     {
-      "description": "Update Docker Ubuntu 26.04 distro base digest for both root modes together",
+      "description": "Update Docker and Podman Ubuntu 26.04 distro base digest for both root modes together",
       "matchManagers": [
         "custom.regex"
       ],
@@ -923,8 +934,9 @@
       "matchPackageNames": [
         "docker.io/library/ubuntu"
       ],
+      "matchCurrentValue": "/^26\\.04$/",
       "matchFileNames": [
-        "/^images\\/docker\\/docker-ubuntu-26\\.04-(?:rootful|rootless)\\/container\\.yaml$/"
+        "/^images\\/(?:docker\\/docker|podman\\/podman)-ubuntu-26\\.04-(?:rootful|rootless)\\/container\\.yaml$/"
       ],
       "matchUpdateTypes": [
         "digest"

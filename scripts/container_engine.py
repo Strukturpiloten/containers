@@ -787,7 +787,7 @@ def _topological_levels(images: list[JsonMap], selected_names: set[str] | None =
 
 
 def _changed_files(before: str | None, sha: str, event_name: str) -> list[str] | None:
-    if event_name not in {"pull_request", "push"} or not before or not sha or set(before) == {"0"}:
+    if event_name not in {"pull_request", "merge_group", "push"} or not before or not sha or set(before) == {"0"}:
         return None
 
     git = shutil.which("git")
