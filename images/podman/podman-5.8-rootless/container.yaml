@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=../../../container.schema.json
 schemaVersion: 1
 name: podman-5.8-rootless
-version: v5.8.7
+version: v5.8.8
 image: ghcr.io/strukturpiloten/podman-5.8-rootless
 title: Podman 5.8 rootless
 description: Podman 5.8 rootless nested-container image built from source on Fedora
