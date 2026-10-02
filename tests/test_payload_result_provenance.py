@@ -8,6 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import yaml
+
 from scripts import container_engine as engine
 
 
@@ -40,32 +42,20 @@ class PayloadResultProvenanceTests(unittest.TestCase):
         payload = inputs["payload"]
         self.assertEqual(payload["manifest"], "images/podman/payloads/podman-6.1.yaml")
         self.assertEqual(payload["manifestSha256"], hashlib.sha256(Path(payload["manifest"]).read_bytes()).hexdigest())
-        self.assertEqual(payload["args"]["PODMAN_COMMIT"], "04f3aa430e6df81bea059978bc5bafbc846ba3e7")
-        self.assertEqual(payload["args"]["NETAVARK_COMMIT"], "8e91ad1d947ed325327b638f0cb906bea1f7d0ab")
-        self.assertEqual(payload["args"]["AARDVARK_COMMIT"], "cd7417681229219059939bdd9f0b3bd9ac9abb08")
+        declared = yaml.safe_load(Path(payload["manifest"]).read_text())["build"]["args"]
+        for key in ("PODMAN_COMMIT", "NETAVARK_COMMIT", "AARDVARK_COMMIT"):
+            self.assertEqual(payload["args"][key], declared[key])
 
     def test_docker_verified_checksums_survive_for_each_architecture(self) -> None:
         inputs = self._published_inputs("docker-29-rootless")
         payload = inputs["payload"]
         self.assertEqual(payload["manifest"], "images/docker/upstream/29/payload.yaml")
         self.assertEqual(payload["manifestSha256"], hashlib.sha256(Path(payload["manifest"]).read_bytes()).hexdigest())
-        self.assertEqual(payload["args"]["ENGINE_VERSION"], "29.8.1")
-        self.assertEqual(
-            payload["architectureArgs"]["amd64"]["ENGINE_SHA256"],
-            "d8db66739d2e28d4933786d73e918d9be643a67fbd835db1bf740d650a259e70",
-        )
-        self.assertEqual(
-            payload["architectureArgs"]["arm64"]["ENGINE_SHA256"],
-            "667395fbffab52901b80181dfbb39ea76da2fbd7642c4fbddd24e42146b07b48",
-        )
-        self.assertEqual(
-            payload["architectureArgs"]["amd64"]["ROOTLESS_SHA256"],
-            "8f1ed16fc6913241e599af6234a7f30502bde6e73bebbbc7176b17802d967d49",
-        )
-        self.assertEqual(
-            payload["architectureArgs"]["arm64"]["ROOTLESS_SHA256"],
-            "3890bed82dc432e9fed7e52efcc18bb82647cd7beae45b03e9e2a2f6c3282c66",
-        )
+        declared = yaml.safe_load(Path(payload["manifest"]).read_text())["build"]
+        self.assertEqual(payload["args"]["ENGINE_VERSION"], declared["args"]["ENGINE_VERSION"])
+        for arch in ("amd64", "arm64"):
+            for pin in ("ENGINE_SHA256", "ROOTLESS_SHA256"):
+                self.assertEqual(payload["architectureArgs"][arch][pin], declared["architectureArgs"][arch][pin])
         self.assertEqual(payload["provenance"]["payloadKind"], "verified-upstream-static-archives")
 
 

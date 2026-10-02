@@ -31,6 +31,11 @@ branch if an update cannot be represented by its configured managers.
 
 ## Automatic dependency merges
 
+The [upstream release monitor](upstream-releases.md) creates assigned issues for
+missing Docker/Podman compatibility lines and proposes verified Docker Engine
+updates. Renovate continues maintaining existing Podman patch lines and pinned
+base-image digests.
+
 Compatible patch and digest updates use Renovate's existing, narrowly scoped
 automerge rules. A native GitHub merge queue removes the repeated rebase race:
 after one PR merges, GitHub tests the next queued candidate against the new
