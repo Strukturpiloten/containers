@@ -246,8 +246,44 @@ class PlanningTests(unittest.TestCase):
             {"amd64", "arm64"},
         )
         self.assertEqual(plan["selection"]["reason"], "image-specific or shared runtime input changed")
-        plan["eventName"] = "pull_request"
-        self.assertIn("none (non-publishing)", engine._plan_summary(plan))
+        for event_name in ("pull_request", "merge_group"):
+            with self.subTest(event=event_name):
+                plan["eventName"] = event_name
+                self.assertIn("none (non-publishing)", engine._plan_summary(plan))
+
+    def test_merge_group_diffs_queue_base_and_selects_all_queued_changes(self) -> None:
+        options = engine.PlanOptions(
+            event_name="merge_group",
+            ref_name="gh-readonly-queue/main/pr-123-fixture",
+            default_branch="main",
+            before="b" * 40,
+            sha="c" * 40,
+            max_stages=None,
+        )
+        images = [*self.images, {"name": "unaffected", "inputs": ["images/unaffected/**"]}]
+        with (
+            patch.object(engine.shutil, "which", return_value="/usr/bin/git"),
+            patch.object(
+                engine.subprocess,
+                "run",
+                return_value=SimpleNamespace(
+                    returncode=0, stdout="images/base/Containerfile\nimages/app/Containerfile\n"
+                ),
+            ) as diff,
+        ):
+            self.assertEqual(engine._selected_image_names(images, options), {"base", "app"})
+        self.assertEqual(diff.call_args.args[0][-4:], ["diff", "--name-only", options.before, options.sha])
+
+    def test_merge_group_without_base_falls_back_to_full_build(self) -> None:
+        options = engine.PlanOptions(
+            event_name="merge_group",
+            ref_name="gh-readonly-queue/main/pr-123-fixture",
+            default_branch="main",
+            before=None,
+            sha="c" * 40,
+            max_stages=None,
+        )
+        self.assertEqual(engine._selected_image_names(self.images, options), {"base", "app"})
 
 
 class InternalDependencyTests(unittest.TestCase):

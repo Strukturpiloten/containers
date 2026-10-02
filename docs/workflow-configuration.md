@@ -29,6 +29,68 @@ commands. A missed source or generated update fails the generation check rather
 than silently changing workflow behavior. Manually regenerate on the Renovate
 branch if an update cannot be represented by its configured managers.
 
+## Automatic dependency merges
+
+Compatible patch and digest updates use Renovate's existing, narrowly scoped
+automerge rules. A native GitHub merge queue removes the repeated rebase race:
+after one PR merges, GitHub tests the next queued candidate against the new
+`main`, without waiting for another Renovate execution. Renovate's platform
+automerge adds eligible PRs to the queue. Real conflicts and failed checks still
+need investigation; neither is overridden by the queue.
+
+`Validate containers` runs on both `pull_request` and `merge_group` events. Queue
+validation compares `merge_group.base_sha` with the checked-out queue revision,
+so all changes in the candidate select their affected images and dependents.
+Version validation uses that same base. Payloads, native architecture builds,
+runtime checks, vulnerability admission, and the fail-closed `Required CI`
+aggregate run as usual. Queue validation does not publish images; publication
+starts after the merge reaches `main`.
+
+Queue admission requires repository write access. Adding a PR to the queue
+authorizes its combined code to run the privileged nested-container runtime
+checks, including when that PR originated in a fork. Review fork changes before
+enqueueing them. Queue validation uses read-only workflow permissions and does
+not receive publication credentials.
+
+### One-time repository activation
+
+Workflow support must be merged before enabling this rule. An administrator
+then opens [Settings → Rules → Rulesets](https://github.com/Strukturpiloten/containers/settings/rules)
+and creates an active branch ruleset named `Merge queue`, targeting the default
+branch, with an empty bypass list and **Require merge queue** enabled.
+
+Use these initial settings:
+
+| Setting | Value |
+| --- | --- |
+| Merge method | Squash |
+| Build concurrency | 1 |
+| Only merge non-failing pull requests | Enabled (`ALLGREEN`) |
+| Status check timeout | 180 minutes |
+| Minimum pull requests to merge | 1 |
+| Maximum pull requests to merge | 1 |
+| Wait time for minimum group size | 0 minutes |
+
+Keep **Allow auto-merge** enabled in the repository's general settings. Keep the
+existing `Required CI` ruleset and organisation review, history, and code quality
+rules. The queue validates the current integration result, so eligible PRs do
+not need repeated manual branch updates. These settings are repository state,
+not something that merging the workflow file enables automatically.
+
+After activation, check the merge queue and Actions for `merge_group` runs. A
+successful candidate should merge and the next candidate should start without
+another Renovate rebase. If there is no queue run, first check that this rule is
+active, the PR has auto-merge enabled, and its required PR checks passed. If a
+candidate fails, inspect its failing job; do not bypass `Required CI`. Renovate
+still resolves eligible branch conflicts and discovers new upstream versions on
+its normal runs. No daily rebase-button operation is part of this process.
+
+Matching Docker and Podman distro digest inputs share a PR per upstream image
+and release line. Existing Docker-prefixed group names are retained for branch
+continuity. Distinct distro releases and the source-built Podman Fedora-minimal
+base remain separate. Manual-review policies for other dependency types remain
+unchanged.
+
 # Build and publication boundaries
 
 Each image's reusable publication workflow waits for that image's native builds.
