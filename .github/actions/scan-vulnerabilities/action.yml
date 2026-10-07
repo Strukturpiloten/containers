@@ -49,13 +49,13 @@ runs:
         case "$(uname -m)" in
           x86_64)
             machine=amd64
-            release=v0.119.0
-            expected=3fa2dc4b924621ab65404cf08d0b8438d896d80ab949c9d5a4ca283c36004c9b
+            release=v0.120.1
+            expected=0a9ee97ef5ae2ee953b0a80098105052e846cdbe319a57d808b519c33cd1343d
             ;;
           aarch64)
             machine=arm64
-            release=v0.119.0
-            expected=29f0ec7c549ddb0e2b6a0ca714851f7399438afc399b80c12808e065edc9a8f8
+            release=v0.120.1
+            expected=29f47391dc283aa79fcc38e65224cd61f64dec0ecfd0db7074128ebf8ff23514
             ;;
           *) echo "Unsupported Grype host architecture" >&2; exit 2 ;;
         esac
