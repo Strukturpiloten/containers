@@ -6,28 +6,28 @@ build:
   architectures: [amd64, arm64]
   args:
     ALPINE_IMAGE: docker.io/library/alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
-    ENGINE_VERSION: 29.8.2
+    ENGINE_VERSION: 29.9.0
   architectureArgs:
     amd64:
       DOCKER_ARCH: x86_64
-      ENGINE_SHA256: 995d1ef289677f74fd58d8d2c35727b6a4ee389c69db8638a3e42d0487aa5b0f
-      ROOTLESS_SHA256: 707ebf6a5afd88104086e7b6749997b2366e816aeaf2c3ef2305b08fde9ee007
+      ENGINE_SHA256: 33e1ab8b63d14bca449f7a3d30d7f6aa669daa544e60a86b17fec87f61afe2b4
+      ROOTLESS_SHA256: 6b4a2e085a1e4ade5ba3de99fd770a0a9b53c719e6bf6b1632242bf4b068adb6
     arm64:
       DOCKER_ARCH: aarch64
-      ENGINE_SHA256: 76a624e4a8e5da654d1150e808175125efb5a6f1b6aa1cbd9caee18f51047a50
-      ROOTLESS_SHA256: f8f759dfeecb5bbe2c963232a1b9380e133f677dc0579263e4ca04c69f40aa47
+      ENGINE_SHA256: 811f6eee271678fc98dbe5c4d896c00fc5fe2daa4f7a37069c17abc036eab85b
+      ROOTLESS_SHA256: f1b76a0721101e15c1eabeccf08751c0d42206defe06422de2e4b8897fc0f129
 provenance:
   payloadKind: verified-upstream-static-archives
-  engineArchive: https://download.docker.com/linux/static/stable/{dockerArch}/docker-29.8.2.tgz
-  rootlessArchive: https://download.docker.com/linux/static/stable/{dockerArch}/docker-rootless-extras-29.8.2.tgz
-  engine: 29.8.2
-  cli: 29.8.2
-  containerd: 2.3.6
+  engineArchive: https://download.docker.com/linux/static/stable/{dockerArch}/docker-29.9.0.tgz
+  rootlessArchive: https://download.docker.com/linux/static/stable/{dockerArch}/docker-rootless-extras-29.9.0.tgz
+  engine: 29.9.0
+  cli: 29.9.0
+  containerd: 2.4.1
   runc: 1.5.2
-  rootlesskit: 3.1.0
+  rootlesskit: 3.2.0
   sourceRevision:
-    dockerd: 8af9fe3
-    cli: 7fc2dff
-    containerd: ee2735368117d2eb259779949d5e75cdafec9761
+    dockerd: a5b58c9
+    cli: f415da8
+    containerd: f2551031d7276a770f65f98c9b52e57e7dad07e8
     runc: 29dd3dc
   note: Static archives embed historical dependencies; updating Alpine does not patch them.
