@@ -176,7 +176,7 @@ jobs:
           uv run --frozen --group docs --python "${PYTHON_VERSION}" python -m scripts.documentation \
             --output _site --snapshot "${RUNNER_TEMP}/registry-snapshot.json"
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
         with:
           path: _site
 
