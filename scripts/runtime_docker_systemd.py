@@ -13,8 +13,8 @@ import time
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any
 
+from scripts.runtime_errors import ProbeError
 from scripts.runtime_resource_budgets import verify_outer_container_limits
-from scripts.runtime_tests import ProbeError
 
 if TYPE_CHECKING:
     from scripts.runtime_resource_budgets import IsolatedStoreDiskBudget

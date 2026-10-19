@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import uuid
 from pathlib import Path
 from typing import Any
@@ -29,14 +30,11 @@ import yaml
 
 from scripts.metadata_schema import validate_metadata_schema
 from scripts.oci_artifacts import archive_identity
+from scripts.runtime_errors import ProbeError
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TIMEOUT = 45
 MAX_LOG = 4000
-
-
-class ProbeError(RuntimeError):
-    """A runtime assertion or bounded command failed."""
 
 
 class RuntimeContext:
@@ -294,9 +292,18 @@ class RuntimeContext:
                         check=False,
                     )
                     self.podman("wait for owned container", "wait", container, timeout=15, check=False)
-            except ProbeError:
+            except ProbeError as error:
                 if getattr(self, "container_launchers", {}).get(container) == "systemd":
                     shutdown_failures.append(container)
+                    self.checks.append(
+                        {
+                            "name": "cleanup owned systemd shutdown",
+                            "status": "failed",
+                            "container": container,
+                            "error": f"{type(error).__name__}: {error}",
+                            "errorTraceback": "".join(traceback.format_exception(error)),
+                        }
+                    )
             try:
                 self.podman(
                     "cleanup owned container",
@@ -685,21 +692,25 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         evidence["status"] = "passed"
     except (Exception, KeyboardInterrupt) as error:
         evidence["error"] = f"{type(error).__name__}: {error}"
+        evidence["errorTraceback"] = "".join(traceback.format_exception(error))
     finally:
         # A second cancellation signal must not interrupt owned-resource cleanup.
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        if ctx is not None:
-            try:
-                ctx.cleanup()
-            except (OSError, ProbeError, subprocess.TimeoutExpired) as cleanup_error:
-                evidence["status"] = "failed"
-                evidence["cleanupError"] = f"{type(cleanup_error).__name__}: {cleanup_error}"
-        if generated_archive:
-            evidence["source"] = "locally exported image"
-        evidence_path = Path(args.evidence)
-        evidence_path.parent.mkdir(parents=True, exist_ok=True)
-        evidence_path.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
-        signal.signal(signal.SIGTERM, previous_sigterm)
+        try:
+            if ctx is not None:
+                try:
+                    ctx.cleanup()
+                except (Exception, KeyboardInterrupt) as cleanup_error:
+                    evidence["status"] = "failed"
+                    evidence["cleanupError"] = f"{type(cleanup_error).__name__}: {cleanup_error}"
+                    evidence["cleanupErrorTraceback"] = "".join(traceback.format_exception(cleanup_error))
+            if generated_archive:
+                evidence["source"] = "locally exported image"
+            evidence_path = Path(args.evidence)
+            evidence_path.parent.mkdir(parents=True, exist_ok=True)
+            evidence_path.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+        finally:
+            signal.signal(signal.SIGTERM, previous_sigterm)
     return evidence
 
 

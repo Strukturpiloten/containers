@@ -11,12 +11,12 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from scripts import runtime_docker_systemd
+from scripts.runtime_errors import ProbeError
 from scripts.runtime_resource_budgets import (
     IsolatedStoreDiskBudget,
     outer_container_limits,
     verify_outer_container_limits,
 )
-from scripts.runtime_tests import ProbeError
 
 MAX_HTTP_RESPONSE = 8192
 LEGACY_ROOTLESS_OOM_PROFILES = ("docker-debian-11-rootless",)

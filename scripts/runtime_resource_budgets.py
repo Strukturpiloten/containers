@@ -11,7 +11,7 @@ import subprocess
 import threading
 from typing import TYPE_CHECKING, Self
 
-from scripts.runtime_tests import ProbeError
+from scripts.runtime_errors import ProbeError
 
 if TYPE_CHECKING:
     from types import TracebackType
