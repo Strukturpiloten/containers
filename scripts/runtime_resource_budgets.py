@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Self
 from scripts.runtime_errors import ProbeError
 
 if TYPE_CHECKING:
+    from pathlib import Path
     from types import TracebackType
 
     from scripts.runtime_tests import RuntimeContext
@@ -93,11 +94,21 @@ class IsolatedStoreDiskBudget:
         *,
         limit_bytes: int = STORE_LIMIT_BYTES,
         poll_seconds: float = STORE_POLL_SECONDS,
+        source_archive: Path | None = None,
     ) -> None:
         """Keep all measurements scoped to this invocation's isolated store."""
         self.ctx = ctx
         self.limit_bytes = limit_bytes
         self.poll_seconds = poll_seconds
+        self.source_archive = source_archive
+        self.source_identity: tuple[int, int, int, int, int] | None = None
+        if source_archive is not None and (
+            not source_archive.is_absolute()
+            or not source_archive.is_file()
+            or source_archive.is_symlink()
+            or source_archive.is_relative_to(ctx.directory)
+        ):
+            raise ProbeError("disk budget source must be one exact regular archive outside the owned store")
         self.peak_bytes = 0
         self.samples = 0
         self.transient_retries = 0
@@ -105,7 +116,25 @@ class IsolatedStoreDiskBudget:
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._poll, name="isolated-docker-disk-budget", daemon=True)
 
+    def bind_source_archive(self, identity: tuple[int, int, int, int, int]) -> None:
+        """Pin accounting to the same frozen archive inode consumed by both phases."""
+        if self.source_identity is not None and self.source_identity != identity:
+            raise ProbeError("disk budget source identity cannot be rebound")
+        self.source_identity = identity
+        self._verify_source_archive()
+
+    def _verify_source_archive(self) -> None:
+        if self.source_archive is not None and self.source_identity is not None:
+            try:
+                value = self.source_archive.stat(follow_symlinks=False)
+            except OSError as error:
+                raise ProbeError("disk budget lost custody of the pinned source archive path") from error
+            actual = value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns
+            if actual != self.source_identity or self.source_archive.is_symlink():
+                raise ProbeError("disk budget source path no longer accounts for the pinned archive inode")
+
     def _du_once(self) -> tuple[int, str, str]:
+        self._verify_source_archive()
         command = [
             *self.ctx._sudo,
             "timeout",
@@ -117,6 +146,7 @@ class IsolatedStoreDiskBudget:
             "--block-size=1",
             "--",
             str(self.ctx.directory),
+            *((str(self.source_archive),) if self.source_archive is not None else ()),
         ]
         try:
             process = subprocess.Popen(
@@ -155,6 +185,7 @@ class IsolatedStoreDiskBudget:
                     process.communicate(timeout=3)
                 except subprocess.TimeoutExpired as error:
                     raise ProbeError("could not reap isolated disk sampler process group") from error
+        self._verify_source_archive()
         return process.returncode, stdout, stderr
 
     def _measure(self) -> None:
@@ -168,7 +199,19 @@ class IsolatedStoreDiskBudget:
                 continue
             raise ProbeError(f"isolated Docker store disk measurement failed (exit {status}): {stderr.strip()}")
         try:
-            size = int(stdout.split(maxsplit=1)[0])
+            if self.source_archive is None:
+                size = int(stdout.split(maxsplit=1)[0])
+            else:
+                expected = {str(self.ctx.directory), str(self.source_archive)}
+                measured = {}
+                for line in stdout.splitlines():
+                    count, path = line.split("\t", 1)
+                    if path not in expected or path in measured or not count.isdecimal():
+                        raise ValueError("unexpected or duplicate archive/store byte count")
+                    measured[path] = int(count)
+                if measured.keys() != expected:
+                    raise ValueError("missing archive/store byte count")
+                size = sum(measured.values())
         except (IndexError, ValueError) as error:
             raise ProbeError("isolated Docker store disk measurement returned no byte count") from error
         self.samples += 1
@@ -198,6 +241,7 @@ class IsolatedStoreDiskBudget:
                 "samples": self.samples,
                 "transientRetries": self.transient_retries,
                 "error": self._error,
+                **({"sourceArchive": str(self.source_archive)} if self.source_archive is not None else {}),
             }
         )
 
@@ -213,6 +257,7 @@ class IsolatedStoreDiskBudget:
 
     def checkpoint(self) -> None:
         """Stop new nested work after any failed disk observation."""
+        self._verify_source_archive()
         failure = self._failure()
         if failure is not None:
             raise failure

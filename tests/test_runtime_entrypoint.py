@@ -19,7 +19,7 @@ from scripts import runtime_docker, runtime_docker_systemd, runtime_resource_bud
 from scripts.runtime_errors import ProbeError
 
 ROOT = Path(__file__).resolve().parents[1]
-METADATA = ROOT / "images/docker/docker-29-conformance-rootless/container.yaml"
+METADATA = ROOT / "images/docker/docker-29-rootless/container.yaml"
 CONTAINERS = ["a" * 64, "b" * 64]
 _READ_TEXT = Path.read_text
 

@@ -72,6 +72,63 @@ parsers for offline regression coverage; this does not declare or qualify anothe
 image. Debian 11 conformance remains a later phase of issue #344. Its earlier
 unlimited-swap/non-OOM result is not successful evidence.
 
+### Clean control and fault-injection evidence
+
+The systemd-rootless profile requires a clean ordinary-workload control before
+the existing resource fault-injection phase. The phases use separate runtime
+contexts, Podman stores, check lists and daemon storage, on the same architecture
+and exact OCI archive identity. They run sequentially: positive control checks
+and verified cleanup must finish before the enforcement context is created.
+Failure, cancellation, identity drift, unknown cleanup or an expired work budget
+must prevent progression. No new CLI or metadata switch disables this control.
+Direct-launch profiles retain their existing contract.
+
+Both phases use the canonical startup and ordinary storage, network, port and
+health checks. Only the closed internal clean-control phase omits the deliberate
+inner memory/OOM and PID fault injection; those probes remain mandatory in the
+enforcement phase. Both phases still require the unchanged strict orderly
+shutdown, including exit zero and `OOMKilled: false`. A passing clean control
+does not explain or excuse a failed enforcement shutdown.
+
+Work is capped at 300 seconds for the clean control and 900 seconds for the
+pair, without increasing existing command, startup, CPU, memory, PID or disk
+limits. Cleanup retains its bounded safety path even after a work deadline;
+an overrun cannot become successful admission. Phase identity, checks,
+observations, elapsed time and cleanup outcomes remain separately inspectable.
+Supplied or exported input enters one private read-only snapshot outside both
+stores; a retained descriptor supplies the actual bytes for both loads. The
+canonical 12 GiB observer includes that snapshot alongside the active store
+during copy/export, hashing, loading and native work. Snapshot replacement or
+mutation fails custody/accounting. Caller-supplied archives are never deleted.
+
+### OOM attribution boundaries
+
+The R7 native runs failed because the final outer `OOMKilled` flag was true,
+despite exit zero. Their live snapshots showed hierarchical counters changing
+after the deliberate inner OOM, but did not prove what the actual monitor watched
+or why the final flag changed. Local counters staying zero at sampled ancestors
+do not prove absence of host or shutdown pressure.
+
+Upstream source inspection supplies a hypothesis, not runtime attribution:
+[Podman 5.7.0's exit-file reader](https://github.com/podman-container-tools/podman/blob/0370128fc8dcae93533334324ef838db8f8da8cb/libpod/container_internal.go#L199)
+sets the flag when the persisted OOM marker exists, independently of the exit
+code. Its
+[conmon setup](https://github.com/podman-container-tools/podman/blob/0370128fc8dcae93533334324ef838db8f8da8cb/libpod/oci_conmon_common.go#L865)
+passes the exact container's persistent directory.
+[conmon 2.1.13](https://github.com/containers/conmon/blob/82de887596ed8ee6d9b2ee85e4f167f307bb569b/src/cgroup.c#L109)
+watches `memory.events`, not `memory.events.local`, and creates an OOM marker
+when the watched hierarchical OOM counters are nonzero. Both inspected upstream
+revisions are Apache-2.0; their code was not copied or translated into this
+harness. Those source versions are not attestation of the runner's actual
+monitor binary, watch target or marker timing.
+
+Diagnostic observations never change admission. Any further attribution must
+bind the exact owned container, monitor process birth/executable identity,
+observed watch and marker to the native run. Missing or ambiguous evidence stays
+unresolved; snapshots alone do not provide accounting through shutdown. Neither
+these source references nor an additional control run qualifies an image or
+authorizes relaxing the strict shutdown predicate.
+
 Run the repository harness against the exact built OCI archive on each native
 architecture, using `--sudo --allow-privileged`; see the generated image page and
 the [Docker guide](../README.md#runtime-modes-and-admission). A PR must remain

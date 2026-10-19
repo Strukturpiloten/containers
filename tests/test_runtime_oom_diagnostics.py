@@ -114,10 +114,22 @@ class OomDiagnosticTests(unittest.TestCase):
             "container": CONTAINER,
             "state": {"Running": True, "Pid": 100, "ConmonPid": 99, "CgroupPath": OUTER},
             "scope": SCOPE,
+            "directory": str(Path(tempfile.gettempdir()) / "fixture-owned-store"),
         }
         with (
             patch.object(diagnostics, "_process", side_effect=[init, monitor, init, monitor]),
             patch.object(diagnostics, "_text", return_value="conmon\0-c\0" + CONTAINER + "\0"),
+            patch.object(
+                diagnostics,
+                "_monitor",
+                return_value={
+                    **monitor,
+                    "pid": 99,
+                    "actualVersion": None,
+                    "versionAttribution": "unresolved fixture",
+                    "watchedCgroupPath": None,
+                },
+            ),
             patch.object(diagnostics, "_mount", return_value="fixture cgroup2 rw,memory_localevents"),
             patch.object(
                 Path, "stat", autospec=True, side_effect=lambda path: SimpleNamespace(st_ino=inodes[str(path)])
@@ -267,8 +279,7 @@ class OomDiagnosticTests(unittest.TestCase):
     def _assert_observations_persist(self, ctx: runtime_tests.RuntimeContext, evidence_path: Path) -> None:
         args = SimpleNamespace(
             metadata=str(
-                Path(runtime_tests.__file__).resolve().parents[1]
-                / "images/docker/docker-29-conformance-rootless/container.yaml"
+                Path(runtime_tests.__file__).resolve().parents[1] / "images/docker/docker-29-rootless/container.yaml"
             ),
             archive=str(evidence_path.parent / "fixture.tar"),
             arch="amd64",

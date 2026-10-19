@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import socket
 import time
+from contextlib import nullcontext
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from scripts import runtime_docker_systemd
@@ -21,6 +23,22 @@ from scripts.runtime_resource_budgets import (
 
 MAX_HTTP_RESPONSE = 8192
 LEGACY_ROOTLESS_OOM_PROFILES = ("docker-debian-11-rootless",)
+
+
+class DockerProbePhase(Enum):
+    """Closed internal orchestration phases, never metadata or CLI selectors."""
+
+    CLEAN_CONTROL = "clean-control"
+    ENFORCEMENT = "enforcement"
+
+
+def _validate_phase(profile: dict[str, Any], phase: DockerProbePhase) -> None:
+    if not isinstance(phase, DockerProbePhase):
+        raise ProbeError("unknown internal Docker probe phase")
+    if phase is DockerProbePhase.CLEAN_CONTROL and (
+        profile.get("launcher") != "systemd" or profile.get("mode") != "rootless"
+    ):
+        raise ProbeError("clean control requires the systemd rootless Docker profile")
 
 
 if TYPE_CHECKING:
@@ -107,7 +125,21 @@ def run_docker(
     skip_nested: bool,
 ) -> None:
     """Exercise CLI, daemon API, storage, network, mounts, ports, and owned cleanup."""
+    _run_docker_phase(
+        ctx, profile, DockerProbePhase.ENFORCEMENT, allow_privileged=allow_privileged, skip_nested=skip_nested
+    )
+
+
+def _run_docker_phase(
+    ctx: RuntimeContext,
+    profile: dict[str, Any],
+    phase: DockerProbePhase,
+    *,
+    allow_privileged: bool,
+    skip_nested: bool,
+) -> None:
     mode = profile["mode"]
+    _validate_phase(profile, phase)
     systemd = profile.get("launcher", "direct") == "systemd"
     if systemd and profile["outerPrivilege"] != "privileged":
         raise ProbeError("systemd Docker profile requires a privileged rootful outer runtime")
@@ -163,8 +195,12 @@ echo setuid-only""",
         ctx.skip("nested Docker runtime", "privileged test requires trusted context")
         return
 
-    with IsolatedStoreDiskBudget(ctx) as budget:
-        _run_nested_docker(ctx, profile, expected_uid, budget)
+    shared_budget = vars(ctx).get("runtime_disk_budget")
+    with nullcontext(shared_budget) if shared_budget is not None else IsolatedStoreDiskBudget(ctx) as budget:
+        if phase is DockerProbePhase.ENFORCEMENT:
+            _run_nested_docker(ctx, profile, expected_uid, budget)
+        else:
+            _run_nested_docker(ctx, profile, expected_uid, budget, phase=phase)
 
 
 def _outer_options(ctx: RuntimeContext, profile: dict[str, Any], fixture: Path) -> tuple[str, ...]:
@@ -193,9 +229,14 @@ def _outer_options(ctx: RuntimeContext, profile: dict[str, Any], fixture: Path) 
     return tuple(outer_args)
 
 
-def _stop_owned_daemon(ctx: RuntimeContext, container: str, *, systemd: bool) -> None:
+def _stop_owned_daemon(
+    ctx: RuntimeContext, container: str, *, systemd: bool, diagnostics: OomDiagnostics | None = None
+) -> None:
     if systemd:
-        runtime_docker_systemd.stop_guest(ctx, container)
+        if diagnostics is None:
+            runtime_docker_systemd.stop_guest(ctx, container)
+        else:
+            runtime_docker_systemd.stop_guest(ctx, container, on_exit=diagnostics.after_exit)
     else:
         ctx.podman("signal owned Docker daemon PID 1", "exec", container, "sh", "-c", "kill -TERM 1", check=False)
         ctx.podman("wait for owned Docker daemon exit", "wait", container, timeout=30)
@@ -239,9 +280,28 @@ def _prepare_started_daemon(
         )
 
 
-def _run_nested_docker(
-    ctx: RuntimeContext, profile: dict[str, Any], expected_uid: str, budget: IsolatedStoreDiskBudget
+def _verify_daemon_user(
+    ctx: RuntimeContext,
+    budget: IsolatedStoreDiskBudget,
+    container: str,
+    expected_uid: str,
+    *,
+    systemd: bool,
 ) -> None:
+    if not systemd:
+        uid = _checked_exec(ctx, budget, "inspect inner daemon user", container, "id", "-u")
+        ctx.assert_equal("inner daemon user", uid, expected_uid)
+
+
+def _run_nested_docker(
+    ctx: RuntimeContext,
+    profile: dict[str, Any],
+    expected_uid: str,
+    budget: IsolatedStoreDiskBudget,
+    *,
+    phase: DockerProbePhase = DockerProbePhase.ENFORCEMENT,
+) -> None:
+    _validate_phase(profile, phase)
     mode = profile["mode"]
     systemd = profile.get("launcher", "direct") == "systemd"
     if systemd:
@@ -269,9 +329,7 @@ def _run_nested_docker(
     try:
         budget.checkpoint()
         _prepare_started_daemon(ctx, budget, container, profile, deadline)
-        if not systemd:
-            uid = _checked_exec(ctx, budget, "inspect inner daemon user", container, "id", "-u")
-            ctx.assert_equal("inner daemon user", uid, expected_uid)
+        _verify_daemon_user(ctx, budget, container, expected_uid, systemd=systemd)
         version_text = _docker(
             ctx, budget, container, "read Docker API versions", "version", "--format", "{{json .Server}}"
         )
@@ -299,12 +357,13 @@ def _run_nested_docker(
         if systemd:
             runtime_docker_systemd.verify_guest(ctx, budget, container, mode, info)
             diagnostics = OomDiagnostics(ctx, container)
+            diagnostics.snapshot("before-ordinary-work")
 
         _docker(
             ctx, budget, container, "load synthetic nested image", "load", "--input", "/tmp/docker-native-fixture.tar"
         )
         nested = ctx.image_ref
-        if systemd:
+        if systemd and phase is DockerProbePhase.ENFORCEMENT:
             runtime_docker_systemd.verify_inner_limits(ctx, budget, container, mode=mode, diagnostics=diagnostics)
         _docker(ctx, budget, container, "create isolated Docker network", "network", "create", "docker-native-probe")
         _docker(ctx, budget, container, "create isolated Docker volume", "volume", "create", "docker-native-probe")
@@ -449,6 +508,8 @@ def _run_nested_docker(
                 "! docker volume inspect docker-native-probe >/dev/null 2>&1",
             )
     finally:
+        work_deadline = getattr(ctx, "runtime_deadline", None)
+        ctx.runtime_deadline = None
         try:
             if diagnostics is not None:
                 diagnostics.snapshot("before-shutdown")
@@ -456,4 +517,7 @@ def _run_nested_docker(
             try:
                 ctx.logs(container)
             finally:
-                _stop_owned_daemon(ctx, container, systemd=systemd)
+                try:
+                    _stop_owned_daemon(ctx, container, systemd=systemd, diagnostics=diagnostics)
+                finally:
+                    ctx.runtime_deadline = work_deadline

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import re
@@ -17,6 +18,8 @@ from scripts.runtime_errors import ProbeError
 from scripts.runtime_resource_budgets import verify_outer_container_limits
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from scripts.runtime_oom_diagnostics import OomDiagnostics
     from scripts.runtime_resource_budgets import IsolatedStoreDiskBudget
     from scripts.runtime_tests import RuntimeContext
@@ -1638,15 +1641,38 @@ def _assert_orderly_state(ctx: RuntimeContext, state: dict[str, Any]) -> None:
     ctx.checks.append({"name": "owned systemd orderly lifecycle state", "status": "passed", "actual": state})
 
 
-def stop_guest(ctx: RuntimeContext, container: str) -> None:
+def stop_guest(
+    ctx: RuntimeContext, container: str, *, on_exit: Callable[[str, dict[str, Any]], None] | None = None
+) -> None:
     """Request exit.target without force; verify zero exit, never admit emergency halt."""
     if container not in ctx.containers:
         raise ProbeError("systemd shutdown target is not an owned guest")
     exact = ctx.podman("resolve owned systemd guest ID", "inspect", "--format", "{{.Id}}", container)
     if not re.fullmatch(r"[0-9a-f]{64}", exact) or (re.fullmatch(r"[0-9a-f]{64}", container) and exact != container):
         raise ProbeError("owned systemd guest identity is missing or inconsistent")
+    exit_sampled = False
+
+    def observe_exit(state: dict[str, Any]) -> None:
+        nonlocal exit_sampled
+        if on_exit is None or exit_sampled or state["Running"] is not False:
+            return
+        exit_sampled = True
+        try:
+            on_exit(exact, copy.deepcopy(state))
+        except Exception as error:  # noqa: BLE001 — diagnostics cannot alter mandatory shutdown checks.
+            ctx.observations.append(
+                {
+                    "name": "owned systemd OOM diagnostic",
+                    "phase": "after-exit",
+                    "availability": "error",
+                    "attribution": "unresolved",
+                    "reason": f"{type(error).__name__}: {error}",
+                }
+            )
+
     state = _guest_state(ctx, exact)
     if state["Running"] is False:
+        observe_exit(state)
         _assert_orderly_state(ctx, state)
         return
     stop_signal = ctx.podman(
@@ -1675,14 +1701,16 @@ def stop_guest(ctx: RuntimeContext, container: str) -> None:
         )
         result = ctx.podman("wait for owned systemd orderly exit", "wait", exact, timeout=30)
         ctx.assert_equal("owned systemd orderly exit", result, "0")
-        _assert_orderly_state(ctx, _guest_state(ctx, exact))
+        state = _guest_state(ctx, exact)
+        observe_exit(state)
+        _assert_orderly_state(ctx, state)
     except ProbeError as error:
         # Cleanup may halt or force-remove this exact guest, but that fallback
         # must never turn a failed request, unsafe placement or timeout into
         # native admission, even if it happens to produce exit zero.
         try:
             ctx.stop(exact, seconds=30)
-            _guest_state(ctx, exact)
+            observe_exit(_guest_state(ctx, exact))
         except ProbeError:
             pass
         raise ProbeError("owned systemd orderly shutdown failed; emergency halt is not native admission") from error
