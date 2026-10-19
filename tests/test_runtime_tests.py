@@ -149,6 +149,7 @@ class RuntimeCommandTests(unittest.TestCase):
             context.containers = []
             context.run_containers = set()
             context.checks = []
+            context.observations = []
             context._owned_mounts = MagicMock(return_value=[])
             context.load_archive = MagicMock(return_value={})
             container = "b" * 64
@@ -347,6 +348,7 @@ class RuntimeCommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             context = MagicMock()
             context.checks = []
+            context.observations = []
             context.load_archive.return_value = {}
             context.podman.return_value = "podman fixture"
             context.cleanup.side_effect = ProbeError("isolated store retained")

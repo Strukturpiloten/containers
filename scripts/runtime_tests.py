@@ -49,6 +49,7 @@ class RuntimeContext:
         self.run_containers: set[str] = set()
         self.container_launchers: dict[str, str] = {}
         self.checks: list[dict[str, Any]] = []
+        self.observations: list[dict[str, Any]] = []
         self.image_ref = f"localhost/{image}:runtime-{os.getpid()}"
         self._sudo = ["sudo", "-n"] if use_sudo else []
         self._podman = [
@@ -667,6 +668,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     try:
         ctx = RuntimeContext(image=metadata["name"], architecture=architecture, timeout=args.timeout, use_sudo=use_sudo)
         evidence["checks"] = ctx.checks
+        evidence["observations"] = ctx.observations
         if archive is None:
             archive = ctx.directory / "source-image.tar"
             source_podman = ["podman"]

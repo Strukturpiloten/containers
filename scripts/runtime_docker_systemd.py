@@ -17,6 +17,7 @@ from scripts.runtime_errors import ProbeError
 from scripts.runtime_resource_budgets import verify_outer_container_limits
 
 if TYPE_CHECKING:
+    from scripts.runtime_oom_diagnostics import OomDiagnostics
     from scripts.runtime_resource_budgets import IsolatedStoreDiskBudget
     from scripts.runtime_tests import RuntimeContext
 
@@ -1442,8 +1443,51 @@ def _read_memory_association(
     return association
 
 
+def _inner_enforcement_state(
+    ctx: RuntimeContext,
+    budget: IsolatedStoreDiskBudget,
+    container: str,
+    probe: tuple[str, str],
+    *,
+    diagnostics: OomDiagnostics | None,
+) -> tuple[str, dict[str, Any]]:
+    kind, workload = probe
+    try:
+        exit_code = _exec(
+            ctx,
+            budget,
+            container,
+            f"wait bounded inner {kind} enforcement",
+            "docker",
+            "wait",
+            f"docker-native-limit-{kind}",
+        )
+        state = json.loads(
+            _exec(
+                ctx,
+                budget,
+                container,
+                f"inspect inner {kind} enforcement state",
+                "docker",
+                "inspect",
+                "--format",
+                "{{json .State}}",
+                workload,
+            )
+        )
+        return exit_code, state
+    finally:
+        if kind == "memory" and diagnostics is not None:
+            diagnostics.snapshot("after-inner-memory")
+
+
 def verify_inner_limits(
-    ctx: RuntimeContext, budget: IsolatedStoreDiskBudget, container: str, *, mode: str = "rootful"
+    ctx: RuntimeContext,
+    budget: IsolatedStoreDiskBudget,
+    container: str,
+    *,
+    mode: str = "rootful",
+    diagnostics: OomDiagnostics | None = None,
 ) -> None:
     """Read hard limits and require actual bounded OOM and PID refusal evidence."""
     for kind in ("memory", "pids"):
@@ -1510,6 +1554,12 @@ def verify_inner_limits(
             association = (
                 _read_memory_association(ctx, budget, container, workload, evidence) if kind == "memory" else {}
             )
+            if kind == "memory" and diagnostics is not None:
+                diagnostics.snapshot(
+                    "before-inner-memory",
+                    scope=association["allocator"]["group"],
+                    scope_inode=int(association["scope-inode"]),
+                )
             readback = _exec(
                 ctx,
                 budget,
@@ -1523,19 +1573,8 @@ def verify_inner_limits(
                 "cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/pids.max; touch /tmp/resource-start",
             )
             ctx.assert_equal(f"inner {kind} hard limit values", readback, f"{MEMORY_BYTES}\n{INNER_PIDS}")
-            exit_code = _exec(ctx, budget, container, f"wait bounded inner {kind} enforcement", "docker", "wait", name)
-            state = json.loads(
-                _exec(
-                    ctx,
-                    budget,
-                    container,
-                    f"inspect inner {kind} enforcement state",
-                    "docker",
-                    "inspect",
-                    "--format",
-                    "{{json .State}}",
-                    workload,
-                )
+            exit_code, state = _inner_enforcement_state(
+                ctx, budget, container, (kind, workload), diagnostics=diagnostics
             )
             if kind == "memory":
                 output = _exec(

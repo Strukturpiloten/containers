@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from scripts import runtime_docker_systemd
 from scripts.runtime_errors import ProbeError
+from scripts.runtime_oom_diagnostics import OomDiagnostics
 from scripts.runtime_resource_budgets import (
     IsolatedStoreDiskBudget,
     outer_container_limits,
@@ -264,6 +265,7 @@ def _run_nested_docker(
     deadline = runtime_docker_systemd.startup_deadline(ctx) if systemd else None
     launch_timeout = {} if deadline is None else {"timeout": runtime_docker_systemd.startup_remaining(ctx, deadline)}
     container = ctx.start("start nested Docker daemon", options=tuple(outer_args), **launch_timeout)
+    diagnostics: OomDiagnostics | None = None
     try:
         budget.checkpoint()
         _prepare_started_daemon(ctx, budget, container, profile, deadline)
@@ -296,13 +298,14 @@ def _run_nested_docker(
         ctx.assert_equal("daemon rootless security", str(rootless).lower(), str(mode == "rootless").lower())
         if systemd:
             runtime_docker_systemd.verify_guest(ctx, budget, container, mode, info)
+            diagnostics = OomDiagnostics(ctx, container)
 
         _docker(
             ctx, budget, container, "load synthetic nested image", "load", "--input", "/tmp/docker-native-fixture.tar"
         )
         nested = ctx.image_ref
         if systemd:
-            runtime_docker_systemd.verify_inner_limits(ctx, budget, container, mode=mode)
+            runtime_docker_systemd.verify_inner_limits(ctx, budget, container, mode=mode, diagnostics=diagnostics)
         _docker(ctx, budget, container, "create isolated Docker network", "network", "create", "docker-native-probe")
         _docker(ctx, budget, container, "create isolated Docker volume", "volume", "create", "docker-native-probe")
         _checked_exec(
@@ -447,6 +450,10 @@ def _run_nested_docker(
             )
     finally:
         try:
-            ctx.logs(container)
+            if diagnostics is not None:
+                diagnostics.snapshot("before-shutdown")
         finally:
-            _stop_owned_daemon(ctx, container, systemd=systemd)
+            try:
+                ctx.logs(container)
+            finally:
+                _stop_owned_daemon(ctx, container, systemd=systemd)

@@ -141,6 +141,7 @@ class RuntimeEntrypointTests(unittest.TestCase):
             evidence_path = Path(directory) / "evidence.json"
             context = MagicMock()
             context.checks = []
+            context.observations = []
             context.load_archive.return_value = {}
             context.podman.return_value = "podman fixture"
             context.cleanup.side_effect = ValueError("unexpected cleanup failure")
