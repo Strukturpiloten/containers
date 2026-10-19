@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import yaml
 from jsonschema import Draft202012Validator
 
 from scripts import docs_observations
@@ -173,6 +174,31 @@ class DocsCatalogueTests(unittest.TestCase):
         self.assertIsNone(row["softwareVersion"])
         self.assertEqual(row["distribution"], "debian-11")
         self.assertIn("--oom-score-adj=0", image_markdown(row))
+
+    def test_conformance_classification_and_examples_keep_publication_unknown(self) -> None:
+        name = "docker-29-conformance-rootless"
+        metadata = yaml.safe_load((ROOT / f"images/docker/{name}/container.yaml").read_text())
+        row = catalogue([metadata], None, source_revision="b" * 40)["images"][0]
+        page = image_markdown(row)
+        self.assertEqual(row["rootMode"], "rootless")
+        self.assertIsNone(row["distribution"])
+        self.assertEqual(row["softwareVersion"], metadata["version"][1:])
+        self.assertIsNone(row["observation"])
+        self.assertIn("No verified current digest", page)
+        self.assertIn("does not establish publication or native admission", page)
+        self.assertIn(f"--archive /path/to/exact-{name}-amd64.oci.tar", page)
+        for flag in (
+            "--cpus 2",
+            "--memory 4294967296",
+            "--pids-limit 512",
+            "--cgroupns private",
+            "--runtime crun",
+            "--systemd=always",
+            "run.oci.delegate-cgroup=payload",
+        ):
+            self.assertIn(flag, page)
+        self.assertNotIn("sudo podman run", page)
+        self.assertNotIn("--oom-score-adj", page)
 
     def test_mismatched_registry_identity_is_rejected(self) -> None:
         observation = _snapshot_row()

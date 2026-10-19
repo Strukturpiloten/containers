@@ -48,6 +48,7 @@ class RuntimeContext:
         self.directory = Path(tempfile.mkdtemp(prefix="strukturpiloten-runtime-"))
         self.containers: list[str] = []
         self.run_containers: set[str] = set()
+        self.container_launchers: dict[str, str] = {}
         self.checks: list[dict[str, Any]] = []
         self.image_ref = f"localhost/{image}:runtime-{os.getpid()}"
         self._sudo = ["sudo", "-n"] if use_sudo else []
@@ -124,6 +125,9 @@ class RuntimeContext:
             cidfile = self.directory / f"run-{run_id}.cid"
             self.containers.append(container_name)
             self.run_containers.add(container_name)
+            if not hasattr(self, "container_launchers"):
+                self.container_launchers = {}
+            self.container_launchers[container_name] = "systemd" if "--systemd=always" in options else "direct"
             completed = False
             try:
                 output = self.command(
@@ -153,6 +157,7 @@ class RuntimeContext:
                     self.containers[self.containers.index(container_name)] = container
                     self.run_containers.remove(container_name)
                     self.run_containers.add(container)
+                    self.container_launchers[container] = self.container_launchers.pop(container_name)
                 elif completed and self.checks[-1].get("exitCode") == 0:
                     raise ProbeError(f"{name}: Podman run succeeded without cidfile {cidfile}")
         return self.command(name, [*self._podman, *args], timeout=timeout, check=check)
@@ -198,7 +203,7 @@ class RuntimeContext:
         return container
 
     def exec(self, name: str, container: str, *args: str) -> str:
-        return self.podman(name, "exec", container, *args)
+        return self.podman(name, "exec", container, *getattr(self, "exec_guard", ()), *args)
 
     def port(self, container: str, target: int) -> int:
         mapping = self.podman("inspect published port", "port", container, f"{target}/tcp")
@@ -227,6 +232,7 @@ class RuntimeContext:
     def cleanup(self) -> None:
         """Stop only tracked containers and remove the store only after verified teardown."""
         failed: list[str] = []
+        shutdown_failures: list[str] = []
         for container in reversed(self.containers):
             if container in getattr(self, "run_containers", set()):
                 try:
@@ -258,7 +264,11 @@ class RuntimeContext:
                     timeout=10,
                     check=False,
                 )
-                if running == "true":
+                if getattr(self, "container_launchers", {}).get(container) == "systemd":
+                    from scripts.runtime_docker_systemd import stop_guest  # noqa: PLC0415
+
+                    stop_guest(self, container)
+                elif running == "true":
                     self.podman(
                         "signal owned container internally",
                         "exec",
@@ -271,7 +281,8 @@ class RuntimeContext:
                     )
                     self.podman("wait for owned container", "wait", container, timeout=15, check=False)
             except ProbeError:
-                pass
+                if getattr(self, "container_launchers", {}).get(container) == "systemd":
+                    shutdown_failures.append(container)
             try:
                 self.podman(
                     "cleanup owned container",
@@ -331,6 +342,10 @@ class RuntimeContext:
         else:
             shutil.rmtree(self.directory)
         self.checks.append({"name": "cleanup isolated store", "status": "passed"})
+        if shutdown_failures:
+            raise ProbeError(
+                f"systemd shutdown was abnormal for {shutdown_failures}; exact owned resources were removed"
+            )
 
 
 def _wait_for_port(port: int, *, timeout: int = 15) -> None:

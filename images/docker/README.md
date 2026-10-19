@@ -39,6 +39,15 @@ Upstream build metadata declares AMD64 and ARM64. Every declared architecture an
 
 ## Validation
 
+The separate [guest-systemd conformance fixture](conformance/README.md) declares
+`docker-29-conformance-rootless` on Debian 13 with the same verified upstream
+payload. It uses guest PID 1 systemd, a real UID 1000 user manager, and strict
+inner memory/no-swap/OOM and PID-effect probes under bounded rootful outer
+Podman. Its metadata is a declaration; native AMD64 and ARM64 conformance remain
+unqualified until the exact candidate passes the full harness. Debian 11
+conformance remains a later issue #344 phase. Use the dedicated harness contract
+for this image.
+
 The native contract starts each daemon, checks the actual Engine and CLI/API range, confirms root mode and storage driver, loads a synthetic image into the inner daemon, and exercises named and bind mounts, a user network and DNS, a published TCP port, health/restart settings, and owned cleanup. It uses the final image itself as an offline nested fixture. Run it against one built OCI archive on a Linux runner with passwordless rootful Podman:
 
 ```sh

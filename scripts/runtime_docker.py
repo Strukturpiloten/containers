@@ -10,6 +10,7 @@ import socket
 import time
 from typing import TYPE_CHECKING, Any
 
+from scripts import runtime_docker_systemd
 from scripts.runtime_resource_budgets import (
     IsolatedStoreDiskBudget,
     outer_container_limits,
@@ -18,6 +19,7 @@ from scripts.runtime_resource_budgets import (
 from scripts.runtime_tests import ProbeError
 
 MAX_HTTP_RESPONSE = 8192
+LEGACY_ROOTLESS_OOM_PROFILES = ("docker-debian-11-rootless",)
 
 
 if TYPE_CHECKING:
@@ -72,7 +74,10 @@ def run_docker(
 ) -> None:
     """Exercise CLI, daemon API, storage, network, mounts, ports, and owned cleanup."""
     mode = profile["mode"]
-    expected_uid = "1000" if mode == "rootless" else "0"
+    systemd = profile.get("launcher", "direct") == "systemd"
+    if systemd and profile["outerPrivilege"] != "privileged":
+        raise ProbeError("systemd Docker profile requires a privileged rootful outer runtime")
+    expected_uid = "1000" if mode == "rootless" and not systemd else "0"
     cli = ctx.podman(
         "Docker CLI, identity and payload provenance",
         "run",
@@ -128,12 +133,48 @@ echo setuid-only""",
         _run_nested_docker(ctx, profile, expected_uid, budget)
 
 
+def _outer_options(ctx: RuntimeContext, profile: dict[str, Any], fixture: Path) -> tuple[str, ...]:
+    outer_args = [
+        *outer_container_limits(),
+        "--device",
+        "/dev/fuse",
+        "--volume",
+        f"{fixture}:/tmp/docker-native-fixture.tar:ro",
+        "--publish",
+        "127.0.0.1::18080",
+    ]
+    if profile.get("launcher", "direct") == "systemd":
+        outer_args.extend(runtime_docker_systemd.SYSTEMD_OPTIONS)
+    legacy_rootless = ctx.name in LEGACY_ROOTLESS_OOM_PROFILES
+    if legacy_rootless:
+        # Native Bullseye Docker 20.10.5 predates the OOM-score fix in Moby #46626.
+        # With an inherited positive score, its runc cannot lower a nested container
+        # to Docker's default score of zero (Moby #46563). Normalize the privileged
+        # outer workload while keeping every inner docker run at its default.
+        outer_args.extend(["--oom-score-adj", "0"])
+    if profile["outerPrivilege"] == "privileged":
+        outer_args.append("--privileged")
+    else:
+        outer_args.extend(["--security-opt", "apparmor=unconfined"])
+    return tuple(outer_args)
+
+
+def _stop_owned_daemon(ctx: RuntimeContext, container: str, *, systemd: bool) -> None:
+    if systemd:
+        runtime_docker_systemd.stop_guest(ctx, container)
+    else:
+        ctx.podman("signal owned Docker daemon PID 1", "exec", container, "sh", "-c", "kill -TERM 1", check=False)
+        ctx.podman("wait for owned Docker daemon exit", "wait", container, timeout=30)
+
+
 def _run_nested_docker(
     ctx: RuntimeContext, profile: dict[str, Any], expected_uid: str, budget: IsolatedStoreDiskBudget
 ) -> None:
     mode = profile["mode"]
-    # A Docker archive of the exact built image is a version-pinned, offline fixture.
-    # The inner daemon receives no host Docker socket and the outer launcher stays Podman.
+    systemd = profile.get("launcher", "direct") == "systemd"
+    if systemd:
+        runtime_docker_systemd.verify_runtime(ctx)
+    # The exact built image is an offline fixture; no host Docker socket is used.
     fixture = ctx.directory / "docker-native-fixture.tar"
     budget.checkpoint()
     ctx.podman(
@@ -147,31 +188,16 @@ def _run_nested_docker(
         timeout=180,
     )
     budget.checkpoint()
-    outer_args = [
-        *outer_container_limits(),
-        "--device",
-        "/dev/fuse",
-        "--volume",
-        f"{fixture}:/tmp/docker-native-fixture.tar:ro",
-        "--publish",
-        "127.0.0.1::18080",
-    ]
-    if ctx.name == "docker-debian-11-rootless":
-        # Native Bullseye Docker 20.10.5 predates the OOM-score fix in Moby #46626.
-        # With an inherited positive score, its runc cannot lower a nested container
-        # to Docker's default score of zero (Moby #46563). Normalize the privileged
-        # outer workload while keeping every inner docker run at its default.
-        outer_args.extend(["--oom-score-adj", "0"])
-    if profile["outerPrivilege"] == "privileged":
-        outer_args.append("--privileged")
-    else:
-        outer_args.extend(["--security-opt", "apparmor=unconfined"])
+    outer_args = _outer_options(ctx, profile, fixture)
+    legacy_rootless = ctx.name in LEGACY_ROOTLESS_OOM_PROFILES
     budget.checkpoint()
     container = ctx.start("start nested Docker daemon", options=tuple(outer_args))
+    if systemd:
+        ctx.exec_guard = runtime_docker_systemd.guarded_command()
     try:
         budget.checkpoint()
         verify_outer_container_limits(ctx, container)
-        if ctx.name == "docker-debian-11-rootless":
+        if legacy_rootless:
             score = _checked_exec(
                 ctx, budget, "read legacy Docker outer OOM score", container, "cat", "/proc/1/oom_score_adj"
             )
@@ -186,8 +212,9 @@ def _run_nested_docker(
             "-euc",
             "for n in $(seq 1 45); do docker info >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1",
         )
-        uid = _checked_exec(ctx, budget, "inspect inner daemon user", container, "id", "-u")
-        ctx.assert_equal("inner daemon user", uid, expected_uid)
+        if not systemd:
+            uid = _checked_exec(ctx, budget, "inspect inner daemon user", container, "id", "-u")
+            ctx.assert_equal("inner daemon user", uid, expected_uid)
         version_text = _docker(
             ctx, budget, container, "read Docker API versions", "version", "--format", "{{json .Server}}"
         )
@@ -212,11 +239,15 @@ def _run_nested_docker(
         security = [str(value) for value in info.get("SecurityOptions", [])]
         rootless = any("rootless" in value for value in security)
         ctx.assert_equal("daemon rootless security", str(rootless).lower(), str(mode == "rootless").lower())
+        if systemd:
+            runtime_docker_systemd.verify_guest(ctx, budget, container, mode, info)
 
         _docker(
             ctx, budget, container, "load synthetic nested image", "load", "--input", "/tmp/docker-native-fixture.tar"
         )
         nested = ctx.image_ref
+        if systemd:
+            runtime_docker_systemd.verify_inner_limits(ctx, budget, container, mode=mode)
         _docker(ctx, budget, container, "create isolated Docker network", "network", "create", "docker-native-probe")
         _docker(ctx, budget, container, "create isolated Docker volume", "volume", "create", "docker-native-probe")
         _checked_exec(
@@ -338,6 +369,7 @@ def _run_nested_docker(
             _wait_http(outer_port, b"docker-native-ok")
             budget.checkpoint()
             ctx.checks.append({"name": "host published port", "status": "passed", "port": outer_port})
+            verify_outer_container_limits(ctx, container)
         finally:
             ctx.exec(
                 "remove owned nested Docker resources",
@@ -362,13 +394,4 @@ def _run_nested_docker(
         try:
             ctx.logs(container)
         finally:
-            ctx.podman(
-                "signal owned Docker daemon PID 1",
-                "exec",
-                container,
-                "sh",
-                "-c",
-                "kill -TERM 1",
-                check=False,
-            )
-            ctx.podman("wait for owned Docker daemon exit", "wait", container, timeout=30)
+            _stop_owned_daemon(ctx, container, systemd=systemd)

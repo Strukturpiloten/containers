@@ -555,6 +555,45 @@
         "reason": "No successful build result supplied.",
         "status": "unknown"
       },
+      "image": "ghcr.io/strukturpiloten/docker-29-conformance-rootless",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "docker"
+        ],
+        "reviewAfter": "2026-10-27",
+        "state": "maintained",
+        "supportBoundary": "Verified upstream Docker archive inputs on maintained Debian 13; native conformance remains unqualified. Dedicated privileged isolated conformance fixture; guest systemd needs crun-specific cgroup delegation. Devices remain subject to native Engine/runc behavior and are not repaired by this profile."
+      },
+      "name": "docker-29-conformance-rootless",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        },
+        "arm64": {
+          "docker": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v29.8.2"
+    },
+    {
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
       "image": "ghcr.io/strukturpiloten/docker-29-rootful",
       "lifecycle": {
         "admission": "isolated-test",
