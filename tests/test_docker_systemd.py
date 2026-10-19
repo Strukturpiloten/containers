@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
@@ -18,19 +19,31 @@ if TYPE_CHECKING:
 
 from scripts import container_engine
 from scripts.metadata_schema import MetadataSchemaError, validate_metadata_schema
-from scripts.runtime_docker import _outer_options, _run_nested_docker, run_docker
+from scripts.runtime_docker import (
+    _outer_options,
+    _prepare_started_daemon,
+    _run_nested_docker,
+    _wait_for_systemd_api,
+    run_docker,
+)
 from scripts.runtime_docker_systemd import (
     INNER_PIDS,
     MEMORY_BYTES,
     PLACEMENT_GUARD,
+    PLACEMENT_READBACK_COMMAND,
+    PLACEMENT_SAMPLE_SECONDS,
     RESOURCE_START_FILE,
     SYSTEMD_OPTIONS,
     _hierarchy_evidence,
+    _placement_observation,
     guarded_command,
+    startup_deadline,
+    startup_remaining,
     stop_guest,
     verify_guest,
     verify_inner_limits,
     verify_runtime,
+    wait_for_placement,
 )
 from scripts.runtime_resource_budgets import outer_container_limits
 from scripts.runtime_tests import ProbeError, RuntimeContext
@@ -51,6 +64,7 @@ class DockerSystemdTests(unittest.TestCase):
         ctx.directory = Path("owned-store")
         ctx._sudo = ["sudo", "-n"]
         ctx.checks = []
+        ctx.timeout = 45
         ctx.containers = ["owned"]
         return ctx
 
@@ -439,6 +453,30 @@ class DockerSystemdTests(unittest.TestCase):
         ctx.podman.assert_any_call("wait for owned systemd orderly exit", "wait", "a" * 64, timeout=30)
         self.assertFalse(any("kill -TERM 1" in str(call) for call in ctx.podman.call_args_list))
 
+    def test_launch_counts_toward_startup_deadline_and_passive_failure_cleans_owned_guest(self) -> None:
+        ctx, clock = self.shutdown_context(), _startup_clock()
+
+        def start(*_args: object, **_kwargs: object) -> str:
+            clock.now += 3
+            return "owned"
+
+        ctx.start.side_effect = start
+        with (
+            patch("scripts.runtime_docker_systemd.time", clock),
+            patch("scripts.runtime_docker_systemd.verify_runtime"),
+            patch(
+                "scripts.runtime_docker_systemd.wait_for_placement", side_effect=ProbeError("boot failed")
+            ) as passive,
+            self.assertRaisesRegex(ProbeError, "boot failed"),
+        ):
+            _run_nested_docker(
+                ctx, {"mode": "rootless", "launcher": "systemd", "outerPrivilege": "privileged"}, "0", MagicMock()
+            )
+        self.assertEqual(passive.call_args.args[-1], 145)
+        self.assertEqual(ctx.start.call_args.kwargs["timeout"], 45)
+        ctx.exec.assert_not_called()
+        ctx.podman.assert_any_call("wait for owned systemd orderly exit", "wait", "a" * 64, timeout=30)
+
     def test_stop_uses_non_force_exit_target_self_contained_preguard_and_readback(self) -> None:
         ctx = self.shutdown_context()
         stop_guest(ctx, "owned")
@@ -626,6 +664,261 @@ class DockerSystemdTests(unittest.TestCase):
                 self.assertEqual(len(requests), 1)
                 self.assertIn(PLACEMENT_GUARD, requests[0][5])
                 self.assertEqual(requests[0][-3:], ["systemctl", "exit", "0"])
+
+
+def _placement_fixture(state: str = "READY", **changes: str) -> str:
+    fields = {
+        "init": "0::/init.scope",
+        "current": "0::/init.scope",
+        "root-owner": "0",
+        "root-procs": "",
+        "root-controllers": "cpu memory pids",
+        "root-subtree": "cpu memory pids",
+        "leaf-subtree": "",
+    }
+    if state == "EARLY_ROOT":
+        fields.update(init="0::/", current="0::/")
+        fields["root-procs"] = "1 22"
+        fields["root-subtree"] = ""
+    elif state == "EXEC_ROOT":
+        fields["current"] = "0::/"
+        fields["root-procs"] = "22"
+        fields["root-subtree"] = ""
+    elif state == "PENDING_DELEGATION":
+        fields["root-subtree"] = "cpu pids"
+    fields.update(changes)
+    return "\n".join(f"{key}={value}" for key, value in fields.items())
+
+
+def _startup_clock() -> SimpleNamespace:
+    clock = SimpleNamespace(now=100.0)
+    clock.monotonic = lambda: clock.now
+    clock.sleep = lambda seconds: setattr(clock, "now", clock.now + seconds)
+    return clock
+
+
+class SystemdStartupTests(unittest.TestCase):
+    def context(self) -> MagicMock:
+        ctx = MagicMock()
+        ctx.timeout = 45
+        ctx.checks = []
+        ctx.name = "docker-29-conformance-rootless"
+        return ctx
+
+    def test_passive_observation_accepts_only_the_closed_boot_states(self) -> None:
+        for state in ("EARLY_ROOT", "EXEC_ROOT", "PENDING_DELEGATION", "READY"):
+            with self.subTest(state=state):
+                self.assertEqual(_placement_observation(_placement_fixture(state))["state"], state)
+        for changes in (
+            {"init": "0::/", "current": "0::/init.scope"},
+            {"current": "0::/sibling.scope"},
+            {"current": "0::/../init.scope"},
+            {"root-owner": "1000"},
+            {"root-controllers": "cpu pids"},
+            {"root-subtree": "cpu io memory pids"},
+            {"root-procs": "22"},
+            {"root-procs": "0"},
+            {"root-procs": "1 1"},
+            {"leaf-subtree": "memory"},
+            {"root-controllers": "cpu cpu memory pids"},
+            {"init": "broken"},
+        ):
+            with self.subTest(changes=changes), self.assertRaises(ProbeError):
+                _placement_observation(_placement_fixture(**changes))
+
+    def test_root_boot_observations_reject_contradictory_domain_and_same_cgroup_readbacks(self) -> None:
+        for state in ("EARLY_ROOT", "EXEC_ROOT"):
+            with self.subTest(state=state):
+                positive = _placement_observation(_placement_fixture(state))
+                self.assertTrue(positive["rootProcesses"])
+                self.assertEqual(positive["rootSubtree"], [])
+                self.assertEqual(positive["leafSubtree"], [])
+                with self.assertRaisesRegex(ProbeError, "populated root distributed memory"):
+                    _placement_observation(
+                        _placement_fixture(state, **{"root-subtree": "memory", "leaf-subtree": "memory"})
+                    )
+                for mismatch in (
+                    {"root-subtree": "", "leaf-subtree": "memory"},
+                    {"root-procs": "", "root-subtree": "memory", "leaf-subtree": ""},
+                ):
+                    with self.subTest(mismatch=mismatch), self.assertRaisesRegex(ProbeError, "readbacks disagreed"):
+                        _placement_observation(_placement_fixture(state, **mismatch))
+
+    def test_passive_protocol_rejects_missing_duplicate_unknown_and_byte_overflow_before_parse(self) -> None:
+        good = _placement_fixture()
+        for malformed in ("", good + "\nunknown=field", good + "\nroot-owner=0", good.replace("root-procs=\n", "")):
+            with self.subTest(malformed=malformed), self.assertRaises(ProbeError):
+                _placement_observation(malformed)
+        with (
+            patch("scripts.runtime_docker_systemd._cgroup_path") as parse,
+            self.assertRaisesRegex(ProbeError, "byte bound"),
+        ):
+            _placement_observation("é" * 2001)
+        parse.assert_not_called()
+
+    def test_real_passive_reader_propagates_missing_files_and_oversize_without_writes(self) -> None:
+        for failure in (None, "missing", "oversize"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                for pid in ("1", "self"):
+                    (root / "proc" / pid).mkdir(parents=True)
+                    (root / "proc" / pid / "cgroup").write_text("0::/init.scope\n")
+                group = root / "cgroup"
+                (group / "init.scope").mkdir(parents=True)
+                for field, value in {
+                    "cgroup.procs": "",
+                    "cgroup.controllers": "cpu memory pids",
+                    "cgroup.subtree_control": "cpu memory pids",
+                    "init.scope/cgroup.subtree_control": "",
+                }.items():
+                    (group / field).write_text(value)
+                if failure == "missing":
+                    (group / "cgroup.procs").unlink()
+                elif failure == "oversize":
+                    (group / "cgroup.procs").write_text("\n" * 4001)
+                script = "stat() { printf 0; }; " + PLACEMENT_READBACK_COMMAND.replace(
+                    "/proc/", str(root / "proc") + "/"
+                ).replace("/sys/fs/cgroup", str(group))
+                result = subprocess.run(  # noqa: S603 - fixed passive reads against owned temporary fixture files.
+                    ["/bin/sh", "-euc", script], capture_output=True, text=True, check=False, timeout=2
+                )
+                if failure:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(result.stdout, "")
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(_placement_observation(result.stdout)["state"], "READY")
+
+    def test_one_deadline_bounds_placement_limits_and_guarded_api_without_reset(self) -> None:
+        ctx, clock = self.context(), _startup_clock()
+        ctx.timeout = 60
+        ctx.podman.side_effect = [
+            _placement_fixture("EARLY_ROOT"),
+            _placement_fixture("EXEC_ROOT"),
+            _placement_fixture(),
+        ]
+        calls = []
+        first_api_call = 2
+
+        def execute(name: str, *_args: str, **options: float) -> str:
+            self.assertEqual(ctx.exec_guard, guarded_command())
+            calls.append((name, options["timeout"]))
+            if name == "read outer Docker cgroup limits":
+                clock.now += 5
+                return "200000 100000\n4294967296\n512"
+            clock.now += 2
+            return "API_PENDING" if len(calls) == first_api_call else "API_READY"
+
+        ctx.exec.side_effect = execute
+        with patch("scripts.runtime_docker_systemd.time", clock), patch("scripts.runtime_docker.time", clock):
+            deadline = startup_deadline(ctx)
+            self.assertEqual(deadline, 145)
+            _prepare_started_daemon(ctx, MagicMock(), "owned", {"launcher": "systemd"}, deadline)
+        self.assertEqual([timeout for _name, timeout in calls], [43, 38, 35])
+        self.assertEqual(ctx.podman.call_count, 3)
+        self.assertTrue(all(call.kwargs["timeout"] <= PLACEMENT_SAMPLE_SECONDS for call in ctx.podman.call_args_list))
+        evidence = next(check for check in ctx.checks if check["name"] == "systemd passive placement readiness")
+        self.assertEqual(evidence["first"]["state"], "EARLY_ROOT")
+        self.assertEqual(evidence["last"]["state"], "READY")
+
+    def test_smaller_timeout_and_expiry_during_read_last_sample_or_api_never_renew(self) -> None:
+        ctx, clock = self.context(), _startup_clock()
+        ctx.timeout = 3
+        with patch("scripts.runtime_docker_systemd.time", clock):
+            self.assertEqual(startup_deadline(ctx), 103)
+            self.assertEqual(startup_remaining(ctx, 103, maximum=2), 2)
+            for invalid in (0, -1, float("nan"), float("inf")):
+                ctx.timeout = invalid
+                with self.subTest(timeout=invalid), self.assertRaises(ProbeError):
+                    startup_deadline(ctx)
+        for phase in ("placement-command", "last-pending-sample", "api"):
+            with self.subTest(phase=phase):
+                ctx, clock = self.context(), _startup_clock()
+
+                def response(
+                    *_args: object, clock: SimpleNamespace = clock, phase: str = phase, **_kwargs: object
+                ) -> str:
+                    clock.now = 101
+                    return _placement_fixture() if phase == "placement-command" else "API_READY"
+
+                ctx.podman.side_effect = response
+                ctx.exec.side_effect = response
+                with (
+                    patch("scripts.runtime_docker_systemd.time", clock),
+                    patch("scripts.runtime_docker.time", clock),
+                    self.assertRaisesRegex(ProbeError, "deadline expired"),
+                ):
+                    if phase == "api":
+                        _wait_for_systemd_api(ctx, MagicMock(), "owned", 101)
+                    else:
+                        if phase == "last-pending-sample":
+                            ctx.podman.side_effect = None
+                            ctx.podman.return_value = _placement_fixture("EARLY_ROOT")
+                        wait_for_placement(ctx, MagicMock(), "owned", 101)
+                self.assertEqual(ctx.exec.call_count if phase == "api" else ctx.podman.call_count, 1)
+
+    def test_passive_failures_are_not_retried_and_frozen_clock_still_has_sample_bound(self) -> None:
+        for result in (
+            ProbeError("OCI error"),
+            ProbeError("read failed"),
+            "malformed",
+            _placement_fixture(current="0::/wrong"),
+        ):
+            with self.subTest(result=result):
+                ctx, clock = self.context(), _startup_clock()
+                ctx.podman.side_effect = result if isinstance(result, ProbeError) else [result]
+                with patch("scripts.runtime_docker_systemd.time", clock), self.assertRaises(ProbeError):
+                    wait_for_placement(ctx, MagicMock(), "owned", 145)
+                self.assertEqual(ctx.podman.call_count, 1)
+                ctx.exec.assert_not_called()
+                self.assertEqual(ctx.checks[-1]["last"]["state"], "FATAL")
+        ctx, clock = self.context(), _startup_clock()
+        clock.sleep = lambda _seconds: None
+        ctx.podman.return_value = _placement_fixture("EARLY_ROOT")
+        with patch("scripts.runtime_docker_systemd.time", clock), self.assertRaisesRegex(ProbeError, "sample count"):
+            wait_for_placement(ctx, MagicMock(), "owned", 145)
+        self.assertEqual(ctx.podman.call_count, 45)
+
+    def test_after_ready_guard_errors_and_invalid_api_markers_are_immediately_fatal(self) -> None:
+        for failure in (ProbeError("guard drift"), ProbeError("OCI error"), "unexpected marker"):
+            with self.subTest(failure=failure):
+                ctx, clock = self.context(), _startup_clock()
+                ctx.podman.return_value = _placement_fixture()
+                ctx.exec.side_effect = ["200000 100000\n4294967296\n512", failure]
+                with (
+                    patch("scripts.runtime_docker_systemd.time", clock),
+                    patch("scripts.runtime_docker.time", clock),
+                    self.assertRaises(ProbeError),
+                ):
+                    _prepare_started_daemon(ctx, MagicMock(), "owned", {"launcher": "systemd"}, 145)
+                self.assertEqual(ctx.podman.call_count, 1)
+                self.assertEqual(ctx.exec.call_count, 2)
+
+    def test_expiry_during_first_limits_never_starts_api_poll(self) -> None:
+        ctx, clock = self.context(), _startup_clock()
+        ctx.podman.return_value = _placement_fixture()
+
+        def limit_read(*_args: object, **_kwargs: object) -> str:
+            clock.now = 145
+            return "200000 100000\n4294967296\n512"
+
+        ctx.exec.side_effect = limit_read
+        with (
+            patch("scripts.runtime_docker_systemd.time", clock),
+            self.assertRaisesRegex(ProbeError, "deadline expired"),
+        ):
+            _prepare_started_daemon(ctx, MagicMock(), "owned", {"launcher": "systemd"}, 145)
+        self.assertEqual(ctx.exec.call_count, 1)
+
+    def test_direct_launcher_preserves_default_timeouts_and_original_api_loop(self) -> None:
+        ctx = self.context()
+        ctx.name = "docker-29-rootful"
+        ctx.exec.return_value = "200000 100000\n4294967296\n512"
+        with patch("scripts.runtime_docker_systemd.wait_for_placement") as passive:
+            _prepare_started_daemon(ctx, MagicMock(), "owned", {"mode": "rootful"}, None)
+        passive.assert_not_called()
+        self.assertTrue(all(not call.kwargs for call in ctx.exec.call_args_list))
+        self.assertIn("seq 1 45", ctx.exec.call_args.args[-1])
 
 
 if __name__ == "__main__":

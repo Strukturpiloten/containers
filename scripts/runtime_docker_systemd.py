@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import signal as signals
+import time
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any
 
@@ -21,6 +23,11 @@ if TYPE_CHECKING:
 MEMORY_BYTES = 32 * 1024**2
 INNER_PIDS = 16
 MAX_VERSION_REPORT = 4096
+STARTUP_SECONDS = 45
+MAX_PLACEMENT_SAMPLES = 45
+MAX_PLACEMENT_READBACK = 4000
+PLACEMENT_SAMPLE_SECONDS = 2
+PLACEMENT_POLL_SECONDS = 1
 SYSTEMD_OPTIONS = (
     "--runtime",
     "crun",
@@ -204,6 +211,33 @@ PLACEMENT_GUARD = (
     'leaf_controllers=$(cat "/sys/fs/cgroup$current/cgroup.subtree_control"); test -z "$leaf_controllers"; '
 )
 
+# Passive observation only: no daemon requests or cgroup/service changes before admission.
+PLACEMENT_READBACK_COMMAND = r"""
+LC_ALL=C; export LC_ALL
+bounded() {
+    value=$(head -c 4001 "$1" && printf x) || exit 80
+    value=${value%x}
+    test "${#value}" -le 4000 || { printf 'placement field exceeded bound\n' >&2; exit 81; }
+    printf '%s' "$value"
+}
+init=$(bounded /proc/1/cgroup)
+current=$(bounded /proc/self/cgroup)
+case "$current" in 0::/*) ;; *) printf 'invalid placement cgroup format\n' >&2; exit 82;; esac
+current_path=${current#0::}
+printf '%s\n' "$current_path" | grep -Eq '^/([A-Za-z0-9_.@:-]+(/[A-Za-z0-9_.@:-]+)*)?$'
+case "$current_path/" in */./*|*/../*) exit 83;; esac
+owner=$(stat -c '%u' /sys/fs/cgroup)
+procs=$(bounded /sys/fs/cgroup/cgroup.procs)
+procs=$(printf '%s' "$procs" | tr '\n' ' ')
+available=$(bounded /sys/fs/cgroup/cgroup.controllers)
+subtree=$(bounded /sys/fs/cgroup/cgroup.subtree_control)
+leaf=$(bounded "/sys/fs/cgroup$current_path/cgroup.subtree_control")
+report=$(printf 'init=%s\ncurrent=%s\nroot-owner=%s\nroot-procs=%s\n' "$init" "$current" "$owner" "$procs"
+    printf 'root-controllers=%s\nroot-subtree=%s\nleaf-subtree=%s' "$available" "$subtree" "$leaf")
+test "${#report}" -le 4000 || { printf 'placement report exceeded bound\n' >&2; exit 84; }
+printf '%s' "$report"
+"""
+
 BOOT_BOUNDARY_UNITS = frozenset(
     {
         "systemd-sysctl.service",
@@ -305,6 +339,166 @@ def guarded_command(*args: str) -> tuple[str, ...]:
     """Refuse guest helpers in a distributor or outside the delegated parent."""
     script = PLACEMENT_GUARD + 'set +e; "$@"; result=$?; set -e; ' + PLACEMENT_GUARD + 'exit "$result"'
     return ("sh", "-euc", script, "--", *args)
+
+
+def startup_deadline(ctx: RuntimeContext) -> float:
+    """Share the original startup allowance, including an explicitly smaller override."""
+    if not math.isfinite(ctx.timeout) or ctx.timeout <= 0:
+        raise ProbeError("systemd startup timeout must be finite and positive")
+    return time.monotonic() + min(STARTUP_SECONDS, ctx.timeout)
+
+
+def startup_remaining(ctx: RuntimeContext, deadline: float, *, maximum: float | None = None) -> float:
+    """Return a positive command timeout without renewing the shared deadline."""
+    remaining = deadline - time.monotonic()
+    if not math.isfinite(remaining) or remaining <= 0 or not math.isfinite(ctx.timeout) or ctx.timeout <= 0:
+        raise ProbeError("systemd startup deadline expired")
+    if maximum is not None and (not math.isfinite(maximum) or maximum <= 0):
+        raise ProbeError("systemd startup command cap must be finite and positive")
+    return min(remaining, ctx.timeout, maximum if maximum is not None else remaining)
+
+
+def _placement_fields(output: str) -> dict[str, str]:
+    if len(output.encode("utf-8")) > MAX_PLACEMENT_READBACK:
+        raise ProbeError("passive placement readback exceeded its byte bound")
+    fields = {}
+    for line in output.splitlines():
+        key, separator, value = line.partition("=")
+        if not separator or key in fields:
+            raise ProbeError("passive placement readback was malformed or duplicated")
+        fields[key] = value
+    if set(fields) != {
+        "init",
+        "current",
+        "root-owner",
+        "root-procs",
+        "root-controllers",
+        "root-subtree",
+        "leaf-subtree",
+    }:
+        raise ProbeError("passive placement readback fields were missing or unknown")
+    return fields
+
+
+def _placement_controllers(value: str) -> set[str]:
+    controllers = value.split()
+    if len(controllers) != len(set(controllers)) or any(
+        not re.fullmatch(r"[a-z][a-z0-9_]*", item) for item in controllers
+    ):
+        raise ProbeError("passive placement controller readback was malformed")
+    return set(controllers)
+
+
+def _placement_observation(output: str) -> dict[str, Any]:
+    fields = _placement_fields(output)
+    paths = []
+    for key in ("init", "current"):
+        if not fields[key].startswith("0::"):
+            raise ProbeError("passive placement process cgroup was malformed")
+        paths.append(_cgroup_path(fields[key].removeprefix("0::"), allow_root=True))
+    init, current = paths
+    available = _placement_controllers(fields["root-controllers"])
+    subtree = _placement_controllers(fields["root-subtree"])
+    leaf = _placement_controllers(fields["leaf-subtree"])
+    required = {"cpu", "memory", "pids"}
+    procs = fields["root-procs"].split()
+    if fields["root-owner"] != "0" or not required <= available or not subtree <= available or not leaf <= available:
+        raise ProbeError("passive placement root ownership or controller availability was invalid")
+    if any(not re.fullmatch(r"[1-9][0-9]{0,9}", pid) for pid in procs) or len(procs) != len(set(procs)):
+        raise ProbeError("passive placement root membership was malformed")
+    if procs and "memory" in subtree:
+        raise ProbeError("passive placement populated root distributed memory")
+    if current == "/" and leaf != subtree:
+        raise ProbeError("passive placement root and leaf readbacks disagreed for the same cgroup")
+    if init == "/" and current == "/":
+        state, reason = "EARLY_ROOT", "PID 1 and passive observer still occupy the namespace root"
+    elif init != "/" and current == "/":
+        state, reason = "EXEC_ROOT", "passive observer has not yet joined the nonroot PID 1 leaf"
+    else:
+        state, reason = _placement_nonroot_state(init, current, procs, subtree, leaf)
+    return {
+        "state": state,
+        "reason": reason,
+        "init": init,
+        "current": current,
+        "rootOwner": fields["root-owner"],
+        "rootProcesses": procs,
+        "rootControllers": sorted(available),
+        "rootSubtree": sorted(subtree),
+        "leafSubtree": sorted(leaf),
+    }
+
+
+def _placement_nonroot_state(
+    init: str, current: str, procs: list[str], subtree: set[str], leaf: set[str]
+) -> tuple[str, str]:
+    if init == "/" or current != init:
+        raise ProbeError("passive placement observer occupied an unexpected nonroot cgroup")
+    if procs or leaf:
+        raise ProbeError("passive placement root was populated or PID 1 leaf distributed controllers")
+    if not {"cpu", "memory", "pids"} <= subtree:
+        return "PENDING_DELEGATION", "namespace root has not yet enabled all required subtree controllers"
+    return "READY", "exact nonroot PID 1 leaf, empty root, and required delegation are ready"
+
+
+def wait_for_placement(ctx: RuntimeContext, budget: IsolatedStoreDiskBudget, container: str, deadline: float) -> None:
+    """Observe bounded boot states; never run daemon work or admit through a failed read."""
+    first = last = None
+    samples = 0
+    try:
+        for _sample in range(MAX_PLACEMENT_SAMPLES):
+            budget.checkpoint()
+            timeout = startup_remaining(ctx, deadline, maximum=PLACEMENT_SAMPLE_SECONDS)
+            output = ctx.podman(
+                "observe passive systemd startup placement",
+                "exec",
+                container,
+                "sh",
+                "-euc",
+                PLACEMENT_READBACK_COMMAND,
+                timeout=timeout,
+            )
+            samples += 1
+            budget.checkpoint()
+            startup_remaining(ctx, deadline)
+            last = _placement_observation(output)
+            if first is None:
+                first = last
+            if last["state"] == "READY":
+                ctx.checks.append(
+                    {
+                        "name": "systemd passive placement readiness",
+                        "status": "passed",
+                        "samples": samples,
+                        "first": first,
+                        "last": last,
+                    }
+                )
+                return
+            time.sleep(min(PLACEMENT_POLL_SECONDS, startup_remaining(ctx, deadline)))
+    except ProbeError as error:
+        ctx.checks.append(
+            {
+                "name": "systemd passive placement readiness",
+                "status": "failed",
+                "samples": samples,
+                "first": first if first is not None else {"state": "FATAL", "reason": str(error)[:1000]},
+                "last": {"state": "FATAL", "reason": str(error)[:1000], "observation": last},
+                "error": str(error)[:1000],
+            }
+        )
+        raise
+    error = "systemd placement exceeded its bounded startup sample count"
+    ctx.checks.append(
+        {
+            "name": "systemd passive placement readiness",
+            "status": "failed",
+            "samples": samples,
+            "first": first,
+            "last": {"state": "FATAL", "reason": error, "observation": last},
+        }
+    )
+    raise ProbeError(error)
 
 
 def _netlink_audit_inodes(lines: list[str]) -> set[int]:

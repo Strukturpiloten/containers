@@ -40,14 +40,16 @@ def outer_container_limits() -> tuple[str, ...]:
     )
 
 
-def verify_outer_container_limits(ctx: RuntimeContext, container: str) -> None:
+def verify_outer_container_limits(ctx: RuntimeContext, container: str, *, timeout: float | None = None) -> None:
     """Read effective cgroup v2 limits inside the outer container; fail closed."""
+    options = {} if timeout is None else {"timeout": timeout}
     raw = ctx.exec(
         "read outer Docker cgroup limits",
         container,
         "sh",
         "-euc",
         "cat /sys/fs/cgroup/cpu.max /sys/fs/cgroup/memory.max /sys/fs/cgroup/pids.max",
+        **options,
     )
     requested = {"cpus": CPU_LIMIT, "memoryBytes": MEMORY_LIMIT_BYTES, "pids": PIDS_LIMIT}
     try:

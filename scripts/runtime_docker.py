@@ -53,11 +53,44 @@ def _wait_http(port: int, marker: bytes, *, timeout: int = 20) -> None:
     raise ProbeError(f"published nested Docker port {port} did not serve the synthetic marker: {last_result}")
 
 
-def _checked_exec(ctx: RuntimeContext, budget: IsolatedStoreDiskBudget, name: str, container: str, *args: str) -> str:
+def _checked_exec(
+    ctx: RuntimeContext,
+    budget: IsolatedStoreDiskBudget,
+    name: str,
+    container: str,
+    *args: str,
+    timeout: float | None = None,
+) -> str:
     budget.checkpoint()
-    output = ctx.exec(name, container, *args)
+    options = {} if timeout is None else {"timeout": timeout}
+    output = ctx.exec(name, container, *args, **options)
     budget.checkpoint()
     return output
+
+
+def _wait_for_systemd_api(
+    ctx: RuntimeContext, budget: IsolatedStoreDiskBudget, container: str, deadline: float
+) -> None:
+    # Only an ordinary daemon-not-ready result is retried. The unchanged strict
+    # exec guard surrounds every sample; guard/OCI/IO failures propagate directly.
+    for _sample in range(runtime_docker_systemd.STARTUP_SECONDS):
+        marker = _checked_exec(
+            ctx,
+            budget,
+            "wait for Docker daemon API",
+            container,
+            "sh",
+            "-euc",
+            "if docker info >/dev/null 2>&1; then printf API_READY; else printf API_PENDING; fi",
+            timeout=runtime_docker_systemd.startup_remaining(ctx, deadline),
+        )
+        runtime_docker_systemd.startup_remaining(ctx, deadline)
+        if marker == "API_READY":
+            return
+        if marker != "API_PENDING":
+            raise ProbeError("systemd Docker API readiness returned an invalid marker")
+        time.sleep(min(1, runtime_docker_systemd.startup_remaining(ctx, deadline)))
+    raise ProbeError("systemd Docker API exceeded its bounded startup sample count")
 
 
 def _docker(ctx: RuntimeContext, budget: IsolatedStoreDiskBudget, container: str, name: str, *args: str) -> str:
@@ -167,6 +200,44 @@ def _stop_owned_daemon(ctx: RuntimeContext, container: str, *, systemd: bool) ->
         ctx.podman("wait for owned Docker daemon exit", "wait", container, timeout=30)
 
 
+def _prepare_started_daemon(
+    ctx: RuntimeContext,
+    budget: IsolatedStoreDiskBudget,
+    container: str,
+    profile: dict[str, Any],
+    deadline: float | None,
+) -> None:
+    systemd = profile.get("launcher", "direct") == "systemd"
+    legacy_rootless = ctx.name in LEGACY_ROOTLESS_OOM_PROFILES
+    if systemd and deadline is None:
+        raise ProbeError("systemd startup deadline was missing")
+    if systemd:
+        runtime_docker_systemd.wait_for_placement(ctx, budget, container, deadline)
+        ctx.exec_guard = runtime_docker_systemd.guarded_command()
+        verify_outer_container_limits(ctx, container, timeout=runtime_docker_systemd.startup_remaining(ctx, deadline))
+        runtime_docker_systemd.startup_remaining(ctx, deadline)
+    else:
+        verify_outer_container_limits(ctx, container)
+    if legacy_rootless:
+        score = _checked_exec(
+            ctx, budget, "read legacy Docker outer OOM score", container, "cat", "/proc/1/oom_score_adj"
+        )
+        ctx.assert_equal("legacy Docker outer OOM score", score, "0")
+    budget.checkpoint()
+    if systemd:
+        _wait_for_systemd_api(ctx, budget, container, deadline)
+    else:
+        _checked_exec(
+            ctx,
+            budget,
+            "wait for Docker daemon API",
+            container,
+            "sh",
+            "-euc",
+            "for n in $(seq 1 45); do docker info >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1",
+        )
+
+
 def _run_nested_docker(
     ctx: RuntimeContext, profile: dict[str, Any], expected_uid: str, budget: IsolatedStoreDiskBudget
 ) -> None:
@@ -189,29 +260,13 @@ def _run_nested_docker(
     )
     budget.checkpoint()
     outer_args = _outer_options(ctx, profile, fixture)
-    legacy_rootless = ctx.name in LEGACY_ROOTLESS_OOM_PROFILES
     budget.checkpoint()
-    container = ctx.start("start nested Docker daemon", options=tuple(outer_args))
-    if systemd:
-        ctx.exec_guard = runtime_docker_systemd.guarded_command()
+    deadline = runtime_docker_systemd.startup_deadline(ctx) if systemd else None
+    launch_timeout = {} if deadline is None else {"timeout": runtime_docker_systemd.startup_remaining(ctx, deadline)}
+    container = ctx.start("start nested Docker daemon", options=tuple(outer_args), **launch_timeout)
     try:
         budget.checkpoint()
-        verify_outer_container_limits(ctx, container)
-        if legacy_rootless:
-            score = _checked_exec(
-                ctx, budget, "read legacy Docker outer OOM score", container, "cat", "/proc/1/oom_score_adj"
-            )
-            ctx.assert_equal("legacy Docker outer OOM score", score, "0")
-        budget.checkpoint()
-        _checked_exec(
-            ctx,
-            budget,
-            "wait for Docker daemon API",
-            container,
-            "sh",
-            "-euc",
-            "for n in $(seq 1 45); do docker info >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1",
-        )
+        _prepare_started_daemon(ctx, budget, container, profile, deadline)
         if not systemd:
             uid = _checked_exec(ctx, budget, "inspect inner daemon user", container, "id", "-u")
             ctx.assert_equal("inner daemon user", uid, expected_uid)

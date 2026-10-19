@@ -20,9 +20,28 @@ socket, host DBus socket, or host cgroup bind mount. The harness neither migrate
 host controllers nor modifies host services, cgroups or sysctls. Guest boot units
 that could alter shared kernel state are masked; journald's audit capability is
 removed and its actual descriptors and normal logging endpoints are checked.
-All execs must remain in the exact nonroot guest PID 1 leaf, with an empty,
+Before admission, a bounded observer performs only passive proc/cgroup reads.
+It records the first and last placement reasons while guest PID 1 or the observer
+still occupies the namespace root, or subtree delegation is not ready. Missing
+files, malformed data, unexpected nonroot placement, unavailable controllers,
+and command errors fail immediately. The observer cannot admit daemon requests
+or nested work. Placement, the first outer-limit read, and daemon API readiness
+share one 45-second startup deadline beginning at outer launch, reduced by a
+smaller configured command timeout; no stage renews that allowance. At most 45
+placement samples run, with one-second pending cadence, a two-second per-sample
+cap, remaining-deadline command timeouts and a 4000-byte output bound. Subsequent
+smoke checks retain their existing independent command timeouts.
+
+After placement admission, all execs must remain in the exact nonroot guest PID 1 leaf, with an empty,
 root-owned namespace-root distributor and delegated CPU, memory and PID
 controllers. Missing readiness or placement evidence fails closed.
+Only the existing read-only daemon-info readiness condition may be polled within
+the remaining startup deadline. Each API sample has the normal pre/post placement
+guard and returns a closed ready/pending marker; guard, OCI, I/O and malformed
+marker failures are fatal and never restart placement admission. Both prior native
+failures refused the first guarded exec but passed the same guard at shutdown;
+their evidence did not identify the transient predicate. Fresh native runs remain
+required to qualify this passive startup observation.
 
 The former extra `payload` delegation subtree is incompatible with the pinned
 Docker Engine 29.8.2. Its [Moby revision 8af9fe3, `withRootless`](https://github.com/moby/moby/blob/8af9fe3a36bab3e039862a2ab1cef1880c9b4d03/daemon/oci_linux.go#L63)

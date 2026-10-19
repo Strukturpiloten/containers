@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import platform
 import re
@@ -67,7 +68,10 @@ class RuntimeContext:
         for part in ("root", "runroot", "tmp"):
             (self.directory / part).mkdir()
 
-    def command(self, name: str, command: list[str], *, timeout: int | None = None, check: bool = True) -> str:
+    def command(self, name: str, command: list[str], *, timeout: float | None = None, check: bool = True) -> str:
+        effective_timeout = self.timeout if timeout is None else timeout
+        if not math.isfinite(effective_timeout) or effective_timeout <= 0:
+            raise ProbeError(f"{name}: command timeout must be finite and positive")
         start = time.monotonic()
         try:
             result = subprocess.run(
@@ -75,7 +79,7 @@ class RuntimeContext:
                 capture_output=True,
                 text=True,
                 check=False,
-                timeout=timeout or self.timeout,
+                timeout=effective_timeout,
             )
         except subprocess.TimeoutExpired as error:
             self.checks.append(
@@ -83,7 +87,7 @@ class RuntimeContext:
                     "name": name,
                     "status": "failed",
                     "durationSeconds": round(time.monotonic() - start, 3),
-                    "error": f"command timed out after {timeout or self.timeout}s",
+                    "error": f"command timed out after {effective_timeout}s",
                 }
             )
             raise ProbeError(f"{name}: command timed out") from error
@@ -104,7 +108,7 @@ class RuntimeContext:
             raise ProbeError(f"{name}: exit {result.returncode}: {diagnostics[-1000:] or output[-1000:]}")
         return output
 
-    def podman(self, name: str, *args: str, timeout: int | None = None, check: bool = True) -> str:
+    def podman(self, name: str, *args: str, timeout: float | None = None, check: bool = True) -> str:
         if args and args[0] == "run":
             try:
                 image_index = args.index(self.image_ref)
@@ -192,9 +196,18 @@ class RuntimeContext:
             name, "run", "--rm", "--security-opt", "label=disable", *options, self.image_ref, *command, timeout=timeout
         )
 
-    def start(self, name: str, *command: str, options: tuple[str, ...] = ()) -> str:
+    def start(self, name: str, *command: str, options: tuple[str, ...] = (), timeout: float | None = None) -> str:
+        timeout_options = {} if timeout is None else {"timeout": timeout}
         container = self.podman(
-            name, "run", "--detach", "--security-opt", "label=disable", *options, self.image_ref, *command
+            name,
+            "run",
+            "--detach",
+            "--security-opt",
+            "label=disable",
+            *options,
+            self.image_ref,
+            *command,
+            **timeout_options,
         )
         if not re.fullmatch(r"[a-f0-9]{64}", container):
             raise ProbeError(f"{name}: no container ID returned")
@@ -202,8 +215,9 @@ class RuntimeContext:
             self.containers.append(container)
         return container
 
-    def exec(self, name: str, container: str, *args: str) -> str:
-        return self.podman(name, "exec", container, *getattr(self, "exec_guard", ()), *args)
+    def exec(self, name: str, container: str, *args: str, timeout: float | None = None) -> str:
+        options = {} if timeout is None else {"timeout": timeout}
+        return self.podman(name, "exec", container, *getattr(self, "exec_guard", ()), *args, **options)
 
     def port(self, container: str, target: int) -> int:
         mapping = self.podman("inspect published port", "port", container, f"{target}/tcp")
