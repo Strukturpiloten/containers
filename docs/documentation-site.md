@@ -41,6 +41,47 @@ uv run --frozen python -m scripts.docs_observations --repository Strukturpiloten
 uv run --frozen --group docs python -m scripts.documentation --output _site --snapshot /tmp/registry-snapshot.json
 ```
 
+## Legal pages and privacy maintenance
+
+The website publishes [Legal Notice](legal-notice.md), [Impressum](impressum.md),
+[Privacy Policy](privacy-policy.md), and [Datenschutzerklärung](datenschutz.md) at
+the top-level routes `/legal-notice/`, `/impressum/`, `/privacy-policy/`, and
+`/datenschutz/`. Their source files live in `docs/`. The common theme links them
+and the company contact page from every page. Language alternatives have their
+own canonical URLs, HTML language metadata, sitemap entries, and Markdown exports.
+
+Keep the German and English versions consistent. Company information is based
+on the existing Strukturpiloten provider information published for BoxFerry;
+verify it when the partners, address, register, tax, or contact details change.
+The licence section distinguishes project materials from software bundled into
+container images. This technical catalogue does not designate a journalistic
+editorial representative; assess that requirement if editorial content is added.
+The consumer-dispute statement follows the company's existing published policy
+and must be reviewed if that policy or its legal obligations change.
+
+The containers website currently uses **GitHub Pages**, not BoxFerry's German
+Hetzner hosting. Do not copy BoxFerry's log-retention period or EEA-only wording.
+Review the applicable provider relationship, any required processing agreement,
+international-transfer safeguards, and actual retention information with the
+company's privacy/legal owner. A public privacy policy does not replace those
+organisational obligations. GitHub does not specify a fixed Pages visitor-IP
+log-retention period in the cited Pages documentation; the policy identifies the
+provider's published retention criteria without inventing a period.
+
+Keep assets local and catalogue search in the browser. When changing hosting,
+adding analytics, embeds, forms, browser storage, or another recipient, review
+the legal basis, information duties, and any consent required by § 25 TDDDG before
+deployment. Update both privacy pages and their revision dates. A cookie banner
+is not added for the current site, which has no optional tracking or storage.
+
+Website-only changes remain validation-only in the container planner. Required
+PR and merge-group CI still run Python checks and the strict offline website
+build, including rendered link/canonical checks. Website sources and their
+existing test modules are excluded from the image-publication push paths.
+The documentation workflow builds and deploys the site after a website-only
+merge without waiting for a container publication. Its registry inspection
+reads publication evidence; it does not build or publish container images.
+
 ## Recovery
 
 For a temporary registry or GitHub API failure, inspect the `Documentation site` build log and its published snapshot statuses, then dispatch the workflow again on `main`. The observer uses bounded network attempts and records incomplete results; a failed site build or deployment leaves the previous successful Pages deployment in place. If a publish workflow is still retrying failed image jobs, wait for its retry to finish and then dispatch one more documentation refresh to pick up final tags.

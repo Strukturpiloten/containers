@@ -20,6 +20,12 @@ from scripts import container_engine, docs_catalogue
 from scripts.docs_site import REPOSITORY_URL, SITE_URL, page_url, rewrite_links, validate_site
 
 ROOT = Path(__file__).resolve().parents[1]
+LEGAL_PAGE_LANGUAGES = {
+    "legal-notice.md": ("en", "impressum.md", "de", "Deutsch"),
+    "impressum.md": ("de", "legal-notice.md", "en", "English"),
+    "privacy-policy.md": ("en", "datenschutz.md", "de", "Deutsch"),
+    "datenschutz.md": ("de", "privacy-policy.md", "en", "English"),
+}
 
 
 def _git(*args: str) -> str:
@@ -41,6 +47,8 @@ def _source_time(path: str) -> str:
 
 def _source_pages() -> dict[Path, str]:
     result = {path.resolve(): f"guides/{path.stem}.md" for path in (ROOT / "docs").glob("*.md")}
+    for filename in LEGAL_PAGE_LANGUAGES:
+        result[(ROOT / "docs" / filename).resolve()] = filename
     result[(ROOT / "docs/index.md").resolve()] = "guides/index.md"
     for name in ("CONTRIBUTING", "SECURITY"):
         result[(ROOT / f"{name}.md").resolve()] = f"guides/{name.lower()}.md"
@@ -74,6 +82,16 @@ def _page(  # noqa: PLR0913
         "markdown_url": SITE_URL + "markdown/" + virtual,
         "catalogue": catalogue,
     }
+    if virtual in LEGAL_PAGE_LANGUAGES:
+        language, alternate, alternate_language, alternate_label = LEGAL_PAGE_LANGUAGES[virtual]
+        frontmatter.update(
+            {
+                "language": language,
+                "alternate_url": page_url(alternate),
+                "alternate_language": alternate_language,
+                "alternate_label": alternate_label,
+            }
+        )
     return "---\n" + yaml.safe_dump(frontmatter, sort_keys=False) + "---\n\n" + content
 
 
