@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import signal as signals
 import socket
@@ -94,7 +95,6 @@ systemctl() {
         *) return 2;;
     esac
 }
-dpkg-query() { printf %s '247.3-7+deb11u8'; }
 readlink() {
     if [ "$1" = "$JOURNAL_EXE" ]; then
         if [ -f "$EXE_MARK" ] && [ -n "${EXE_AFTER:-}" ]; then printf '%s\\n' "$EXE_AFTER";
@@ -108,6 +108,8 @@ cat() {
     else /bin/cat "$@"; fi
 }
 """
+
+DPKG_QUERY = "#!/bin/sh\nprintf %s '247.3-7+deb11u8'\n"
 
 
 def _fixture_roles(kind: str, mode: str) -> dict[str, tuple[int, str]]:
@@ -1259,6 +1261,13 @@ class JournalBoundaryTests(unittest.TestCase):
         with self.assertRaises(ProbeError):
             _journal_boundary_evidence(READBACK + "unknown-data=value\n")
 
+    def test_readback_shell_fixture_functions_use_posix_identifiers(self) -> None:
+        names = re.findall(r"^(\S+)\(\)\s*\{", SYSTEMCTL, re.MULTILINE)
+        self.assertTrue(names)
+        for name in names:
+            with self.subTest(name=name):
+                self.assertRegex(name, r"\A[A-Za-z_][A-Za-z0-9_]*\Z")
+
     def test_real_readback_command_uses_process_namespace_and_fails_missing_proc_data(self) -> None:
         scenarios = (
             None,
@@ -1308,6 +1317,11 @@ class JournalBoundaryTests(unittest.TestCase):
                 provenance.mkdir(parents=True)
                 (provenance / "journal-boundary").write_text(boundary.read_text())
                 (provenance / "conformance-packages").write_text("systemd=247.3-7+deb11u8\n")
+                binaries = root / "bin"
+                binaries.mkdir()
+                package_query = binaries / "dpkg-query"
+                package_query.write_text(DPKG_QUERY)
+                package_query.chmod(0o700)
                 self.alter_fixture(process, scenario, unix)
                 command = JOURNAL_BOUNDARY_COMMAND.replace("/proc/", f"{root}/proc/")
                 command = command.replace("/etc/", f"{root}/etc/").replace("/usr/share/", f"{root}/usr/share/")
@@ -1315,6 +1329,7 @@ class JournalBoundaryTests(unittest.TestCase):
                     ["/bin/sh", "-euc", SYSTEMCTL + command],
                     env={
                         **os.environ,
+                        "PATH": os.pathsep.join((str(binaries), os.environ["PATH"])),
                         "BOUNDARY_FILE": str(boundary),
                         "PID_MARK": str(root / "pid-read"),
                         "EXE_MARK": str(root / "exe-read"),
