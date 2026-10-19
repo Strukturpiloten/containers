@@ -194,9 +194,10 @@ class DocsCatalogueTests(unittest.TestCase):
             "--cgroupns private",
             "--runtime crun",
             "--systemd=always",
-            "run.oci.delegate-cgroup=payload",
+            "run.oci.systemd.subgroup=container",
         ):
             self.assertIn(flag, page)
+        self.assertNotIn("run.oci.delegate-cgroup=payload", page)
         self.assertNotIn("sudo podman run", page)
         self.assertNotIn("--oom-score-adj", page)
 

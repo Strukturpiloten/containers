@@ -27,8 +27,6 @@ SYSTEMD_OPTIONS = (
     "--systemd=always",
     "--annotation",
     "run.oci.systemd.subgroup=container",
-    "--annotation",
-    "run.oci.delegate-cgroup=payload",
 )
 USER_MANAGER = (
     "runuser",
@@ -73,23 +71,26 @@ manager() {
 }
 safe_group() {
     test "${#1}" -le 4096
-    printf '%s\n' "$1" | LC_ALL=C grep -Eq '^/payload(/[A-Za-z0-9_.@:-]+)+$'
+    printf '%s\n' "$1" | LC_ALL=C grep -Eq '^(/[A-Za-z0-9_.@:-]+)+$'
     case "$1/" in */./*|*/../*) exit 1;; esac
 }
 walk() {
     group=$1; depth=0
     while :; do
-        depth=$((depth+1)); test "$depth" -le 32
+        test "$depth" -le 32; depth=$((depth+1))
         case " $seen " in *" $group "*) ;; *)
             directory=/sys/fs/cgroup$group
+            identity=$(stat -c '%i:%u' "$directory")
+            group_type=$(cat "$directory/cgroup.type")
+            available=$(cat "$directory/cgroup.controllers")
+            subtree=$(cat "$directory/cgroup.subtree_control")
+            processes=$(tr '\n' ' ' < "$directory/cgroup.procs")
             printf 'group-%s=%s|%s|%s|%s|%s|%s\n' "$phase" "$group" \
-              "$(stat -c '%i:%u' "$directory")" "$(cat "$directory/cgroup.type")" \
-              "$(cat "$directory/cgroup.controllers")" "$(cat "$directory/cgroup.subtree_control")" \
-              "$(tr '\n' ' ' < "$directory/cgroup.procs")"
+              "$identity" "$group_type" "$available" "$subtree" "$processes"
             seen="$seen $group";;
         esac
-        test "$group" != /payload || break
-        group=${group%/*}; test -n "$group"
+        test "$group" != / || break
+        group=${group%/*}; group=${group:-/}
     done
 }
 process() {
@@ -129,7 +130,7 @@ for phase in before after; do
         process main "$(manager show "$unit" --property MainPID --value)"
         daemon=$(pgrep -x dockerd); process daemon "$daemon"
     else
-        matches=$(find /sys/fs/cgroup/payload -xdev -maxdepth 32 -type d -name "$unit")
+        matches=$(find /sys/fs/cgroup -xdev -maxdepth 32 -type d -name "$unit")
         test "$matches" = "/sys/fs/cgroup$target"
         printf 'scope-%s=%s\n' "$phase" "$matches"
         count=0
@@ -196,10 +197,10 @@ done
 
 PLACEMENT_GUARD = (
     "init=$(cut -d: -f3 /proc/1/cgroup); current=$(cut -d: -f3 /proc/self/cgroup); "
-    'case "$init" in /payload/*) ;; *) exit 90 ;; esac; '
+    'printf "%s\\n" "$init" | LC_ALL=C grep -Eq "^(/[A-Za-z0-9_.@:-]+)+$"; '
+    'case "$init/" in */./*|*/../*) exit 90 ;; esac; '
     'test "$init" = "$current"; '
     'root_procs=$(cat /sys/fs/cgroup/cgroup.procs); test -z "$root_procs"; '
-    'payload_procs=$(cat /sys/fs/cgroup/payload/cgroup.procs); test -z "$payload_procs"; '
     'leaf_controllers=$(cat "/sys/fs/cgroup$current/cgroup.subtree_control"); test -z "$leaf_controllers"; '
 )
 
@@ -564,10 +565,11 @@ def _exec(ctx: RuntimeContext, budget: IsolatedStoreDiskBudget, container: str, 
     return result
 
 
-def _cgroup_path(path: str) -> str:
+def _cgroup_path(path: str, *, allow_root: bool = False) -> str:
     if (
         len(path) > MAX_CGROUP_PATH
-        or not re.fullmatch(r"/payload(?:/[A-Za-z0-9_.@:-]+)*", path)
+        or not re.fullmatch(r"/(?:[A-Za-z0-9_.@:-]+(?:/[A-Za-z0-9_.@:-]+)*)?", path)
+        or (path == "/" and not allow_root)
         or any(part in {".", ".."} for part in path.split("/"))
         or len(path.split("/")) - 1 > MAX_CGROUP_DEPTH
     ):
@@ -577,8 +579,9 @@ def _cgroup_path(path: str) -> str:
 
 def _cgroup_ancestors(path: str) -> list[str]:
     parents = []
-    while path != "/payload":
-        path = path.rsplit("/", 1)[0]
+    _cgroup_path(path, allow_root=True)
+    while path != "/":
+        path = path.rsplit("/", 1)[0] or "/"
         parents.append(path)
     return parents
 
@@ -630,7 +633,7 @@ def _hierarchy_target(snapshot: dict[str, Any], kind: str, unit: str) -> str:
         required_properties.add("MainPID")
     _active_delegation(properties, required_properties)
     target = _cgroup_path(properties["ControlGroup"])
-    if target == "/payload" or target.rsplit("/", 1)[1] != unit:
+    if target.rsplit("/", 1)[1] != unit:
         raise ProbeError("systemd unit cgroup did not match the exact owned unit")
     return target
 
@@ -643,7 +646,7 @@ def _hierarchy_manager(snapshot: dict[str, Any], mode: str, target: str) -> str 
     manager = snapshot["manager"]
     _active_delegation(manager, {"ControlGroup", "MainPID", "Delegate", "ActiveState"})
     delegated = _cgroup_path(manager["ControlGroup"])
-    if delegated == "/payload" or not target.startswith(delegated + "/"):
+    if not target.startswith(delegated + "/"):
         raise ProbeError("rootless unit escaped the actual user manager delegation")
     processes = snapshot["process"]
     if "manager" not in processes or processes["manager"][0] != manager["MainPID"]:
@@ -719,7 +722,7 @@ def _verify_hierarchy_groups(
     if set(groups) != required:
         raise ProbeError("missing or unexpected cgroup hierarchy readback")
     for group, (identity, group_type, available, subtree, procs) in groups.items():
-        _cgroup_path(group)
+        _cgroup_path(group, allow_root=True)
         inode, separator, owner = identity.partition(":")
         if not separator or not inode.isdecimal() or int(inode) <= 0 or not owner.isdecimal() or group_type != "domain":
             raise ProbeError("invalid cgroup directory identity or domain type")
@@ -748,7 +751,7 @@ def _hierarchy_evidence(output: str, *, kind: str, mode: str, unit: str) -> dict
     _hierarchy_roles(before, kind, unit, target)
     uid = "1000" if mode == "rootless" else "0"
     controllers = {"cpu", "memory", "pids"}
-    owners = {values[2]: uid for values in before["process"].values()}
+    owners = {"/": "0", **{values[2]: uid for values in before["process"].values()}}
     owners[target] = uid
     if delegated:
         owners[delegated] = uid
@@ -786,8 +789,9 @@ def verify_guest(
         PLACEMENT_GUARD + 'test "$(id -u)" = 0; test "$(cat /proc/1/comm)" = systemd; '
         "test \"$(awk '/^Uid:/ {print $2}' /proc/1/status)\" = 0; "
         'printf "pid1=%s\\nexec=%s\\n" "$init" "$current"; '
-        "for c in cpu memory pids; do for group in /sys/fs/cgroup /sys/fs/cgroup/payload; do "
-        'grep -qw "$c" "$group/cgroup.controllers"; grep -qw "$c" "$group/cgroup.subtree_control"; done; done',
+        "for c in cpu memory pids; do "
+        'grep -qw "$c" /sys/fs/cgroup/cgroup.controllers; '
+        'grep -qw "$c" /sys/fs/cgroup/cgroup.subtree_control; done',
     )
     expected_root = "/home/docker/.local/share/docker" if mode == "rootless" else "/var/lib/docker"
     boundary = _exec(
@@ -814,7 +818,7 @@ def verify_guest(
             "test -S /run/user/1000/bus; test -f /var/lib/systemd/linger/dockertest; "
             'pid=$(systemctl show user@1000.service --property MainPID --value); test "$pid" -gt 1; '
             "test \"$(awk '/^Uid:/ {print $2}' /proc/$pid/status)\" = 1000; "
-            'case "$(cut -d: -f3 /proc/$pid/cgroup)" in /payload/*) ;; *) exit 1 ;; esac; '
+            'group=$(cut -d: -f3 /proc/$pid/cgroup); test "$group" != /; '
             'test "$(stat -c %u /run/user/1000/bus)" = 1000; '
             'test "$(systemctl show user@1000.service --property Delegate --value)" = yes',
         )
@@ -845,7 +849,7 @@ def verify_guest(
         "-euc",
         "found=0; for pid in $(pgrep -x dockerd); do "
         'test "$(awk \'/^Uid:/ {print $2}\' /proc/$pid/status)" = "$1"; '
-        'case "$(cut -d: -f3 /proc/$pid/cgroup)" in /payload/*) ;; *) exit 1 ;; esac; '
+        'group=$(cut -d: -f3 /proc/$pid/cgroup); test "$group" != /; '
         'found=$((found+1)); done; test "$found" = 1',
         "--",
         "1000" if mode == "rootless" else "0",

@@ -21,6 +21,8 @@ from scripts.runtime_docker_systemd import (
     MEMORY_BYTES,
     _allocator_records,
     _allocator_telemetry,
+    _cgroup_ancestors,
+    _cgroup_path,
     _hierarchy_evidence,
     _journal_boundary_evidence,
     _memory_association,
@@ -129,8 +131,8 @@ def _fixture_parent_paths(paths: set[str]) -> set[str]:
     paths = paths.copy()
     for path in list(paths):
         parent = path
-        while parent != "/payload":
-            parent = parent.rsplit("/", 1)[0]
+        while parent != "/":
+            parent = parent.rsplit("/", 1)[0] or "/"
             paths.add(parent)
     return paths
 
@@ -138,8 +140,8 @@ def _fixture_parent_paths(paths: set[str]) -> set[str]:
 def hierarchy_fixture(*, kind: str = "service", mode: str = "rootful", service_child: bool = False) -> str:
     """Independent sibling-scope layouts, not inferred from daemon service ancestry."""
     uid = "1000" if mode == "rootless" else "0"
-    manager = "/payload/user.slice/user-1000.slice/user@1000.service"
-    dispatcher = manager + "/different.slice" if mode == "rootless" else "/payload/system.slice"
+    manager = "/user.slice/user-1000.slice/user@1000.service"
+    dispatcher = manager + "/different.slice" if mode == "rootless" else "/system.slice"
     unit = "docker.service" if kind == "service" else "docker-" + "a" * 64 + ".scope"
     target = dispatcher + "/" + unit
     leaves = {target: "55 89" if kind == "service" else "101"}
@@ -306,6 +308,22 @@ def _write_hierarchy_fixture(directory: Path, output: str) -> tuple[str, str]:
         if property_.startswith("ControlGroup=")
     )
     return target, target.rsplit("/", 1)[1]
+
+
+def _alter_hierarchy_fixture(directory: Path, target: str, unit: str, kind: str, failure: str | None) -> None:
+    parent = directory / "cgroup" / target.rsplit("/", 1)[0].removeprefix("/")
+    if failure == "missing-controller":
+        (parent / "cgroup.subtree_control").write_text("cpu pids")
+    elif failure == "populated-parent":
+        (parent / "cgroup.procs").write_text("77")
+    elif failure == "scope-collision" and kind == "scope":
+        (directory / "cgroup/another.slice" / unit).mkdir(parents=True)
+    elif failure == "missing-root-file":
+        (directory / "cgroup/cgroup.procs").unlink()
+    elif failure == "missing-root-controller":
+        (directory / "cgroup/cgroup.controllers").write_text("cpu pids")
+    elif failure == "populated-root":
+        (directory / "cgroup/cgroup.procs").write_text("77")
 
 
 HIERARCHY_READERS = r"""
@@ -664,7 +682,64 @@ class HierarchyBoundaryTests(unittest.TestCase):
                 with self.subTest(mode=mode, service_child=service_child):
                     evidence = self.evidence(hierarchy_fixture(mode=mode, service_child=service_child), mode=mode)
                     self.assertEqual(evidence["status"], "passed")
-                    self.assertIn("/payload", evidence["distributors"])
+                    self.assertIn("/", evidence["distributors"])
+
+    def test_namespace_root_is_only_a_root_owned_empty_controller_distributor(self) -> None:
+        for mode in ("rootful", "rootless"):
+            for kind in ("service", "scope"):
+                original = hierarchy_fixture(mode=mode, kind=kind)
+                rows = original.splitlines()
+                root = next(row for row in rows if row.startswith("group-before=/|"))
+                self.assertEqual(sum(row.startswith("group-before=/|") for row in rows), 1)
+                self.assertEqual(sum(row.startswith("group-after=/|") for row in rows), 1)
+                fields = root.split("|", maxsplit=1)[1].split("|")
+                changes = [None, [fields[0].replace(":0", ":1000"), *fields[1:]], [*fields[:-1], "77"]]
+                for position in (2, 3):
+                    for controller in ("cpu", "memory", "pids"):
+                        missing = fields.copy()
+                        missing[position] = " ".join(
+                            value for value in missing[position].split() if value != controller
+                        )
+                        changes.append(missing)
+                for replacement in changes:
+                    with self.subTest(mode=mode, kind=kind, root=replacement):
+                        changed = "\n".join(
+                            row
+                            if not row.startswith(("group-before=/|", "group-after=/|"))
+                            else row.split("|", maxsplit=1)[0] + "|" + "|".join(replacement)
+                            for row in rows
+                            if replacement is not None or not row.startswith(("group-before=/|", "group-after=/|"))
+                        )
+                        with self.assertRaises(ProbeError):
+                            self.evidence(changed, mode=mode, kind=kind)
+
+    def test_root_paths_terminate_and_never_admit_units_managers_or_processes(self) -> None:
+        self.assertEqual(_cgroup_ancestors("/"), [])
+        self.assertEqual(_cgroup_ancestors("/one"), ["/"])
+        self.assertEqual(_cgroup_ancestors("/one/two"), ["/one", "/"])
+        self.assertEqual(_cgroup_path("/", allow_root=True), "/")
+        for unsafe in ("/", "", "relative", "//one", "/one/", "/./one", "/one/../two", "/" + "x/" * 33 + "leaf"):
+            with self.subTest(path=unsafe), self.assertRaises(ProbeError):
+                _cgroup_path(unsafe)
+        for mode in ("rootful", "rootless"):
+            for kind in ("service", "scope"):
+                original = hierarchy_fixture(mode=mode, kind=kind)
+                changes = []
+                for row in original.splitlines():
+                    if row.startswith(("unit-before=ControlGroup=", "manager-before=ControlGroup=")):
+                        prefix, _, _group = row.rpartition("=")
+                        changes.append(
+                            original.replace(
+                                prefix.replace("-before", "-after") + "=" + _group,
+                                prefix.replace("-before", "-after") + "=/",
+                            ).replace(row, prefix + "=/")
+                        )
+                    elif row.startswith("process-before="):
+                        group = row.split("|")[3]
+                        changes.append(original.replace("|" + group + "|/usr/bin/", "|/|/usr/bin/"))
+                for changed in changes:
+                    with self.subTest(mode=mode, kind=kind, changed=changed[:100]), self.assertRaises(ProbeError):
+                        self.evidence(changed, mode=mode, kind=kind)
 
     def test_actual_scope_dispatcher_is_not_assumed_to_be_daemon_service(self) -> None:
         for mode in ("rootful", "rootless"):
@@ -675,7 +750,7 @@ class HierarchyBoundaryTests(unittest.TestCase):
                 if mode == "rootless":
                     self.assertIn("different.slice", evidence["controlGroup"])
                     self.assertEqual(
-                        evidence["userManagerControlGroup"], "/payload/user.slice/user-1000.slice/user@1000.service"
+                        evidence["userManagerControlGroup"], "/user.slice/user-1000.slice/user@1000.service"
                     )
 
     def test_controller_and_no_internal_process_requirements_apply_to_distributors(self) -> None:
@@ -708,8 +783,8 @@ class HierarchyBoundaryTests(unittest.TestCase):
         ):
             with self.subTest(change=changed[:100]), self.assertRaises(ProbeError):
                 self.evidence(changed, kind="scope", mode="rootless")
-        target = "/payload/user.slice/user-1000.slice/user@1000.service/different.slice/" + unit
-        escaped = original.replace(target, "/payload/outside.slice/" + unit)
+        target = "/user.slice/user-1000.slice/user@1000.service/different.slice/" + unit
+        escaped = original.replace(target, "/outside.slice/" + unit)
         with self.assertRaisesRegex(ProbeError, "escaped the actual user manager"):
             self.evidence(escaped, kind="scope", mode="rootless")
 
@@ -729,7 +804,7 @@ class HierarchyBoundaryTests(unittest.TestCase):
                 original.replace(pid, pid.replace("100 1", "200 1")),
                 original.replace(pid, pid.replace("/usr/bin/docker-resource-probe", "/usr/bin/other")),
                 original.replace(scope, scope + "\n" + scope),
-                original.replace(scope, scope.replace("/payload/", "/outside/")),
+                original.replace(scope, scope.replace("/sys/fs/cgroup/", "/sys/fs/cgroup/outside/")),
                 original.replace("a" * 64 + ".scope", "b" * 64 + ".scope"),
                 original.replace("|101|", "|999 101|"),
                 original.replace("|domain|", "|threaded|"),
@@ -749,9 +824,9 @@ class HierarchyBoundaryTests(unittest.TestCase):
             "\n".join(lines[1:]),
             original + "\n" + lines[0],
             original + "\nunknown-before=value",
-            original.replace("/payload/system.slice", "/payload/../system.slice"),
-            original.replace("/payload/system.slice", "/payload/" + "deep/" * 33 + "system.slice"),
-            original.replace("/payload/system.slice", "/payload/" + "x" * 4096),
+            original.replace("/system.slice", "/../system.slice"),
+            original.replace("/system.slice", "/" + "deep/" * 33 + "system.slice"),
+            original.replace("/system.slice", "/" + "x" * 4096),
             original + "x" * (256 * 1024),
             original.replace("process-after=daemon|55|", "process-after=daemon|99|"),
             original.replace("|/usr/bin/dockerd|", "|/usr/bin/not-dockerd|"),
@@ -763,20 +838,22 @@ class HierarchyBoundaryTests(unittest.TestCase):
     def test_real_reader_on_synthetic_hierarchies_without_runtime_or_cgroup_writes(self) -> None:
         for mode in ("rootful", "rootless"):
             for kind in ("service", "scope"):
-                for failure in (None, "missing-controller", "populated-parent", "scope-collision"):
+                for failure in (
+                    None,
+                    "missing-controller",
+                    "populated-parent",
+                    "scope-collision",
+                    "missing-root-file",
+                    "missing-root-controller",
+                    "populated-root",
+                ):
                     with (
                         self.subTest(mode=mode, kind=kind, failure=failure),
                         tempfile.TemporaryDirectory() as temporary,
                     ):
                         directory = Path(temporary)
                         target, unit = _write_hierarchy_fixture(directory, hierarchy_fixture(kind=kind, mode=mode))
-                        parent = directory / "cgroup" / target.rsplit("/", 1)[0].removeprefix("/")
-                        if failure == "missing-controller":
-                            (parent / "cgroup.subtree_control").write_text("cpu pids")
-                        elif failure == "populated-parent":
-                            (parent / "cgroup.procs").write_text("77")
-                        elif failure == "scope-collision" and kind == "scope":
-                            (directory / "cgroup/payload/another.slice" / unit).mkdir(parents=True)
+                        _alter_hierarchy_fixture(directory, target, unit, kind, failure)
                         script = HIERARCHY_READERS + HIERARCHY_READBACK_COMMAND.replace(
                             "/sys/fs/cgroup", str(directory / "cgroup")
                         ).replace("/proc/", str(directory / "proc") + "/")
@@ -789,12 +866,17 @@ class HierarchyBoundaryTests(unittest.TestCase):
                             timeout=10,
                         )
                         collision = failure == "scope-collision" and kind == "scope"
-                        if collision:
+                        if collision or failure == "missing-root-file":
                             self.assertNotEqual(completed.returncode, 0)
                             continue
                         self.assertEqual(completed.returncode, 0, completed.stderr)
                         readback = completed.stdout.replace(str(directory / "cgroup"), "/sys/fs/cgroup")
-                        if failure in {"missing-controller", "populated-parent"}:
+                        if failure in {
+                            "missing-controller",
+                            "populated-parent",
+                            "missing-root-controller",
+                            "populated-root",
+                        }:
                             with self.assertRaises(ProbeError):
                                 self.evidence(readback, kind=kind, mode=mode)
                         else:

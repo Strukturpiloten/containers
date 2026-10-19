@@ -144,6 +144,7 @@ class DockerSystemdTests(unittest.TestCase):
         )
         for item in (*outer_container_limits(), *SYSTEMD_OPTIONS, "--privileged"):
             self.assertIn(item, options)
+        self.assertNotIn("run.oci.delegate-cgroup=payload", options)
         self.assertNotIn("--oom-score-adj", options)
         self.assertIn("owned/fixture.tar:/tmp/docker-native-fixture.tar:ro", options)
         self.assertFalse(any("/sys/fs/cgroup:" in item or "docker.sock:" in item for item in options))
@@ -220,35 +221,30 @@ class DockerSystemdTests(unittest.TestCase):
                     with self.assertRaises(ProbeError):
                         verify_runtime(ctx)
 
-    def test_safe_exec_guard_checks_empty_distributors_and_pid1_leaf(self) -> None:
+    def test_safe_exec_guard_checks_empty_root_and_exact_nonroot_pid1_leaf(self) -> None:
         # Execute the real guard with synthetic kernel-file readers; no runtime or cgroup writes.
-        for init, current, root_processes, payload_processes, subtree, success in (
-            ("/payload/init.scope", "/payload/init.scope", "", "", "", True),
-            ("/payload/init.scope", "/", "", "", "", False),
-            ("/payload/init.scope", "/payload", "", "", "", False),
-            ("/payload/init.scope", "/payload/init.scope", "44", "", "", False),
-            ("/payload/init.scope", "/payload/init.scope", "", "44", "", False),
-            ("/payload/init.scope", "/payload/init.scope", "", "", "memory", False),
-            ("/payload/init.scope", "/payload/init.scope", "", "MISSING", "", False),
+        for init, current, root_processes, subtree, success in (
+            ("/init.scope", "/init.scope", "", "", True),
+            ("/init.scope", "/", "", "", False),
+            ("/", "/", "", "", False),
+            ("/init.scope", "/sibling.scope", "", "", False),
+            ("/init.scope", "/init.scope", "44", "", False),
+            ("/init.scope", "/init.scope", "MISSING", "", False),
+            ("/init.scope", "/init.scope", "", "memory", False),
+            ("/init.scope", "/init.scope", "", "MISSING", False),
+            ("/../init.scope", "/../init.scope", "", "", False),
+            ("/./init.scope", "/./init.scope", "", "", False),
+            ("", "", "", "", False),
         ):
-            with self.subTest(current=current, root=root_processes, payload=payload_processes):
-                # Positional fixtures avoid shell interpolation of test data.
+            with self.subTest(init=init, current=current, root=root_processes, subtree=subtree):
                 prelude = (
                     'cut() { case "$*" in */proc/1/cgroup) printf %s "$INIT";; *) printf %s "$CURRENT";; esac; }; '
-                    'cat() { test "$PAYLOAD_PROCS" != MISSING || return 1; '
-                    'case "$1" in /sys/fs/cgroup/cgroup.procs) printf %s "$ROOT_PROCS";; '
-                    '/sys/fs/cgroup/payload/cgroup.procs) printf %s "$PAYLOAD_PROCS";; '
-                    '*) printf %s "$SUBTREE";; esac; }; '
+                    'cat() { case "$1" in /sys/fs/cgroup/cgroup.procs) value=$ROOT_PROCS;; '
+                    '*) value=$SUBTREE;; esac; test "$value" != MISSING; printf %s "$value"; }; '
                 )
                 result = subprocess.run(  # noqa: S603 - fixed shell harness with literal fixtures in environment.
                     ["/bin/sh", "-euc", prelude + PLACEMENT_GUARD],
-                    env={
-                        "INIT": init,
-                        "CURRENT": current,
-                        "ROOT_PROCS": root_processes,
-                        "PAYLOAD_PROCS": payload_processes,
-                        "SUBTREE": subtree,
-                    },
+                    env={"INIT": init, "CURRENT": current, "ROOT_PROCS": root_processes, "SUBTREE": subtree},
                     capture_output=True,
                     check=False,
                     timeout=2,
@@ -276,7 +272,7 @@ class DockerSystemdTests(unittest.TestCase):
                 if name == "inspect systemd daemon service main PID":
                     return "44"
                 if name == "read delegated Docker service cgroup":
-                    return "/payload/user.slice/user-1000.slice/user@1000.service/app.slice/docker.service"
+                    return "/user.slice/user-1000.slice/user@1000.service/app.slice/docker.service"
                 return ""
 
             ctx.exec.side_effect = run

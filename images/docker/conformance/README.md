@@ -13,14 +13,36 @@ The native harness must prove the actual daemon identity, user manager, service,
 controller delegation, and stable cgroup hierarchy before it admits nested work.
 
 The trusted outer runtime is rootful Podman with crun, a private cgroup namespace,
-`--systemd=always`, and crun's `run.oci.systemd.subgroup=container` and
-`run.oci.delegate-cgroup=payload` annotations. The guest receives no host Docker
+`--systemd=always`, and crun's `run.oci.systemd.subgroup=container` annotation.
+Guest systemd manages the private cgroup namespace root directly, creating its
+own nonroot PID 1 leaf and user hierarchy. The guest receives no host Docker
 socket, host DBus socket, or host cgroup bind mount. The harness neither migrates
 host controllers nor modifies host services, cgroups or sysctls. Guest boot units
 that could alter shared kernel state are masked; journald's audit capability is
 removed and its actual descriptors and normal logging endpoints are checked.
-All execs must remain in the guest PID 1 leaf, with empty root and payload
-distributor cgroups. Missing readiness or placement evidence fails closed.
+All execs must remain in the exact nonroot guest PID 1 leaf, with an empty,
+root-owned namespace-root distributor and delegated CPU, memory and PID
+controllers. Missing readiness or placement evidence fails closed.
+
+The former extra `payload` delegation subtree is incompatible with the pinned
+Docker Engine 29.8.2. Its [Moby revision 8af9fe3, `withRootless`](https://github.com/moby/moby/blob/8af9fe3a36bab3e039862a2ab1cef1880c9b4d03/daemon/oci_linux.go#L63)
+reads `/sys/fs/cgroup/user.slice/user-<uid>.slice/cgroup.controllers` directly,
+before converting the container spec; it does not discover a systemd prefix.
+Both native architectures failed that lookup under `/payload` despite passing
+the actual delegation readback. This is also tracked in [Moby #53531](https://github.com/moby/moby/issues/53531).
+Removing the extra subtree lets the guest's actual systemd hierarchy match the
+namespace-root-relative layout. No path aliases or controller migration are used.
+
+[crun 1.21 exec placement](https://github.com/containers/crun/blob/1.21/src/libcrun/linux.c#L5052)
+passes the container init PID to its cgroup mover. When the original cgroup
+rejects an exec process with `EBUSY`, [its cgroup v2 fallback](https://github.com/containers/crun/blob/1.21/src/libcrun/cgroup-setup.c#L438)
+reads that init PID's current cgroup and checks it against the original
+container cgroup path, with bounded retries. The harness independently requires
+the exec process to occupy the exact PID 1 leaf; fallback behavior alone is not
+admission evidence. Moby's Apache-2.0 and crun's LGPL-2.1-or-later upstream sources
+were inspected only for this diagnosis, not copied into the implementation or
+redistributed in images. The layout correction remains unqualified until fresh
+native AMD64 and ARM64 runs prove the complete contract below.
 
 The existing outer CPU, memory, PID, command timeout, observed 12 GiB disk budget,
 and exact-owned-resource cleanup remain mandatory. Inner enforcement additionally
