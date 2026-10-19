@@ -21,6 +21,7 @@ WEBSITE_PATHS = (
     "documentation/theme/main.html",
     "documentation/assets/site.css",
     "scripts/documentation.py",
+    "scripts/docs_site.py",
     "tests/test_docs_site.py",
     "tests/test_documentation_workflow.py",
 )

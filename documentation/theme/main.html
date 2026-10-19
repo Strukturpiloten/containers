@@ -35,7 +35,7 @@
     {% if not page.meta.catalogue %}
     <aside class="page-sidebar" lang="en">
       <a href="{{ '' | url }}" class="back-link">← All images</a>
-      {% if page.toc %}<nav aria-label="On this page"><p class="eyebrow">On this page</p><ul>{% for item in page.toc %}{% for child in item.children %}<li><a href="{{ child.url }}">{{ child.title }}</a></li>{% endfor %}{% endfor %}</ul></nav>{% endif %}
+      {% if page.toc %}<nav lang="{{ page.meta.language | default('en') | e }}" aria-label="{{ 'Auf dieser Seite' if page.meta.language == 'de' else 'On this page' }}"><p class="eyebrow">{{ 'Auf dieser Seite' if page.meta.language == 'de' else 'On this page' }}</p><ul>{% for item in page.toc %}{% for child in item.children %}<li><a href="{{ child.url }}">{{ child.title }}</a></li>{% endfor %}{% endfor %}</ul></nav>{% endif %}
       <div class="sidebar-links"><a href="{{ 'guides/tags-and-versions/' | url }}">Understand versions & tags</a><a href="{{ 'guides/security-and-support/' | url }}">Security & support</a><a href="{{ 'guides/data-and-discovery/' | url }}">JSON & Markdown exports</a></div>
     </aside>
     {% endif %}
