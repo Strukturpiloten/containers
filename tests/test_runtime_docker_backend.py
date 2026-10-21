@@ -23,6 +23,118 @@ from scripts.runtime_tests import RuntimeContext
 
 
 class PrivateDockerControls(unittest.TestCase):
+    @staticmethod
+    def implicit_slice_state(backend: DockerBackend) -> dict[str, str]:
+        # The smoke receipt observed Description, LoadState, ActiveState,
+        # Transient and an empty ControlGroup. The remaining properties are
+        # affirmative additional observations required by the corrected probe.
+        return {
+            "Id": backend.slice,
+            "Names": backend.slice,
+            "Description": "Slice /" + backend.slice.removesuffix(".slice"),
+            "LoadState": "loaded",
+            "ActiveState": "inactive",
+            "Transient": "no",
+            "ControlGroup": "",
+            "FragmentPath": "",
+            "SourcePath": "",
+            "DropInPaths": "",
+            "UnitFileState": "",
+        }
+
+    def test_receipt_shaped_implicit_slice_requires_explicit_properties_and_absent_cgroup(self) -> None:
+        backend = DockerBackend(Path("/owned-runtime"), ())
+        state = self.implicit_slice_state(backend)
+        raw = "\n".join(f"{key}={value}" for key, value in state.items())
+        ctx = MagicMock()
+        with patch.object(backend, "_call", side_effect=[raw, "", ""]) as call:
+            backend._unused_slice(ctx)
+        show = call.call_args_list[0].args[2]
+        self.assertIn("--all", show)
+        properties = next(
+            argument.removeprefix("--property=") for argument in show if argument.startswith("--property=")
+        )
+        self.assertTrue(set(state) <= set(properties.split(",")))
+        self.assertEqual(
+            [invocation.args[2] for invocation in call.call_args_list[1:]],
+            [
+                ["test", "!", "-e", "/sys/fs/cgroup/" + backend.slice],
+                ["test", "!", "-L", "/sys/fs/cgroup/" + backend.slice],
+            ],
+        )
+
+    def test_slice_collision_or_unknown_properties_fail_before_kernel_admission(self) -> None:
+        backend = DockerBackend(Path("/owned-runtime"), ())
+        changes = {
+            "Id": "other.slice",
+            "Names": backend.slice + " alias.slice",
+            "LoadState": "error",
+            "Description": "foreign",
+            "Transient": "yes",
+            "ActiveState": "active",
+            "ControlGroup": "/" + backend.slice,
+            "MainPID": "123",
+            "FragmentPath": "/etc/systemd/system/foreign.slice",
+            "SourcePath": "/etc/foreign",
+            "DropInPaths": "/etc/systemd/system/slice.d/override.conf",
+            "UnitFileState": "static",
+        }
+        for key, value in changes.items():
+            with self.subTest(key=key):
+                state = self.implicit_slice_state(backend) | {key: value}
+                with (
+                    patch.object(backend, "_read_state", return_value=state),
+                    patch.object(backend, "_call") as call,
+                    self.assertRaises(DockerBackendError),
+                ):
+                    backend._unused_slice(MagicMock())
+                call.assert_not_called()
+        for key in self.implicit_slice_state(backend):
+            with self.subTest(missing=key):
+                state = self.implicit_slice_state(backend)
+                del state[key]
+                with (
+                    patch.object(backend, "_read_state", return_value=state),
+                    patch.object(backend, "_call") as call,
+                    self.assertRaises(DockerBackendError),
+                ):
+                    backend._unused_slice(MagicMock())
+                call.assert_not_called()
+
+    def test_existing_kernel_path_or_symlink_prevents_slice_admission(self) -> None:
+        backend = DockerBackend(Path("/owned-runtime"), ())
+        for load_state in ("not-found", "loaded"):
+            for failure_index in (0, 1):
+                with self.subTest(load_state=load_state, failure_index=failure_index):
+                    state = self.implicit_slice_state(backend) | {"LoadState": load_state}
+                    replies = [""] * failure_index + [subprocess.CalledProcessError(1, "test")]
+                    with (
+                        patch.object(backend, "_read_state", return_value=state),
+                        patch.object(backend, "_call", side_effect=replies) as call,
+                        self.assertRaises(subprocess.CalledProcessError),
+                    ):
+                        backend._unused_slice(MagicMock())
+                    self.assertEqual(call.call_count, failure_index + 1)
+
+    def test_each_created_service_rechecks_slice_configuration_before_inode_binding(self) -> None:
+        backend = DockerBackend(Path("/owned-runtime"), ())
+        backend.deadline = 2000
+        active = self.implicit_slice_state(backend) | {"ActiveState": "active", "ControlGroup": "/" + backend.slice}
+        replaced = active | {"DropInPaths": "/etc/systemd/system/slice.d/foreign.conf"}
+        with (
+            patch("time.monotonic", return_value=1000),
+            patch.object(backend, "_state", return_value={"LoadState": "not-found"}),
+            patch.object(backend, "_read_state", side_effect=[active, replaced]),
+            patch.object(backend, "_call", return_value="1:2") as call,
+        ):
+            backend._start(MagicMock(), "containerd", ("/usr/bin/containerd",))
+            self.assertEqual(backend.slice_identity, "1:2")
+            with self.assertRaisesRegex(DockerBackendError, "unconfigured implicit"):
+                backend._start(MagicMock(), "dockerd", ("/usr/bin/dockerd",))
+        self.assertEqual(len(backend.units), 2)
+        self.assertEqual(backend.slice_identity, "1:2")
+        self.assertEqual(sum(invocation.args[2][0] == "stat" for invocation in call.call_args_list), 1)
+
     def test_replacement_network_cannot_be_removed_or_authorize_store_deletion(self) -> None:
         backend = DockerBackend(Path("/owned-runtime"), ())
         backend.ready = True

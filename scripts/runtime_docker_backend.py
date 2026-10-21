@@ -144,7 +144,11 @@ class DockerBackend:
                 "show",
                 unit,
                 "--no-pager",
-                "--property=LoadState,Description,Transient,MainPID,ActiveState,ControlGroup",
+                "--all",
+                (
+                    "--property=Id,Names,LoadState,Description,Transient,MainPID,ActiveState,ControlGroup,"
+                    "FragmentPath,SourcePath,DropInPaths,UnitFileState"
+                ),
             ],
         )
         return dict(line.split("=", 1) for line in raw.splitlines() if "=" in line)
@@ -157,9 +161,42 @@ class DockerBackend:
             raise DockerBackendError("private runtime service ownership changed; retaining store")
         return result
 
+    def _implicit_slice(self, state: dict[str, str]) -> None:
+        # systemd synthesizes an inactive slice even before it has a cgroup.
+        # A loaded unit is not itself a collision, but configured/transient or
+        # aliased slices must never be adopted. Missing evidence fails closed.
+        expected = {
+            "Id": self.slice,
+            "Names": self.slice,
+            "LoadState": "loaded",
+            "Description": "Slice /" + self.slice.removesuffix(".slice"),
+            "Transient": "no",
+            "FragmentPath": "",
+            "SourcePath": "",
+            "DropInPaths": "",
+            "UnitFileState": "",
+        }
+        if any(state.get(key) != value for key, value in expected.items()):
+            raise DockerBackendError("private runtime slice is not an unconfigured implicit unit")
+
+    def _unused_slice(self, ctx: RuntimeContext) -> None:
+        state = self._read_state(ctx, self.slice)
+        if state.get("LoadState") != "not-found":
+            self._implicit_slice(state)
+            if (
+                state.get("ActiveState") != "inactive"
+                or state.get("ControlGroup") != ""
+                or state.get("MainPID", "") not in {"", "0"}
+            ):
+                raise DockerBackendError("private runtime slice already exists")
+        path = "/sys/fs/cgroup/" + self.slice
+        self._call(ctx, "verify private runtime slice cgroup is absent", ["test", "!", "-e", path])
+        self._call(ctx, "verify private runtime slice cgroup is not a symlink", ["test", "!", "-L", path])
+
     def _slice_identity(self, ctx: RuntimeContext) -> str:
         state = self._read_state(ctx, self.slice)
-        if state.get("ControlGroup") != "/" + self.slice:
+        self._implicit_slice(state)
+        if state.get("ActiveState") != "active" or state.get("ControlGroup") != "/" + self.slice:
             raise DockerBackendError("private runtime slice cgroup identity changed")
         identity = self._call(
             ctx, "bind private runtime slice inode", ["stat", "--format=%d:%i", "/sys/fs/cgroup/" + self.slice]
@@ -378,8 +415,7 @@ class DockerBackend:
         if self.deadline is not None:
             raise DockerBackendError("private Docker preparation cannot renew its budget")
         self.deadline = time.monotonic() + 1800
-        if self._read_state(ctx, self.slice).get("LoadState") != "not-found":
-            raise DockerBackendError("private runtime slice already exists")
+        self._unused_slice(ctx)
         self._start_services(ctx)
         version = self._endpoint_version(ctx)
         for unit in self.units:
