@@ -45,15 +45,19 @@ FIXTURE_PHASES = frozenset(
         "parent-cleanup-timeout",
     }
 )
+FIXTURE_EXIT_LABELS = {status: f"exited-{status}" for status in (0, 1, 124, 125, 126, 127, 137)}
 FIXTURE_CHILD_EXITS = frozenset(
-    {"unobserved", "killed-sigkill", "killed-other", "exited-137", "exited-other", "dumped", "other"}
+    {"unobserved", "killed-sigkill", "killed-other", "exited-other", "dumped", "other", *FIXTURE_EXIT_LABELS.values()}
 )
+FIXTURE_READ_OUTCOMES = frozenset({"byte-limit", "timeout", "EOF-success", "other"})
 
 
 def _closed_fixture_failure(result: dict[str, Any], errors: str) -> str:
     phase = result.get("phase")
     child_exit = result.get("childExit")
     error_type = result.get("failureType")
+    before_abandon = result.get("guardBeforeAbandon")
+    read_outcome = result.get("readOutcome")
     categories = {
         None: "none",
         "AssertionError": "assertion",
@@ -74,6 +78,12 @@ def _closed_fixture_failure(result: dict[str, Any], errors: str) -> str:
                 else "other"
             ),
             "childExit": child_exit if isinstance(child_exit, str) and child_exit in FIXTURE_CHILD_EXITS else "unknown",
+            "guardBeforeAbandon": before_abandon
+            if isinstance(before_abandon, str) and before_abandon in FIXTURE_CHILD_EXITS | {"running"}
+            else "unknown",
+            "readOutcome": read_outcome
+            if isinstance(read_outcome, str) and read_outcome in FIXTURE_READ_OUTCOMES
+            else "unknown",
             "cleanupACK": result.get("cleanupACK") is True,
             "childrenRemain": bool(result.get("remainingChildren")),
             "groupsRemain": bool(result.get("remainingGroups")),
@@ -85,11 +95,14 @@ def _closed_fixture_failure(result: dict[str, Any], errors: str) -> str:
 
 
 def _closed_child_exit(observed: os.waitid_result) -> str:
-    if observed.si_code == os.CLD_KILLED:
-        return "killed-sigkill" if observed.si_status == signal.SIGKILL else "killed-other"
-    if observed.si_code == os.CLD_EXITED:
-        return "exited-137" if observed.si_status == 128 + signal.SIGKILL else "exited-other"
-    return "dumped" if observed.si_code == os.CLD_DUMPED else "other"
+    code, status = getattr(observed, "si_code", None), getattr(observed, "si_status", None)
+    if type(code) is not int or type(status) is not int:
+        return "other"
+    if code == os.CLD_KILLED:
+        return "killed-sigkill" if status == signal.SIGKILL else "killed-other"
+    if code == os.CLD_EXITED:
+        return FIXTURE_EXIT_LABELS.get(status, "exited-other")
+    return "dumped" if code == os.CLD_DUMPED else "other"
 
 
 def _assert_sigkill_exit(pid: int, observed: os.waitid_result | None) -> None:
@@ -628,6 +641,8 @@ class RootlessFailureDiagnostics(unittest.TestCase):
             "phase": "guard-proof",
             "failureType": "AssertionError",
             "childExit": "exited-137",
+            "guardBeforeAbandon": "running",
+            "readOutcome": "byte-limit",
             "failure": private_path,
             "cleanupACK": True,
             "remainingChildren": [private_pid],
@@ -645,6 +660,8 @@ class RootlessFailureDiagnostics(unittest.TestCase):
                 "phase": "guard-proof",
                 "errorCategory": "assertion",
                 "childExit": "exited-137",
+                "guardBeforeAbandon": "running",
+                "readOutcome": "byte-limit",
                 "cleanupACK": True,
                 "childrenRemain": True,
                 "groupsRemain": True,
@@ -652,12 +669,48 @@ class RootlessFailureDiagnostics(unittest.TestCase):
                 "stderrPresent": True,
             },
         )
-        result.update({"phase": private_path, "failureType": private_path, "childExit": private_path})
+        result.update(
+            {
+                "phase": private_path,
+                "failureType": private_path,
+                "childExit": private_path,
+                "guardBeforeAbandon": private_path,
+                "readOutcome": private_path,
+            }
+        )
         unknown = json.loads(_closed_fixture_failure(result, private_path))
         self.assertEqual(unknown["phase"], "unknown")
         self.assertEqual(unknown["errorCategory"], "other")
         self.assertEqual(unknown["childExit"], "unknown")
+        self.assertEqual(unknown["guardBeforeAbandon"], "unknown")
+        self.assertEqual(unknown["readOutcome"], "unknown")
         self.assertNotIn(PRIVATE_MARKER, json.dumps(unknown))
+        result.update({"guardBeforeAbandon": {"raw": private_path}, "readOutcome": [private_path]})
+        self.assertNotIn(PRIVATE_MARKER, _closed_fixture_failure(result, private_path))
+
+    def test_closed_guard_exit_categories_accept_only_known_numeric_statuses(self) -> None:
+        for status, expected in (
+            (0, "exited-0"),
+            (1, "exited-1"),
+            (124, "exited-124"),
+            (125, "exited-125"),
+            (126, "exited-126"),
+            (127, "exited-127"),
+            (137, "exited-137"),
+            (138, "exited-other"),
+        ):
+            with self.subTest(status=status):
+                observed = SimpleNamespace(si_code=os.CLD_EXITED, si_status=status)
+                self.assertEqual(_closed_child_exit(observed), expected)
+        for code, status in (
+            (os.CLD_EXITED, PRIVATE_MARKER),
+            (PRIVATE_MARKER, 1),
+            (os.CLD_EXITED, True),
+            (None, None),
+        ):
+            with self.subTest(code=code, status=status):
+                self.assertEqual(_closed_child_exit(SimpleNamespace(si_code=code, si_status=status)), "other")
+        self.assertEqual(_closed_child_exit(SimpleNamespace()), "other")
 
     def test_closed_guard_exit_diagnostic_does_not_accept_a_normal_137_exit(self) -> None:
         context = {"phase": "guard-proof"}
@@ -703,10 +756,8 @@ class RootlessFailureDiagnostics(unittest.TestCase):
     def _assert_owner_death_fixture(self, sudo: tuple[str, ...], deadline: float, failure: str | None) -> None:
         with tempfile.TemporaryDirectory() as directory:
             self.backend.diagnostic_reader_pending = False
-            self.backend.sudo = sudo
-            self.backend.deadline = time.monotonic() + 100
-            pidfile = Path(directory) / "query.pid"
-            groupfile = Path(directory) / "guard.pid"
+            self.backend.sudo, self.backend.deadline = sudo, time.monotonic() + 100
+            pidfile, groupfile = Path(directory) / "query.pid", Path(directory) / "guard.pid"
             query = (
                 "import os,signal,time;from pathlib import Path;"
                 f"Path({str(pidfile)!r}).write_text(str(os.getpid()));"
@@ -722,10 +773,30 @@ class RootlessFailureDiagnostics(unittest.TestCase):
             ) -> list[str]:
                 absolute = int(arguments[arguments.index("--deadline-ns") + 1]) / 1_000_000_000
                 owner = (
-                    "import os,signal,sys;from pathlib import Path;"
+                    "import json,os,signal,sys;from pathlib import Path;"
                     "from scripts import runtime_docker_diagnostics as d\n"
+                    "original_read=d._read_query\n"
+                    "read_outcome='other'\n"
+                    "def record_read(process,deadline):\n"
+                    " global read_outcome\n"
+                    " try:\n"
+                    "  output=original_read(process,deadline)\n"
+                    " except d._UnavailableError as error:\n"
+                    "  read_outcome=str(error) if str(error) in ('byte-limit','timeout') else 'other'\n"
+                    "  raise\n"
+                    " read_outcome='EOF-success'\n"
+                    " return output\n"
+                    "d._read_query=record_read\n"
                     "def abandon(process,deadline):\n"
-                    f" Path({str(groupfile)!r}).write_text(str(process.pid))\n"
+                    " observed=os.waitid(os.P_PID,process.pid,os.WEXITED|os.WNOHANG|os.WNOWAIT)\n"
+                    " before='running' if observed is None else (\n"
+                    f"  {FIXTURE_EXIT_LABELS!r}.get(observed.si_status,'exited-other')\n"
+                    "  if observed.si_code==os.CLD_EXITED\n"
+                    "  else ('killed-sigkill' if observed.si_status==signal.SIGKILL else 'killed-other')\n"
+                    "  if observed.si_code==os.CLD_KILLED else 'dumped'\n"
+                    "  if observed.si_code==os.CLD_DUMPED else 'other')\n"
+                    f" Path({str(groupfile)!r}).write_text(json.dumps(\n"
+                    "  {'pid':process.pid,'guardBeforeAbandon':before,'readOutcome':read_outcome}))\n"
                     " os.kill(os.getpid(),signal.SIGKILL)\n"
                     "d._drain_query=abandon\n"
                     f"d._query_capture([sys.executable,'-c',{query!r}],{absolute!r})"
@@ -754,7 +825,11 @@ class RootlessFailureDiagnostics(unittest.TestCase):
                 signal.pause()
                 self.fail("fixture resumed without its deadline interruption")
             self.fixture_context["phase"] = "metadata"
-            query_pid, guard_pid = int(pidfile.read_text()), int(groupfile.read_text())
+            guard_metadata = json.loads(groupfile.read_text())
+            query_pid, guard_pid = int(pidfile.read_text()), int(guard_metadata["pid"])
+            self.fixture_context.update(
+                {name: guard_metadata.get(name) for name in ("guardBeforeAbandon", "readOutcome")}
+            )
             # Observe both deaths without reaping: orphan zombies can be
             # independently reaped, so query absence alone is not group absence.
             self.fixture_context["phase"] = "guard-proof"
