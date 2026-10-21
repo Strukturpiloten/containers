@@ -30,6 +30,8 @@ A push to `main` selects changed images and their reverse dependencies; the dail
 
 ## Test a change
 
+See [runtime backends](runtime-backends.md) for the explicit CI profile policy, local Podman default, private Docker prerequisites, evidence and publication boundary.
+
 Run the non-publishing repository checks before a pull request:
 
 ```sh

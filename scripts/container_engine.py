@@ -64,6 +64,9 @@ GLOBAL_IMAGE_INPUTS = (
     "security/**",
     "scripts/container_engine.py",
     "scripts/runtime_tests.py",
+    "scripts/runtime_backends.py",
+    "scripts/runtime_docker_backend.py",
+    "scripts/runtime_docker_expiry.py",
     "scripts/oci_artifacts.py",
     "scripts/runtime_docker.py",
     "scripts/admission.py",
@@ -1514,6 +1517,7 @@ def _command_test_podman_image(args: argparse.Namespace) -> None:
                 sudo=False,
                 no_sudo=False,
                 timeout=45,
+                outer_engine="podman",
             )
         )
         if result["status"] != "passed":
