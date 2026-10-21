@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -24,6 +26,105 @@ if TYPE_CHECKING:
 
 CONTAINER = "a" * 64
 PRIVATE_MARKER = "must-not-appear-in-public-evidence"
+FIXTURE_CLEANUP_SECONDS = 1
+
+
+def _assert_sigkill_exit(pid: int, observed: os.waitid_result | None) -> None:
+    if (
+        observed is None
+        or observed.si_pid != pid
+        or observed.si_code != os.CLD_KILLED
+        or observed.si_status != signal.SIGKILL
+    ):
+        message = "owned fixture child has not terminated by SIGKILL"
+        raise AssertionError(message)
+
+
+def _observe_owned_sigkill(pid: int, deadline: float) -> None:
+    while time.monotonic() < deadline:
+        try:
+            observed = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except ChildProcessError:
+            # The query remains the guard's child until the guard dies.
+            observed = None
+        if observed is not None:
+            _assert_sigkill_exit(pid, observed)
+            return
+        time.sleep(min(0.001, max(0, deadline - time.monotonic())))
+    message = "owned fixture child did not terminate before the original deadline"
+    raise AssertionError(message)
+
+
+def _drain_fixture_children(deadline: float) -> dict[str, Any]:
+    children_file = Path(f"/proc/self/task/{os.getpid()}/children")
+    owned_pids: set[int] = set()
+    owned_groups: set[int] = set()
+    while True:
+        children = [int(value) for value in children_file.read_text().split()]
+        if not children or time.monotonic() >= deadline:
+            break
+        for pid in children:
+            try:
+                # WNOWAIT establishes direct/adopted ownership without releasing
+                # the PID; metadata files are never fallback signal authority.
+                os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            except ChildProcessError:
+                continue
+            owned_pids.add(pid)
+            if os.getpgid(pid) == pid:
+                owned_groups.add(pid)
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, os.WNOHANG)
+        time.sleep(min(0.001, max(0, deadline - time.monotonic())))
+    remaining_groups = []
+    for group in sorted(owned_groups):
+        try:
+            os.killpg(group, 0)
+        except ProcessLookupError:
+            continue
+        remaining_groups.append(group)
+    remaining_pids = []
+    for pid in sorted(owned_pids):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            continue
+        remaining_pids.append(pid)
+    return {
+        "cleanupACK": not children and not remaining_groups and not remaining_pids,
+        "remainingChildren": children,
+        "remainingGroups": remaining_groups,
+        "remainingPids": remaining_pids,
+    }
+
+
+def _run_owner_death_supervisor(sudo: tuple[str, ...], deadline: float, failure: str | None) -> None:
+    # Confine orphan adoption to this disposable subprocess, never the test runner.
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(36, 1, 0, 0, 0) != 0:  # Linux PR_SET_CHILD_SUBREAPER.
+        raise OSError(ctypes.get_errno(), "fixture subreaper unavailable")
+
+    def stop_fixture(_signum: int, _frame: object) -> None:
+        message = "original fixture deadline elapsed"
+        raise TimeoutError(message)
+
+    signal.signal(signal.SIGTERM, stop_fixture)
+    test = RootlessFailureDiagnostics()
+    test.setUp()
+    error = None
+    try:
+        test._assert_owner_death_fixture(sudo, deadline, failure)
+    except BaseException as caught:  # noqa: BLE001 - every fixture failure must preserve cleanup ownership.
+        error = caught
+    finally:
+        # A late parent timeout must not interrupt the bounded adoption/reap loop.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        cleanup = _drain_fixture_children(deadline + FIXTURE_CLEANUP_SECONDS)
+    cleanup.update({"failureType": type(error).__name__ if error is not None else None, "failure": str(error)})
+    sys.stdout.write(json.dumps(cleanup) + "\n")
+    sys.stdout.flush()
+    if error is not None or not cleanup["cleanupACK"]:
+        raise SystemExit(1)
 
 
 class RootlessFailureDiagnostics(unittest.TestCase):
@@ -382,61 +483,159 @@ class RootlessFailureDiagnostics(unittest.TestCase):
 
     def test_owner_death_before_drain_leaves_an_independent_original_deadline_guard(self) -> None:
         for sudo in ((), ("sudo", "-n")):
-            with self.subTest(sudo=sudo), tempfile.TemporaryDirectory() as directory:
-                self.backend.diagnostic_reader_pending = False
-                self.backend.sudo = sudo
-                self.backend.deadline = time.monotonic() + 100
-                pidfile = Path(directory) / "query.pid"
-                groupfile = Path(directory) / "guard.pid"
-                query = (
-                    "import os,signal,time;from pathlib import Path;"
-                    f"Path({str(pidfile)!r}).write_text(str(os.getpid()));"
-                    "signal.signal(signal.SIGTERM,signal.SIG_IGN);os.write(1,b'x'*65537);time.sleep(30)"
+            with self.subTest(sudo=sudo):
+                result = self._run_owner_death_case(sudo)
+                self.assertIsNone(result["failureType"])
+
+    def test_owner_death_supervisor_reaps_children_after_early_fixture_and_parent_timeout_failures(self) -> None:
+        for sudo in ((), ("sudo", "-n")):
+            for failure, expected in (
+                ("assertion", "AssertionError"),
+                ("missing-metadata", "FileNotFoundError"),
+                ("await-interruption", "TimeoutError"),
+            ):
+                with self.subTest(sudo=sudo, failure=failure):
+                    result = self._run_owner_death_case(sudo, failure)
+                    self.assertEqual(result["failureType"], expected)
+                    if failure == "assertion":
+                        self.assertEqual(result["failure"], "injected assertion before PID acquisition")
+                    elif failure == "await-interruption":
+                        self.assertEqual(result["failure"], "original fixture deadline elapsed")
+
+    def _run_owner_death_case(self, sudo: tuple[str, ...], failure: str | None = None) -> dict[str, Any]:
+        deadline = time.monotonic() + 2
+        cleanup_deadline = deadline + FIXTURE_CLEANUP_SECONDS
+        supervisor = (
+            "from tests.test_runtime_docker_diagnostics import _run_owner_death_supervisor;"
+            f"_run_owner_death_supervisor({sudo!r},{deadline!r},{failure!r})"
+        )
+        process = subprocess.Popen(  # noqa: S603 - fixed disposable Python fixture, never a native runtime.
+            [sys.executable, "-c", supervisor], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        )
+        try:
+            output, errors = process.communicate(timeout=max(0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            # Never use run(timeout), whose automatic SIGKILL could bypass reap.
+            observed = os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            if observed is None:
+                os.kill(process.pid, signal.SIGTERM)
+            try:
+                output, errors = process.communicate(timeout=max(0, cleanup_deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                # Retain the unreaped owner instead of destroying its reaper.
+                self.unverified_supervisor = process
+                children = Path(f"/proc/{process.pid}/task/{process.pid}/children").read_text()
+                self.fail(f"fixture cleanup unverified; supervisor={process.pid}, children={children}")
+        result = json.loads(output)
+        self.assertTrue(result["cleanupACK"], result)
+        self.assertEqual(result["remainingChildren"], [])
+        self.assertEqual(result["remainingGroups"], [])
+        self.assertEqual(result["remainingPids"], [])
+        self.assertEqual(process.returncode, 0 if failure is None else 1, errors)
+        if failure is None:
+            self.assertLess(time.monotonic(), deadline)
+        self.assertLess(time.monotonic(), cleanup_deadline)
+        return result
+
+    def test_owned_child_exit_oracle_rejects_a_running_child_and_accepts_sigkill(self) -> None:
+        deadline = time.monotonic() + 2
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import os,time;os.close(1);time.sleep(30)"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        try:
+            self.assertEqual(diagnostics._read_stdout(process, deadline), b"")
+            observed = os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            self.assertIsNone(observed)
+            with self.assertRaisesRegex(AssertionError, "has not terminated by SIGKILL"):
+                _assert_sigkill_exit(process.pid, observed)
+            # An expired fixture-only cleanup reserve must neither signal the
+            # live child nor acknowledge that teardown has been completed.
+            incomplete = _drain_fixture_children(time.monotonic())
+            self.assertFalse(incomplete["cleanupACK"])
+            self.assertIn(process.pid, incomplete["remainingChildren"])
+            self.assertIsNone(os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT))
+            os.kill(process.pid, signal.SIGKILL)
+            _observe_owned_sigkill(process.pid, deadline)
+            self.assertLess(time.monotonic(), deadline)
+        finally:
+            process.kill()
+            process.wait(timeout=max(0, deadline - time.monotonic()))
+            if process.stdout is not None:
+                process.stdout.close()
+        self.assertEqual(process.returncode, -signal.SIGKILL)
+
+    def _assert_owner_death_fixture(self, sudo: tuple[str, ...], deadline: float, failure: str | None) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            self.backend.diagnostic_reader_pending = False
+            self.backend.sudo = sudo
+            self.backend.deadline = time.monotonic() + 100
+            pidfile = Path(directory) / "query.pid"
+            groupfile = Path(directory) / "guard.pid"
+            query = (
+                "import os,signal,time;from pathlib import Path;"
+                f"Path({str(pidfile)!r}).write_text(str(os.getpid()));"
+                "signal.signal(signal.SIGTERM,signal.SIG_IGN);os.write(1,b'x'*65537);time.sleep(30)"
+            )
+
+            def abandoned_owner(
+                arguments: list[str],
+                _seconds: float,
+                sudo: tuple[str, ...] = sudo,
+                groupfile: Path = groupfile,
+                query: str = query,
+            ) -> list[str]:
+                absolute = int(arguments[arguments.index("--deadline-ns") + 1]) / 1_000_000_000
+                owner = (
+                    "import os,signal,sys;from pathlib import Path;"
+                    "from scripts import runtime_docker_diagnostics as d\n"
+                    "def abandon(process,deadline):\n"
+                    f" Path({str(groupfile)!r}).write_text(str(process.pid))\n"
+                    " os.kill(os.getpid(),signal.SIGKILL)\n"
+                    "d._drain_query=abandon\n"
+                    f"d._query_capture([sys.executable,'-c',{query!r}],{absolute!r})"
                 )
+                if not sudo:
+                    return [sys.executable, "-c", owner]
+                monitor = (
+                    "import subprocess,sys;"
+                    f"child=subprocess.Popen([sys.executable,'-c',{owner!r}]);sys.exit(child.wait())"
+                )
+                return [sys.executable, "-c", monitor]
 
-                def abandoned_owner(
-                    arguments: list[str],
-                    _seconds: float,
-                    sudo: tuple[str, ...] = sudo,
-                    groupfile: Path = groupfile,
-                    query: str = query,
-                ) -> list[str]:
-                    absolute = int(arguments[arguments.index("--deadline-ns") + 1]) / 1_000_000_000
-                    owner = (
-                        "import os,signal,sys;from pathlib import Path;"
-                        "from scripts import runtime_docker_diagnostics as d\n"
-                        "def abandon(process,deadline):\n"
-                        f" Path({str(groupfile)!r}).write_text(str(process.pid))\n"
-                        " os.kill(os.getpid(),signal.SIGKILL)\n"
-                        "d._drain_query=abandon\n"
-                        f"d._query_capture([sys.executable,'-c',{query!r}],{absolute!r})"
-                    )
-                    if not sudo:
-                        return [sys.executable, "-c", owner]
-                    monitor = (
-                        "import subprocess,sys;"
-                        f"child=subprocess.Popen([sys.executable,'-c',{owner!r}]);sys.exit(child.wait())"
-                    )
-                    return [sys.executable, "-c", monitor]
-
-                deadline = time.monotonic() + 2
-                with (
-                    patch.object(self.backend, "privileged", side_effect=abandoned_owner),
-                    self.assertRaisesRegex(diagnostics._UnavailableError, "cleanup-unverified"),
-                ):
-                    diagnostics._capture(self.backend, ["inspect", CONTAINER], deadline)
-                self.assertTrue(self.backend.diagnostic_reader_pending)
-                query_pid, guard_pid = int(pidfile.read_text()), int(groupfile.read_text())
-                while time.monotonic() < deadline:
-                    try:
-                        os.kill(query_pid, 0)
-                    except ProcessLookupError:
-                        break
-                    time.sleep(min(0.01, max(0, deadline - time.monotonic())))
-                with self.assertRaises(ProcessLookupError):
-                    os.kill(query_pid, 0)
-                with self.assertRaises(ProcessLookupError):
-                    os.killpg(guard_pid, 0)
+            with (
+                patch.object(self.backend, "privileged", side_effect=abandoned_owner),
+                self.assertRaisesRegex(diagnostics._UnavailableError, "cleanup-unverified"),
+            ):
+                diagnostics._capture(self.backend, ["inspect", CONTAINER], deadline)
+            self.assertTrue(self.backend.diagnostic_reader_pending)
+            if failure == "assertion":
+                self.fail("injected assertion before PID acquisition")
+            if failure == "missing-metadata":
+                pidfile.unlink()
+            if failure == "await-interruption":
+                signal.pause()
+                self.fail("fixture resumed without its deadline interruption")
+            query_pid, guard_pid = int(pidfile.read_text()), int(groupfile.read_text())
+            # Observe both deaths without reaping: orphan zombies can be
+            # independently reaped, so query absence alone is not group absence.
+            _observe_owned_sigkill(guard_pid, deadline)
+            _observe_owned_sigkill(query_pid, deadline)
+            self.assertEqual(os.waitpid(query_pid, os.WNOHANG)[0], query_pid)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(query_pid, 0)
+            # Deterministically reproduce the old assertion's false premise:
+            # the dead, unreaped guard still makes its group discoverable.
+            os.killpg(guard_pid, 0)
+            _assert_sigkill_exit(guard_pid, os.waitid(os.P_PID, guard_pid, os.WEXITED | os.WNOHANG | os.WNOWAIT))
+            self.assertEqual(os.waitpid(guard_pid, os.WNOHANG)[0], guard_pid)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(query_pid, 0)
+            with self.assertRaises(ProcessLookupError):
+                os.killpg(guard_pid, 0)
+            self.assertLess(time.monotonic(), deadline)
 
     def test_pending_reader_cannot_be_cleared_by_another_capture_or_erase_its_private_store(self) -> None:
         self.backend.diagnostic_reader_pending = True
