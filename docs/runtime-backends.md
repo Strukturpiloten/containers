@@ -48,14 +48,45 @@ original error. Global prune and ambient-store cleanup are prohibited.
 ## CI prerequisites and evidence
 
 Docker-selected jobs require Docker CLI/daemon, containerd, systemd, `ip`,
-`timeout` and existing Skopeo tooling. No new download or package-installation
-path is added: the existing signed Ubuntu build-tool installation is unchanged;
-missing Docker-side runner prerequisites fail closed. Hosted-runner packages
+GNU Coreutils `timeout` and existing Skopeo tooling. Before native services or
+disk sampling, the existing command owner qualifies `gnutimeout` when present,
+otherwise `timeout`, using a strict numeric GNU version banner. A selected
+non-GNU, malformed, missing or failing provider is rejected without trying a
+different provider. The canonical absolute executable is retained privately for
+the invocation and reused by the privileged command watchdog, isolated root
+diagnostic guard and disk sampler; root does not resolve a different executable.
+Public evidence contains only `gnu-coreutils`, its numeric version and the
+`prefixed`/`unprefixed` path kind, never the executable path or raw provider output.
+After admission, public launch errors, command/sampler records and final evidence
+also redact the retained path and its escaped spellings, including sudo errors
+and late evidence rewrites. Exit statuses and unrelated actionable diagnostics
+remain available; native parser return values, argv and held binary fixture
+streams are not rewritten.
+
+Ubuntu 26.04 supplies GNU Coreutils in the official parallel
+[`gnu-coreutils` package](https://packages.ubuntu.com/resolute-updates/amd64/gnu-coreutils/download)
+(`/usr/bin/gnutimeout`); a transitional `coreutils` package version does
+not identify which implementation owns the unprefixed executable. Do not switch
+the runner's default utilities or accept an alternative provider's exit status
+as proof of descendant termination. The strict offline owner-death controls
+still require both the guard and query to die by SIGKILL before the original
+two-second deadline, followed by owned-process/group absence and reaping.
+Actual runner presence and native behavior require refreshed exact-candidate CI
+evidence; offline admission alone does not qualify a hosted runner toolchain.
+
+No new download or package-installation path is added: the existing signed
+Ubuntu build-tool installation is unchanged; missing Docker-side runner
+prerequisites fail closed. Hosted-runner packages
 lack independent project-pinned checksums: this is an explicit runner-environment
 integrity exception, not an invented pin. Actual Docker/containerd/systemd
-versions are recorded. Existing runner/tool Renovate ownership in
-`.github/automation.yml` is unchanged; image/payload pins and managers are
-unchanged. New backend/helper source files are global build inputs.
+versions are recorded. This is an existing OS-provided prerequisite, not a new
+download, package declaration or tool-version pin. Existing Renovate runner
+extraction owns `(AMD64|ARM64)_RUNNER` in `.github/automation.yml` through the
+`github-runners` datasource; `.github/renovate.json` groups those upgrades as
+`GitHub Ubuntu runners`. Those definitions, generated consumers, image/payload
+pins and managers are unchanged; no duplicate manager is added. The shared
+resource-budget helper joins the backend/diagnostics sources as a global build
+input so provider-policy changes select every consuming runtime image.
 
 Additive `host.outerEngineSelection` and `host.outerRuntime` evidence does not
 change inner mode or archive identity. CI admission derives the expected engine

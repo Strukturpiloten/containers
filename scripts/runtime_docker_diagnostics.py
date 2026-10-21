@@ -54,6 +54,87 @@ class _UnavailableError(Exception):
     """Carry only a closed diagnostic-availability reason, never raw output."""
 
 
+def _valid_timeout_provider(admitted: object) -> bool:
+    return (
+        isinstance(admitted, tuple)
+        and len(admitted) == 3
+        and all(isinstance(value, str) for value in admitted)
+        and Path(admitted[0]).is_absolute()
+        and re.fullmatch(r"[0-9]+(?:\.[0-9]+)+", admitted[1]) is not None
+        and admitted[2] in {"prefixed", "unprefixed"}
+    )
+
+
+def qualify_gnu_timeout(ctx: RuntimeContext) -> tuple[str, str, str]:
+    """Admit one private GNU path through the invocation's existing command owner."""
+    admitted = vars(ctx).get("_gnu_timeout_provider")
+    if admitted is not None:
+        if not _valid_timeout_provider(admitted):
+            reason = "GNU timeout provider admission is invalid"
+            raise ValueError(reason)
+        return admitted
+    candidate = shutil.which("gnutimeout")
+    kind = "prefixed"
+    if candidate is None:
+        candidate, kind = shutil.which("timeout"), "unprefixed"
+    if candidate is None:
+        reason = "GNU timeout prerequisite is unavailable"
+        raise ValueError(reason)
+    try:
+        executable = str(Path(candidate).resolve(strict=True))
+    except OSError, RuntimeError:
+        reason = "GNU timeout prerequisite path is unavailable"
+        raise ValueError(reason) from None
+    first_record = len(ctx.checks)
+    try:
+        output = ctx.command("qualify GNU timeout provider", [executable, "--version"])
+    except Exception:  # noqa: BLE001 - prerequisite errors never publish an arbitrary provider's output/path.
+        reason = "GNU timeout prerequisite command failed"
+        raise ValueError(reason) from None
+    finally:
+        # Even a failing provider's recorded error may contain private path/output.
+        del ctx.checks[first_record:]
+        ctx.checks.append({"name": "GNU timeout provider admission", "status": "failed"})
+    banner = output.splitlines()[0] if isinstance(output, str) and output else ""
+    observed = re.fullmatch(r"(?:gnu)?timeout \(GNU coreutils\) ([0-9]+(?:\.[0-9]+)+)", banner)
+    if observed is None:
+        reason = "GNU timeout provider identity is unverified"
+        raise ValueError(reason)
+    provider = (executable, observed[1], kind)
+    ctx._gnu_timeout_provider = provider  # noqa: SLF001 - invocation-private custody, never public evidence.
+    ctx.checks[-1].update(
+        {
+            "name": "GNU timeout provider admission",
+            "status": "passed",
+            "provider": "gnu-coreutils",
+            "version": observed[1],
+            "pathKind": kind,
+        }
+    )
+    return provider
+
+
+def redact_timeout_provider(ctx: RuntimeContext, value: str) -> str:
+    """Redact only the admitted watchdog path from a public text copy."""
+    provider = vars(ctx).get("_gnu_timeout_provider")
+    if provider is None:
+        provider = getattr(vars(ctx).get("backend"), "_gnu_timeout_provider", None)
+    if not _valid_timeout_provider(provider):
+        return value
+    executable = provider[0]
+    spellings = {executable, shlex.quote(executable)}
+    for spelling in (
+        repr(executable),
+        ascii(executable),
+        json.dumps(executable),
+        json.dumps(executable, ensure_ascii=False),
+    ):
+        spellings.update((spelling, spelling[1:-1]))
+    for spelling in sorted(spellings, key=len, reverse=True):
+        value = value.replace(spelling, "[gnu-timeout]")
+    return value
+
+
 def _read_stdout(
     process: subprocess.Popen[bytes], deadline: float, limit: int = BYTE_LIMIT, interrupted: list[bool] | None = None
 ) -> bytes:
@@ -130,11 +211,12 @@ def _read_query(process: subprocess.Popen[bytes], deadline: float) -> bytes:
     return output
 
 
-def _spawn_query(arguments: list[str], work_deadline: float, remaining: float) -> subprocess.Popen[bytes]:
+def _spawn_query(
+    arguments: list[str], work_deadline: float, remaining: float, timeout_executable: str | None
+) -> subprocess.Popen[bytes]:
     if remaining <= 0.05:
         raise _UnavailableError("budget-exhausted")
-    watchdog = shutil.which("timeout")
-    if watchdog is None:
+    if timeout_executable is None or not Path(timeout_executable).is_absolute():
         raise _UnavailableError("query-unavailable")
     work = work_deadline - time.monotonic() - min(0.05, remaining / 16)
     if work <= 0:
@@ -142,19 +224,19 @@ def _spawn_query(arguments: list[str], work_deadline: float, remaining: float) -
     # This guard is INSIDE the query's new session and survives owner death.
     # Killing/reaping the outer sudo/timeout owner cannot disarm this guard.
     return subprocess.Popen(
-        [watchdog, "--signal=KILL", f"{work}s", *arguments],
+        [timeout_executable, "--signal=KILL", f"{work}s", *arguments],
         start_new_session=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
     )
 
 
-def _query_capture(arguments: list[str], deadline: float) -> dict[str, Any]:
+def _query_capture(arguments: list[str], deadline: float, timeout_executable: str | None = None) -> dict[str, Any]:
     remaining = deadline - time.monotonic()
     # Prepay cleanup and protocol transmission inside the one original budget.
     work_deadline = deadline - min(2.0, remaining * 0.6)
     try:
-        process = _spawn_query(arguments, work_deadline, remaining)
+        process = _spawn_query(arguments, work_deadline, remaining, timeout_executable)
     except _UnavailableError as error:
         return {"status": str(error), "teardownVerified": True}
     raw = b""
@@ -271,6 +353,8 @@ def _capture(backend: DockerBackend, request: list[str], deadline: float) -> byt
             str(backend.directory),
             "--deadline-ns",
             str(int(deadline * 1_000_000_000)),
+            "--timeout-executable",
+            backend.timeout_executable(),
             *request,
         ],
         remaining,
@@ -442,6 +526,7 @@ def main() -> None:
     parser.add_argument("--capture", required=True, action="store_true")
     parser.add_argument("--directory", required=True, type=Path)
     parser.add_argument("--deadline-ns", required=True, type=int)
+    parser.add_argument("--timeout-executable", required=True, type=Path)
     parser.add_argument("request", nargs="+")
     args = parser.parse_args()
     interrupted = [False]
@@ -455,10 +540,17 @@ def main() -> None:
     signal.signal(signal.SIGINT, note_interruption)
     try:
         deadline = args.deadline_ns / 1_000_000_000
-        if os.geteuid() != 0 or not args.directory.is_absolute() or not 0 < deadline - time.monotonic() <= 5:
+        if (
+            os.geteuid() != 0
+            or not args.directory.is_absolute()
+            or not args.timeout_executable.is_absolute()
+            or not 0 < deadline - time.monotonic() <= 5
+        ):
             result = {"status": "query-unavailable", "teardownVerified": False}
         else:
-            result = _query_capture(_worker_arguments(args.directory, args.request), deadline)
+            result = _query_capture(
+                _worker_arguments(args.directory, args.request), deadline, str(args.timeout_executable)
+            )
         if interrupted[0] and result.get("teardownVerified") is True:
             result = {"status": "interrupted", "teardownVerified": True}
     except Exception:  # noqa: BLE001 - fixed acknowledgement only; never serialize private failures.

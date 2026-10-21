@@ -19,7 +19,7 @@ from unittest.mock import MagicMock, patch
 from scripts import runtime_docker_diagnostics as diagnostics
 from scripts.runtime_docker import _run_nested_docker
 from scripts.runtime_docker_backend import DockerBackend
-from scripts.runtime_tests import ProbeError
+from scripts.runtime_tests import DEFAULT_TIMEOUT, ProbeError, RuntimeContext
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -178,7 +178,9 @@ def _drain_fixture_children(deadline: float) -> dict[str, Any]:
     }
 
 
-def _run_owner_death_supervisor(sudo: tuple[str, ...], deadline: float, failure: str | None) -> None:
+def _run_owner_death_supervisor(
+    sudo: tuple[str, ...], deadline: float, failure: str | None, provider: tuple[str, str, str]
+) -> None:
     # Confine orphan adoption to this disposable subprocess, never the test runner.
     libc = ctypes.CDLL(None, use_errno=True)
     if libc.prctl(36, 1, 0, 0, 0) != 0:  # Linux PR_SET_CHILD_SUBREAPER.
@@ -190,6 +192,7 @@ def _run_owner_death_supervisor(sudo: tuple[str, ...], deadline: float, failure:
 
     signal.signal(signal.SIGTERM, stop_fixture)
     test = RootlessFailureDiagnostics()
+    test.gnu_timeout_provider = provider
     test.setUp()
     test.fixture_context = {"phase": "initializing", "childExit": "unobserved"}
     error = None
@@ -214,9 +217,151 @@ def _run_owner_death_supervisor(sudo: tuple[str, ...], deadline: float, failure:
         raise SystemExit(1)
 
 
+def qualified_local_timeout() -> tuple[str, str, str]:
+    """Offline prerequisite admission through the existing command/deadline owner."""
+    ctx = RuntimeContext.__new__(RuntimeContext)
+    ctx.timeout = DEFAULT_TIMEOUT
+    ctx.backend = object()
+    ctx.checks = []
+    return diagnostics.qualify_gnu_timeout(ctx)
+
+
+class GnuTimeoutAdmissionControls(unittest.TestCase):
+    @staticmethod
+    def context() -> RuntimeContext:
+        ctx = RuntimeContext.__new__(RuntimeContext)
+        ctx.timeout = DEFAULT_TIMEOUT
+        ctx.backend = object()
+        ctx.checks = []
+        return ctx
+
+    def test_prefixed_preference_and_qualified_unprefixed_fallback_retain_one_private_path(self) -> None:
+        for kind, candidates, banner in (
+            ("prefixed", ["/private/gnutimeout"], "timeout (GNU coreutils) 9.7"),
+            ("unprefixed", [None, "/private/timeout"], "timeout (GNU coreutils) 9.4"),
+        ):
+            with (
+                self.subTest(kind=kind),
+                patch.object(diagnostics.shutil, "which", side_effect=candidates) as which,
+                patch.object(Path, "resolve", return_value=Path("/private/" + PRIVATE_MARKER)),
+                patch(
+                    "subprocess.run",
+                    return_value=subprocess.CompletedProcess([], 0, banner + "\n" + PRIVATE_MARKER, PRIVATE_MARKER),
+                ) as run,
+            ):
+                ctx = self.context()
+                provider = diagnostics.qualify_gnu_timeout(ctx)
+                self.assertEqual(provider, ("/private/" + PRIVATE_MARKER, banner.split()[-1], kind))
+                self.assertEqual(diagnostics.qualify_gnu_timeout(ctx), provider)
+                run.assert_called_once()
+                self.assertEqual(run.call_args.args[0], [provider[0], "--version"])
+                self.assertEqual(
+                    [call.args[0] for call in which.call_args_list],
+                    ["gnutimeout"] if kind == "prefixed" else ["gnutimeout", "timeout"],
+                )
+                self.assertNotIn(PRIVATE_MARKER, json.dumps(ctx.checks))
+                self.assertEqual(
+                    ctx.checks[-1],
+                    {
+                        "name": "GNU timeout provider admission",
+                        "status": "passed",
+                        "provider": "gnu-coreutils",
+                        "version": provider[1],
+                        "pathKind": kind,
+                    },
+                )
+
+    def test_selected_non_gnu_nonzero_and_malformed_providers_fail_closed_without_fallback(self) -> None:
+        cases = (
+            (0, "timeout (uutils coreutils) 0.10.0\n" + PRIVATE_MARKER),
+            (0, "timeout (GNU coreutils) 9.7-unverified\n" + PRIVATE_MARKER),
+            (0, "timeout (GNU coreutils) unknown"),
+            (0, ""),
+            (1, "timeout (GNU coreutils) 9.7\n" + PRIVATE_MARKER),
+        )
+        for status, output in cases:
+            with (
+                self.subTest(status=status, banner=output.splitlines()[:1]),
+                patch.object(diagnostics.shutil, "which", return_value="/private/" + PRIVATE_MARKER) as which,
+                patch.object(Path, "resolve", return_value=Path("/private/" + PRIVATE_MARKER)),
+                patch("subprocess.run", return_value=subprocess.CompletedProcess([], status, output, PRIVATE_MARKER)),
+                self.assertRaises(ValueError) as caught,
+            ):
+                ctx = self.context()
+                diagnostics.qualify_gnu_timeout(ctx)
+            which.assert_called_once_with("gnutimeout")
+            self.assertNotIn(PRIVATE_MARKER, str(caught.exception) + json.dumps(ctx.checks))
+            self.assertIsNone(vars(ctx).get("_gnu_timeout_provider"))
+            self.assertTrue(all(record["status"] == "failed" for record in ctx.checks))
+
+    def test_missing_or_unresolvable_selected_provider_never_launches_a_command(self) -> None:
+        for candidate in (None, "/private/" + PRIVATE_MARKER):
+            with (
+                self.subTest(candidate=candidate is not None),
+                patch.object(diagnostics.shutil, "which", return_value=candidate),
+                patch.object(Path, "resolve", side_effect=OSError(PRIVATE_MARKER)),
+                patch("subprocess.run") as run,
+                self.assertRaises(ValueError) as caught,
+            ):
+                diagnostics.qualify_gnu_timeout(self.context())
+            run.assert_not_called()
+            self.assertNotIn(PRIVATE_MARKER, str(caught.exception))
+
+    def test_provider_command_failure_redacts_arbitrary_records_and_errors(self) -> None:
+        ctx = self.context()
+
+        def fail(*_args: object) -> str:
+            ctx.checks.append(
+                {
+                    "name": PRIVATE_MARKER,
+                    "stdout": PRIVATE_MARKER,
+                    "stderr": PRIVATE_MARKER,
+                    "error": PRIVATE_MARKER,
+                    "path": PRIVATE_MARKER,
+                }
+            )
+            raise ProbeError(PRIVATE_MARKER)
+
+        with (
+            patch.object(diagnostics.shutil, "which", return_value="/private/timeout"),
+            patch.object(Path, "resolve", return_value=Path("/private/timeout")),
+            patch.object(ctx, "command", side_effect=fail),
+            self.assertRaises(ValueError) as caught,
+        ):
+            diagnostics.qualify_gnu_timeout(ctx)
+        self.assertNotIn(PRIVATE_MARKER, str(caught.exception) + json.dumps(ctx.checks))
+
+    def test_invalid_cached_admission_and_unadmitted_queries_fail_closed(self) -> None:
+        ctx = self.context()
+        ctx._gnu_timeout_provider = ("relative", "9.7", "prefixed")
+        with patch("subprocess.run") as run, self.assertRaises(ValueError):
+            diagnostics.qualify_gnu_timeout(ctx)
+        run.assert_not_called()
+        with patch.object(diagnostics.subprocess, "Popen") as spawn:
+            result = diagnostics._query_capture(["unused"], time.monotonic() + 2)
+        spawn.assert_not_called()
+        self.assertEqual(result, {"status": "query-unavailable", "teardownVerified": True})
+
+    def test_root_entrypoint_remains_stdlib_only_under_isolated_python(self) -> None:
+        result = subprocess.run(  # noqa: S603 - fixed isolated entrypoint help, never native runtime contact.
+            [sys.executable, "-I", str(Path(diagnostics.__file__).resolve()), "--help"],
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=True,
+        )
+        self.assertIn("--timeout-executable", result.stdout)
+
+
 class RootlessFailureDiagnostics(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        # Before each fixture's original two-second proof deadline is created.
+        cls.gnu_timeout_provider = qualified_local_timeout()
+
     def setUp(self) -> None:
         self.backend = DockerBackend(Path("/owned-runtime"), ("sudo", "-n"))
+        self.backend._gnu_timeout_provider = self.gnu_timeout_provider
         self.backend.ready = True
         self.backend.deadline = 2000
         self.ctx = MagicMock()
@@ -423,7 +568,7 @@ class RootlessFailureDiagnostics(unittest.TestCase):
                 ):
                     diagnostics._capture(self.backend, ["inspect", CONTAINER], 1005)
                 self.assertIs(spawn.call_args.kwargs["stderr"], subprocess.DEVNULL)
-                self.assertEqual(spawn.call_args.args[0][:3], ["sudo", "-n", "timeout"])
+                self.assertEqual(spawn.call_args.args[0][:3], ["sudo", "-n", self.gnu_timeout_provider[0]])
                 process.kill.assert_not_called()
                 process.wait.assert_called_once_with(timeout=5)
 
@@ -445,7 +590,7 @@ class RootlessFailureDiagnostics(unittest.TestCase):
             patch.object(diagnostics, "_read_query", return_value=PRIVATE_MARKER.encode()),
             patch.object(diagnostics, "_drain_query", side_effect=diagnostics._UnavailableError("cleanup-unverified")),
         ):
-            result = diagnostics._query_capture(["fixed-test-query"], 1005)
+            result = diagnostics._query_capture(["fixed-test-query"], 1005, self.gnu_timeout_provider[0])
         self.assertEqual(result, {"status": "cleanup-unverified", "teardownVerified": False})
         self.assertNotIn(PRIVATE_MARKER, json.dumps(result))
 
@@ -475,9 +620,10 @@ class RootlessFailureDiagnostics(unittest.TestCase):
                         arguments: list[str], _seconds: float, query: str = query, sudo: tuple[str, ...] = sudo
                     ) -> list[str]:
                         absolute = int(arguments[arguments.index("--deadline-ns") + 1]) / 1_000_000_000
+                        provider = arguments[arguments.index("--timeout-executable") + 1]
                         owner = (
                             "import json,sys;from scripts.runtime_docker_diagnostics import _query_capture;"
-                            f"print(json.dumps(_query_capture([sys.executable,'-c',{query!r}],{absolute!r})),flush=True)"
+                            f"print(json.dumps(_query_capture([sys.executable,'-c',{query!r}],{absolute!r},{provider!r})),flush=True)"
                         )
                         if not sudo:
                             return [sys.executable, "-c", owner]
@@ -548,7 +694,7 @@ class RootlessFailureDiagnostics(unittest.TestCase):
             patch.object(diagnostics.os, "waitid", side_effect=observe) as waitid,
             patch.object(diagnostics.os, "killpg", side_effect=signal_group),
         ):
-            result = diagnostics._query_capture(["fixed-test-query"], 1005)
+            result = diagnostics._query_capture(["fixed-test-query"], 1005, self.gnu_timeout_provider[0])
         self.assertEqual(result["status"], "available")
         self.assertTrue(result["teardownVerified"])
         self.assertEqual(events, ["observe", "observe", "observe", "signal-held-group", "reap"])
@@ -562,7 +708,9 @@ class RootlessFailureDiagnostics(unittest.TestCase):
         for attempt in range(10):
             with self.subTest(attempt=attempt):
                 result = diagnostics._query_capture(
-                    [sys.executable, "-c", "print('closed-positive',flush=True)"], time.monotonic() + 2
+                    [sys.executable, "-c", "print('closed-positive',flush=True)"],
+                    time.monotonic() + 2,
+                    self.gnu_timeout_provider[0],
                 )
                 self.assertEqual(result["status"], "available")
                 self.assertTrue(result["teardownVerified"])
@@ -594,7 +742,7 @@ class RootlessFailureDiagnostics(unittest.TestCase):
         cleanup_deadline = deadline + FIXTURE_CLEANUP_SECONDS
         supervisor = (
             "from tests.test_runtime_docker_diagnostics import _run_owner_death_supervisor;"
-            f"_run_owner_death_supervisor({sudo!r},{deadline!r},{failure!r})"
+            f"_run_owner_death_supervisor({sudo!r},{deadline!r},{failure!r},{self.gnu_timeout_provider!r})"
         )
         process = subprocess.Popen(  # noqa: S603 - fixed disposable Python fixture, never a native runtime.
             [sys.executable, "-c", supervisor], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
@@ -771,7 +919,10 @@ class RootlessFailureDiagnostics(unittest.TestCase):
                 groupfile: Path = groupfile,
                 query: str = query,
             ) -> list[str]:
-                absolute = int(arguments[arguments.index("--deadline-ns") + 1]) / 1_000_000_000
+                absolute, provider = (
+                    int(arguments[arguments.index("--deadline-ns") + 1]) / 1_000_000_000,
+                    arguments[arguments.index("--timeout-executable") + 1],
+                )
                 owner = (
                     "import json,os,signal,sys;from pathlib import Path;"
                     "from scripts import runtime_docker_diagnostics as d\n"
@@ -799,7 +950,7 @@ class RootlessFailureDiagnostics(unittest.TestCase):
                     "  {'pid':process.pid,'guardBeforeAbandon':before,'readOutcome':read_outcome}))\n"
                     " os.kill(os.getpid(),signal.SIGKILL)\n"
                     "d._drain_query=abandon\n"
-                    f"d._query_capture([sys.executable,'-c',{query!r}],{absolute!r})"
+                    f"d._query_capture([sys.executable,'-c',{query!r}],{absolute!r},{provider!r})"
                 )
                 if not sudo:
                     return [sys.executable, "-c", owner]

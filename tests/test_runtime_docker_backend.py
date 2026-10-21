@@ -21,8 +21,62 @@ from scripts import runtime_tests
 from scripts.runtime_docker_backend import DockerBackend, DockerBackendError
 from scripts.runtime_tests import RuntimeContext
 
+FAKE_GNU_TIMEOUT = "/qualified/gnu-timeout"
+
+
+def admitted_backend(directory: Path, sudo: tuple[str, ...]) -> DockerBackend:
+    """Explicit fake-client admission; never resolve or launch a real provider."""
+    backend = DockerBackend(directory, sudo)
+    backend._gnu_timeout_provider = (FAKE_GNU_TIMEOUT, "9.7", "prefixed")
+    return backend
+
 
 class PrivateDockerControls(unittest.TestCase):
+    def test_unadmitted_backend_rejects_privileged_watchdogs(self) -> None:
+        backend = DockerBackend(Path("/owned-runtime"), ("sudo", "-n"))
+        with self.assertRaisesRegex(DockerBackendError, "not been admitted"):
+            backend.privileged(["unused"], 5)
+
+    def test_gnu_admission_uses_original_deadline_before_any_native_resource(self) -> None:
+        for banner, admitted in (("timeout (GNU coreutils) 9.7", True), ("timeout (uutils) 0.10.0", False)):
+            backend = DockerBackend(Path("/owned-runtime"), ("sudo", "-n"))
+            ctx = RuntimeContext.__new__(RuntimeContext)
+            ctx.backend, ctx.timeout, ctx.checks = backend, 45, []
+
+            def version(
+                command: list[str], *, backend: DockerBackend = backend, banner: str = banner, **_kwargs: object
+            ) -> subprocess.CompletedProcess[str]:
+                self.assertEqual(backend.deadline, 2800)
+                self.assertIsNone(backend._gnu_timeout_provider)
+                self.assertEqual(command, [FAKE_GNU_TIMEOUT, "--version"])
+                return subprocess.CompletedProcess(command, 0, banner, "")
+
+            expected_error = (
+                self.assertRaisesRegex(RuntimeError, "stop after admission")
+                if admitted
+                else self.assertRaisesRegex(DockerBackendError, "prerequisite admission failed")
+            )
+            with (
+                self.subTest(admitted=admitted),
+                patch("time.monotonic", return_value=1000),
+                patch.object(backend, "_tool", return_value="/unused-tool"),
+                patch("scripts.runtime_docker_diagnostics.shutil.which", return_value=FAKE_GNU_TIMEOUT),
+                patch.object(Path, "resolve", return_value=Path(FAKE_GNU_TIMEOUT)),
+                patch("subprocess.run", side_effect=version) as run,
+                patch.object(backend, "_unused_slice", side_effect=RuntimeError("stop after admission")) as slice_check,
+                patch.object(backend, "_start_services") as services,
+                expected_error,
+            ):
+                backend.prepare(ctx)
+            run.assert_called_once()
+            self.assertEqual(slice_check.call_count, int(admitted))
+            services.assert_not_called()
+            if admitted:
+                self.assertEqual(backend.timeout_executable(), FAKE_GNU_TIMEOUT)
+                self.assertEqual(backend._gnu_timeout_provider, ctx._gnu_timeout_provider)
+            else:
+                self.assertIsNone(backend._gnu_timeout_provider)
+
     @staticmethod
     def implicit_slice_state(backend: DockerBackend) -> dict[str, str]:
         # The smoke receipt observed Description, LoadState, ActiveState,
@@ -43,7 +97,7 @@ class PrivateDockerControls(unittest.TestCase):
         }
 
     def test_receipt_shaped_implicit_slice_requires_explicit_properties_and_absent_cgroup(self) -> None:
-        backend = DockerBackend(Path("/owned-runtime"), ())
+        backend = admitted_backend(Path("/owned-runtime"), ())
         state = self.implicit_slice_state(backend)
         raw = "\n".join(f"{key}={value}" for key, value in state.items())
         ctx = MagicMock()
@@ -64,7 +118,7 @@ class PrivateDockerControls(unittest.TestCase):
         )
 
     def test_slice_collision_or_unknown_properties_fail_before_kernel_admission(self) -> None:
-        backend = DockerBackend(Path("/owned-runtime"), ())
+        backend = admitted_backend(Path("/owned-runtime"), ())
         changes = {
             "Id": "other.slice",
             "Names": backend.slice + " alias.slice",
@@ -102,7 +156,7 @@ class PrivateDockerControls(unittest.TestCase):
                 call.assert_not_called()
 
     def test_existing_kernel_path_or_symlink_prevents_slice_admission(self) -> None:
-        backend = DockerBackend(Path("/owned-runtime"), ())
+        backend = admitted_backend(Path("/owned-runtime"), ())
         for load_state in ("not-found", "loaded"):
             for failure_index in (0, 1):
                 with self.subTest(load_state=load_state, failure_index=failure_index):
@@ -117,7 +171,7 @@ class PrivateDockerControls(unittest.TestCase):
                     self.assertEqual(call.call_count, failure_index + 1)
 
     def test_each_created_service_rechecks_slice_configuration_before_inode_binding(self) -> None:
-        backend = DockerBackend(Path("/owned-runtime"), ())
+        backend = admitted_backend(Path("/owned-runtime"), ())
         backend.deadline = 2000
         active = self.implicit_slice_state(backend) | {"ActiveState": "active", "ControlGroup": "/" + backend.slice}
         replaced = active | {"DropInPaths": "/etc/systemd/system/slice.d/foreign.conf"}
@@ -136,7 +190,7 @@ class PrivateDockerControls(unittest.TestCase):
         self.assertEqual(sum(invocation.args[2][0] == "stat" for invocation in call.call_args_list), 1)
 
     def test_replacement_network_cannot_be_removed_or_authorize_store_deletion(self) -> None:
-        backend = DockerBackend(Path("/owned-runtime"), ())
+        backend = admitted_backend(Path("/owned-runtime"), ())
         backend.ready = True
         backend.network_id = "a" * 64
         replacement = "b" * 64
@@ -172,7 +226,7 @@ class PrivateDockerControls(unittest.TestCase):
         self.assertFalse(any(call.args[1:3] == ("network", "rm") for call in ctx.podman.call_args_list))
 
     def test_only_original_network_id_with_matching_name_and_label_can_be_removed(self) -> None:
-        backend = DockerBackend(Path("/owned-runtime"), ())
+        backend = admitted_backend(Path("/owned-runtime"), ())
         backend.network_id = "a" * 64
         ctx = MagicMock()
         ctx.podman.side_effect = [
@@ -197,7 +251,7 @@ class PrivateDockerControls(unittest.TestCase):
             patch("subprocess.run") as run,
             patch("subprocess.Popen") as spawn,
         ):
-            backend = DockerBackend(Path(directory), ("sudo", "-n"))
+            backend = admitted_backend(Path(directory), ("sudo", "-n"))
             backend.initialize()
             run.assert_not_called()
             spawn.assert_not_called()
@@ -206,10 +260,10 @@ class PrivateDockerControls(unittest.TestCase):
 
     def test_client_has_no_ambient_endpoint_context_or_credentials(self) -> None:
         with patch.object(DockerBackend, "_tool", return_value="/usr/bin/docker"):
-            backend = DockerBackend(Path("/owned-runtime"), ("sudo", "-n"))
+            backend = admitted_backend(Path("/owned-runtime"), ("sudo", "-n"))
             command = backend.command_prefix(15)
-        self.assertEqual(command[:3], ["sudo", "-n", "timeout"])
-        self.assertLess(command.index("timeout"), command.index("/usr/bin/docker"))
+        self.assertEqual(command[:3], ["sudo", "-n", FAKE_GNU_TIMEOUT])
+        self.assertLess(command.index(FAKE_GNU_TIMEOUT), command.index("/usr/bin/docker"))
         self.assertIn("unix:///owned-runtime/docker.sock", command)
         self.assertIn("DOCKER_CONTEXT", command)
         self.assertIn("DOCKER_HOST", command)
@@ -218,7 +272,7 @@ class PrivateDockerControls(unittest.TestCase):
         self.assertNotIn("context", command)
 
     def test_run_requires_ready_network_and_rejects_ownership_overrides(self) -> None:
-        backend = DockerBackend(Path("/owned-runtime"), ())
+        backend = admitted_backend(Path("/owned-runtime"), ())
         with self.assertRaises(DockerBackendError):
             backend.run_options(())
         backend.ready = True
@@ -240,7 +294,7 @@ class PrivateDockerControls(unittest.TestCase):
             DockerBackend.save_arguments(("save", "--format", "oci-archive", "image"))
 
     def test_service_name_collision_cannot_register_or_start_service(self) -> None:
-        backend = DockerBackend(Path("/owned-runtime"), ())
+        backend = admitted_backend(Path("/owned-runtime"), ())
         ctx = MagicMock()
         with (
             patch.object(backend, "_state", return_value={"LoadState": "loaded"}),
@@ -252,7 +306,7 @@ class PrivateDockerControls(unittest.TestCase):
         self.assertFalse(backend.units)
 
     def test_service_is_owned_before_client_timeout_and_budget_is_not_renewed(self) -> None:
-        backend = DockerBackend(Path("/owned-runtime"), ())
+        backend = admitted_backend(Path("/owned-runtime"), ())
         backend.deadline = 2000
         ctx = MagicMock()
         with (
@@ -266,7 +320,7 @@ class PrivateDockerControls(unittest.TestCase):
         self.assertEqual(backend.deadline, 2000)
 
     def test_wrong_service_identity_never_receives_stop(self) -> None:
-        backend = DockerBackend(Path("/owned-runtime"), ())
+        backend = admitted_backend(Path("/owned-runtime"), ())
         backend.units["owned.service"] = ("dockerd",)
         ctx = MagicMock()
         with (
@@ -282,7 +336,7 @@ class PrivateDockerControls(unittest.TestCase):
         self.assertFalse(any("stop" in invocation.args[2] for invocation in call.call_args_list))
 
     def test_process_outside_owned_slice_is_not_admitted(self) -> None:
-        backend = DockerBackend(Path("/owned-runtime"), ())
+        backend = admitted_backend(Path("/owned-runtime"), ())
         backend.units["owned.service"] = ("dockerd",)
         with (
             patch.object(
@@ -302,7 +356,7 @@ class PrivateDockerControls(unittest.TestCase):
                 DockerBackend._routes(raw)
 
     def test_cleanup_failure_retains_store_and_still_stops_owned_services(self) -> None:
-        backend = DockerBackend(Path("/owned-runtime"), ())
+        backend = admitted_backend(Path("/owned-runtime"), ())
         backend.ready = True
         ctx = MagicMock()
         ctx.containers = ["a" * 64]
@@ -323,7 +377,7 @@ class PrivateDockerControls(unittest.TestCase):
 
     def test_conversion_checks_config_digest_before_any_docker_load(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            backend = DockerBackend(Path(directory), ())
+            backend = admitted_backend(Path(directory), ())
             ctx = MagicMock()
             ctx.architecture = "amd64"
             ctx.image_ref = "localhost/test:owned"
@@ -343,7 +397,7 @@ class PrivateDockerControls(unittest.TestCase):
             ctx.podman.assert_called_once()
 
     def test_owned_endpoint_rejects_foreign_store_and_rootless_server(self) -> None:
-        backend = DockerBackend(Path("/owned-runtime"), ())
+        backend = admitted_backend(Path("/owned-runtime"), ())
         for root, security in (("/var/lib/docker", []), ("/owned-runtime/root", ["name=rootless"])):
             with (
                 self.subTest(root=root, security=security),
@@ -361,7 +415,7 @@ class PrivateDockerControls(unittest.TestCase):
             self.assertEqual(backend._endpoint_version(MagicMock()), "29.8.2")
 
     def test_live_container_membership_must_match_the_entire_owned_scope(self) -> None:
-        backend = DockerBackend(Path("/owned-runtime"), ())
+        backend = admitted_backend(Path("/owned-runtime"), ())
         identifier = "a" * 64
         ctx = MagicMock()
         ctx.podman.return_value = json.dumps(backend.slice) + "|123"
@@ -377,7 +431,7 @@ class PrivateDockerControls(unittest.TestCase):
                 backend.admit_container(ctx, identifier)
 
     def test_aggregate_budget_retains_cleanup_reserve(self) -> None:
-        backend = DockerBackend(Path("/owned-runtime"), ())
+        backend = admitted_backend(Path("/owned-runtime"), ())
         backend.deadline = 100
         with patch("time.monotonic", return_value=50), self.assertRaises(DockerBackendError):
             backend.command_prefix(5)
@@ -386,16 +440,16 @@ class PrivateDockerControls(unittest.TestCase):
             self.assertIn("docker", backend.command_prefix(5))
 
     def test_cleanup_watchdog_and_python_timeout_fit_the_remaining_deadline(self) -> None:
-        backend = DockerBackend(Path("/owned-runtime"), ("sudo", "-n"))
+        backend = admitted_backend(Path("/owned-runtime"), ("sudo", "-n"))
         backend.deadline = 100
         backend.cleaning_up = True
         with patch("time.monotonic", return_value=98):
             command = backend.privileged(["systemctl", "stop", "owned.service"], 25)
-        index = command.index("timeout")
+        index = command.index(FAKE_GNU_TIMEOUT)
         duration = float(command[index + 3].removesuffix("s"))
         kill = float(command[index + 2].split("=", 1)[1].removesuffix("s"))
         self.assertLess(duration + kill, 2)
-        self.assertEqual(command[:3], ["sudo", "-n", "timeout"])
+        self.assertEqual(command[:3], ["sudo", "-n", FAKE_GNU_TIMEOUT])
         ctx = RuntimeContext.__new__(RuntimeContext)
         ctx.backend = backend
         ctx.timeout = 45
@@ -408,7 +462,7 @@ class PrivateDockerControls(unittest.TestCase):
         self.assertLess(run.call_args.kwargs["timeout"], 10)
 
     def test_zero_or_expired_cleanup_allowance_never_launches_a_command(self) -> None:
-        backend = DockerBackend(Path("/owned-runtime"), ())
+        backend = admitted_backend(Path("/owned-runtime"), ())
         backend.deadline = 100
         backend.cleaning_up = True
         ctx = RuntimeContext.__new__(RuntimeContext)
@@ -426,7 +480,7 @@ class PrivateDockerControls(unittest.TestCase):
             run.assert_not_called()
 
     def test_root_watchdog_is_reclamped_if_time_elapses_before_python_launch(self) -> None:
-        backend = DockerBackend(Path("/owned-runtime"), ("sudo", "-n"))
+        backend = admitted_backend(Path("/owned-runtime"), ("sudo", "-n"))
         backend.deadline = 100
         backend.cleaning_up = True
         with patch("time.monotonic", return_value=90):
@@ -441,14 +495,14 @@ class PrivateDockerControls(unittest.TestCase):
         ):
             ctx.command("root cleanup after delay", earlier, timeout=25)
         final = run.call_args.args[0]
-        index = final.index("timeout")
+        index = final.index(FAKE_GNU_TIMEOUT)
         duration = float(final[index + 3].removesuffix("s"))
         kill = float(final[index + 2].split("=", 1)[1].removesuffix("s"))
         self.assertLess(duration + kill, 1)
         self.assertLess(run.call_args.kwargs["timeout"], 1)
 
     def test_successful_exit_after_absolute_deadline_is_a_failed_check(self) -> None:
-        backend = DockerBackend(Path("/owned-runtime"), ())
+        backend = admitted_backend(Path("/owned-runtime"), ())
         backend.deadline = 100
         backend.cleaning_up = True
         ctx = RuntimeContext.__new__(RuntimeContext)
@@ -471,7 +525,7 @@ class PrivateDockerControls(unittest.TestCase):
 
     def test_expiry_before_store_removal_retains_the_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            backend = DockerBackend(Path(directory), ())
+            backend = admitted_backend(Path(directory), ())
             backend.deadline = 100
             ctx = MagicMock()
             ctx._owned_mounts.return_value = []
@@ -495,7 +549,7 @@ class PrivateDockerControls(unittest.TestCase):
 
     def test_late_store_removal_cannot_emit_a_cleanup_pass(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            backend = DockerBackend(Path(directory), ())
+            backend = admitted_backend(Path(directory), ())
             backend.deadline = 100
             ctx = MagicMock()
             ctx._owned_mounts.return_value = []
@@ -516,7 +570,7 @@ class PrivateDockerControls(unittest.TestCase):
 
     def test_successful_cleanup_drains_services_before_removing_store(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            backend = DockerBackend(Path(directory), ())
+            backend = admitted_backend(Path(directory), ())
             ctx = MagicMock()
             ctx._owned_mounts.return_value = []
             events = []
@@ -529,7 +583,7 @@ class PrivateDockerControls(unittest.TestCase):
             self.assertEqual(ctx.checks.append.call_args.args[0]["status"], "passed")
 
     def test_unknown_slice_inode_prevents_stop_and_store_deletion(self) -> None:
-        backend = DockerBackend(Path("/owned-runtime"), ())
+        backend = admitted_backend(Path("/owned-runtime"), ())
         state = {"LoadState": "loaded", "ControlGroup": "/" + backend.slice}
         with (
             patch.object(backend, "_read_state", return_value=state),
@@ -542,7 +596,7 @@ class PrivateDockerControls(unittest.TestCase):
 
     def test_unstarted_backend_cleanup_never_contacts_a_service_manager(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            backend = DockerBackend(Path(directory), ())
+            backend = admitted_backend(Path(directory), ())
             ctx = MagicMock()
             ctx._owned_mounts.return_value = []
             with patch.object(backend, "_call") as call, patch("shutil.rmtree"):
@@ -574,7 +628,7 @@ class SelectionIntegrationControls(unittest.TestCase):
                 skip_nested=True,
                 outer_engine="profile",
             )
-            backend = DockerBackend(Path(directory), ())
+            backend = admitted_backend(Path(directory), ())
             backend.deadline = 100
             ctx = MagicMock()
             ctx.backend = backend
@@ -639,7 +693,7 @@ class SelectionIntegrationControls(unittest.TestCase):
                 skip_nested=True,
                 outer_engine="profile",
             )
-            backend = DockerBackend(Path(directory), ())
+            backend = admitted_backend(Path(directory), ())
             backend.deadline = 100
             ctx = MagicMock()
             ctx.backend = backend

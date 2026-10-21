@@ -32,6 +32,7 @@ from scripts.metadata_schema import validate_metadata_schema
 from scripts.oci_artifacts import archive_identity
 from scripts.runtime_backends import PodmanBackend, select_outer_engine
 from scripts.runtime_docker_backend import DockerBackend
+from scripts.runtime_docker_diagnostics import redact_timeout_provider
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -155,6 +156,7 @@ class RuntimeContext:
         stdout: BinaryIO | None = None,
     ) -> str:
         streams = self._fixture_stream_options(stdin, stdout)
+        public_name = redact_timeout_provider(self, name)
         binary_fixture = stdin is not None or stdout is not None
         allowance = self.timeout if timeout is None else timeout
         docker = isinstance(getattr(self, "backend", None), DockerBackend)
@@ -173,25 +175,42 @@ class RuntimeContext:
         except subprocess.TimeoutExpired as error:
             self.checks.append(
                 {
-                    "name": name,
+                    "name": public_name,
                     "status": "failed",
                     "durationSeconds": round(time.monotonic() - start, 3),
                     "error": f"command timed out after {allowance}s",
                 }
             )
+            if vars(self).get("_gnu_timeout_provider") is not None or (
+                docker and vars(self.backend).get("_gnu_timeout_provider") is not None
+            ):
+                raise ProbeError(redact_timeout_provider(self, f"{name}: command timed out")) from None
             raise ProbeError(f"{name}: command timed out") from error
+        except OSError as error:
+            detail = redact_timeout_provider(self, str(error))
+            if detail == str(error):
+                raise
+            self.checks.append(
+                {
+                    "name": public_name,
+                    "status": "failed",
+                    "durationSeconds": round(time.monotonic() - start, 3),
+                    "error": detail,
+                }
+            )
+            raise ProbeError(f"{public_name}: {detail}") from None
         output = "" if binary_fixture else (result.stdout or "").strip()
         diagnostics = "" if binary_fixture else (result.stderr or "").strip()
         record = {
-            "name": name,
+            "name": public_name,
             "status": "passed" if result.returncode == 0 else "failed",
             "durationSeconds": round(time.monotonic() - start, 3),
             "exitCode": result.returncode,
         }
         if output:
-            record["stdout"] = output[-MAX_LOG:]
+            record["stdout"] = redact_timeout_provider(self, output)[-MAX_LOG:]
         if diagnostics:
-            record["stderr"] = diagnostics[-MAX_LOG:]
+            record["stderr"] = redact_timeout_provider(self, diagnostics)[-MAX_LOG:]
         stream_error = None
         if binary_fixture:
             try:
@@ -206,15 +225,23 @@ class RuntimeContext:
                 self.backend.check_deadline()
             except Exception as error:
                 record["status"] = "failed"
-                record["error"] = str(error)
+                record["error"] = redact_timeout_provider(self, str(error))
                 self.checks.append(record)
-                raise ProbeError(f"{name}: command completed after its original aggregate deadline") from error
+                if record["error"] != str(error):
+                    raise ProbeError(
+                        f"{public_name}: command completed after its original aggregate deadline"
+                    ) from None
+                raise ProbeError(f"{public_name}: command completed after its original aggregate deadline") from error
         self.checks.append(record)
         if stream_error is not None:
             raise ProbeError(stream_error)
         if check and result.returncode:
-            detail = "binary fixture stream command failed" if binary_fixture else diagnostics[-1000:] or output[-1000:]
-            raise ProbeError(f"{name}: exit {result.returncode}: {detail}")
+            detail = (
+                "binary fixture stream command failed"
+                if binary_fixture
+                else redact_timeout_provider(self, diagnostics)[-1000:] or redact_timeout_provider(self, output)[-1000:]
+            )
+            raise ProbeError(redact_timeout_provider(self, f"{name}: exit {result.returncode}: {detail}"))
         return output
 
     def podman(
@@ -738,6 +765,21 @@ def _signal_interrupt(_signum: int, _frame: Any) -> None:
     raise KeyboardInterrupt
 
 
+def _public_timeout_evidence(ctx: RuntimeContext | None, value: Any) -> Any:
+    """Protect only the admitted provider path in copies of JSON evidence values."""
+    if ctx is None:
+        return value
+    if isinstance(value, str):
+        return redact_timeout_provider(ctx, value)
+    if isinstance(value, dict):
+        return {key: _public_timeout_evidence(ctx, item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_public_timeout_evidence(ctx, item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_public_timeout_evidence(ctx, item) for item in value)
+    return value
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
     previous_sigterm = signal.getsignal(signal.SIGTERM)
     if args.metadata:
@@ -844,7 +886,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             # or unlink an unrelated file.
             with evidence_path.open("wb", buffering=0) as record:
                 try:
-                    body = (json.dumps(evidence, indent=2) + "\n").encode("utf-8")
+                    body = (json.dumps(_public_timeout_evidence(ctx, evidence), indent=2) + "\n").encode("utf-8")
                     if record.write(body) != len(body):
                         raise OSError("short runtime evidence write")
                     record.flush()
@@ -859,7 +901,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                             # replacement, so even a failed rewrite is invalid.
                             record.seek(0)
                             record.truncate()
-                            body = (json.dumps(evidence, indent=2) + "\n").encode("utf-8")
+                            body = (json.dumps(_public_timeout_evidence(ctx, evidence), indent=2) + "\n").encode(
+                                "utf-8"
+                            )
                             if record.write(body) != len(body):
                                 raise OSError("short failed-evidence rewrite") from completion_error
                             record.flush()
@@ -871,7 +915,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     raise
         finally:
             signal.signal(signal.SIGTERM, previous_sigterm)
-    return evidence
+    return _public_timeout_evidence(ctx, evidence)
 
 
 def main() -> int:

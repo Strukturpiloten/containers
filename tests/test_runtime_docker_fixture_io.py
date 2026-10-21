@@ -136,6 +136,7 @@ class DockerFixtureIO(unittest.TestCase):
                 with self.subTest(identifier=identifier), self.assertRaisesRegex(ProbeError, "exact held container ID"):
                     self.ctx.load_fixture_archive("import", identifier, archive)
             self.ctx.backend = DockerBackend(self.ctx.directory, ())
+            self.ctx.backend._gnu_timeout_provider = ("/qualified/gnu-timeout", "9.7", "prefixed")
             with (
                 patch.object(self.ctx.backend, "_tool", return_value="/usr/bin/docker"),
                 patch.object(self.ctx, "command", return_value="") as command,
@@ -253,6 +254,7 @@ class DockerFixtureIO(unittest.TestCase):
 
     def test_late_stream_completion_still_fails_original_deadline_and_refreshes_root_watchdog(self) -> None:
         self.ctx.backend = DockerBackend(self.ctx.directory, ())
+        self.ctx.backend._gnu_timeout_provider = ("/qualified/gnu-timeout", "9.7", "prefixed")
         self.ctx.backend.deadline = 2000
         clock = [1000]
 

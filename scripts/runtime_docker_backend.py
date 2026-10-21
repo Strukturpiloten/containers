@@ -24,6 +24,8 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from scripts.runtime_docker_diagnostics import qualify_gnu_timeout
+
 if TYPE_CHECKING:
     from scripts.runtime_tests import RuntimeContext
 
@@ -54,6 +56,7 @@ class DockerBackend:
         self.slice_identity: str | None = None
         self.watchdog: str | None = None
         self.diagnostic_reader_pending = False
+        self._gnu_timeout_provider: tuple[str, str, str] | None = None
 
     @staticmethod
     def _tool(name: str) -> str:
@@ -86,17 +89,32 @@ class DockerBackend:
         if self.deadline is not None and time.monotonic() >= self.deadline:
             raise DockerBackendError("private runtime original aggregate deadline exhausted")
 
+    def timeout_executable(self) -> str:
+        """Return only this invocation's admitted absolute GNU watchdog path."""
+        if self._gnu_timeout_provider is None:
+            raise DockerBackendError("GNU timeout provider has not been admitted")
+        return self._gnu_timeout_provider[0]
+
     def privileged(self, argv: list[str], seconds: float) -> list[str]:
         """Put the command watchdog under sudo, before the privileged command."""
         seconds = self.command_timeout(seconds)
         kill_allowance = min(1.0, seconds / 4)
         scheduling_allowance = min(0.5, seconds / 4)
         duration = seconds - kill_allowance - scheduling_allowance
-        return [*self.sudo, "timeout", "--signal=TERM", f"--kill-after={kill_allowance}s", f"{duration}s", *argv]
+        return [
+            *self.sudo,
+            self.timeout_executable(),
+            "--signal=TERM",
+            f"--kill-after={kill_allowance}s",
+            f"{duration}s",
+            *argv,
+        ]
 
     def rebudget_command(self, command: list[str], seconds: float) -> list[str]:
         """Refresh our own root watchdog at the final subprocess launch boundary."""
-        prefix = [*self.sudo, "timeout", "--signal=TERM"]
+        if self._gnu_timeout_provider is None:
+            return command  # The direct provider preflight cannot require its own uninitialized watchdog.
+        prefix = [*self.sudo, self.timeout_executable(), "--signal=TERM"]
         if command[: len(prefix)] != prefix:
             return command
         if len(command) <= len(prefix) + 2 or not command[len(prefix)].startswith("--kill-after="):
@@ -411,11 +429,15 @@ class DockerBackend:
         """Start and prove private services before importing any image."""
         if not self.sudo and os.geteuid() != 0:
             raise DockerBackendError("private Docker backend requires rootful execution")
-        for name in ("docker", "dockerd", "containerd", "systemd-run", "systemctl", "timeout", "ip", "skopeo"):
+        for name in ("docker", "dockerd", "containerd", "systemd-run", "systemctl", "ip", "skopeo"):
             self._tool(name)
         if self.deadline is not None:
             raise DockerBackendError("private Docker preparation cannot renew its budget")
         self.deadline = time.monotonic() + 1800
+        try:
+            self._gnu_timeout_provider = qualify_gnu_timeout(ctx)
+        except ValueError:
+            raise DockerBackendError("GNU timeout prerequisite admission failed") from None
         self._unused_slice(ctx)
         self._start_services(ctx)
         version = self._endpoint_version(ctx)
