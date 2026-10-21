@@ -567,6 +567,23 @@
       ]
     },
     {
+      "description": "Update PHP and Alpine versions together while preserving the FPM Alpine variant",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "docker.io/php"
+      ],
+      "matchFileNames": [
+        "images/nextcloud/nextcloud-phpfpm/container.yaml",
+        "images/typo3/typo3-phpfpm/container.yaml"
+      ],
+      "versioning": "regex:^(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)-(?<compatibility>fpm-alpine)(?<build>\\d+)\\.(?<revision>\\d+)$"
+    },
+    {
       "description": "PHP extension and Composer version updates require human review",
       "matchPackageNames": [
         "krakjoe/apcu",
