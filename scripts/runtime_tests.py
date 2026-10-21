@@ -15,14 +15,16 @@ import re
 import shutil
 import signal
 import socket
+import stat
 import struct
 import subprocess
 import sys
 import tempfile
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
@@ -30,6 +32,10 @@ from scripts.metadata_schema import validate_metadata_schema
 from scripts.oci_artifacts import archive_identity
 from scripts.runtime_backends import PodmanBackend, select_outer_engine
 from scripts.runtime_docker_backend import DockerBackend
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from typing import BinaryIO
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TIMEOUT = 45
@@ -55,6 +61,7 @@ class RuntimeContext:
         self.containers: list[str] = []
         self.run_containers: set[str] = set()
         self.checks: list[dict[str, Any]] = []
+        self._fixture_archives: dict[int, tuple[BinaryIO, Path, tuple[int, int]]] = {}
         self.image_ref = f"localhost/{image}:runtime-{os.getpid()}"
         self._sudo = ["sudo", "-n"] if use_sudo else []
         self.outer_engine = outer_engine
@@ -92,7 +99,63 @@ class RuntimeContext:
             return self.backend.command_prefix(self.timeout if timeout is None else timeout)
         return self._podman
 
-    def command(self, name: str, command: list[str], *, timeout: float | None = None, check: bool = True) -> str:
+    @contextmanager
+    def private_fixture_archive(self) -> Iterator[BinaryIO]:
+        """Hold the sole parent-owned fixture inode without reopening its pathname."""
+        path = self.directory / "docker-native-fixture.tar"
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, "w+b", buffering=0) as archive:
+            observed = os.fstat(archive.fileno())
+            self._fixture_archives[id(archive)] = (archive, path, (observed.st_dev, observed.st_ino))
+            try:
+                self._fixture_descriptor(archive)
+                yield archive
+            finally:
+                self._fixture_archives.pop(id(archive))
+
+    def _fixture_descriptor(self, archive: BinaryIO) -> int:
+        entry = self._fixture_archives.get(id(archive))
+        if entry is None or entry[0] is not archive:
+            raise ProbeError("binary fixture stream is not an owned held descriptor")
+        try:
+            descriptor = archive.fileno()
+            observed, named = os.fstat(descriptor), entry[1].lstat()
+        except OSError, ValueError:
+            raise ProbeError("binary fixture descriptor ownership is unverified") from None
+        if (
+            (observed.st_dev, observed.st_ino) != entry[2]
+            or (named.st_dev, named.st_ino) != entry[2]
+            or not stat.S_ISREG(observed.st_mode)
+            or observed.st_uid != os.geteuid()
+            or stat.S_IMODE(observed.st_mode) != 0o600
+            or observed.st_nlink != 1
+        ):
+            raise ProbeError("binary fixture descriptor ownership changed")
+        return descriptor
+
+    def _fixture_stream_options(self, stdin: BinaryIO | None, stdout: BinaryIO | None) -> dict[str, Any]:
+        if stdin is None and stdout is None:
+            return {"capture_output": True}
+        if stdin is not None and stdout is not None:
+            raise ProbeError("binary fixture command requires one stream direction")
+        return {
+            "stdin": self._fixture_descriptor(stdin) if stdin is not None else subprocess.DEVNULL,
+            "stdout": self._fixture_descriptor(stdout) if stdout is not None else subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+        }
+
+    def command(  # noqa: PLR0913 - additive stream handles preserve the existing timeout/check call contract.
+        self,
+        name: str,
+        command: list[str],
+        *,
+        timeout: float | None = None,
+        check: bool = True,
+        stdin: BinaryIO | None = None,
+        stdout: BinaryIO | None = None,
+    ) -> str:
+        streams = self._fixture_stream_options(stdin, stdout)
+        binary_fixture = stdin is not None or stdout is not None
         allowance = self.timeout if timeout is None else timeout
         docker = isinstance(getattr(self, "backend", None), DockerBackend)
         if docker:
@@ -102,10 +165,10 @@ class RuntimeContext:
         try:
             result = subprocess.run(
                 command,
-                capture_output=True,
                 text=True,
                 check=False,
                 timeout=allowance,
+                **streams,
             )
         except subprocess.TimeoutExpired as error:
             self.checks.append(
@@ -117,8 +180,8 @@ class RuntimeContext:
                 }
             )
             raise ProbeError(f"{name}: command timed out") from error
-        output = (result.stdout or "").strip()
-        diagnostics = (result.stderr or "").strip()
+        output = "" if binary_fixture else (result.stdout or "").strip()
+        diagnostics = "" if binary_fixture else (result.stderr or "").strip()
         record = {
             "name": name,
             "status": "passed" if result.returncode == 0 else "failed",
@@ -129,6 +192,15 @@ class RuntimeContext:
             record["stdout"] = output[-MAX_LOG:]
         if diagnostics:
             record["stderr"] = diagnostics[-MAX_LOG:]
+        stream_error = None
+        if binary_fixture:
+            try:
+                self._fixture_stream_options(stdin, stdout)
+            except ProbeError:
+                stream_error = "binary fixture descriptor ownership changed during command"
+                record.update({"status": "failed", "error": stream_error})
+            if result.returncode:
+                record["error"] = "binary fixture stream command failed"
         if docker:
             try:
                 self.backend.check_deadline()
@@ -138,17 +210,31 @@ class RuntimeContext:
                 self.checks.append(record)
                 raise ProbeError(f"{name}: command completed after its original aggregate deadline") from error
         self.checks.append(record)
+        if stream_error is not None:
+            raise ProbeError(stream_error)
         if check and result.returncode:
-            raise ProbeError(f"{name}: exit {result.returncode}: {diagnostics[-1000:] or output[-1000:]}")
+            detail = "binary fixture stream command failed" if binary_fixture else diagnostics[-1000:] or output[-1000:]
+            raise ProbeError(f"{name}: exit {result.returncode}: {detail}")
         return output
 
-    def podman(self, name: str, *args: str, timeout: int | None = None, check: bool = True) -> str:
+    def podman(
+        self,
+        name: str,
+        *args: str,
+        timeout: int | None = None,
+        check: bool = True,
+        stdin: BinaryIO | None = None,
+        stdout: BinaryIO | None = None,
+    ) -> str:
         # Keep this internal compatibility name for existing probe callers; the
         # resolved backend owns the endpoint, option normalization and lifecycle.
         docker = isinstance(getattr(self, "backend", None), DockerBackend)
+        streams = {key: value for key, value in (("stdin", stdin), ("stdout", stdout)) if value is not None}
         if docker and args[:1] == ("save",):
             args = self.backend.save_arguments(args)
         if args and args[0] == "run":
+            if streams:
+                raise ProbeError("binary fixture streams cannot launch a container")
             try:
                 image_index = args.index(self.image_ref)
             except ValueError as error:
@@ -203,7 +289,7 @@ class RuntimeContext:
                         self.backend.admit_container(self, container)
                 elif completed and self.checks[-1].get("exitCode") == 0:
                     raise ProbeError(f"{name}: Podman run succeeded without cidfile {cidfile}")
-        return self.command(name, [*self._prefix(timeout), *args], timeout=timeout, check=check)
+        return self.command(name, [*self._prefix(timeout), *args], timeout=timeout, check=check, **streams)
 
     def assert_equal(self, name: str, actual: str, expected: str) -> None:
         passed = actual == expected
@@ -250,6 +336,15 @@ class RuntimeContext:
 
     def exec(self, name: str, container: str, *args: str) -> str:
         return self.podman(name, "exec", container, *args)
+
+    def load_fixture_archive(self, name: str, container: str, archive: BinaryIO) -> str:
+        """Import only through the held container ID and the owned archive stdin."""
+        self._fixture_descriptor(archive)
+        if re.fullmatch(r"[a-f0-9]{64}", container) is None or container not in self.containers:
+            raise ProbeError("binary fixture import requires an exact held container ID")
+        if archive.tell() != 0 or os.fstat(archive.fileno()).st_size <= 0:
+            raise ProbeError("binary fixture import requires a nonempty archive rewound on its held descriptor")
+        return self.podman(name, "exec", "--interactive", container, "docker", "load", stdin=archive)
 
     def port(self, container: str, target: int) -> int:
         mapping = self.podman("inspect published port", "port", container, f"{target}/tcp")

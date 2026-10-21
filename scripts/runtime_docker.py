@@ -1,7 +1,7 @@
 """Native, bounded Docker daemon checks using the isolated outer Podman context."""
 
 # The synthetic resource names and shell commands are intentionally explicit in evidence.
-# ruff: noqa: EM101, EM102, PLR0915, S108, TRY003
+# ruff: noqa: EM101, EM102, PLR0915, TRY003
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ MAX_HTTP_RESPONSE = 8192
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from typing import BinaryIO
 
     from scripts.runtime_tests import RuntimeContext
 
@@ -132,6 +133,17 @@ echo setuid-only""",
 def _run_nested_docker(
     ctx: RuntimeContext, profile: dict[str, Any], expected_uid: str, budget: IsolatedStoreDiskBudget
 ) -> None:
+    with ctx.private_fixture_archive() as archive:
+        _run_nested_docker_with_archive(ctx, profile, expected_uid, budget, archive)
+
+
+def _run_nested_docker_with_archive(
+    ctx: RuntimeContext,
+    profile: dict[str, Any],
+    expected_uid: str,
+    budget: IsolatedStoreDiskBudget,
+    archive: BinaryIO,
+) -> None:
     mode = profile["mode"]
     # A Docker archive of the exact built image is a version-pinned, offline fixture.
     # The inner daemon receives no host Docker socket or ambient outer endpoint.
@@ -142,10 +154,9 @@ def _run_nested_docker(
         "save",
         "--format",
         "docker-archive",
-        "--output",
-        str(fixture),
         ctx.image_ref,
         timeout=180,
+        stdout=archive,
     )
     budget.checkpoint()
     outer_args = [
@@ -217,9 +228,10 @@ def _run_nested_docker(
         rootless = any("rootless" in value for value in security)
         ctx.assert_equal("daemon rootless security", str(rootless).lower(), str(mode == "rootless").lower())
 
-        _docker(
-            ctx, budget, container, "load synthetic nested image", "load", "--input", "/tmp/docker-native-fixture.tar"
-        )
+        budget.checkpoint()
+        archive.seek(0)
+        ctx.load_fixture_archive("load synthetic nested image", container, archive)
+        budget.checkpoint()
         nested = ctx.image_ref
         _docker(ctx, budget, container, "create isolated Docker network", "network", "create", "docker-native-probe")
         _docker(ctx, budget, container, "create isolated Docker volume", "volume", "create", "docker-native-probe")
