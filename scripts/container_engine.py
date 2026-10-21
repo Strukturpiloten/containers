@@ -66,6 +66,7 @@ GLOBAL_IMAGE_INPUTS = (
     "scripts/runtime_tests.py",
     "scripts/runtime_backends.py",
     "scripts/runtime_docker_backend.py",
+    "scripts/runtime_docker_diagnostics.py",
     "scripts/runtime_docker_expiry.py",
     "scripts/oci_artifacts.py",
     "scripts/runtime_docker.py",

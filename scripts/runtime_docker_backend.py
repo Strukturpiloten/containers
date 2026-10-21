@@ -53,6 +53,7 @@ class DockerBackend:
         self.cleaning_up = False
         self.slice_identity: str | None = None
         self.watchdog: str | None = None
+        self.diagnostic_reader_pending = False
 
     @staticmethod
     def _tool(name: str) -> str:
@@ -686,6 +687,7 @@ class DockerBackend:
             links = json.loads(self._call(ctx, "audit private Docker bridge absence", ["ip", "-j", "link", "show"]))
             if any(row.get("ifname") == self.bridge for row in links):
                 failures.append("private Docker bridge still exists")
+        failures.extend(self._diagnostic_reader_failures())
         if failures:
             raise DockerBackendError("; ".join(failures) + "; retaining private runtime store")
         if self.directory.is_symlink() or self.directory.resolve() != self.directory:
@@ -701,6 +703,9 @@ class DockerBackend:
         ctx.containers.clear()
         ctx.run_containers.clear()
         ctx.checks.append({"name": "cleanup isolated store", "status": "passed"})
+
+    def _diagnostic_reader_failures(self) -> list[str]:
+        return ["private diagnostic query teardown is unverified"] if self.diagnostic_reader_pending else []
 
     def _remove_containers(self, ctx: RuntimeContext) -> None:
         for token in reversed(ctx.containers):

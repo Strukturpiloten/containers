@@ -10,6 +10,7 @@ import socket
 import time
 from typing import TYPE_CHECKING, Any
 
+from scripts.runtime_docker_diagnostics import diagnose_rootless_failure
 from scripts.runtime_resource_budgets import (
     IsolatedStoreDiskBudget,
     outer_container_limits,
@@ -133,7 +134,7 @@ def _run_nested_docker(
 ) -> None:
     mode = profile["mode"]
     # A Docker archive of the exact built image is a version-pinned, offline fixture.
-    # The inner daemon receives no host Docker socket and the outer launcher stays Podman.
+    # The inner daemon receives no host Docker socket or ambient outer endpoint.
     fixture = ctx.directory / "docker-native-fixture.tar"
     budget.checkpoint()
     ctx.podman(
@@ -167,7 +168,9 @@ def _run_nested_docker(
     else:
         outer_args.extend(["--security-opt", "apparmor=unconfined"])
     budget.checkpoint()
+    started = time.time()
     container = ctx.start("start nested Docker daemon", options=tuple(outer_args))
+    api_ready = False
     try:
         budget.checkpoint()
         verify_outer_container_limits(ctx, container)
@@ -186,6 +189,7 @@ def _run_nested_docker(
             "-euc",
             "for n in $(seq 1 45); do docker info >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1",
         )
+        api_ready = True
         uid = _checked_exec(ctx, budget, "inspect inner daemon user", container, "id", "-u")
         ctx.assert_equal("inner daemon user", uid, expected_uid)
         version_text = _docker(
@@ -202,13 +206,13 @@ def _run_nested_docker(
         )
         ctx.assert_equal("daemon Engine version", version["Version"], engine_version)
         if not version.get("ApiVersion") or not version.get("MinAPIVersion"):
-            raise ProbeError("daemon did not report API version range")
+            raise ProbeError("daemon did not report API version range")  # noqa: TRY301 - preserve original probe failure.
         info_text = _docker(
             ctx, budget, container, "inspect Docker storage and security", "info", "--format", "{{json .}}"
         )
         info = json.loads(info_text)
         if not info.get("Driver"):
-            raise ProbeError("daemon did not initialize a storage driver")
+            raise ProbeError("daemon did not initialize a storage driver")  # noqa: TRY301 - preserve original probe failure.
         security = [str(value) for value in info.get("SecurityOptions", [])]
         rootless = any("rootless" in value for value in security)
         ctx.assert_equal("daemon rootless security", str(rootless).lower(), str(mode == "rootless").lower())
@@ -358,6 +362,10 @@ def _run_nested_docker(
                 "! docker network inspect docker-native-probe >/dev/null 2>&1; "
                 "! docker volume inspect docker-native-probe >/dev/null 2>&1",
             )
+    except Exception:
+        if mode == "rootless" and not api_ready:
+            diagnose_rootless_failure(ctx, container, started)
+        raise
     finally:
         try:
             ctx.logs(container)

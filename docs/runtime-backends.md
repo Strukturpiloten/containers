@@ -63,6 +63,29 @@ from the exact profile and requires explicit `profile` selection, observed
 versions, rootful private storage and, for Docker, a private Unix endpoint.
 Podman version fields are never attached to Docker evidence.
 
+An early rootless Docker launch failure may add explicitly non-acceptance
+diagnostics. Read-only inspection is limited to the held, owner-verified
+container through its private endpoint. Only closed privilege, AppArmor,
+security-option and exit-state fields are recorded; raw metadata and stderr
+are not published. A current-boot kernel journal query is confined to the
+launch-to-failure window, with 64 records plus an overflow sentinel and a 64 KiB
+capture limit. Only exact RootlessKit AppArmor user-namespace-denial record
+counts or an unavailable reason are retained, never raw journal messages.
+The fixed root-side reader owns a separate query process group, kills that
+held group before reaping its direct child, and verifies group absence before
+acknowledging teardown. Reaping a sudo/timeout launcher or observing exit 137
+alone is not cleanup proof. Missing acknowledgement remains unverified.
+An independently deadline-bound root watchdog inside that query group remains
+active if the reader owner dies. Unverified query teardown blocks another
+diagnostic capture and retains this invocation's private store, even after the
+independent container/network/service/slice cleanup attempts. A later
+observation cannot clear earlier lifetime uncertainty.
+These are host-task-window observations, not proof of container causality.
+The whole diagnostic attempt has a five-second cap within the original runtime
+deadline, without consuming the 60-second cleanup reserve. Missing, truncated,
+late or zero-count observations cannot qualify a prerequisite, waive a test,
+or turn the original failure into a pass. No host security policy is changed.
+
 Offline controls do not qualify either native architecture or resolve issue #344
 and draft PR #429's separate systemd/delegation fixture. Strict OOM, clean-control,
 lifecycle and cleanup assertions remain. DockerLens/BoxFerry's historically
