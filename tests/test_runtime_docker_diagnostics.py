@@ -27,6 +27,69 @@ if TYPE_CHECKING:
 CONTAINER = "a" * 64
 PRIVATE_MARKER = "must-not-appear-in-public-evidence"
 FIXTURE_CLEANUP_SECONDS = 1
+FIXTURE_PHASES = frozenset(
+    {
+        "initializing",
+        "capture",
+        "pending-latch",
+        "metadata",
+        "guard-proof",
+        "query-proof",
+        "query-reap",
+        "query-absence",
+        "guard-group-visible",
+        "guard-proof-recheck",
+        "guard-reap",
+        "final-absence",
+        "original-deadline",
+        "parent-cleanup-timeout",
+    }
+)
+FIXTURE_CHILD_EXITS = frozenset(
+    {"unobserved", "killed-sigkill", "killed-other", "exited-137", "exited-other", "dumped", "other"}
+)
+
+
+def _closed_fixture_failure(result: dict[str, Any], errors: str) -> str:
+    phase = result.get("phase")
+    child_exit = result.get("childExit")
+    error_type = result.get("failureType")
+    categories = {
+        None: "none",
+        "AssertionError": "assertion",
+        "TimeoutError": "timeout",
+        "FileNotFoundError": "metadata-missing",
+        "ChildProcessError": "child-ownership",
+        "ProcessLookupError": "process-absent",
+        "PermissionError": "permission",
+    }
+    return json.dumps(
+        {
+            "phase": phase if isinstance(phase, str) and phase in FIXTURE_PHASES else "unknown",
+            "errorCategory": (
+                "none"
+                if error_type is None
+                else categories.get(error_type, "other")
+                if isinstance(error_type, str)
+                else "other"
+            ),
+            "childExit": child_exit if isinstance(child_exit, str) and child_exit in FIXTURE_CHILD_EXITS else "unknown",
+            "cleanupACK": result.get("cleanupACK") is True,
+            "childrenRemain": bool(result.get("remainingChildren")),
+            "groupsRemain": bool(result.get("remainingGroups")),
+            "pidsRemain": bool(result.get("remainingPids")),
+            "stderrPresent": bool(errors),
+        },
+        sort_keys=True,
+    )
+
+
+def _closed_child_exit(observed: os.waitid_result) -> str:
+    if observed.si_code == os.CLD_KILLED:
+        return "killed-sigkill" if observed.si_status == signal.SIGKILL else "killed-other"
+    if observed.si_code == os.CLD_EXITED:
+        return "exited-137" if observed.si_status == 128 + signal.SIGKILL else "exited-other"
+    return "dumped" if observed.si_code == os.CLD_DUMPED else "other"
 
 
 def _assert_sigkill_exit(pid: int, observed: os.waitid_result | None) -> None:
@@ -40,7 +103,9 @@ def _assert_sigkill_exit(pid: int, observed: os.waitid_result | None) -> None:
         raise AssertionError(message)
 
 
-def _observe_owned_sigkill(pid: int, deadline: float) -> None:
+def _observe_owned_sigkill(pid: int, deadline: float, context: dict[str, str] | None = None) -> None:
+    if context is not None:
+        context["childExit"] = "unobserved"
     while time.monotonic() < deadline:
         try:
             observed = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
@@ -48,6 +113,8 @@ def _observe_owned_sigkill(pid: int, deadline: float) -> None:
             # The query remains the guard's child until the guard dies.
             observed = None
         if observed is not None:
+            if context is not None:
+                context["childExit"] = _closed_child_exit(observed)
             _assert_sigkill_exit(pid, observed)
             return
         time.sleep(min(0.001, max(0, deadline - time.monotonic())))
@@ -111,6 +178,7 @@ def _run_owner_death_supervisor(sudo: tuple[str, ...], deadline: float, failure:
     signal.signal(signal.SIGTERM, stop_fixture)
     test = RootlessFailureDiagnostics()
     test.setUp()
+    test.fixture_context = {"phase": "initializing", "childExit": "unobserved"}
     error = None
     try:
         test._assert_owner_death_fixture(sudo, deadline, failure)
@@ -120,7 +188,13 @@ def _run_owner_death_supervisor(sudo: tuple[str, ...], deadline: float, failure:
         # A late parent timeout must not interrupt the bounded adoption/reap loop.
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         cleanup = _drain_fixture_children(deadline + FIXTURE_CLEANUP_SECONDS)
-    cleanup.update({"failureType": type(error).__name__ if error is not None else None, "failure": str(error)})
+    cleanup.update(
+        {
+            "failureType": type(error).__name__ if error is not None else None,
+            "failure": str(error),
+            **test.fixture_context,
+        }
+    )
     sys.stdout.write(json.dumps(cleanup) + "\n")
     sys.stdout.flush()
     if error is not None or not cleanup["cleanupACK"]:
@@ -525,17 +599,76 @@ class RootlessFailureDiagnostics(unittest.TestCase):
                 # Retain the unreaped owner instead of destroying its reaper.
                 self.unverified_supervisor = process
                 children = Path(f"/proc/{process.pid}/task/{process.pid}/children").read_text()
-                self.fail(f"fixture cleanup unverified; supervisor={process.pid}, children={children}")
+                self.fail(
+                    _closed_fixture_failure(
+                        {
+                            "phase": "parent-cleanup-timeout",
+                            "failureType": "TimeoutError",
+                            "remainingChildren": children,
+                        },
+                        "",
+                    )
+                )
         result = json.loads(output)
-        self.assertTrue(result["cleanupACK"], result)
-        self.assertEqual(result["remainingChildren"], [])
-        self.assertEqual(result["remainingGroups"], [])
-        self.assertEqual(result["remainingPids"], [])
-        self.assertEqual(process.returncode, 0 if failure is None else 1, errors)
+        context = _closed_fixture_failure(result, errors)
+        self.assertTrue(result["cleanupACK"], context)
+        self.assertTrue(result["remainingChildren"] == [], context)
+        self.assertTrue(result["remainingGroups"] == [], context)
+        self.assertTrue(result["remainingPids"] == [], context)
+        self.assertEqual(process.returncode, 0 if failure is None else 1, context)
         if failure is None:
             self.assertLess(time.monotonic(), deadline)
         self.assertLess(time.monotonic(), cleanup_deadline)
         return result
+
+    def test_fixture_failure_context_is_closed_and_redacts_paths_pids_and_raw_errors(self) -> None:
+        private_path = f"/private/{PRIVATE_MARKER}/fixture"
+        private_pid = 987654321
+        result = {
+            "phase": "guard-proof",
+            "failureType": "AssertionError",
+            "childExit": "exited-137",
+            "failure": private_path,
+            "cleanupACK": True,
+            "remainingChildren": [private_pid],
+            "remainingGroups": [private_pid],
+            "remainingPids": [private_pid],
+        }
+        context = _closed_fixture_failure(result, private_path)
+        with self.assertRaises(AssertionError) as captured:
+            self.assertEqual(1, 0, context)
+        for private in (PRIVATE_MARKER, private_path, str(private_pid)):
+            self.assertNotIn(private, str(captured.exception))
+        self.assertEqual(
+            json.loads(context),
+            {
+                "phase": "guard-proof",
+                "errorCategory": "assertion",
+                "childExit": "exited-137",
+                "cleanupACK": True,
+                "childrenRemain": True,
+                "groupsRemain": True,
+                "pidsRemain": True,
+                "stderrPresent": True,
+            },
+        )
+        result.update({"phase": private_path, "failureType": private_path, "childExit": private_path})
+        unknown = json.loads(_closed_fixture_failure(result, private_path))
+        self.assertEqual(unknown["phase"], "unknown")
+        self.assertEqual(unknown["errorCategory"], "other")
+        self.assertEqual(unknown["childExit"], "unknown")
+        self.assertNotIn(PRIVATE_MARKER, json.dumps(unknown))
+
+    def test_closed_guard_exit_diagnostic_does_not_accept_a_normal_137_exit(self) -> None:
+        context = {"phase": "guard-proof"}
+        observed = SimpleNamespace(si_pid=123, si_code=os.CLD_EXITED, si_status=128 + signal.SIGKILL)
+        with (
+            patch.object(time, "monotonic", return_value=1000),
+            patch.object(os, "waitid", return_value=observed),
+            self.assertRaisesRegex(AssertionError, "has not terminated by SIGKILL"),
+        ):
+            _observe_owned_sigkill(123, 1002, context)
+        self.assertEqual(context, {"phase": "guard-proof", "childExit": "exited-137"})
 
     def test_owned_child_exit_oracle_rejects_a_running_child_and_accepts_sigkill(self) -> None:
         deadline = time.monotonic() + 2
@@ -605,11 +738,13 @@ class RootlessFailureDiagnostics(unittest.TestCase):
                 )
                 return [sys.executable, "-c", monitor]
 
+            self.fixture_context["phase"] = "capture"
             with (
                 patch.object(self.backend, "privileged", side_effect=abandoned_owner),
                 self.assertRaisesRegex(diagnostics._UnavailableError, "cleanup-unverified"),
             ):
                 diagnostics._capture(self.backend, ["inspect", CONTAINER], deadline)
+            self.fixture_context["phase"] = "pending-latch"
             self.assertTrue(self.backend.diagnostic_reader_pending)
             if failure == "assertion":
                 self.fail("injected assertion before PID acquisition")
@@ -618,23 +753,35 @@ class RootlessFailureDiagnostics(unittest.TestCase):
             if failure == "await-interruption":
                 signal.pause()
                 self.fail("fixture resumed without its deadline interruption")
+            self.fixture_context["phase"] = "metadata"
             query_pid, guard_pid = int(pidfile.read_text()), int(groupfile.read_text())
             # Observe both deaths without reaping: orphan zombies can be
             # independently reaped, so query absence alone is not group absence.
-            _observe_owned_sigkill(guard_pid, deadline)
-            _observe_owned_sigkill(query_pid, deadline)
+            self.fixture_context["phase"] = "guard-proof"
+            _observe_owned_sigkill(guard_pid, deadline, self.fixture_context)
+            self.fixture_context["phase"] = "query-proof"
+            _observe_owned_sigkill(query_pid, deadline, self.fixture_context)
+            self.fixture_context["phase"] = "query-reap"
             self.assertEqual(os.waitpid(query_pid, os.WNOHANG)[0], query_pid)
+            self.fixture_context["phase"] = "query-absence"
             with self.assertRaises(ProcessLookupError):
                 os.kill(query_pid, 0)
             # Deterministically reproduce the old assertion's false premise:
             # the dead, unreaped guard still makes its group discoverable.
+            self.fixture_context["phase"] = "guard-group-visible"
             os.killpg(guard_pid, 0)
-            _assert_sigkill_exit(guard_pid, os.waitid(os.P_PID, guard_pid, os.WEXITED | os.WNOHANG | os.WNOWAIT))
+            self.fixture_context["phase"] = "guard-proof-recheck"
+            observed = os.waitid(os.P_PID, guard_pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            self.fixture_context["childExit"] = _closed_child_exit(observed) if observed is not None else "unobserved"
+            _assert_sigkill_exit(guard_pid, observed)
+            self.fixture_context["phase"] = "guard-reap"
             self.assertEqual(os.waitpid(guard_pid, os.WNOHANG)[0], guard_pid)
+            self.fixture_context["phase"] = "final-absence"
             with self.assertRaises(ProcessLookupError):
                 os.kill(query_pid, 0)
             with self.assertRaises(ProcessLookupError):
                 os.killpg(guard_pid, 0)
+            self.fixture_context["phase"] = "original-deadline"
             self.assertLess(time.monotonic(), deadline)
 
     def test_pending_reader_cannot_be_cleared_by_another_capture_or_erase_its_private_store(self) -> None:
