@@ -5,7 +5,7 @@ FROM ${ALPINE_IMAGE}
 
 RUN set -eux; \
     apk upgrade --no-cache; \
-    apk add --no-cache ca-certificates fuse-overlayfs iproute2 iptables procps shadow shadow-subids slirp4netns tar; \
+    apk add --no-cache ca-certificates curl fuse-overlayfs iproute2 iptables procps shadow shadow-subids slirp4netns tar; \
     addgroup -g 1000 docker; \
     adduser -D -u 1000 -G docker -h /home/docker docker; \
     printf 'docker:100000:65536\n' > /etc/subuid; \
@@ -14,6 +14,7 @@ RUN set -eux; \
     mkdir -p /run/user/1000 /home/docker/.local/share/docker /usr/share/strukturpiloten/docker; \
     chown -R docker:docker /run/user/1000 /home/docker; \
     chmod 0700 /run/user/1000; \
+    /usr/bin/curl --disable --version > /usr/share/strukturpiloten/docker/curl-version; \
     apk info -vv > /usr/share/strukturpiloten/docker/os-packages
 COPY --from=payload /payload/engine/ /usr/local/bin/
 COPY --from=payload /payload/rootless/ /usr/local/bin/

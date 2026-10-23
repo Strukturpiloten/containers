@@ -5,8 +5,9 @@ FROM ${ALPINE_IMAGE}
 
 RUN set -eux; \
     apk upgrade --no-cache; \
-    apk add --no-cache ca-certificates iproute2 iptables procps tar; \
+    apk add --no-cache ca-certificates curl iproute2 iptables procps tar; \
     mkdir -p /var/lib/docker /run/docker /usr/share/strukturpiloten/docker; \
+    /usr/bin/curl --disable --version > /usr/share/strukturpiloten/docker/curl-version; \
     apk info -vv > /usr/share/strukturpiloten/docker/os-packages
 COPY --from=payload /payload/engine/ /usr/local/bin/
 COPY --from=payload /payload/provenance/ /usr/share/strukturpiloten/docker/

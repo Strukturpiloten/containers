@@ -28,7 +28,7 @@ case "$distro" in
         apt-get update
         apt-get --yes upgrade
         apt-get install --yes --no-install-recommends \
-            busybox ca-certificates "$engine_package" iproute2 iptables passwd procps tar
+            busybox ca-certificates curl "$engine_package" iproute2 iptables passwd procps tar
         if [ "$distro" = debian-13 ]; then
             # Debian 13 splits the vendor CLI from the docker.io daemon package.
             apt-get install --yes --no-install-recommends docker-cli
@@ -46,7 +46,7 @@ case "$distro" in
     fedora-43|fedora-44)
         dnf --assumeyes --refresh upgrade
         dnf --assumeyes install --setopt=install_weak_deps=False \
-            busybox ca-certificates "$engine_package" iproute iptables iptables-nft procps-ng shadow-utils tar
+            busybox ca-certificates curl-minimal "$engine_package" iproute iptables iptables-nft procps-ng shadow-utils tar
         if [ "$mode" = rootless ]; then
             dnf --assumeyes install --setopt=install_weak_deps=False \
                 fuse-overlayfs rootlesskit shadow-utils-subid slirp4netns
@@ -69,7 +69,7 @@ case "$distro" in
             zypper --non-interactive update
         fi
         zypper --non-interactive install --no-recommends \
-            busybox ca-certificates "$engine_package" iproute2 iptables procps shadow tar
+            busybox ca-certificates curl "$engine_package" iproute2 iptables procps shadow tar
         if [ "$mode" = rootless ]; then
             zypper --non-interactive install --no-recommends \
                 fuse-overlayfs libcap-progs rootlesskit slirp4netns
@@ -97,7 +97,7 @@ case "$distro" in
         ;;
     alpine-3.24)
         apk upgrade --no-cache
-        apk add --no-cache busybox ca-certificates "$engine_package" iproute2 iptables procps shadow tar
+        apk add --no-cache busybox ca-certificates curl "$engine_package" iproute2 iptables procps shadow tar
         if [ "$mode" = rootless ]; then
             apk add --no-cache fuse-overlayfs rootlesskit shadow-subids slirp4netns
         fi
@@ -108,7 +108,7 @@ case "$distro" in
     arch)
         pacman --sync --refresh --sysupgrade --noconfirm
         pacman --sync --noconfirm --needed \
-            busybox ca-certificates "$engine_package" iproute2 iptables-nft procps-ng shadow tar
+            busybox ca-certificates curl "$engine_package" iproute2 iptables-nft procps-ng shadow tar
         if [ "$mode" = rootless ]; then
             pacman --sync --noconfirm --needed \
                 fuse-overlayfs rootlesskit slirp4netns
@@ -122,6 +122,7 @@ case "$distro" in
     *) echo "Unsupported vendor distro: $distro" >&2; exit 1 ;;
 esac
 
+/usr/bin/curl --disable --version > "$provenance/curl-version"
 command -v busybox
 command -v docker
 command -v dockerd
