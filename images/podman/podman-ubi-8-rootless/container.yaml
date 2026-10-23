@@ -27,7 +27,7 @@ build:
   runtimeBaseArg: DISTRO_IMAGE
   args:
     DISTRO_IMAGE:
-      value: registry.access.redhat.com/ubi8/ubi:latest@sha256:73071333d0cd7c526b6d7d01f0c9b709fd4a96c47853b1c9071e0a11284bd1da
+      value: registry.access.redhat.com/ubi8/ubi:latest@sha256:bd097b288df365aec7bad694c87036534ce94d1a4974c943f417f757f8eb2ac4
       type: external-image
     HOME_DIR: {value: /home/podman, type: static}
     RUN_AS_USER: {value: podman, type: static}
