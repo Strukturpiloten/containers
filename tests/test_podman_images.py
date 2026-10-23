@@ -279,10 +279,26 @@ class PodmanImageTests(unittest.TestCase):
         self.assertIn("--archive", action)
         self.assertIn("--evidence", action)
         self.assertIn("Upload runtime evidence", action)
-        self.assertIn("--root", runtime)
-        self.assertIn("--runroot", runtime)
-        self.assertIn("--tmpdir", runtime)
-        self.assertIn("CONTAINERS_CONF_OVERRIDE", runtime)
+        backend = runtime_tests.PodmanBackend(
+            Path("/authored-owned-store"), ("sudo", "-n"), action_directory / "podman-smoke-containers.conf"
+        )
+        self.assertEqual(
+            backend.command_prefix(),
+            [
+                "sudo",
+                "-n",
+                "env",
+                f"CONTAINERS_CONF_OVERRIDE={action_directory / 'podman-smoke-containers.conf'}",
+                "podman",
+                "--root",
+                "/authored-owned-store/root",
+                "--runroot",
+                "/authored-owned-store/runroot",
+                "--tmpdir",
+                "/authored-owned-store/tmp",
+            ],
+        )
+        self.assertIn("self.backend.command_prefix()", runtime)
         self.assertEqual(action.count("github.event_name != 'pull_request'"), 1)
         self.assertIn("github.event.pull_request.head.repo.full_name == github.repository", action)
         self.assertIn("--allow-privileged", action)

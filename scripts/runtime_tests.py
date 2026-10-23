@@ -15,19 +15,28 @@ import re
 import shutil
 import signal
 import socket
+import stat
 import struct
 import subprocess
 import sys
 import tempfile
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
 from scripts.metadata_schema import validate_metadata_schema
 from scripts.oci_artifacts import archive_identity
+from scripts.runtime_backends import PodmanBackend, select_outer_engine
+from scripts.runtime_docker_backend import DockerBackend
+from scripts.runtime_docker_diagnostics import redact_timeout_provider
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from typing import BinaryIO
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TIMEOUT = 45
@@ -39,9 +48,13 @@ class ProbeError(RuntimeError):
 
 
 class RuntimeContext:
-    """Own one isolated host Podman store and every container started in it."""
+    """Own one isolated outer-runtime store and every container started in it."""
 
-    def __init__(self, *, image: str, architecture: str, timeout: int, use_sudo: bool) -> None:
+    def __init__(
+        self, *, image: str, architecture: str, timeout: int, use_sudo: bool, outer_engine: str = "podman"
+    ) -> None:
+        if outer_engine not in {"podman", "docker"}:
+            raise ProbeError(f"unsupported resolved outer engine {outer_engine}")
         self.name = image
         self.architecture = architecture
         self.timeout = timeout
@@ -49,62 +62,206 @@ class RuntimeContext:
         self.containers: list[str] = []
         self.run_containers: set[str] = set()
         self.checks: list[dict[str, Any]] = []
+        self._fixture_archives: dict[int, tuple[BinaryIO, Path, tuple[int, int]]] = {}
         self.image_ref = f"localhost/{image}:runtime-{os.getpid()}"
         self._sudo = ["sudo", "-n"] if use_sudo else []
-        self._podman = [
-            *self._sudo,
-            "env",
-            f"CONTAINERS_CONF_OVERRIDE={ROOT / '.github/actions/build-arch-image/podman-smoke-containers.conf'}",
-            "podman",
-            "--root",
-            str(self.directory / "root"),
-            "--runroot",
-            str(self.directory / "runroot"),
-            "--tmpdir",
-            str(self.directory / "tmp"),
-        ]
-        for part in ("root", "runroot", "tmp"):
-            (self.directory / part).mkdir()
+        self.outer_engine = outer_engine
+        self.backend = (
+            PodmanBackend(
+                self.directory,
+                tuple(self._sudo),
+                ROOT / ".github/actions/build-arch-image/podman-smoke-containers.conf",
+            )
+            if outer_engine == "podman"
+            else DockerBackend(self.directory, tuple(self._sudo))
+        )
+        self.backend.initialize()
+        self._podman = self.backend.command_prefix() if outer_engine == "podman" else []
 
-    def command(self, name: str, command: list[str], *, timeout: int | None = None, check: bool = True) -> str:
+    def prepare(self) -> dict[str, str]:
+        """Observe the selected backend; never substitute another runtime."""
+        if isinstance(self.backend, DockerBackend):
+            return self.backend.prepare(self)
+        version = self.podman("host Podman version", "--version")
+        if not version.startswith("podman version "):
+            raise ProbeError("outer Podman version observation is invalid")
+        rootless = self.podman("host Podman root mode", "info", "--format", "{{.Host.Security.Rootless}}")
+        if rootless not in {"true", "false"}:
+            raise ProbeError("outer Podman root mode observation is invalid")
+        return {
+            "engine": "podman",
+            "clientVersion": version,
+            "rootMode": "rootless" if rootless == "true" else "rootful",
+            "storage": "invocation-owned",
+        }
+
+    def _prefix(self, timeout: float | None) -> list[str]:
+        if isinstance(getattr(self, "backend", None), DockerBackend):
+            return self.backend.command_prefix(self.timeout if timeout is None else timeout)
+        return self._podman
+
+    @contextmanager
+    def private_fixture_archive(self) -> Iterator[BinaryIO]:
+        """Hold the sole parent-owned fixture inode without reopening its pathname."""
+        path = self.directory / "docker-native-fixture.tar"
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, "w+b", buffering=0) as archive:
+            observed = os.fstat(archive.fileno())
+            self._fixture_archives[id(archive)] = (archive, path, (observed.st_dev, observed.st_ino))
+            try:
+                self._fixture_descriptor(archive)
+                yield archive
+            finally:
+                self._fixture_archives.pop(id(archive))
+
+    def _fixture_descriptor(self, archive: BinaryIO) -> int:
+        entry = self._fixture_archives.get(id(archive))
+        if entry is None or entry[0] is not archive:
+            raise ProbeError("binary fixture stream is not an owned held descriptor")
+        try:
+            descriptor = archive.fileno()
+            observed, named = os.fstat(descriptor), entry[1].lstat()
+        except OSError, ValueError:
+            raise ProbeError("binary fixture descriptor ownership is unverified") from None
+        if (
+            (observed.st_dev, observed.st_ino) != entry[2]
+            or (named.st_dev, named.st_ino) != entry[2]
+            or not stat.S_ISREG(observed.st_mode)
+            or observed.st_uid != os.geteuid()
+            or stat.S_IMODE(observed.st_mode) != 0o600
+            or observed.st_nlink != 1
+        ):
+            raise ProbeError("binary fixture descriptor ownership changed")
+        return descriptor
+
+    def _fixture_stream_options(self, stdin: BinaryIO | None, stdout: BinaryIO | None) -> dict[str, Any]:
+        if stdin is None and stdout is None:
+            return {"capture_output": True}
+        if stdin is not None and stdout is not None:
+            raise ProbeError("binary fixture command requires one stream direction")
+        return {
+            "stdin": self._fixture_descriptor(stdin) if stdin is not None else subprocess.DEVNULL,
+            "stdout": self._fixture_descriptor(stdout) if stdout is not None else subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+        }
+
+    def command(  # noqa: PLR0913 - additive stream handles preserve the existing timeout/check call contract.
+        self,
+        name: str,
+        command: list[str],
+        *,
+        timeout: float | None = None,
+        check: bool = True,
+        stdin: BinaryIO | None = None,
+        stdout: BinaryIO | None = None,
+    ) -> str:
+        streams = self._fixture_stream_options(stdin, stdout)
+        public_name = redact_timeout_provider(self, name)
+        binary_fixture = stdin is not None or stdout is not None
+        allowance = self.timeout if timeout is None else timeout
+        docker = isinstance(getattr(self, "backend", None), DockerBackend)
+        if docker:
+            allowance = self.backend.command_timeout(allowance)
+            command = self.backend.rebudget_command(command, allowance)
         start = time.monotonic()
         try:
             result = subprocess.run(
                 command,
-                capture_output=True,
                 text=True,
                 check=False,
-                timeout=timeout or self.timeout,
+                timeout=allowance,
+                **streams,
             )
         except subprocess.TimeoutExpired as error:
             self.checks.append(
                 {
-                    "name": name,
+                    "name": public_name,
                     "status": "failed",
                     "durationSeconds": round(time.monotonic() - start, 3),
-                    "error": f"command timed out after {timeout or self.timeout}s",
+                    "error": f"command timed out after {allowance}s",
                 }
             )
+            if vars(self).get("_gnu_timeout_provider") is not None or (
+                docker and vars(self.backend).get("_gnu_timeout_provider") is not None
+            ):
+                raise ProbeError(redact_timeout_provider(self, f"{name}: command timed out")) from None
             raise ProbeError(f"{name}: command timed out") from error
-        output = (result.stdout or "").strip()
-        diagnostics = (result.stderr or "").strip()
+        except OSError as error:
+            detail = redact_timeout_provider(self, str(error))
+            if detail == str(error):
+                raise
+            self.checks.append(
+                {
+                    "name": public_name,
+                    "status": "failed",
+                    "durationSeconds": round(time.monotonic() - start, 3),
+                    "error": detail,
+                }
+            )
+            raise ProbeError(f"{public_name}: {detail}") from None
+        output = "" if binary_fixture else (result.stdout or "").strip()
+        diagnostics = "" if binary_fixture else (result.stderr or "").strip()
         record = {
-            "name": name,
+            "name": public_name,
             "status": "passed" if result.returncode == 0 else "failed",
             "durationSeconds": round(time.monotonic() - start, 3),
             "exitCode": result.returncode,
         }
         if output:
-            record["stdout"] = output[-MAX_LOG:]
+            record["stdout"] = redact_timeout_provider(self, output)[-MAX_LOG:]
         if diagnostics:
-            record["stderr"] = diagnostics[-MAX_LOG:]
+            record["stderr"] = redact_timeout_provider(self, diagnostics)[-MAX_LOG:]
+        stream_error = None
+        if binary_fixture:
+            try:
+                self._fixture_stream_options(stdin, stdout)
+            except ProbeError:
+                stream_error = "binary fixture descriptor ownership changed during command"
+                record.update({"status": "failed", "error": stream_error})
+            if result.returncode:
+                record["error"] = "binary fixture stream command failed"
+        if docker:
+            try:
+                self.backend.check_deadline()
+            except Exception as error:
+                record["status"] = "failed"
+                record["error"] = redact_timeout_provider(self, str(error))
+                self.checks.append(record)
+                if record["error"] != str(error):
+                    raise ProbeError(
+                        f"{public_name}: command completed after its original aggregate deadline"
+                    ) from None
+                raise ProbeError(f"{public_name}: command completed after its original aggregate deadline") from error
         self.checks.append(record)
+        if stream_error is not None:
+            raise ProbeError(stream_error)
         if check and result.returncode:
-            raise ProbeError(f"{name}: exit {result.returncode}: {diagnostics[-1000:] or output[-1000:]}")
+            detail = (
+                "binary fixture stream command failed"
+                if binary_fixture
+                else redact_timeout_provider(self, diagnostics)[-1000:] or redact_timeout_provider(self, output)[-1000:]
+            )
+            raise ProbeError(redact_timeout_provider(self, f"{name}: exit {result.returncode}: {detail}"))
         return output
 
-    def podman(self, name: str, *args: str, timeout: int | None = None, check: bool = True) -> str:
+    def podman(
+        self,
+        name: str,
+        *args: str,
+        timeout: int | None = None,
+        check: bool = True,
+        stdin: BinaryIO | None = None,
+        stdout: BinaryIO | None = None,
+    ) -> str:
+        # Keep this internal compatibility name for existing probe callers; the
+        # resolved backend owns the endpoint, option normalization and lifecycle.
+        docker = isinstance(getattr(self, "backend", None), DockerBackend)
+        streams = {key: value for key, value in (("stdin", stdin), ("stdout", stdout)) if value is not None}
+        if docker and args[:1] == ("save",):
+            args = self.backend.save_arguments(args)
         if args and args[0] == "run":
+            if streams:
+                raise ProbeError("binary fixture streams cannot launch a container")
             try:
                 image_index = args.index(self.image_ref)
             except ValueError as error:
@@ -119,6 +276,8 @@ class RuntimeContext:
             # Podman removes cidfiles with --rm containers. Keep one-shot containers
             # until our exact-ID cleanup so ownership survives timeout/cancellation.
             options = tuple(option for option in options if option != "--rm" and not option.startswith("--rm="))
+            if docker:
+                options = self.backend.run_options(options)
             run_id = uuid.uuid4().hex
             container_name = f"strukturpiloten-runtime-{run_id}"
             cidfile = self.directory / f"run-{run_id}.cid"
@@ -129,7 +288,7 @@ class RuntimeContext:
                 output = self.command(
                     name,
                     [
-                        *self._podman,
+                        *self._prefix(timeout),
                         "run",
                         "--name",
                         container_name,
@@ -153,9 +312,11 @@ class RuntimeContext:
                     self.containers[self.containers.index(container_name)] = container
                     self.run_containers.remove(container_name)
                     self.run_containers.add(container)
+                    if docker and completed and self.checks[-1].get("exitCode") == 0:
+                        self.backend.admit_container(self, container)
                 elif completed and self.checks[-1].get("exitCode") == 0:
                     raise ProbeError(f"{name}: Podman run succeeded without cidfile {cidfile}")
-        return self.command(name, [*self._podman, *args], timeout=timeout, check=check)
+        return self.command(name, [*self._prefix(timeout), *args], timeout=timeout, check=check, **streams)
 
     def assert_equal(self, name: str, actual: str, expected: str) -> None:
         passed = actual == expected
@@ -170,7 +331,10 @@ class RuntimeContext:
 
     def load_archive(self, archive: Path) -> dict[str, str]:
         identity = archive_identity(archive, self.architecture)
-        self.podman("load OCI archive", "load", "--quiet", "--input", str(archive), timeout=180)
+        if isinstance(getattr(self, "backend", None), DockerBackend):
+            self.backend.import_archive(self, archive, identity)
+        else:
+            self.podman("load OCI archive", "load", "--quiet", "--input", str(archive), timeout=180)
         ids = self.podman("list loaded images", "images", "--quiet", "--no-trunc").splitlines()
         if len(ids) != 1:
             raise ProbeError(f"expected one image in isolated store, got {len(ids)}")
@@ -200,6 +364,15 @@ class RuntimeContext:
     def exec(self, name: str, container: str, *args: str) -> str:
         return self.podman(name, "exec", container, *args)
 
+    def load_fixture_archive(self, name: str, container: str, archive: BinaryIO) -> str:
+        """Import only through the held container ID and the owned archive stdin."""
+        self._fixture_descriptor(archive)
+        if re.fullmatch(r"[a-f0-9]{64}", container) is None or container not in self.containers:
+            raise ProbeError("binary fixture import requires an exact held container ID")
+        if archive.tell() != 0 or os.fstat(archive.fileno()).st_size <= 0:
+            raise ProbeError("binary fixture import requires a nonempty archive rewound on its held descriptor")
+        return self.podman(name, "exec", "--interactive", container, "docker", "load", stdin=archive)
+
     def port(self, container: str, target: int) -> int:
         mapping = self.podman("inspect published port", "port", container, f"{target}/tcp")
         port = mapping.rsplit(":", 1)[-1]
@@ -226,6 +399,9 @@ class RuntimeContext:
 
     def cleanup(self) -> None:
         """Stop only tracked containers and remove the store only after verified teardown."""
+        if isinstance(getattr(self, "backend", None), DockerBackend):
+            self.backend.cleanup(self)
+            return
         failed: list[str] = []
         for container in reversed(self.containers):
             if container in getattr(self, "run_containers", set()):
@@ -589,6 +765,21 @@ def _signal_interrupt(_signum: int, _frame: Any) -> None:
     raise KeyboardInterrupt
 
 
+def _public_timeout_evidence(ctx: RuntimeContext | None, value: Any) -> Any:
+    """Protect only the admitted provider path in copies of JSON evidence values."""
+    if ctx is None:
+        return value
+    if isinstance(value, str):
+        return redact_timeout_provider(ctx, value)
+    if isinstance(value, dict):
+        return {key: _public_timeout_evidence(ctx, item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_public_timeout_evidence(ctx, item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_public_timeout_evidence(ctx, item) for item in value)
+    return value
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
     previous_sigterm = signal.getsignal(signal.SIGTERM)
     if args.metadata:
@@ -629,8 +820,21 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     archive = Path(args.archive).resolve() if args.archive else None
     generated_archive = False
     try:
-        ctx = RuntimeContext(image=metadata["name"], architecture=architecture, timeout=args.timeout, use_sudo=use_sudo)
+        selection = getattr(args, "outer_engine", "podman")
+        profile_name, profile = next(iter(profiles.items()))
+        outer_engine = select_outer_engine(selection, profile_name)
+        evidence["host"]["outerEngineSelection"] = selection
+        if outer_engine == "docker" and archive is None:
+            raise ProbeError("private Docker backend requires an explicit OCI archive, not an ambient image reference")
+        ctx = RuntimeContext(
+            image=metadata["name"],
+            architecture=architecture,
+            timeout=args.timeout,
+            use_sudo=use_sudo,
+            outer_engine=outer_engine,
+        )
         evidence["checks"] = ctx.checks
+        evidence["host"]["outerRuntime"] = ctx.prepare()
         if archive is None:
             archive = ctx.directory / "source-image.tar"
             source_podman = ["podman"]
@@ -641,8 +845,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             )
             generated_archive = True
         evidence["imageIdentity"] = ctx.load_archive(archive)
-        evidence["host"]["podmanVersion"] = ctx.podman("host Podman version", "--version")
-        profile_name, profile = next(iter(profiles.items()))
+        if outer_engine == "podman":
+            evidence["host"]["podmanVersion"] = evidence["host"]["outerRuntime"]["clientVersion"]
         if profile_name == "podman":
             _podman(ctx, profile, archive=archive, allow_privileged=args.allow_privileged, skip_nested=args.skip_nested)
         elif profile_name == "phpFpm":
@@ -662,16 +866,56 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         if ctx is not None:
             try:
                 ctx.cleanup()
-            except (OSError, ProbeError, subprocess.TimeoutExpired) as cleanup_error:
+            except (Exception, KeyboardInterrupt) as cleanup_error:
                 evidence["status"] = "failed"
                 evidence["cleanupError"] = f"{type(cleanup_error).__name__}: {cleanup_error}"
         if generated_archive:
             evidence["source"] = "locally exported image"
         evidence_path = Path(args.evidence)
         evidence_path.parent.mkdir(parents=True, exist_ok=True)
-        evidence_path.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
-        signal.signal(signal.SIGTERM, previous_sigterm)
-    return evidence
+        if ctx is not None and isinstance(getattr(ctx, "backend", None), DockerBackend):
+            try:
+                ctx.backend.check_deadline()
+            except Exception as completion_error:
+                evidence["status"] = "failed"
+                previous = evidence.get("cleanupError", "")
+                evidence["cleanupError"] = f"{previous}; {completion_error}".lstrip("; ")
+        try:
+            # Keep the descriptor for exactly the record we write. If a late
+            # completion requires invalidation, never follow a replaced pathname
+            # or unlink an unrelated file.
+            with evidence_path.open("wb", buffering=0) as record:
+                try:
+                    body = (json.dumps(_public_timeout_evidence(ctx, evidence), indent=2) + "\n").encode("utf-8")
+                    if record.write(body) != len(body):
+                        raise OSError("short runtime evidence write")
+                    record.flush()
+                    if ctx is not None and isinstance(getattr(ctx, "backend", None), DockerBackend):
+                        try:
+                            ctx.backend.check_deadline()
+                        except Exception as completion_error:
+                            evidence["status"] = "failed"
+                            previous = evidence.get("cleanupError", "")
+                            evidence["cleanupError"] = f"{previous}; {completion_error}".lstrip("; ")
+                            # Remove the passing body before serializing its
+                            # replacement, so even a failed rewrite is invalid.
+                            record.seek(0)
+                            record.truncate()
+                            body = (json.dumps(_public_timeout_evidence(ctx, evidence), indent=2) + "\n").encode(
+                                "utf-8"
+                            )
+                            if record.write(body) != len(body):
+                                raise OSError("short failed-evidence rewrite") from completion_error
+                            record.flush()
+                except Exception, KeyboardInterrupt:
+                    # An I/O failure must not leave this invocation's valid
+                    # passing body available as evidence. This acts on the held
+                    # descriptor, not any possibly replaced output pathname.
+                    os.ftruncate(record.fileno(), 0)
+                    raise
+        finally:
+            signal.signal(signal.SIGTERM, previous_sigterm)
+    return _public_timeout_evidence(ctx, evidence)
 
 
 def main() -> int:
@@ -683,6 +927,12 @@ def main() -> int:
     source.add_argument("--archive")
     source.add_argument("--image-ref")
     parser.add_argument("--arch")
+    parser.add_argument(
+        "--outer-engine",
+        choices=("podman", "docker", "profile"),
+        default="podman",
+        help="outer runtime policy; local default is Podman, profile selection is explicit",
+    )
     parser.add_argument("--evidence", required=True)
     parser.add_argument("--allow-privileged", action="store_true")
     parser.add_argument("--skip-nested", action="store_true")
