@@ -145,16 +145,20 @@ def _python_configuration(root: Path, before: dict, head: dict) -> tuple[str, di
         version = f"{match[1]}.{match[2]}"
         if tomllib.loads(_read(root, head, "uv.lock")).get("requires-python") != f"=={version}.*":
             raise RepairError("Python migration requires a matching lockfile")
-        text, count = re.subn(r"(?m)^PYTHON_VERSION:[^\n]*$", f'PYTHON_VERSION: "{version}"', text)
-        if count != 1:
-            raise RepairError("Python migration requires one canonical interpreter pin")
+        raw_config = yaml.safe_load(text)
+        selected = raw_config.get("PYTHON_VERSION", "") if isinstance(raw_config, dict) else ""
+        if not isinstance(selected, str) or ".".join(selected.split(".")[:2]) != version:
+            text, count = re.subn(r"(?m)^PYTHON_VERSION:[^\n]*$", f'PYTHON_VERSION: "{version}"', text)
+            if count != 1:
+                raise RepairError("Python migration requires one canonical interpreter pin")
     with tempfile.TemporaryDirectory() as directory:
         temporary = Path(directory)
         path = temporary / CONFIG
         path.parent.mkdir()
         path.write_text(text, encoding="utf-8")
         config = load_config(temporary)
-    if not requirement.startswith(f">={config['PYTHON_VERSION']},"):
+    supported_line = ".".join(config["PYTHON_VERSION"].split(".")[:2])
+    if not requirement.startswith(f">={supported_line},"):
         raise RepairError("Canonical Python runtime does not match project requirement")
     return text, config
 

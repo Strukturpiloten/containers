@@ -156,6 +156,26 @@ class GeneratedSnapshotTests(unittest.TestCase):
         with self.assertRaisesRegex(repair.RepairError, "matching lockfile"):
             repair.generated_changes(self.root, self.base, head)
 
+    def test_coordinated_python_migration_preserves_explicit_patch_pin(self) -> None:
+        head = self.commit(
+            {
+                "pyproject.toml": '[project]\nrequires-python = ">=3.15,<3.16"\n',
+                "uv.lock": 'requires-python = "==3.15.*"\n',
+                repair.CONFIG: yaml.safe_dump({**FIXTURE, "PYTHON_VERSION": "3.15.1"}),
+            }
+        )
+        changes = repair.generated_changes(self.root, self.base, head)
+        self.assertNotIn(repair.CONFIG, changes)
+        self.assertEqual(yaml.safe_load(changes[OUTPUT])["env"]["PYTHON_VERSION"], "3.15.1")
+        self.assert_idempotent(head, changes)
+
+    def test_python_patch_update_within_supported_line_is_preserved(self) -> None:
+        head = self.commit({repair.CONFIG: yaml.safe_dump({**FIXTURE, "PYTHON_VERSION": "3.14.8"})})
+        changes = repair.generated_changes(self.root, self.base, head)
+        self.assertNotIn(repair.CONFIG, changes)
+        self.assertEqual(yaml.safe_load(changes[OUTPUT])["env"]["PYTHON_VERSION"], "3.14.8")
+        self.assert_idempotent(head, changes)
+
     def test_new_main_templates_are_included_in_a_python_repair(self) -> None:
         head = self.commit(
             {
