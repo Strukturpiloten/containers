@@ -75,6 +75,20 @@ class DockerResourceBudgetTests(unittest.TestCase):
             verify_outer_container_limits(ctx, "outer-id")
         self.assertEqual(ctx.checks[-1]["status"], "failed")
 
+    def test_startup_timeout_forwarding_preserves_resource_enforcement(self) -> None:
+        ctx = MagicMock()
+        ctx.checks = []
+        for readback, accepted in (("200000 100000\n4294967296\n512", True), ("max 100000\nmax\nmax", False)):
+            with self.subTest(readback=readback):
+                ctx.exec.return_value = readback
+                if accepted:
+                    verify_outer_container_limits(ctx, "owned", timeout=0.25)
+                else:
+                    with self.assertRaisesRegex(ProbeError, "not enforced"):
+                        verify_outer_container_limits(ctx, "owned", timeout=0.25)
+                self.assertEqual(ctx.exec.call_args.kwargs, {"timeout": 0.25})
+                self.assertEqual(ctx.checks[-1]["status"], "passed" if accepted else "failed")
+
     def test_disk_admission_and_growth_use_only_the_task_store(self) -> None:
         with tempfile.TemporaryDirectory(prefix="strukturpiloten-budget-test-") as directory:
             root = Path(directory)

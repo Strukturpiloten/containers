@@ -12,6 +12,8 @@ from typing import Any
 from scripts import container_engine, docs_observations
 from scripts.maintenance import lifecycle_for
 from scripts.policy import semver_tags
+from scripts.runtime_docker_systemd import SYSTEMD_OPTIONS
+from scripts.runtime_resource_budgets import outer_container_limits
 
 CANONICAL_URL = "https://containers.strukturpiloten.de"
 SOURCE_URL = "https://github.com/Strukturpiloten/containers"
@@ -307,6 +309,36 @@ def _markdown(value: object) -> str:
     return str(value).replace("|", "\\|").replace("\n", " ").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def _conformance_example(row: dict[str, Any]) -> list[str]:
+    name = row["name"]
+    flags = (*outer_container_limits(), *SYSTEMD_OPTIONS)
+    mode = row["runtimeTests"]["docker"]["mode"]
+    return [
+        (
+            "This systemd conformance declaration does not establish publication or native admission. "
+            "Use the repository native harness against an exact locally built OCI archive:"
+        ),
+        "",
+        "```sh",
+        ".venv/bin/python -m scripts.runtime_tests \\",
+        f"  --metadata {row['metadataPath']} \\",
+        f"  --archive /path/to/exact-{name}-amd64.oci.tar \\",
+        "  --arch amd64 --sudo --allow-privileged \\",
+        f"  --evidence /tmp/{name}-amd64-evidence.json",
+        "```",
+        "",
+        (
+            f"The bounded rootful outer Podman launcher selects `{' '.join(flags)}` and `/dev/fuse`. "
+            "Its only bind is the read-only archive of the exact built image. "
+            f"Guest PID 1 is UID 0; the inner Docker daemon mode is `{mode}`. "
+            "Runtime provenance, safe exec placement, user-manager/controller delegation, inner OOM/PID enforcement, "
+            "storage budgets, and owned cleanup must pass the harness. "
+            "Read the Docker family guide and dedicated conformance contract before scheduling a pilot."
+        ),
+        "",
+    ]
+
+
 def image_markdown(row: dict[str, Any]) -> str:  # noqa: C901, PLR0912, PLR0915 - ordered page sections.
     """Render a single image, preserving observation and evidence limits."""
     name, image = row["name"], row["image"]
@@ -384,7 +416,9 @@ def image_markdown(row: dict[str, Any]) -> str:  # noqa: C901, PLR0912, PLR0915 
         ]
         if isinstance(observation, dict) and observation.get("refreshError"):
             lines += [f"Refresh error: {_markdown(observation['refreshError'])}", ""]
-    if row["family"] == "docker":
+    if row["family"] == "docker" and row.get("runtimeTests", {}).get("docker", {}).get("launcher") == "systemd":
+        lines += _conformance_example(row)
+    elif row["family"] == "docker":
         ref = latest["reference"] if isinstance(latest, dict) else f"{image}:{row['imageVersion']}"
         oom = " --oom-score-adj=0" if name == "docker-debian-11-rootless" else ""
         lines += [

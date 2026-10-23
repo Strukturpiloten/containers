@@ -15,6 +15,42 @@ from scripts.runtime_tests import ProbeError, RuntimeContext
 
 
 class RuntimeCommandTests(unittest.TestCase):
+    def test_explicit_timeout_is_forwarded_without_zero_or_negative_default_fallback(self) -> None:
+        context = RuntimeContext.__new__(RuntimeContext)
+        context.timeout = 45
+        context.checks = []
+        result = subprocess.CompletedProcess(["fixed"], 0, "ok", "")
+        with patch("scripts.runtime_tests.subprocess.run", return_value=result) as run:
+            context.command("default", ["fixed"])
+            self.assertEqual(run.call_args.kwargs["timeout"], 45)
+            context.command("remaining", ["fixed"], timeout=0.25)
+            self.assertEqual(run.call_args.kwargs["timeout"], 0.25)
+            run.reset_mock()
+            for timeout in (0, -1, float("nan"), float("inf")):
+                with self.subTest(timeout=timeout), self.assertRaisesRegex(ProbeError, "finite and positive"):
+                    context.command("expired", ["fixed"], timeout=timeout)
+            run.assert_not_called()
+
+    def test_exec_keeps_guard_and_forwards_only_explicit_timeout(self) -> None:
+        context = RuntimeContext.__new__(RuntimeContext)
+        context.exec_guard = ("fixed-guard",)
+        context.podman = MagicMock(return_value="ok")
+        context.exec("default", "owned", "true")
+        context.podman.assert_called_with("default", "exec", "owned", "fixed-guard", "true")
+        context.exec("remaining", "owned", "true", timeout=0.25)
+        context.podman.assert_called_with("remaining", "exec", "owned", "fixed-guard", "true", timeout=0.25)
+
+    def test_start_forwards_only_explicit_timeout_and_keeps_owned_identity(self) -> None:
+        context = RuntimeContext.__new__(RuntimeContext)
+        context.image_ref = "localhost/test:runtime"
+        context.containers = []
+        context.podman = MagicMock(return_value="a" * 64)
+        context.start("default")
+        self.assertEqual(context.podman.call_args.kwargs, {})
+        context.start("bounded launch", timeout=0.25)
+        self.assertEqual(context.podman.call_args.kwargs, {"timeout": 0.25})
+        self.assertEqual(context.containers, ["a" * 64])
+
     def test_image_precedes_guest_command_and_follows_podman_options(self) -> None:
         context = RuntimeContext.__new__(RuntimeContext)
         context.image_ref = "localhost/test:runtime"
@@ -113,6 +149,7 @@ class RuntimeCommandTests(unittest.TestCase):
             context.containers = []
             context.run_containers = set()
             context.checks = []
+            context.observations = []
             context._owned_mounts = MagicMock(return_value=[])
             context.load_archive = MagicMock(return_value={})
             container = "b" * 64
@@ -311,6 +348,7 @@ class RuntimeCommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             context = MagicMock()
             context.checks = []
+            context.observations = []
             context.load_archive.return_value = {}
             context.podman.return_value = "podman fixture"
             context.cleanup.side_effect = ProbeError("isolated store retained")

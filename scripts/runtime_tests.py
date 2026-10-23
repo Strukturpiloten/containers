@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import platform
 import re
@@ -20,22 +21,25 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import yaml
 
 from scripts.metadata_schema import validate_metadata_schema
 from scripts.oci_artifacts import archive_identity
+from scripts.runtime_docker import DockerProbePhase
+from scripts.runtime_errors import ProbeError
+from scripts.runtime_resource_budgets import STORE_LIMIT_BYTES, IsolatedStoreDiskBudget, outer_container_limits
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TIMEOUT = 45
 MAX_LOG = 4000
-
-
-class ProbeError(RuntimeError):
-    """A runtime assertion or bounded command failed."""
+CONTROL_SECONDS = 300
+SYSTEMD_PAIR_SECONDS = 900
 
 
 class RuntimeContext:
@@ -48,8 +52,13 @@ class RuntimeContext:
         self.directory = Path(tempfile.mkdtemp(prefix="strukturpiloten-runtime-"))
         self.containers: list[str] = []
         self.run_containers: set[str] = set()
+        self.container_launchers: dict[str, str] = {}
         self.checks: list[dict[str, Any]] = []
-        self.image_ref = f"localhost/{image}:runtime-{os.getpid()}"
+        self.observations: list[dict[str, Any]] = []
+        self.runtime_deadline: float | None = None
+        self.runtime_phase = "single"
+        self.runtime_disk_budget: IsolatedStoreDiskBudget | None = None
+        self.image_ref = f"localhost/{image}:runtime-{os.getpid()}-{uuid.uuid4().hex}"
         self._sudo = ["sudo", "-n"] if use_sudo else []
         self._podman = [
             *self._sudo,
@@ -63,10 +72,23 @@ class RuntimeContext:
             "--tmpdir",
             str(self.directory / "tmp"),
         ]
-        for part in ("root", "runroot", "tmp"):
-            (self.directory / part).mkdir()
+        try:
+            for part in ("root", "runroot", "tmp"):
+                (self.directory / part).mkdir()
+        except (Exception, KeyboardInterrupt) as error:
+            try:
+                shutil.rmtree(self.directory)
+            except OSError as cleanup_error:
+                raise ProbeError(f"cannot remove partial owned store {self.directory}: {cleanup_error}") from error
+            raise
 
-    def command(self, name: str, command: list[str], *, timeout: int | None = None, check: bool = True) -> str:
+    def command(self, name: str, command: list[str], *, timeout: float | None = None, check: bool = True) -> str:
+        effective_timeout = self.timeout if timeout is None else timeout
+        deadline = getattr(self, "runtime_deadline", None)
+        if deadline is not None:
+            effective_timeout = min(effective_timeout, deadline - time.monotonic())
+        if not math.isfinite(effective_timeout) or effective_timeout <= 0:
+            raise ProbeError(f"{name}: command timeout must be finite and positive")
         start = time.monotonic()
         try:
             result = subprocess.run(
@@ -74,7 +96,7 @@ class RuntimeContext:
                 capture_output=True,
                 text=True,
                 check=False,
-                timeout=timeout or self.timeout,
+                timeout=effective_timeout,
             )
         except subprocess.TimeoutExpired as error:
             self.checks.append(
@@ -82,7 +104,7 @@ class RuntimeContext:
                     "name": name,
                     "status": "failed",
                     "durationSeconds": round(time.monotonic() - start, 3),
-                    "error": f"command timed out after {timeout or self.timeout}s",
+                    "error": f"command timed out after {effective_timeout}s",
                 }
             )
             raise ProbeError(f"{name}: command timed out") from error
@@ -103,7 +125,7 @@ class RuntimeContext:
             raise ProbeError(f"{name}: exit {result.returncode}: {diagnostics[-1000:] or output[-1000:]}")
         return output
 
-    def podman(self, name: str, *args: str, timeout: int | None = None, check: bool = True) -> str:
+    def podman(self, name: str, *args: str, timeout: float | None = None, check: bool = True) -> str:
         if args and args[0] == "run":
             try:
                 image_index = args.index(self.image_ref)
@@ -124,6 +146,9 @@ class RuntimeContext:
             cidfile = self.directory / f"run-{run_id}.cid"
             self.containers.append(container_name)
             self.run_containers.add(container_name)
+            if not hasattr(self, "container_launchers"):
+                self.container_launchers = {}
+            self.container_launchers[container_name] = "systemd" if "--systemd=always" in options else "direct"
             completed = False
             try:
                 output = self.command(
@@ -153,6 +178,7 @@ class RuntimeContext:
                     self.containers[self.containers.index(container_name)] = container
                     self.run_containers.remove(container_name)
                     self.run_containers.add(container)
+                    self.container_launchers[container] = self.container_launchers.pop(container_name)
                 elif completed and self.checks[-1].get("exitCode") == 0:
                     raise ProbeError(f"{name}: Podman run succeeded without cidfile {cidfile}")
         return self.command(name, [*self._podman, *args], timeout=timeout, check=check)
@@ -169,7 +195,23 @@ class RuntimeContext:
         self.checks.append({"name": name, "status": "skipped", "reason": reason})
 
     def load_archive(self, archive: Path) -> dict[str, str]:
-        identity = archive_identity(archive, self.architecture)
+        if getattr(self, "runtime_deadline", None) is None:
+            identity = archive_identity(archive, self.architecture)
+        else:
+            code = (
+                "import json,sys\nfrom pathlib import Path\n"
+                "sys.path.insert(0,sys.argv[1])\nfrom scripts.oci_artifacts import archive_identity\n"
+                "result=json.dumps(archive_identity(Path(sys.argv[2]),sys.argv[3]))\n"
+                "if len(result)>4096: raise ValueError('archive identity exceeded its byte bound')\n"
+                "print(result)\n"
+            )
+            identity = json.loads(
+                self.command(
+                    "read bounded OCI archive identity",
+                    [sys.executable, "-I", "-c", code, str(ROOT), str(archive), self.architecture],
+                    timeout=180,
+                )
+            )
         self.podman("load OCI archive", "load", "--quiet", "--input", str(archive), timeout=180)
         ids = self.podman("list loaded images", "images", "--quiet", "--no-trunc").splitlines()
         if len(ids) != 1:
@@ -187,9 +229,18 @@ class RuntimeContext:
             name, "run", "--rm", "--security-opt", "label=disable", *options, self.image_ref, *command, timeout=timeout
         )
 
-    def start(self, name: str, *command: str, options: tuple[str, ...] = ()) -> str:
+    def start(self, name: str, *command: str, options: tuple[str, ...] = (), timeout: float | None = None) -> str:
+        timeout_options = {} if timeout is None else {"timeout": timeout}
         container = self.podman(
-            name, "run", "--detach", "--security-opt", "label=disable", *options, self.image_ref, *command
+            name,
+            "run",
+            "--detach",
+            "--security-opt",
+            "label=disable",
+            *options,
+            self.image_ref,
+            *command,
+            **timeout_options,
         )
         if not re.fullmatch(r"[a-f0-9]{64}", container):
             raise ProbeError(f"{name}: no container ID returned")
@@ -197,8 +248,9 @@ class RuntimeContext:
             self.containers.append(container)
         return container
 
-    def exec(self, name: str, container: str, *args: str) -> str:
-        return self.podman(name, "exec", container, *args)
+    def exec(self, name: str, container: str, *args: str, timeout: float | None = None) -> str:
+        options = {} if timeout is None else {"timeout": timeout}
+        return self.podman(name, "exec", container, *getattr(self, "exec_guard", ()), *args, **options)
 
     def port(self, container: str, target: int) -> int:
         mapping = self.podman("inspect published port", "port", container, f"{target}/tcp")
@@ -227,6 +279,7 @@ class RuntimeContext:
     def cleanup(self) -> None:
         """Stop only tracked containers and remove the store only after verified teardown."""
         failed: list[str] = []
+        shutdown_failures: list[str] = []
         for container in reversed(self.containers):
             if container in getattr(self, "run_containers", set()):
                 try:
@@ -258,7 +311,11 @@ class RuntimeContext:
                     timeout=10,
                     check=False,
                 )
-                if running == "true":
+                if getattr(self, "container_launchers", {}).get(container) == "systemd":
+                    from scripts.runtime_docker_systemd import stop_guest  # noqa: PLC0415
+
+                    stop_guest(self, container)
+                elif running == "true":
                     self.podman(
                         "signal owned container internally",
                         "exec",
@@ -270,8 +327,18 @@ class RuntimeContext:
                         check=False,
                     )
                     self.podman("wait for owned container", "wait", container, timeout=15, check=False)
-            except ProbeError:
-                pass
+            except ProbeError as error:
+                if getattr(self, "container_launchers", {}).get(container) == "systemd":
+                    shutdown_failures.append(container)
+                    self.checks.append(
+                        {
+                            "name": "cleanup owned systemd shutdown",
+                            "status": "failed",
+                            "container": container,
+                            "error": f"{type(error).__name__}: {error}",
+                            "errorTraceback": "".join(traceback.format_exception(error)),
+                        }
+                    )
             try:
                 self.podman(
                     "cleanup owned container",
@@ -331,6 +398,10 @@ class RuntimeContext:
         else:
             shutil.rmtree(self.directory)
         self.checks.append({"name": "cleanup isolated store", "status": "passed"})
+        if shutdown_failures:
+            raise ProbeError(
+                f"systemd shutdown was abnormal for {shutdown_failures}; exact owned resources were removed"
+            )
 
 
 def _wait_for_port(port: int, *, timeout: int = 15) -> None:
@@ -589,6 +660,308 @@ def _signal_interrupt(_signum: int, _frame: Any) -> None:
     raise KeyboardInterrupt
 
 
+class _PairCancellation:
+    def __init__(self) -> None:
+        self.cancelled = False
+        self.defer_interrupts = False
+
+    def __call__(self, _signum: int, _frame: Any) -> None:
+        self.cancelled = True
+        if not self.defer_interrupts:
+            raise KeyboardInterrupt
+
+
+class _ArchiveSnapshot:
+    def __init__(self, path: Path, supplied: Path | None) -> None:
+        self.path = path
+        self.supplied = supplied
+        self.handle: BinaryIO | None = None
+        self.identity: tuple[int, int, int, int, int] | None = None
+
+    def prepare(self, ctx: RuntimeContext, args: argparse.Namespace) -> None:
+        if self.handle is not None:
+            self.verify()
+            return
+        if self.supplied is None:
+            ctx.command(
+                "export local image",
+                ["podman", "save", "--format", "oci-archive", "--output", str(self.path), args.image_ref],
+                timeout=180,
+            )
+        else:
+            if not self.supplied.is_file():
+                raise ProbeError("supplied OCI archive is not a regular file")
+            code = (
+                "import sys\n"
+                "with open(sys.argv[1],'rb') as source, open(sys.argv[2],'wb') as target:\n"
+                " total=0\n"
+                " while block:=source.read(1024*1024):\n"
+                "  total+=len(block)\n"
+                "  if total>int(sys.argv[3]): raise ValueError('source archive exceeds disk budget')\n"
+                "  target.write(block)\n"
+            )
+            ctx.command(
+                "snapshot supplied OCI archive",
+                [sys.executable, "-I", "-c", code, str(self.supplied), str(self.path), str(STORE_LIMIT_BYTES)],
+                timeout=180,
+            )
+        if not 0 < self.path.stat().st_size <= STORE_LIMIT_BYTES:
+            raise ProbeError("owned OCI archive snapshot has an invalid or over-budget size")
+        self.path.chmod(0o400)
+        self.handle = self.path.open("rb")
+        value = os.fstat(self.handle.fileno())
+        self.identity = value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns
+        self.verify()
+
+    def verify(self) -> None:
+        value = self.path.stat(follow_symlinks=False)
+        current = value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns
+        if self.identity is not None and current != self.identity:
+            raise ProbeError("owned OCI snapshot path changed after its input inode was pinned")
+
+    def load_path(self) -> Path:
+        if self.handle is None:
+            raise ProbeError("owned OCI snapshot is not pinned")
+        return Path(f"/proc/{os.getpid()}/fd/{self.handle.fileno()}")
+
+    def close(self) -> None:
+        if self.handle is not None:
+            self.handle.close()
+
+
+@dataclass(frozen=True)
+class _DockerPhasePlan:
+    args: argparse.Namespace
+    metadata: dict[str, Any]
+    architecture: str
+    use_sudo: bool
+    archive: _ArchiveSnapshot
+    phase: DockerProbePhase
+    deadline: float
+    cancellation: _PairCancellation
+    expected_identity: dict[str, Any] | None
+
+
+def _phase_error(evidence: dict[str, Any], error: BaseException, *, key: str = "error") -> None:
+    evidence["status"] = "failed"
+    summary = f"{type(error).__name__}: {error}"
+    details = "".join(traceback.format_exception(error))
+    if key in evidence:
+        evidence.setdefault("additionalErrors", []).append({"kind": key, "error": summary, "traceback": details})
+    else:
+        evidence[key] = summary
+        evidence[key + "Traceback"] = details
+
+
+def _execute_docker_phase(plan: _DockerPhasePlan) -> dict[str, Any]:
+    started = time.monotonic()
+    result: dict[str, Any] = {
+        "phase": plan.phase.value,
+        "status": "failed",
+        "checks": [],
+        "observations": [],
+        "cleanupVerified": False,
+        "architecture": plan.architecture,
+    }
+    ctx: RuntimeContext | None = None
+    try:
+        if plan.cancellation.cancelled or started >= plan.deadline:
+            raise ProbeError("required Docker phase cancelled or wall-time budget exhausted before context creation")
+        # Ownership acquisition has no native work; latch cancellation until the
+        # completed context can be cleaned, rather than losing a partial store.
+        plan.cancellation.defer_interrupts = True
+        try:
+            ctx = RuntimeContext(
+                image=plan.metadata["name"],
+                architecture=plan.architecture,
+                timeout=plan.args.timeout,
+                use_sudo=plan.use_sudo,
+            )
+        finally:
+            plan.cancellation.defer_interrupts = False
+        result["checks"], result["observations"] = ctx.checks, ctx.observations
+        ctx.runtime_phase = plan.phase.value
+        ctx.runtime_deadline = plan.deadline
+        if plan.cancellation.cancelled:
+            raise KeyboardInterrupt
+        _docker_phase_work(plan, ctx, result)
+        result["status"] = "passed"
+    except (Exception, KeyboardInterrupt) as error:
+        if isinstance(error, KeyboardInterrupt):
+            plan.cancellation.cancelled = True
+        _phase_error(result, error)
+    finally:
+        plan.cancellation.defer_interrupts = True
+        try:
+            if ctx is not None:
+                ctx.runtime_deadline = None
+                try:
+                    ctx.cleanup()
+                    result["cleanupVerified"] = True
+                except (Exception, KeyboardInterrupt) as error:
+                    if isinstance(error, KeyboardInterrupt):
+                        plan.cancellation.cancelled = True
+                    _phase_error(result, error, key="cleanupError")
+        finally:
+            plan.cancellation.defer_interrupts = False
+        finished = time.monotonic()
+        result["durationSeconds"] = round(finished - started, 3)
+        if plan.cancellation.cancelled:
+            _phase_error(result, KeyboardInterrupt("Docker phase cancelled; no subsequent phase may start"))
+        elif finished >= plan.deadline:
+            _phase_error(result, ProbeError("Docker phase wall-time budget exhausted, including owned cleanup"))
+        elif result["status"] == "passed" and (
+            not result["checks"] or any(check.get("status") != "passed" for check in result["checks"])
+        ):
+            _phase_error(result, ProbeError("Docker phase has failed, skipped or unknown admission checks"))
+    return result
+
+
+def _docker_phase_work(plan: _DockerPhasePlan, ctx: RuntimeContext, result: dict[str, Any]) -> None:
+    from scripts.runtime_docker import _run_docker_phase  # noqa: PLC0415
+
+    budget = IsolatedStoreDiskBudget(ctx, source_archive=plan.archive.path)
+    if plan.archive.identity is not None:
+        budget.bind_source_archive(plan.archive.identity)
+    try:
+        with budget:
+            ctx.runtime_disk_budget = budget
+            plan.archive.prepare(ctx, plan.args)
+            budget.bind_source_archive(plan.archive.identity)
+            budget.checkpoint()
+            identity = ctx.load_archive(plan.archive.load_path())
+            budget.checkpoint()
+            plan.archive.verify()
+            result["imageIdentity"] = identity
+            result["archiveSnapshot"] = {"fdPinned": True, "identity": list(plan.archive.identity)}
+            if plan.expected_identity is not None and identity != plan.expected_identity:
+                raise ProbeError("control and enforcement OCI archive identities differ")
+            if identity.get("architecture") != plan.architecture:
+                raise ProbeError("Docker phase archive architecture differs from the requested native architecture")
+            result["podmanVersion"] = ctx.podman("host Podman version", "--version")
+            profile = plan.metadata["tests"]["docker"]
+            if plan.phase is DockerProbePhase.CLEAN_CONTROL:
+                _run_docker_phase(
+                    ctx,
+                    profile,
+                    plan.phase,
+                    allow_privileged=plan.args.allow_privileged,
+                    skip_nested=False,
+                )
+            else:
+                _docker(
+                    ctx,
+                    profile,
+                    archive=plan.archive.load_path(),
+                    allow_privileged=plan.args.allow_privileged,
+                    skip_nested=False,
+                )
+    finally:
+        ctx.runtime_disk_budget = None
+
+
+def _run_systemd_pair(
+    args: argparse.Namespace, metadata: dict[str, Any], evidence: dict[str, Any], *, use_sudo: bool
+) -> dict[str, Any]:
+    started = time.monotonic()
+    deadline = started + SYSTEMD_PAIR_SECONDS
+    cancellation = _PairCancellation()
+    previous = {kind: signal.getsignal(kind) for kind in (signal.SIGTERM, signal.SIGINT)}
+    source: tempfile.TemporaryDirectory[str] | None = None
+    archive: _ArchiveSnapshot | None = None
+    evidence["phases"] = []
+    evidence["observations"] = []
+    evidence["budgets"] = {
+        "controlSeconds": CONTROL_SECONDS,
+        "pairWallSeconds": SYSTEMD_PAIR_SECONDS,
+        "commandTimeoutSeconds": args.timeout,
+        "outerOptions": list(outer_container_limits()),
+        "storeMaxBytes": STORE_LIMIT_BYTES,
+        "cleanup": "original bounded cleanup commands run even after work expiry; overrun cannot pass",
+    }
+    try:
+        for kind in previous:
+            signal.signal(kind, cancellation)
+        profile = metadata["tests"]["docker"]
+        if args.skip_nested or profile.get("nestedRuntime", True) is False or not args.allow_privileged:
+            raise ProbeError("both required systemd Docker phases need enabled privileged nested runtime work")
+        cancellation.defer_interrupts = True
+        try:
+            source = tempfile.TemporaryDirectory(prefix="strukturpiloten-runtime-source-")
+            archive = _ArchiveSnapshot(
+                Path(source.name) / "source-image.tar",
+                Path(args.archive).resolve() if args.archive else None,
+            )
+            archive.path.touch(mode=0o600, exist_ok=False)
+        finally:
+            cancellation.defer_interrupts = False
+        if not args.archive:
+            evidence["source"] = "locally exported image"
+        for phase in (DockerProbePhase.CLEAN_CONTROL, DockerProbePhase.ENFORCEMENT):
+            if cancellation.cancelled or time.monotonic() >= deadline:
+                raise ProbeError("systemd Docker pair cancelled or wall-time budget exhausted before next phase")
+            result = _execute_docker_phase(
+                _DockerPhasePlan(
+                    args=args,
+                    metadata=metadata,
+                    architecture=evidence["architecture"],
+                    use_sudo=use_sudo,
+                    archive=archive,
+                    phase=phase,
+                    deadline=min(deadline, started + CONTROL_SECONDS)
+                    if phase is DockerProbePhase.CLEAN_CONTROL
+                    else deadline,
+                    cancellation=cancellation,
+                    expected_identity=evidence.get("imageIdentity"),
+                )
+            )
+            evidence["phases"].append(result)
+            evidence["checks"].extend({**check, "phase": phase.value} for check in result["checks"])
+            evidence["observations"].extend({**item, "routePhase": phase.value} for item in result["observations"])
+            if "imageIdentity" not in evidence and "imageIdentity" in result:
+                evidence["imageIdentity"] = result["imageIdentity"]
+            if "podmanVersion" in result:
+                evidence["host"]["podmanVersion"] = result["podmanVersion"]
+            if result["status"] != "passed" or not result["cleanupVerified"]:
+                for key in ("error", "errorTraceback", "cleanupError", "cleanupErrorTraceback", "additionalErrors"):
+                    if key in result:
+                        evidence[key] = list(result[key]) if key == "additionalErrors" else result[key]
+                break
+        if len(evidence["phases"]) == 2 and all(phase["status"] == "passed" for phase in evidence["phases"]):
+            evidence["status"] = "passed"
+    except (Exception, KeyboardInterrupt) as error:
+        _phase_error(evidence, error)
+    finally:
+        cancellation.defer_interrupts = True
+        try:
+            if archive is not None and archive.identity is not None:
+                archive.verify()
+        except (Exception, KeyboardInterrupt) as error:
+            _phase_error(evidence, error, key="cleanupError")
+        finally:
+            try:
+                if archive is not None:
+                    archive.close()
+                if source is not None:
+                    source.cleanup()
+            except (Exception, KeyboardInterrupt) as error:
+                _phase_error(evidence, error, key="cleanupError")
+            if cancellation.cancelled:
+                _phase_error(evidence, KeyboardInterrupt("systemd Docker pair cancelled"))
+            finished = time.monotonic()
+            evidence["durationSeconds"] = round(finished - started, 3)
+            if finished >= deadline:
+                _phase_error(evidence, ProbeError("systemd Docker pair wall-time budget exhausted"))
+            try:
+                evidence_path = Path(args.evidence)
+                evidence_path.parent.mkdir(parents=True, exist_ok=True)
+                evidence_path.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+            finally:
+                for kind, handler in previous.items():
+                    signal.signal(kind, handler)
+    return evidence
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
     previous_sigterm = signal.getsignal(signal.SIGTERM)
     if args.metadata:
@@ -625,12 +998,19 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         not args.no_sudo
         and subprocess.run(["sudo", "-n", "true"], capture_output=True, check=False, timeout=5).returncode == 0
     )
+    if (
+        next(iter(profiles)) == "docker"
+        and profiles["docker"].get("launcher") == "systemd"
+        and profiles["docker"].get("mode") == "rootless"
+    ):
+        return _run_systemd_pair(args, metadata, evidence, use_sudo=use_sudo)
     ctx: RuntimeContext | None = None
     archive = Path(args.archive).resolve() if args.archive else None
     generated_archive = False
     try:
         ctx = RuntimeContext(image=metadata["name"], architecture=architecture, timeout=args.timeout, use_sudo=use_sudo)
         evidence["checks"] = ctx.checks
+        evidence["observations"] = ctx.observations
         if archive is None:
             archive = ctx.directory / "source-image.tar"
             source_podman = ["podman"]
@@ -656,21 +1036,25 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         evidence["status"] = "passed"
     except (Exception, KeyboardInterrupt) as error:
         evidence["error"] = f"{type(error).__name__}: {error}"
+        evidence["errorTraceback"] = "".join(traceback.format_exception(error))
     finally:
         # A second cancellation signal must not interrupt owned-resource cleanup.
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        if ctx is not None:
-            try:
-                ctx.cleanup()
-            except (OSError, ProbeError, subprocess.TimeoutExpired) as cleanup_error:
-                evidence["status"] = "failed"
-                evidence["cleanupError"] = f"{type(cleanup_error).__name__}: {cleanup_error}"
-        if generated_archive:
-            evidence["source"] = "locally exported image"
-        evidence_path = Path(args.evidence)
-        evidence_path.parent.mkdir(parents=True, exist_ok=True)
-        evidence_path.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
-        signal.signal(signal.SIGTERM, previous_sigterm)
+        try:
+            if ctx is not None:
+                try:
+                    ctx.cleanup()
+                except (Exception, KeyboardInterrupt) as cleanup_error:
+                    evidence["status"] = "failed"
+                    evidence["cleanupError"] = f"{type(cleanup_error).__name__}: {cleanup_error}"
+                    evidence["cleanupErrorTraceback"] = "".join(traceback.format_exception(cleanup_error))
+            if generated_archive:
+                evidence["source"] = "locally exported image"
+            evidence_path = Path(args.evidence)
+            evidence_path.parent.mkdir(parents=True, exist_ok=True)
+            evidence_path.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+        finally:
+            signal.signal(signal.SIGTERM, previous_sigterm)
     return evidence
 
 
