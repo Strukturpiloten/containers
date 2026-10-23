@@ -145,5 +145,6 @@ class InputSelectionTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertLess(preflight, upload)
                 self.assertIn("has_builds", steps[preflight]["if"])
+                self.assertEqual(steps[preflight].get("continue-on-error", False), path.endswith("publish-images.yml"))
                 self.assertIn("always()", steps[upload]["if"])
                 self.assertIn("image-inputs.json", steps[upload]["with"]["path"])

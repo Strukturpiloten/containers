@@ -47,13 +47,19 @@ fleet. A tool-only push selects no images for publication. Scheduled and manual
 runs retain their full or explicitly requested scope; image and runtime changes
 retain affected-image and reverse-dependency coverage.
 
-Before PR, queue, or publication matrices start, `scripts.image_inputs` checks the
+Before PR and queue matrices start, `scripts.image_inputs` checks the
 selected image arguments and private payload base-image arguments. Lookups are
 deduplicated by digest, then checked for manifest identity and required Linux
 platforms. Empty indexes, missing architectures, and missing digests fail the plan
 job before expensive builds start. Transient registry failures have a bounded
 retry budget; permanently missing manifests are reported immediately. Unselected
 images do not participate in this preflight.
+
+Publication planning runs the same check as an advisory and retains its evidence.
+A failed preflight there cannot prevent unrelated images from publishing: every
+image still has to pass its own build, runtime, vulnerability, and provenance
+gates. This preserves independent publication when an upstream registry removes
+one base image. PR and merge-queue preflight failures always block `Required CI`.
 
 The `container-build-plan` artifact includes `image-inputs.json`, including on a
 preflight failure. Its failed checks identify the exact reference, architectures,

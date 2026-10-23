@@ -172,6 +172,8 @@ jobs:
 
       - name: Preflight selected image inputs
         if: steps.outputs.outputs.has_builds == 'true'
+        # Preserve independent publication: each image still must pass its own build/runtime/scan gates.
+        continue-on-error: true
         uses: ./.github/actions/preflight-images
       - name: Summarize build plan
         if: always() && steps.outputs.outcome == 'success'
