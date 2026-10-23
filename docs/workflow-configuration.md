@@ -23,11 +23,42 @@ verified by GitHub CI.
 
 Renovate updates canonical tool/runner values and the corresponding literals in
 generated workflow YAML in the same dependency update. Its custom template
-manager tracks action tags and commit digests together, alongside the native
-manager's generated-workflow references. There are no privileged post-upgrade
-commands. A missed source or generated update fails the generation check rather
-than silently changing workflow behavior. Manually regenerate on the Renovate
-branch if an update cannot be represented by its configured managers.
+manager tracks major-only, minor and full action tags with their commit digests,
+alongside the native manager's generated-workflow references. Python interpreter
+updates share a reviewed group with project requirements and the lockfile.
+
+## Completing Renovate updates automatically
+
+`Complete Renovate updates` reconciles generated files on same-repository PRs
+authored by `renovate[bot]`. It runs on PR updates, hourly for recovery, and on
+manual dispatch. Dispatch with a PR number to check one branch, or leave it empty
+to check all open Renovate PRs.
+
+The workflow checks out only the trusted default branch and installs its locked
+dependencies. `scripts.renovate_updates` reads immutable Git objects from a PR;
+it never checks out or imports PR code. It previews the PR combined with current
+`main`, regenerates the maintenance catalogue and workflows, synchronizes action
+pin updates between templates and outputs, and aligns the canonical interpreter
+when a Python requirement and matching lockfile have changed. Template changes
+must match trusted `main` except for literal action tags and commit hashes.
+
+When generated changes are necessary, one completion commit incorporates that
+preview of `main` and the generated files. A remote-head lease prevents replacing
+concurrent edits. Queued PRs stay unchanged. A real merge conflict requests
+Renovate's own rebase checkbox; merely falling behind `main` does not request a
+rebase. Repeated runs with matching files make no commits.
+
+The existing `RELEASE_AUTOMATION_TOKEN` must have repository Contents, Pull requests
+and Workflows write access. Its pushes trigger normal PR CI automatically. The
+built-in Actions token would require manual approval for the resulting workflow
+runs. `gitIgnoredAuthors` allows Renovate to replace the completion bot's commits
+when it updates its own branch; human edits retain Renovate's usual protection.
+Mend-hosted post-upgrade commands are not required.
+
+Freshness checks, Required CI, the merge queue and dependency review policies
+remain enforced. A successful completion run establishes generated-file
+consistency; image builds, runtime tests and admission checks still decide whether
+a dependency update can merge.
 
 ## CI-tool changes and image-input preflight
 
