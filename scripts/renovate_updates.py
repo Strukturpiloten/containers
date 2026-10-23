@@ -36,10 +36,15 @@ CATALOGUE = ("docs/image-catalogue.json", "docs/image-catalogue.md")
 BOT_NAME = "github-actions[bot]"
 BOT_EMAIL = "41898282+github-actions[bot]@users.noreply.github.com"
 MAX_BLOB_SIZE = 1_000_000
+MERGE_PARENT_COUNT = 2
 
 
 class RepairError(RuntimeError):
     """A PR cannot be completed within the trusted regeneration boundary."""
+
+
+class WorkflowPermissionError(RepairError):
+    """GitHub explicitly rejected a workflow update by the automation credential."""
 
 
 def _run(root: Path, arguments: list[str], *, data: str | None = None, env: dict | None = None) -> str:
@@ -57,6 +62,11 @@ def _run(root: Path, arguments: list[str], *, data: str | None = None, env: dict
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RepairError(f"Could not run {arguments[0]}") from exc
     if result.returncode:
+        diagnostic = result.stderr.lower()
+        if "push" in arguments and "workflow" in diagnostic and ("permission" in diagnostic or "scope" in diagnostic):
+            raise WorkflowPermissionError(
+                "GitHub rejected workflow changes: RELEASE_AUTOMATION_TOKEN needs Workflows write access"
+            )
         raise RepairError(f"{arguments[0]} {arguments[1]} failed (exit {result.returncode})")
     return result.stdout
 
@@ -338,12 +348,44 @@ def _push_completion(root: Path, github: GitHub, pull: dict, commit: str, paths:
     number, head, branch = pull["number"], pull["head"]["sha"], pull["head"]["ref"]
     try:
         _git(root, "push", f"--force-with-lease=refs/heads/{branch}:{head}", "origin", f"{commit}:refs/heads/{branch}")
+    except WorkflowPermissionError:
+        raise
     except RepairError:
-        if github.request("GET", f"pulls/{number}")["head"]["sha"] == head:
+        current = github.request("GET", f"pulls/{number}")
+        unchanged = current.get("state") == "open" and current["head"]["sha"] == head
+        remote = _git(root, "ls-remote", "--heads", "origin", f"refs/heads/{branch}").split() if unchanged else []
+        if unchanged and remote and remote[0] == head:
             raise RepairError("Completion push failed; verify the bot's Contents and Workflows write access") from None
         _report(f"PR #{number}: concurrent update won the push; defer to the next event.")
     else:
         _report(f"PR #{number}: completed {', '.join(paths)}; normal CI will run on {commit}.")
+
+
+def _custom_commits(root: Path, default_branch: str, pull: dict) -> bool:
+    """Accept bot commits and verified plain merges of trusted main only."""
+    login = pull["user"]["login"]
+    bot_authors = {
+        BOT_EMAIL,
+        f"{login}@users.noreply.github.com",
+        f"{pull['user']['id']}+{login}@users.noreply.github.com",
+    }
+    history = _git(root, "log", "--format=%H %ae", f"origin/{default_branch}..{pull['head']['sha']}")
+    for line in history.splitlines():
+        commit, author = line.split(" ", 1)
+        if author in bot_authors:
+            continue
+        parents = _git(root, "show", "--no-patch", "--format=%P", commit).split()
+        if len(parents) != MERGE_PARENT_COUNT:
+            return True
+        ancestor = _git(root, "merge-base", parents[1], f"origin/{default_branch}").strip()
+        if ancestor != parents[1]:
+            return True
+        preview = _merge_snapshot(root, parents[0], parents[1])
+        if preview is None or _git(root, "rev-parse", f"{preview}^{{tree}}") != _git(
+            root, "rev-parse", f"{commit}^{{tree}}"
+        ):
+            return True
+    return False
 
 
 def _ready_pull(root: Path, github: GitHub, default_branch: str, pull: dict) -> bool:
@@ -358,14 +400,7 @@ def _ready_pull(root: Path, github: GitHub, default_branch: str, pull: dict) -> 
     if _git(root, "rev-parse", "FETCH_HEAD").strip() != head:
         _report(f"PR #{number}: branch changed; defer to the next event.")
         return False
-    login = pull["user"]["login"]
-    bot_authors = {
-        BOT_EMAIL,
-        f"{login}@users.noreply.github.com",
-        f"{pull['user']['id']}+{login}@users.noreply.github.com",
-    }
-    authors = set(_git(root, "log", "--format=%ae", f"origin/{default_branch}..{head}").splitlines())
-    if not authors <= bot_authors:
+    if _custom_commits(root, default_branch, pull):
         _report(f"PR #{number}: custom commits present; left unchanged.")
         return False
     return True
