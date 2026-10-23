@@ -170,7 +170,11 @@ jobs:
 
           uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine github-outputs build-plan.json >> "$GITHUB_OUTPUT"
 
+      - name: Preflight selected image inputs
+        if: steps.outputs.outputs.has_builds == 'true'
+        uses: ./.github/actions/preflight-images
       - name: Summarize build plan
+        if: always() && steps.outputs.outcome == 'success'
         shell: bash
         run: |
           set -euo pipefail
@@ -178,10 +182,13 @@ jobs:
           uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine plan-summary build-plan.json >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload build plan
+        if: always() && steps.outputs.outcome == 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: container-build-plan
-          path: build-plan.json
+          path: |
+            build-plan.json
+            image-inputs.json
           if-no-files-found: error
           retention-days: 1
 

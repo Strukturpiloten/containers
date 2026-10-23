@@ -29,6 +29,47 @@ commands. A missed source or generated update fails the generation check rather
 than silently changing workflow behavior. Manually regenerate on the Renovate
 branch if an update cannot be represented by its configured managers.
 
+## CI-tool changes and image-input preflight
+
+Non-major `UV_VERSION` and `ACTIONLINT_VERSION` updates receive focused PR and
+merge-queue verification. The planner reads the configuration and every generated
+workflow at both Git revisions. Only those version fields may differ; executable
+workflow changes, stale generated values, runner/Python/Syft changes, template or
+source changes, and unavailable history retain ordinary build selection. Merely
+changing a file under `.github/` never grants the smaller matrix.
+
+Focused verification still runs all repository tests, metadata checks, strict
+documentation generation, and workflow freshness/lint checks. It builds and tests
+`docker-29-rootless`, `podman-alpine-3.24-rootful`, and `nextcloud-phpfpm` on AMD64
+and ARM64, including the usual runtime and vulnerability admission checks. This
+selects six architecture jobs and two Docker payload jobs instead of the full
+fleet. A tool-only push selects no images for publication. Scheduled and manual
+runs retain their full or explicitly requested scope; image and runtime changes
+retain affected-image and reverse-dependency coverage.
+
+Before PR, queue, or publication matrices start, `scripts.image_inputs` checks the
+selected image arguments and private payload base-image arguments. Lookups are
+deduplicated by digest, then checked for manifest identity and required Linux
+platforms. Empty indexes, missing architectures, and missing digests fail the plan
+job before expensive builds start. Transient registry failures have a bounded
+retry budget; permanently missing manifests are reported immediately. Unselected
+images do not participate in this preflight.
+
+The `container-build-plan` artifact includes `image-inputs.json`, including on a
+preflight failure. Its failed checks identify the exact reference, architectures,
+and metadata/payload consumers. Repair a missing pin by resolving a replacement
+for the intended tag, verifying both architectures, and updating all intended
+consumers together. Keep the digest pin: a valid tag alone does not establish that
+the pinned manifest is usable. Preflight is an availability/platform check, not a
+replacement for building, testing, scanning, or provenance verification.
+
+To reproduce a plan's input check locally with `skopeo` installed:
+
+```sh
+uv run --frozen --python 3.14 python -m scripts.image_inputs \
+  --plan build-plan.json --output image-inputs.json
+```
+
 ## Automatic dependency merges
 
 The [upstream release monitor](upstream-releases.md) creates assigned issues for
@@ -76,10 +117,12 @@ Use these initial settings:
 | Maximum pull requests to merge | 1 |
 | Wait time for minimum group size | 0 minutes |
 
-Keep **Allow auto-merge** enabled in the repository's general settings. Keep the
-existing `Required CI` ruleset and organisation review, history, and code quality
-rules. The queue validates the current integration result, so eligible PRs do
-not need repeated manual branch updates. These settings are repository state,
+Keep **Allow auto-merge** enabled in the repository's general settings. Keep
+`Required CI` required in the effective default-branch rules, including when that
+requirement is inherited from the organisation. Keep the review, history, and
+code quality rules. Disable **Require branches to be up to date** in every
+applicable ruleset: the queue validates the current integration result, so
+eligible PRs do not need repeated manual branch updates. These settings are repository state,
 not something that merging the workflow file enables automatically.
 
 After activation, check the merge queue and Actions for `merge_group` runs. A
