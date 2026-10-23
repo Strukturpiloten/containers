@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,12 +15,33 @@ import yaml
 
 from scripts import container_engine as engine
 from scripts import renovate_updates as repair
+from tests.test_maintenance import IMAGE as CATALOGUE_FIXTURE
 from tests.test_workflow_config import FIXTURE
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ".github/workflow-templates/documentation.yml.j2"
 OUTPUT = ".github/workflows/documentation.yml"
-IMAGE = "images/podman/podman-5.8-rootful/container.yaml"
+IMAGE = "images/fixtures/example/container.yaml"
+# Authored fixture only; these versions and image digests are not registry evidence.
+METADATA_FIXTURE = {
+    **CATALOGUE_FIXTURE,
+    "schemaVersion": 1,
+    "version": "v98.76.54",
+    "title": "Synthetic fixture",
+    "description": "Independent test data for generated dependency files",
+    "build": {
+        "context": ".",
+        "containerfile": "Containerfile",
+        "architectures": ["amd64"],
+        "runtimeBaseArg": "BASE_IMAGE",
+        "args": {"BASE_IMAGE": {"value": f"docker.io/library/alpine:3.24@sha256:{'a' * 64}", "type": "external-image"}},
+    },
+    "dependencies": {
+        "internal": [],
+        "external": [{"name": "alpine", "image": "docker.io/library/alpine", "arg": "BASE_IMAGE"}],
+    },
+    "inputs": ["Containerfile"],
+}
 TEMPLATE = """name: Fixture
 on: workflow_dispatch
 env:
@@ -57,7 +79,7 @@ class GeneratedSnapshotTests(unittest.TestCase):
             {
                 SOURCE: TEMPLATE,
                 repair.CONFIG: yaml.safe_dump(FIXTURE),
-                IMAGE: (ROOT / IMAGE).read_text(),
+                IMAGE: yaml.safe_dump(METADATA_FIXTURE),
                 "pyproject.toml": '[project]\nrequires-python = ">=3.14,<3.15"\n',
                 "uv.lock": 'requires-python = "==3.14.*"\n',
             }
@@ -81,11 +103,11 @@ class GeneratedSnapshotTests(unittest.TestCase):
 
     def test_podman_update_regenerates_catalogue_without_modifying_checkout(self) -> None:
         image = yaml.safe_load((self.root / IMAGE).read_text())
-        image["version"] = "v5.8.9"
+        image["version"] = "v98.76.55"
         head = self.commit({IMAGE: yaml.safe_dump(image)})
         changes = repair.generated_changes(self.root, self.base, head)
         self.assertEqual(set(changes), {repair.CATALOGUE[0]})
-        self.assertEqual(json.loads(changes[repair.CATALOGUE[0]])["images"][0]["version"], "v5.8.9")
+        self.assertEqual(json.loads(changes[repair.CATALOGUE[0]])["images"][0]["version"], "v98.76.55")
         self.assert_idempotent(head, changes)
 
     def test_generated_only_pages_updates_reach_template(self) -> None:
@@ -160,6 +182,22 @@ class GeneratedSnapshotTests(unittest.TestCase):
         main = self.commit({"fixture.txt": "main change\n"})
         self.assertIsNone(repair._merge_snapshot(self.root, head, main))
 
+    def test_plain_main_merge_is_distinct_from_a_custom_human_commit(self) -> None:
+        repair._git(self.root, "config", "user.email", "29139614+renovate[bot]@users.noreply.github.com")
+        head = self.commit({"dependency.txt": "bot update\n"})
+        repair._git(self.root, "switch", "-c", "advanced-main", self.base)
+        repair._git(self.root, "config", "user.email", "person@example.invalid")
+        main = self.commit({"main.txt": "trusted change\n"})
+        repair._git(self.root, "update-ref", "refs/remotes/origin/main", main)
+        repair._git(self.root, "switch", "--detach", head)
+        repair._git(self.root, "merge", "--no-edit", main)
+        merged = repair._git(self.root, "rev-parse", "HEAD").strip()
+        pull = _pull()
+        pull["head"]["sha"] = merged
+        self.assertFalse(repair._custom_commits(self.root, "main", pull))
+        pull["head"]["sha"] = self.commit({"custom.txt": "human edit\n"})
+        self.assertTrue(repair._custom_commits(self.root, "main", pull))
+
     def test_conflicting_action_candidates_are_rejected(self) -> None:
         head = self.commit(
             {
@@ -186,7 +224,7 @@ class GeneratedSnapshotTests(unittest.TestCase):
     def test_symlink_metadata_is_not_read(self) -> None:
         path = self.root / IMAGE
         path.unlink()
-        path.symlink_to(ROOT / IMAGE)
+        path.symlink_to(ROOT / "LICENSE")
         head = self.commit({"unrelated.txt": "fixture"})
         with self.assertRaisesRegex(repair.RepairError, "regular tracked file"):
             repair.generated_changes(self.root, self.base, head)
@@ -230,7 +268,7 @@ class RepairOwnershipTests(unittest.TestCase):
         github = repair.GitHub("example/repo")
 
         def git_command(_root: Path, *arguments: str, **_kwargs: object) -> str:
-            return "person@example.invalid\n" if arguments[0] == "log" else "a" * 40
+            return f"{'f' * 40} person@example.invalid\n" if arguments[0] == "log" else "a" * 40
 
         with (
             patch.object(repair, "_queued", return_value=False),
@@ -250,7 +288,7 @@ class RepairOwnershipTests(unittest.TestCase):
 
         def git_command(_root: Path, *arguments: str, **_kwargs: object) -> str:
             if arguments[0] == "log":
-                return "29139614+renovate[bot]@users.noreply.github.com\n"
+                return f"{'f' * 40} 29139614+renovate[bot]@users.noreply.github.com\n"
             return "a" * 40 if arguments[0] == "rev-parse" else "c" * 40
 
         with (
@@ -295,11 +333,26 @@ class RepairOwnershipTests(unittest.TestCase):
     def test_permission_failure_is_reported_instead_of_silently_skipped(self) -> None:
         github = repair.GitHub("example/repo")
         with (
-            patch.object(repair, "_git", side_effect=repair.RepairError("push rejected")),
+            patch.object(repair, "_git", side_effect=[repair.RepairError("push rejected"), "a" * 40]),
             patch.object(github, "request", return_value=_pull()),
             self.assertRaisesRegex(repair.RepairError, "Contents and Workflows write"),
         ):
             repair._push_completion(Path(), github, _pull(), "c" * 40, [repair.CATALOGUE[0]])
+
+    def test_workflow_permission_diagnostic_does_not_reflect_credentials(self) -> None:
+        result = subprocess.CompletedProcess(
+            ["git", "push"],
+            1,
+            stdout="",
+            stderr="refusing to allow update workflow without workflows permission credential-secret",
+        )
+        with (
+            patch.object(repair.subprocess, "run", return_value=result),
+            self.assertRaises(repair.WorkflowPermissionError) as error,
+        ):
+            repair._run(Path(), ["git", "push"])
+        self.assertIn("Workflows write", str(error.exception))
+        self.assertNotIn("credential-secret", str(error.exception))
 
     def test_local_execution_cannot_publish(self) -> None:
         with (

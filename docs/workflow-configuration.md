@@ -46,7 +46,9 @@ When generated changes are necessary, one completion commit incorporates that
 preview of `main` and the generated files. A remote-head lease prevents replacing
 concurrent edits. Queued PRs stay unchanged. A real merge conflict requests
 Renovate's own rebase checkbox; merely falling behind `main` does not request a
-rebase. Repeated runs with matching files make no commits.
+rebase. Plain historical merges of trusted `main` are accepted only when their
+trees match Git's clean merge; custom edits remain protected. Repeated runs with
+matching files make no commits.
 
 The existing `RELEASE_AUTOMATION_TOKEN` must have repository Contents, Pull requests
 and Workflows write access. Its pushes trigger normal PR CI automatically. The
