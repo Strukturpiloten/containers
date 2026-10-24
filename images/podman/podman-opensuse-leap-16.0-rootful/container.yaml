@@ -26,7 +26,7 @@ build:
   runtimeBaseArg: DISTRO_IMAGE
   args:
     DISTRO_IMAGE:
-      value: registry.opensuse.org/opensuse/leap:16.0@sha256:230a53aa81c3d1e4318ba8c73a942f0f330383c229ae64dd116d4fee1a6a16ab
+      value: registry.opensuse.org/opensuse/leap:16.0@sha256:295892214721055ace3d2b7f86b21d4143cc0edb4264149d3310a0a032fa166a
       type: external-image
     HOME_DIR: {value: /root, type: static}
     RUN_AS_USER: {value: root, type: static}
