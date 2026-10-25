@@ -18,6 +18,7 @@ Lifecycle is repository policy. Registry availability and runtime coverage requi
 | docker-27-rootless | legacy | isolated-test | 2026-10-27 | unknown | unknown | unknown |
 | docker-28-rootful | legacy | isolated-test | 2026-10-27 | unknown | unknown | unknown |
 | docker-28-rootless | legacy | isolated-test | 2026-10-27 | unknown | unknown | unknown |
+| docker-29-conformance-rootless | maintained | isolated-test | 2026-10-27 | unknown | unknown | unknown |
 | docker-29-rootful | maintained | isolated-test | 2026-10-27 | unknown | unknown | unknown |
 | docker-29-rootless | maintained | isolated-test | 2026-10-27 | unknown | unknown | unknown |
 | docker-alpine-3.24-rootful | maintained | isolated-test | 2026-10-27 | unknown | unknown | unknown |

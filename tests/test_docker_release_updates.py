@@ -26,6 +26,7 @@ from scripts.docker_release_updates import (
     _run_version,
     _validate_evidence,
     apply_release,
+    payload_consumers,
     probe_release,
     verify_release,
 )
@@ -75,7 +76,15 @@ class DockerReleaseUpdatesTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         payload = Path("images/docker/upstream/29/payload.yaml")
-        paths = [payload, *(Path(f"images/docker/docker-29-{mode}/container.yaml") for mode in ("rootful", "rootless"))]
+        paths = [
+            payload,
+            *(
+                Path(f"images/docker/docker-29{variant}-{mode}/container.yaml")
+                for variant, mode in (("", "rootful"), ("", "rootless"), ("-conformance", "rootless"))
+            ),
+            Path("images/docker/upstream/20.10/payload.yaml"),
+            Path("images/docker/docker-20.10-rootful/container.yaml"),
+        ]
         for path in paths:
             (self.root / path).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / path, self.root / path)
@@ -90,19 +99,109 @@ class DockerReleaseUpdatesTests(unittest.TestCase):
     def test_apply_updates_both_images_and_all_payload_provenance(self) -> None:
         changed = apply_release("29", NEW_VERSION, self.evidence_dir, self.root)
         verify_release("29", NEW_VERSION, self.evidence_dir, self.root)
-        self.assertEqual(len(changed), 3)
+        self.assertEqual(len(changed), 4)
         payload_path = self.root / "images/docker/upstream/29/payload.yaml"
         payload = yaml.safe_load(payload_path.read_text(encoding="utf-8"))
         self.assertEqual(payload["build"]["args"]["ENGINE_VERSION"], NEW_VERSION)
         self.assertEqual(payload["provenance"]["containerd"], "2.3.6")
         self.assertEqual(payload["provenance"]["sourceRevision"]["runc"], "456defa")
         self.assertEqual(payload["build"]["architectureArgs"]["arm64"]["ROOTLESS_SHA256"], "b" * 64)
-        for mode in ("rootful", "rootless"):
-            path = self.root / f"images/docker/docker-29-{mode}/container.yaml"
+        for variant, mode in (("", "rootful"), ("", "rootless"), ("-conformance", "rootless")):
+            path = self.root / f"images/docker/docker-29{variant}-{mode}/container.yaml"
             metadata = yaml.safe_load(path.read_text(encoding="utf-8"))
             self.assertEqual(metadata["version"], f"v{NEW_VERSION}")
             self.assertIn(f"Docker Engine {NEW_VERSION}", metadata["description"])
             self.assertEqual(metadata["lifecycle"]["admission"], "isolated-test")
+
+    def test_all_canonical_consumers_are_discovered_without_editing_historical_lanes(self) -> None:
+        source = self.root / "images/docker/docker-29-conformance-rootless/container.yaml"
+        metadata = yaml.safe_load(source.read_text())
+        name = "docker-29-extra-rootless"
+        metadata.update({"name": name, "image": f"ghcr.io/strukturpiloten/{name}"})
+        extra = self.root / f"images/docker/{name}/container.yaml"
+        extra.parent.mkdir()
+        extra.write_text(source.read_text().replace("docker-29-conformance-rootless", name))
+        historical = self.root / "images/docker/docker-20.10-rootful/container.yaml"
+        historical_payload = self.root / "images/docker/upstream/20.10/payload.yaml"
+        original = (historical.read_bytes(), historical_payload.read_bytes())
+        with self.assertRaisesRegex(DockerReleaseError, "ownership"):
+            apply_release("29", NEW_VERSION, self.evidence_dir, self.root)
+        extra.unlink()
+        changed = apply_release("29", NEW_VERSION, self.evidence_dir, self.root)
+        self.assertEqual(len(changed), 4)
+        self.assertEqual((historical.read_bytes(), historical_payload.read_bytes()), original)
+        verify_release("29", NEW_VERSION, self.evidence_dir, self.root)
+
+    def test_invalid_conformance_consumer_prevents_every_planned_write(self) -> None:
+        path = self.root / "images/docker/docker-29-conformance-rootless/container.yaml"
+        valid = yaml.safe_load(path.read_text())
+        changes = (
+            (("name",), "docker-28-conformance-rootless"),
+            (("version",), "v29.0.0"),
+            (("build", "payload"), "images/docker/upstream/28/payload.yaml"),
+            (("build", "architectures"), ["amd64"]),
+            (("tests", "docker", "mode"), "rootful"),
+            (("tests", "docker", "launcher"), "direct"),
+            (("image",), "ghcr.io/strukturpiloten/wrong"),
+        )
+        for keys, value in changes:
+            with self.subTest(field=keys):
+                candidate = json.loads(json.dumps(valid))
+                node = candidate
+                for key in keys[:-1]:
+                    node = node[key]
+                node[keys[-1]] = value
+                path.write_text(yaml.safe_dump(candidate))
+                before = {item: item.read_bytes() for item in (self.root / "images").rglob("*.yaml")}
+                with self.assertRaises(DockerReleaseError):
+                    apply_release("29", NEW_VERSION, self.evidence_dir, self.root)
+                self.assertEqual({item: item.read_bytes() for item in before}, before)
+
+    def test_optional_singleton_never_replaces_required_direct_pair(self) -> None:
+        optional = self.root / "images/docker/docker-29-conformance-rootless/container.yaml"
+        expected = {
+            self.root / "images/docker/docker-29-rootful/container.yaml",
+            self.root / "images/docker/docker-29-rootless/container.yaml",
+        }
+        self.assertEqual(set(payload_consumers(self.root, "29")), expected | {optional})
+        saved = optional.read_text()
+        optional.unlink()
+        self.assertEqual(set(payload_consumers(self.root, "29")), expected)
+        optional.write_text(saved)
+        for path in expected:
+            with self.subTest(path=path):
+                source = path.read_text()
+                path.unlink()
+                with self.assertRaisesRegex(DockerReleaseError, "required direct"):
+                    payload_consumers(self.root, "29")
+                path.write_text(source)
+
+    def test_direct_images_cannot_impersonate_systemd_or_cross_line_consumers(self) -> None:
+        path = self.root / "images/docker/docker-29-rootless/container.yaml"
+        valid = yaml.safe_load(path.read_text())
+        for field, value in (("launcher", "systemd"), ("mode", "rootful")):
+            with self.subTest(field=field):
+                candidate = json.loads(json.dumps(valid))
+                candidate["tests"]["docker"][field] = value
+                path.write_text(yaml.safe_dump(candidate))
+                with self.assertRaisesRegex(DockerReleaseError, "ownership"):
+                    payload_consumers(self.root, "29")
+        path.write_text(yaml.safe_dump(valid))
+        other = self.root / "images/docker/docker-28-rootless/container.yaml"
+        other.parent.mkdir()
+        candidate = json.loads(json.dumps(valid))
+        candidate["name"] = other.parent.name
+        candidate["image"] = f"ghcr.io/strukturpiloten/{other.parent.name}"
+        other.write_text(yaml.safe_dump(candidate))
+        with self.assertRaisesRegex(DockerReleaseError, "ownership"):
+            payload_consumers(self.root, "29")
+
+    def test_verify_rejects_stale_conformance_consumer(self) -> None:
+        apply_release("29", NEW_VERSION, self.evidence_dir, self.root)
+        path = self.root / "images/docker/docker-29-conformance-rootless/container.yaml"
+        path.write_text(path.read_text().replace(f"version: v{NEW_VERSION}", f"version: v{OLD_VERSION}"))
+        with self.assertRaisesRegex(DockerReleaseError, "fresh evidence"):
+            verify_release("29", NEW_VERSION, self.evidence_dir, self.root)
 
     def test_verify_rejects_orphan_branch_with_stale_archive_hash(self) -> None:
         apply_release("29", NEW_VERSION, self.evidence_dir, self.root)

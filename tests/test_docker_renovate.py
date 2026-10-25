@@ -165,6 +165,53 @@ class DockerRenovateTests(unittest.TestCase):
                 package = image.split(":", 1)[0]
                 self.assertEqual(_matching_group_rules(self.rules, path, package, other_version), [])
 
+    def test_conformance_pins_extract_once_and_share_exact_debian_digest_groups(self) -> None:
+        manager = next(
+            item
+            for item in self.managers
+            if item["description"] == "Track external pinned container image tags and digests in container metadata"
+        )
+        extraction = re.compile(manager["matchStrings"][0].replace("(?<", "(?P<"))
+        freeze = next(
+            rule
+            for rule in self.rules
+            if rule["description"]
+            == "Keep distro compatibility images on their declared OS release while allowing digest refreshes"
+        )
+        digest_policy = next(
+            rule
+            for rule in self.rules
+            if rule["description"] == "Squash-merge pinned container digest updates after required CI"
+        )
+        self.assertEqual(
+            {
+                key: digest_policy[key]
+                for key in ("automerge", "automergeType", "automergeStrategy", "platformAutomerge")
+            },
+            {"automerge": True, "automergeType": "pr", "automergeStrategy": "squash", "platformAutomerge": True},
+        )
+        self.assertFalse(self.config["vulnerabilityAlerts"]["dependencyDashboardApproval"])
+        path = "images/docker/docker-29-conformance-rootless/container.yaml"
+        source = (ROOT / path).read_text()
+        metadata = yaml.safe_load(source)
+        matches = list(extraction.finditer(source))
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(
+            f"{matches[0]['depName']}:{matches[0]['currentValue']}@{matches[0]['currentDigest']}",
+            metadata["build"]["args"]["DISTRO_IMAGE"]["value"],
+        )
+        self.assertEqual(
+            [item["description"] for item in self.managers if _matches_path(item["managerFilePatterns"], path)],
+            [manager["description"]],
+        )
+        groups = _matching_group_rules(self.rules, path, "docker.io/library/debian", "13")
+        self.assertEqual([rule["groupName"] for rule in groups], ["Docker Debian 13 distro base"])
+        self.assertEqual(_matching_group_rules(self.rules, path, "docker.io/library/debian", "other-tag"), [])
+        self.assertTrue(_matches_path(freeze["matchFileNames"], path))
+        self.assertFalse(freeze["enabled"])
+        self.assertEqual(set(freeze["matchUpdateTypes"]), {"major", "minor", "patch"})
+        self.assertEqual(_matching_group_rules(self.rules, path, "docker.io/library/debian", "13", "patch"), [])
+
     def test_source_fedora_minimal_keeps_its_separate_group(self) -> None:
         path = "images/podman/podman-5.4-rootful/container.yaml"
         metadata = yaml.safe_load((ROOT / path).read_text(encoding="utf-8"))

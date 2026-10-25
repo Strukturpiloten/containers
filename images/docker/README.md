@@ -31,13 +31,22 @@ The rootful image starts `dockerd` as UID 0 with `/var/lib/docker` as its data r
 
 The metadata declares `tests.docker.mode` and the required outer privilege explicitly. A rootless *inner* daemon still needs a trusted, privileged outer Podman boundary on the tested Linux runner. Rootless outer Podman started the 20.10 daemon during pilot work but failed to start its nested runc workload; this does not establish a usable unprivileged outer profile. Test jobs use an isolated rootful outer Podman store, task-owned names and volumes, bounded timeouts, and cleanup readback. No global prune is used.
 
-The native Docker probe limits both outer Podman runs to two CPUs, 4 GiB of memory, and 512 PIDs. The outer container uses a private cgroup namespace; after starting the nested daemon, the probe reads its effective cgroup v2 CPU, memory, and PID limits from inside it and fails if any limit is absent or looser; requested and observed values go into runtime evidence. Individual commands default to a 45-second timeout, with a 180-second allowance for archive transfers. The Docker 29 `VOLUME` data root keeps its normal Podman anonymous-volume backing and snapshotter behavior.
+The native Docker probe limits every outer Podman run to two CPUs, 4 GiB of memory, and 512 PIDs. The outer container uses a private cgroup namespace; after starting the nested daemon, the probe reads its effective cgroup v2 CPU, memory, and PID limits from inside it and fails if any limit is absent or looser; requested and observed values go into runtime evidence. Individual commands default to a 45-second timeout, with a 180-second allowance for archive transfers. The Docker 29 `VOLUME` data root keeps its normal Podman anonymous-volume backing and snapshotter behavior.
 
 The task-owned Podman store has a 12 GiB **observed** disk budget, including anonymous volumes and the offline Docker fixture. The harness measures the store before starting nested work, then polls with `du --one-file-system` two seconds after each completed sample; `du` is killed after five seconds, with an eight-second outer timeout fallback. A sample that sees only files disappearing during traversal is retried once; permission or other measurement errors fail closed. Evidence records the limit, peak measured usage, sample count, transient retries, cadence, and measured overshoot. This is an admission and monitoring limit, not a hard filesystem quota: writes can pass the threshold between samples, and there is no fixed byte bound on overshoot. The probe checks the monitor before and after each nested work command and starts no further work after an excess or measurement failure. An already-running command can continue until its timeout (180 seconds for the fixture save; otherwise the configured per-command timeout, default 45 seconds and capped at 300 seconds) before owned-resource cleanup runs. The sampler and any timed-out `du` process group stop before isolated-store cleanup. No global prune is used.
 
 Upstream build metadata declares AMD64 and ARM64. Every declared architecture and daemon mode must pass native daemon, API, network, storage, port, mount, resource-budget, and cleanup checks before publication. Consult the immutable release maintenance evidence for the results of a specific image digest. A green cross-build or emulated binary execution is not sufficient. Linux kernel and host security behavior still need dedicated host testing when they matter.
 
 ## Validation
+
+The separate [guest-systemd conformance fixture](conformance/README.md) declares
+`docker-29-conformance-rootless` on Debian 13 with the same verified upstream
+payload. It uses guest PID 1 systemd, a real UID 1000 user manager, and strict
+inner memory/no-swap/OOM and PID-effect probes under bounded rootful outer
+Podman. Its metadata is a declaration; native AMD64 and ARM64 conformance remain
+unqualified until the exact candidate passes the full harness. Debian 11
+conformance remains a later issue #344 phase. Use the dedicated harness contract
+for this image.
 
 The native contract starts each daemon, checks the actual Engine and CLI/API range, confirms root mode and storage driver, loads a synthetic image into the inner daemon, and exercises named and bind mounts, a user network and DNS, a published TCP port, health/restart settings, and owned cleanup. It uses the final image itself as an offline nested fixture. Run it against one built OCI archive on a Linux runner with passwordless rootful Podman:
 

@@ -1,0 +1,62 @@
+---
+# yaml-language-server: $schema=../../../container.schema.json
+schemaVersion: 1
+name: docker-29-conformance-rootless
+version: v29.8.2
+image: ghcr.io/strukturpiloten/docker-29-conformance-rootless
+title: Docker 29 systemd conformance rootless
+description: Upstream Docker Engine 29.8.2 on Debian 13, dedicated rootless systemd conformance fixture
+tests:
+  docker:
+    mode: rootless
+    launcher: systemd
+    outerPrivilege: privileged
+    nestedRuntime: true
+build:
+  context: .
+  containerfile: images/docker/conformance/upstream.Containerfile
+  architectures:
+    - amd64
+    - arm64
+  runtimeBaseArg: DISTRO_IMAGE
+  payload: images/docker/upstream/29/payload.yaml
+  args:
+    DISTRO_IMAGE:
+      value: docker.io/library/debian:13@sha256:913f6706df59a68922d1dd08f78c2476560a8d367897200a6005b00e5f67c2d5
+      type: external-image
+    DISTRO_ID:
+      value: 'debian-13'
+      type: static
+    MODE:
+      value: 'rootless'
+      type: static
+    DOCKER_HOST_VALUE:
+      value: 'unix:///run/user/1000/docker.sock'
+      type: static
+    STORAGE_PATH:
+      value: '/home/docker/.local/share/docker'
+      type: static
+dependencies:
+  internal: []
+  external:
+    - name: debian-13
+      image: docker.io/library/debian
+      arg: DISTRO_IMAGE
+inputs:
+  - images/docker/docker-29-conformance-rootless/**
+  - images/docker/conformance/**
+  - images/docker/upstream/29/payload.yaml
+  - images/docker/upstream/payload.Containerfile
+  - images/docker/upstream/fetch-payload.sh
+  - scripts/runtime_docker_systemd.py
+  - shared/oci-labels.env
+lifecycle:
+  state: maintained
+  admission: isolated-test
+  reviewAfter: '2026-10-27'
+  supportBoundary: >-
+    Verified upstream Docker archive inputs on maintained Debian 13; native conformance remains unqualified.
+    Dedicated privileged isolated conformance fixture; guest systemd needs crun-specific cgroup delegation.
+    Devices remain subject to native Engine/runc behavior and are not repaired by this profile.
+  requiredRuntimeProfiles:
+    - docker

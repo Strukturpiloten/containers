@@ -434,25 +434,61 @@ def _prepare_payload(path: Path, line: str, version: str, evidence: dict[str, di
     return old_version, new_payload
 
 
-def _prepare_image(path: Path, line: str, mode: str, old_version: str, version: str) -> str:
+def payload_consumers(root: Path, line: str) -> list[Path]:
+    """Discover the exact canonical payload's consumers and reject cross-line ownership."""
+    if re.fullmatch(r"20\.10|[1-9]\d*", line) is None:
+        msg = "Invalid Docker compatibility line"
+        raise DockerReleaseError(msg)
+    payload = f"images/docker/upstream/{line}/payload.yaml"
+    allowed = {
+        f"docker-{line}-{variant}{mode}": (mode, "systemd" if variant else "direct")
+        for variant in ("", "conformance-")
+        for mode in ("rootful", "rootless")
+    }
+    mandatory = {root / f"images/docker/docker-{line}-{mode}/container.yaml" for mode in ("rootful", "rootless")}
+    consumers = []
+    for path in sorted((root / "images/docker").glob("*/container.yaml")):
+        image = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if image.get("build", {}).get("payload") != payload:
+            if path.parent.name.startswith(f"docker-{line}-"):
+                msg = f"Docker image points to the wrong canonical payload: {path}"
+                raise DockerReleaseError(msg)
+            continue
+        name = image.get("name", "")
+        mode = image.get("tests", {}).get("docker", {}).get("mode")
+        if (
+            name != path.parent.name
+            or name not in allowed
+            or allowed[name] != (mode, image.get("tests", {}).get("docker", {}).get("launcher", "direct"))
+            or image.get("image") != f"ghcr.io/strukturpiloten/{name}"
+            or set(image["build"].get("architectures", [])) != set(ARCHES)
+        ):
+            msg = f"Docker canonical payload consumer ownership is invalid: {path}"
+            raise DockerReleaseError(msg)
+        consumers.append(path)
+    if not mandatory.issubset(consumers):
+        msg = "Docker canonical payload is missing its required direct rootful/rootless consumers"
+        raise DockerReleaseError(msg)
+    return consumers
+
+
+def _prepare_image(path: Path, old_version: str, version: str) -> str:
     source = path.read_text(encoding="utf-8")
     metadata = yaml.safe_load(source)
-    if metadata["name"] != f"docker-{line}-{mode}" or metadata["version"] != f"v{old_version}":
-        msg = f"Docker {mode} image does not match current payload version"
-        raise DockerReleaseError(msg)
-    if metadata["build"]["payload"] != f"images/docker/upstream/{line}/payload.yaml":
-        msg = f"Docker {mode} image points to the wrong payload"
+    name = metadata["name"]
+    if metadata["version"] != f"v{old_version}":
+        msg = f"Docker {name} image does not match current payload version"
         raise DockerReleaseError(msg)
     description = metadata["description"]
     if not isinstance(description, str) or description.count(f"Docker Engine {old_version}") != 1:
-        msg = f"Docker {mode} description does not match current payload version"
+        msg = f"Docker {name} description does not match current payload version"
         raise DockerReleaseError(msg)
     new_description = description.replace(f"Docker Engine {old_version}", f"Docker Engine {version}")
     new_source = _replace_scalars(source, {("version",): f"v{version}", ("description",): new_description})
     expected_metadata = dict(metadata)
     expected_metadata.update({"version": f"v{version}", "description": new_description})
     if yaml.safe_load(new_source) != expected_metadata:
-        msg = f"Docker {mode} image changed outside approved release fields"
+        msg = f"Docker {name} image changed outside approved release fields"
         raise DockerReleaseError(msg)
     return new_source
 
@@ -477,16 +513,10 @@ def verify_release(line: str, version: str, evidence_dir: Path, root: Path = ROO
         if str(value) != expected:
             msg = f"Docker payload disagrees with fresh evidence: {'.'.join(field_path)}"
             raise DockerReleaseError(msg)
-    for mode in ("rootful", "rootless"):
-        path = root / f"images/docker/docker-{line}-{mode}/container.yaml"
+    for path in payload_consumers(root, line):
         image = yaml.safe_load(path.read_text(encoding="utf-8"))
-        if (
-            image["name"] != f"docker-{line}-{mode}"
-            or image["version"] != f"v{version}"
-            or image["build"]["payload"] != f"images/docker/upstream/{line}/payload.yaml"
-            or f"Docker Engine {version}" not in image["description"]
-        ):
-            msg = f"Docker {mode} image does not match fresh evidence"
+        if image["version"] != f"v{version}" or image["description"].count(f"Docker Engine {version}") != 1:
+            msg = f"Docker {image['name']} image does not match fresh evidence"
             raise DockerReleaseError(msg)
 
 
@@ -497,9 +527,8 @@ def apply_release(line: str, version: str, evidence_dir: Path, root: Path = ROOT
     payload_path = root / "images/docker/upstream" / line / "payload.yaml"
     old_version, new_payload = _prepare_payload(payload_path, line, version, evidence)
     edits = {payload_path: new_payload}
-    for mode in ("rootful", "rootless"):
-        path = root / f"images/docker/docker-{line}-{mode}/container.yaml"
-        edits[path] = _prepare_image(path, line, mode, old_version, version)
+    for path in payload_consumers(root, line):
+        edits[path] = _prepare_image(path, old_version, version)
     for path, content in edits.items():
         path.write_text(content, encoding="utf-8")
     return list(edits)

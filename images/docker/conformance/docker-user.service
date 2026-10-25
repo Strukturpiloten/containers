@@ -1,0 +1,14 @@
+[Unit]
+Description=Isolated rootless conformance Docker daemon
+
+[Service]
+Type=simple
+Environment=HOME=/home/docker XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+ExecStart=/usr/local/bin/start-conformance-daemon
+Delegate=yes
+TasksMax=infinity
+TimeoutStopSec=20
+KillMode=mixed
+
+[Install]
+WantedBy=default.target
