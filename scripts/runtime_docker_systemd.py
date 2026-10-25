@@ -1563,19 +1563,26 @@ def verify_inner_limits(
                     scope=association["allocator"]["group"],
                     scope_inode=int(association["scope-inode"]),
                 )
-            readback = _exec(
-                ctx,
-                budget,
-                container,
-                f"read exact inner {kind} cgroup limits",
-                "docker",
-                "exec",
-                name,
-                "sh",
-                "-euc",
-                "cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/pids.max; touch /tmp/resource-start",
-            )
-            ctx.assert_equal(f"inner {kind} hard limit values", readback, f"{MEMORY_BYTES}\n{INNER_PIDS}")
+            try:
+                readback = _exec(
+                    ctx,
+                    budget,
+                    container,
+                    f"read exact inner {kind} cgroup limits",
+                    "docker",
+                    "exec",
+                    name,
+                    "sh",
+                    "-euc",
+                    "cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/pids.max; touch /tmp/resource-start",
+                )
+                ctx.assert_equal(f"inner {kind} hard limit values", readback, f"{MEMORY_BYTES}\n{INNER_PIDS}")
+            except BaseException:
+                # Release can have reached the allocator even if exec/readback
+                # failed. Preserve that failure and sample before owned removal.
+                if kind == "memory" and diagnostics is not None:
+                    diagnostics.snapshot("after-inner-memory")
+                raise
             exit_code, state = _inner_enforcement_state(
                 ctx, budget, container, (kind, workload), diagnostics=diagnostics
             )
@@ -1641,8 +1648,29 @@ def _assert_orderly_state(ctx: RuntimeContext, state: dict[str, Any]) -> None:
     ctx.checks.append({"name": "owned systemd orderly lifecycle state", "status": "passed", "actual": state})
 
 
+def _observe_before_stop(ctx: RuntimeContext, observer: Callable[[], None] | None) -> None:
+    if observer is None:
+        return
+    try:
+        observer()
+    except Exception as error:  # noqa: BLE001 — evidence cannot alter the native shutdown result.
+        ctx.observations.append(
+            {
+                "name": "owned systemd OOM custody",
+                "phase": "before-stop-request",
+                "availability": "error",
+                "attribution": "unresolved",
+                "reason": type(error).__name__,
+            }
+        )
+
+
 def stop_guest(
-    ctx: RuntimeContext, container: str, *, on_exit: Callable[[str, dict[str, Any]], None] | None = None
+    ctx: RuntimeContext,
+    container: str,
+    *,
+    on_exit: Callable[[str, dict[str, Any]], None] | None = None,
+    before_stop: Callable[[], None] | None = None,
 ) -> None:
     """Request exit.target without force; verify zero exit, never admit emergency halt."""
     if container not in ctx.containers:
@@ -1686,6 +1714,7 @@ def stop_guest(
     # launched after this request; only exact-ID host readback establishes exit.
     request = PLACEMENT_GUARD + 'test "$(id -u)" = 0; test "$(cat /proc/1/comm)" = systemd; exec "$@"'
     try:
+        _observe_before_stop(ctx, before_stop)
         ctx.podman(
             "request owned systemd exit.target with pre-shutdown placement guard",
             "exec",

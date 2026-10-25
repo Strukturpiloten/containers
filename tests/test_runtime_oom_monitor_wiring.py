@@ -15,11 +15,18 @@ WORK_REFUSAL = "authored work refusal"
 
 
 class MonitorWiringTests(unittest.TestCase):
+    def test_custody_cleanup_failure_still_restores_original_deadline(self) -> None:
+        ctx, diagnostics = MagicMock(), MagicMock()
+        diagnostics.close.side_effect = OSError("owned diagnostic cleanup failed")
+        with self.assertRaisesRegex(OSError, "owned diagnostic cleanup failed"):
+            runtime_docker._close_oom_diagnostics(ctx, diagnostics, 17)
+        self.assertEqual(ctx.runtime_deadline, 17)
+
     def test_systemd_stop_passes_only_the_bound_host_observer(self) -> None:
         ctx, diagnostics = MagicMock(), MagicMock()
         with patch.object(runtime_docker.runtime_docker_systemd, "stop_guest") as stop:
             runtime_docker._stop_owned_daemon(ctx, CID, systemd=True, diagnostics=diagnostics)
-            stop.assert_called_once_with(ctx, CID, on_exit=diagnostics.after_exit)
+            stop.assert_called_once_with(ctx, CID, on_exit=diagnostics.after_exit, before_stop=diagnostics.before_stop)
             ctx.podman.assert_not_called()
         with patch.object(runtime_docker.runtime_docker_systemd, "stop_guest") as stop:
             runtime_docker._stop_owned_daemon(ctx, CID, systemd=True)
@@ -79,6 +86,7 @@ class MonitorWiringTests(unittest.TestCase):
                 phase=phase,
             )
         self.assertEqual(events, ["before-ordinary-work", "ordinary-work-start", "before-shutdown"])
-        stop.assert_called_once_with(ctx, CID, on_exit=diagnostics.after_exit)
+        stop.assert_called_once_with(ctx, CID, on_exit=diagnostics.after_exit, before_stop=diagnostics.before_stop)
+        diagnostics.close.assert_called_once_with()
         limits.assert_not_called()  # Refused before load, never pretend injection ran.
         self.assertEqual(ctx.runtime_deadline, 1)

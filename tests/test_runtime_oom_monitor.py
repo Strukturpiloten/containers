@@ -5,14 +5,19 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import select
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
+from functools import partial
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from scripts import runtime_docker_systemd as systemd
 from scripts import runtime_oom_diagnostics as diagnostics
+from scripts import runtime_oom_watch as custody
 from scripts.runtime_errors import ProbeError
 
 CID = "a" * 64
@@ -430,6 +435,442 @@ class ExitObserverTests(unittest.TestCase):
         self.assertEqual(str(raised.exception.__cause__), "original request failure")
         observer.assert_called_once()
         self.assertEqual(ctx.observations[-1]["availability"], "error")
+
+    def test_before_stop_observer_brackets_only_the_actual_request(self) -> None:
+        for failure in (False, True):
+            with self.subTest(failure=failure):
+                ctx, observer = self.context(_terminal(), running=True, request_error=failure), MagicMock()
+                observer.side_effect = lambda context=ctx: self.assertEqual(context.podman.call_count, 3)
+                if failure:
+                    with self.assertRaisesRegex(ProbeError, "emergency halt is not native admission"):
+                        systemd.stop_guest(ctx, CID, before_stop=observer)
+                else:
+                    systemd.stop_guest(ctx, CID, before_stop=observer)
+                observer.assert_called_once_with()
+        ctx, observer = self.context(_terminal()), MagicMock()
+        systemd.stop_guest(ctx, CID, before_stop=observer)
+        observer.assert_not_called()
+
+    def test_before_stop_observer_failure_never_excuses_outer_oom(self) -> None:
+        ctx = self.context(_terminal(oom=True), running=True)
+        observer = MagicMock(side_effect=OSError("authored observer failure"))
+        with self.assertRaisesRegex(ProbeError, "emergency halt is not native admission"):
+            systemd.stop_guest(ctx, CID, before_stop=observer)
+        self.assertEqual(ctx.observations[0]["availability"], "error")
+        self.assertEqual(ctx.checks[-1]["status"], "failed")
+
+
+class MarkerCustodyTests(unittest.TestCase):
+    """Exercise actual local inotify/pidfd identities without a container."""
+
+    def fixture(self, root: Path, *, pid: int | None = None) -> tuple[dict, Path, Path]:
+        store = root / "store"
+        persist, bundle = store / "persist" / CID, store / "bundle" / CID
+        persist.mkdir(parents=True)
+        bundle.mkdir(parents=True)
+        group = root / "cgroup"
+        group.mkdir()
+        for name in ("memory.events", "memory.events.local"):
+            (group / name).write_text("max 0\noom 0\noom_kill 0\n")
+        markers = diagnostics._markers(
+            {
+                "directory": str(store),
+                "candidates": [
+                    {"path": str(persist / "oom")},
+                    {"path": str(bundle / "oom")},
+                ],
+            },
+            diagnostics._MonitorReads(time.monotonic() + 10),
+        )
+        info = (group / "memory.events").stat()
+        original_pid = os.getpid() if pid is None else pid
+        request = {
+            "pid": original_pid,
+            "starttime": custody._birth(original_pid),
+            "deadline": time.monotonic() + 10,
+            "markers": markers,
+            "watch": {
+                "availability": "observed",
+                "path": "/owned",
+                "inode": info.st_ino,
+                "major": os.major(info.st_dev),
+                "minor": os.minor(info.st_dev),
+                "directoryIdentity": {"dev": group.stat().st_dev, "ino": group.stat().st_ino},
+                "fd": 7,
+                "wd": 1,
+            },
+        }
+        return request, persist / "oom", group
+
+    def observer(self, request: dict, group: Path) -> custody.MarkerCustody:
+        original = custody._directory
+
+        def mapped(path: Path) -> int:
+            return original(group if path == Path("/sys/fs/cgroup/owned") else path)
+
+        with patch.object(custody, "_directory", side_effect=mapped):
+            observer = custody.MarkerCustody(request)
+        self.addCleanup(observer.close)
+        return observer
+
+    def test_kernel_creation_binds_original_inode_pidfd_and_counter_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            request, marker, group = self.fixture(Path(directory))
+            observer = self.observer(request, group)
+            self.assertFalse(select.select([observer.pidfd], [], [], 0)[0])
+            (group / "memory.events").write_text("max 1\noom 1\noom_kill 1\n")
+            marker.write_bytes(b"authored marker")
+            record = observer.sample("after-inner-memory")
+            created = next(event for event in record["events"] if event["mask"] & custody.IN_CREATE)
+            self.assertEqual(created["fileIdentity"]["ino"], marker.stat().st_ino)
+            self.assertTrue(created["originalPidAlive"])
+            self.assertEqual(created["counters"]["memory.events"]["oom_kill"], 1)
+            self.assertEqual(created["counters"]["memory.events.local"]["oom_kill"], 0)
+            self.assertEqual(record["markers"][0]["sha256"], hashlib.sha256(b"authored marker").hexdigest())
+            self.assertEqual(record["originalConmonWatch"], request["watch"])
+            self.assertEqual(record["attribution"], "unresolved")
+            self.assertEqual(record["uncertainty"], [])
+            held = list(observer.fds)
+            observer.close()
+            for descriptor in held:
+                with self.assertRaises(OSError):
+                    os.fstat(descriptor)
+
+    def test_marker_removed_with_parent_retains_creation_but_stays_unresolved(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            request, marker, group = self.fixture(Path(directory))
+            observer = self.observer(request, group)
+            marker.touch()
+            original = observer.sample("after-inner-memory")["events"][0]["fileIdentity"]
+            marker.unlink()
+            marker.parent.rmdir()
+            record = observer.sample("before-stop-request")
+            self.assertEqual(record["events"][0]["fileIdentity"], original)
+            self.assertEqual(record["markers"][0]["availability"], "unresolved")
+            self.assertTrue(record["uncertainty"])
+            self.assertTrue(record["originalPidAlive"])
+
+    def test_replaced_marker_and_parent_never_become_new_baselines(self) -> None:
+        for replacement in ("marker", "parent"):
+            with self.subTest(replacement=replacement), tempfile.TemporaryDirectory() as directory:
+                request, marker, group = self.fixture(Path(directory))
+                observer = self.observer(request, group)
+                marker.touch()
+                old = observer.sample("after-inner-memory")["events"][0]["fileIdentity"]
+                if replacement == "marker":
+                    marker.unlink()
+                else:
+                    marker.parent.rename(marker.parent.with_name("old-parent"))
+                    marker.parent.mkdir()
+                marker.write_bytes(b"replacement")
+                record = observer.sample("before-stop-request")
+                self.assertEqual(record["events"][0]["fileIdentity"], old)
+                self.assertEqual(record["markers"][0]["availability"], "unresolved")
+                self.assertEqual(len(record["markers"][0]["completedContents"]), 1)
+                self.assertTrue(record["uncertainty"])
+
+    def test_original_pid_exit_is_held_and_only_bracketed_request_is_recorded(self) -> None:
+        for before_stop in (False, True):
+            with (
+                self.subTest(before_stop=before_stop),
+                tempfile.TemporaryDirectory() as directory,
+                subprocess.Popen(
+                    [sys.executable, "-I", "-c", "import sys; sys.stdin.buffer.read()"],
+                    stdin=subprocess.PIPE,
+                ) as child,
+            ):
+                request, _marker, group = self.fixture(Path(directory), pid=child.pid)
+                observer = self.observer(request, group)
+                if before_stop:
+                    self.assertTrue(observer.sample("before-stop-request")["originalPidAlive"])
+                child.stdin.close()
+                child.wait(timeout=2)
+                record = observer.sample("after-exit")
+                self.assertFalse(record["originalPidAlive"])
+                self.assertIsInstance(record["exitObservedMonotonicNs"], int)
+                self.assertEqual(record["beforeStopBoundaryObserved"], before_stop)
+                self.assertIn("precedes command dispatch", record["stopDelivery"])
+                self.assertEqual(bool(record["uncertainty"]), not before_stop)
+
+    def test_invalid_binding_partial_events_and_expiry_are_not_observations(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            request, marker, group = self.fixture(Path(directory))
+            request["starttime"] = "0"
+            with self.assertRaisesRegex(ValueError, "original PID changed"):
+                self.observer(request, group)
+            request["starttime"] = custody._birth(os.getpid())
+            request["watch"]["inode"] += 1
+            with self.assertRaisesRegex(ValueError, "event inode changed"):
+                self.observer(request, group)
+            request["watch"]["inode"] -= 1
+            observer = self.observer(request, group)
+            with patch.object(custody.os, "read", return_value=b"short"), self.assertRaisesRegex(ValueError, "partial"):
+                observer.drain()
+            observer.deadline = time.monotonic() - 1
+            marker.touch()
+            with self.assertRaisesRegex(ValueError, "deadline expired"):
+                observer.sample("after-inner-memory")
+
+    def test_oversize_marker_and_preexisting_marker_remain_unresolved(self) -> None:
+        for existing in (False, True):
+            with self.subTest(existing=existing), tempfile.TemporaryDirectory() as directory:
+                request, marker, group = self.fixture(Path(directory))
+                if existing:
+                    marker.touch()
+                observer = self.observer(request, group)
+                marker.write_bytes(b"x" * (custody.MAX_FILE + 1))
+                record = observer.sample("after-inner-memory")
+                self.assertEqual(record["markers"][0]["availability"], "unresolved")
+                self.assertTrue(record["uncertainty"])
+                self.assertLess(len(json.dumps(record)), custody.MAX_BYTES)
+
+    def test_disappeared_conmon_watch_is_sticky_and_retains_original_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            request, _marker, group = self.fixture(Path(directory))
+            observer = self.observer(request, group)
+            observer.observe_watch({"availability": "unresolved"})
+            observer.observe_watch(request["watch"])
+            record = observer.sample("after-inner-memory")
+            self.assertEqual(record["originalConmonWatch"], request["watch"])
+            self.assertIn("conmon watch continuity unresolved", record["uncertainty"])
+
+    def test_counter_read_failure_does_not_discard_held_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            request, marker, group = self.fixture(Path(directory))
+            observer = self.observer(request, group)
+            marker.touch()
+            old = observer.sample("after-inner-memory")["events"][0]["fileIdentity"]
+            (group / "memory.events.local").write_text("partial")
+            record = observer.sample("before-stop-request")
+            self.assertEqual(record["events"][0]["fileIdentity"], old)
+            self.assertEqual(record["counters"], {"availability": "unresolved"})
+            self.assertIn("held counter read unresolved", record["uncertainty"])
+
+    def test_autonomous_close_capture_survives_marker_and_parent_removal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            request, marker, group = self.fixture(Path(directory))
+            observer = self.observer(request, group)
+            payload = b"completed before cleanup"
+            marker.write_bytes(payload)
+            inode = marker.stat().st_ino
+            # No lifecycle sample before deletion: drain is the autonomous
+            # observer path that must retain completed bytes before cleanup.
+            observer.drain()
+            marker.unlink()
+            marker.parent.rmdir()
+            record = observer.sample("before-stop-request")
+            completed = record["markers"][0]["completedContents"]
+            self.assertEqual(len(completed), 1)
+            self.assertEqual(completed[0]["fileIdentity"]["ino"], inode)
+            self.assertEqual(completed[0]["bytesRead"], len(payload))
+            self.assertEqual(completed[0]["sha256"], hashlib.sha256(payload).hexdigest())
+            close = next(event for event in record["events"] if event["mask"] & custody.IN_CLOSE_WRITE)
+            self.assertEqual(close["completedContent"], completed[0])
+            self.assertEqual(record["markers"][0]["availability"], "unresolved")
+            self.assertTrue(record["uncertainty"])
+            self.assertEqual(record["attribution"], "unresolved")
+
+    def test_unclosed_rewrite_cannot_replace_prior_completed_content(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            request, marker, group = self.fixture(Path(directory))
+            observer = self.observer(request, group)
+            original = b"original complete marker"
+            marker.write_bytes(original)
+            first = observer.sample("after-inner-memory")
+            self.assertEqual(first["markers"][0]["availability"], "held")
+            original_completion = dict(first["markers"][0]["completedContents"][0])
+            with marker.open("wb") as writer:
+                writer.write(b"prefix!")
+                writer.flush()
+                during = observer.sample("before-shutdown")
+                current = during["markers"][0]
+                self.assertEqual(current["availability"], "unresolved")
+                self.assertNotIn("bytesRead", current)
+                self.assertNotIn("sha256", current)
+                self.assertEqual(current["completedContents"], [original_completion])
+                self.assertEqual(original_completion["bytesRead"], len(original))
+                self.assertIn("marker rewritten after completed observation", during["uncertainty"])
+                writer.write(b"now closed")
+            after = observer.sample("before-stop-request")
+            self.assertEqual(after["markers"][0]["availability"], "held")
+            completions = after["markers"][0]["completedContents"]
+            self.assertEqual(completions[0], original_completion)
+            self.assertEqual(len(completions), 2)
+            self.assertEqual(completions[1]["sha256"], hashlib.sha256(b"prefix!now closed").hexdigest())
+            self.assertGreater(completions[1]["observedWriteEpoch"], completions[0]["observedWriteEpoch"])
+            self.assertIn("marker rewritten after completed observation", after["uncertainty"])
+
+    def test_old_close_queued_before_later_open_rewrite_does_not_seal_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            request, marker, group = self.fixture(Path(directory))
+            observer = self.observer(request, group)
+            marker.write_bytes(b"first writer closed")
+            with marker.open("wb") as writer:
+                writer.write(b"unclosed prefix")
+                writer.flush()
+                record = observer.sample("after-inner-memory")
+                self.assertEqual(record["markers"][0]["availability"], "unresolved")
+                self.assertEqual(record["markers"][0]["completedContents"], [])
+                self.assertTrue(record["uncertainty"])
+                self.assertTrue(all("completedContent" not in event for event in record["events"]))
+
+    @staticmethod
+    def _rewrite_after_queued_events(
+        observer: custody.MarkerCustody, marker: Path, writers: list, raw: bytes
+    ) -> list[tuple[int, int, int, bytes]]:
+        parsed = custody.MarkerCustody._queued_events(observer, raw)
+        if not writers:
+            # The initial batch has been read and parsed; its old close has
+            # not caused a content read. The modify enters the next batch.
+            writer = marker.open("wb")
+            writers.append(writer)
+            writer.write(b"unclosed race prefix")
+            writer.flush()
+        return parsed
+
+    def test_rewrite_after_initial_queue_read_cannot_seal_open_prefix(self) -> None:
+        for prior_completion in (False, True):
+            with self.subTest(prior_completion=prior_completion), tempfile.TemporaryDirectory() as directory:
+                request, marker, group = self.fixture(Path(directory))
+                observer = self.observer(request, group)
+                retained = []
+                if prior_completion:
+                    marker.write_bytes(b"independently completed original")
+                    retained = list(observer.sample("after-inner-memory")["markers"][0]["completedContents"])
+                marker.write_bytes(b"old close awaiting observer")
+                writers = []
+                try:
+                    with patch.object(
+                        observer,
+                        "_queued_events",
+                        side_effect=partial(self._rewrite_after_queued_events, observer, marker, writers),
+                    ):
+                        record = observer.sample("before-shutdown")
+                    self.assertEqual(len(writers), 1)
+                    self.assertFalse(writers[0].closed)
+                    current = record["markers"][0]
+                    self.assertEqual(current["availability"], "unresolved")
+                    self.assertEqual(current["completedContents"], retained)
+                    self.assertNotIn("sha256", current)
+                    self.assertNotIn("bytesRead", current)
+                    self.assertIn("completed marker changed during post-read bracket", record["uncertainty"])
+                    prefix_hash = hashlib.sha256(b"unclosed race prefix").hexdigest()
+                    self.assertNotIn(prefix_hash, json.dumps(record))
+                    self.assertEqual(record["attribution"], "unresolved")
+                finally:
+                    for writer in writers:
+                        writer.close()
+
+    def test_rewrite_during_content_read_keeps_prior_completion_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            request, marker, group = self.fixture(Path(directory))
+            observer = self.observer(request, group)
+            marker.write_bytes(b"prior completed original")
+            prior = list(observer.sample("after-inner-memory")["markers"][0]["completedContents"])
+            marker.write_bytes(b"old close awaiting read")
+            original_read = observer._read
+            writers = []
+
+            def read_then_rewrite(descriptor: int, maximum: int) -> bytes:
+                raw = original_read(descriptor, maximum)
+                if descriptor == observer.markers[0]["file"] and not writers:
+                    writer = marker.open("wb")
+                    writers.append(writer)
+                    writer.write(b"during read prefix")
+                    writer.flush()
+                return raw
+
+            try:
+                with patch.object(observer, "_read", side_effect=read_then_rewrite):
+                    record = observer.sample("before-shutdown")
+                self.assertEqual(len(writers), 1)
+                self.assertFalse(writers[0].closed)
+                self.assertEqual(record["markers"][0]["availability"], "unresolved")
+                self.assertEqual(record["markers"][0]["completedContents"], prior)
+                self.assertNotIn(hashlib.sha256(b"during read prefix").hexdigest(), json.dumps(record))
+                self.assertTrue(record["uncertainty"])
+            finally:
+                for writer in writers:
+                    writer.close()
+
+    def test_post_read_queue_failure_cannot_publish_proposed_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            request, marker, group = self.fixture(Path(directory))
+            observer = self.observer(request, group)
+            marker.write_bytes(b"original sealed history")
+            prior = list(observer.sample("after-inner-memory")["markers"][0]["completedContents"])
+            marker.write_bytes(b"later closed candidate")
+            queued = observer._pending_events()
+            message = "post-read queue incomplete"
+            with (
+                patch.object(observer, "_pending_events", side_effect=[queued, ValueError(message)]),
+                self.assertRaisesRegex(ValueError, "post-read queue incomplete"),
+            ):
+                observer.drain()
+            self.assertEqual(observer.markers[0]["completedContents"], prior)
+            self.assertFalse(observer.markers[0]["closedWrite"])
+            self.assertNotIn(hashlib.sha256(b"later closed candidate").hexdigest(), json.dumps(observer.events))
+
+    def test_read_budget_and_kernel_queue_overflow_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            request, _marker, group = self.fixture(Path(directory))
+            observer = self.observer(request, group)
+            raw = custody.EVENT_HEADER.pack(-1, custody.IN_Q_OVERFLOW, 0, 0)
+            with patch.object(custody.os, "read", return_value=raw), self.assertRaisesRegex(ValueError, "overflow"):
+                observer.drain()
+            observer.reads = custody.MAX_READS
+            with self.assertRaisesRegex(ValueError, "budget exhausted"):
+                observer.sample("after-inner-memory")
+
+
+class CustodyProtocolTests(unittest.TestCase):
+    def test_eof_partial_input_and_expired_input_are_bounded(self) -> None:
+        for value in (b"", b"partial", None):
+            with self.subTest(value=value):
+                reader, writer = os.pipe()
+                try:
+                    if value is not None:
+                        os.write(writer, value)
+                    stream = MagicMock()
+                    stream.fileno.return_value = reader
+                    with patch.object(custody.sys, "stdin", stream):
+                        if value is None:
+                            with self.assertRaisesRegex(ValueError, "deadline expired"):
+                                custody._line(time.monotonic() - 1)
+                        else:
+                            os.close(writer)
+                            writer = None
+                            if value:
+                                with self.assertRaisesRegex(ValueError, "partial"):
+                                    custody._line(time.monotonic() + 1)
+                            else:
+                                self.assertEqual(custody._line(time.monotonic() + 1), b"")
+                finally:
+                    os.close(reader)
+                    if writer is not None:
+                        os.close(writer)
+
+    def test_server_eof_and_failure_close_original_custody_and_retain_events(self) -> None:
+        for failure in (False, True):
+            with self.subTest(failure=failure):
+                observer, stream = MagicMock(), MagicMock()
+                observer.deadline = time.monotonic() + 1
+                observer.events = [{"mask": custody.IN_CREATE, "originalPidAlive": True}]
+                observer.watch, observer.exited_at, observer.reasons = {}, None, []
+                next_line = ValueError("partial custody input") if failure else b""
+                with (
+                    patch.object(custody, "MarkerCustody", return_value=observer),
+                    patch.object(custody.sys, "stdin", stream),
+                    patch.object(custody, "_line", side_effect=[b"{}\n", next_line]),
+                    patch.object(custody.select, "select", return_value=([stream.fileno()], [], [])),
+                    patch.object(custody, "_reply") as reply,
+                ):
+                    custody.main()
+                observer.close.assert_called_once_with()
+                if failure:
+                    record = reply.call_args.args[0]
+                    self.assertEqual(record["availability"], "error")
+                    self.assertEqual(record["events"], observer.events)
 
 
 if __name__ == "__main__":

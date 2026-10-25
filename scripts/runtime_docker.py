@@ -229,6 +229,16 @@ def _outer_options(ctx: RuntimeContext, profile: dict[str, Any], fixture: Path) 
     return tuple(outer_args)
 
 
+def _close_oom_diagnostics(
+    ctx: RuntimeContext, diagnostics: OomDiagnostics | None, work_deadline: float | None
+) -> None:
+    try:
+        if diagnostics is not None:
+            diagnostics.close()
+    finally:
+        ctx.runtime_deadline = work_deadline
+
+
 def _stop_owned_daemon(
     ctx: RuntimeContext, container: str, *, systemd: bool, diagnostics: OomDiagnostics | None = None
 ) -> None:
@@ -236,7 +246,9 @@ def _stop_owned_daemon(
         if diagnostics is None:
             runtime_docker_systemd.stop_guest(ctx, container)
         else:
-            runtime_docker_systemd.stop_guest(ctx, container, on_exit=diagnostics.after_exit)
+            runtime_docker_systemd.stop_guest(
+                ctx, container, on_exit=diagnostics.after_exit, before_stop=diagnostics.before_stop
+            )
     else:
         ctx.podman("signal owned Docker daemon PID 1", "exec", container, "sh", "-c", "kill -TERM 1", check=False)
         ctx.podman("wait for owned Docker daemon exit", "wait", container, timeout=30)
@@ -520,4 +532,4 @@ def _run_nested_docker(
                 try:
                     _stop_owned_daemon(ctx, container, systemd=systemd, diagnostics=diagnostics)
                 finally:
-                    ctx.runtime_deadline = work_deadline
+                    _close_oom_diagnostics(ctx, diagnostics, work_deadline)

@@ -424,7 +424,13 @@ def _event_candidates(root: Path, outer: str, paths: list[str], reads: _MonitorR
                 linked = event.stat(follow_symlinks=False)
                 _require((info.st_dev, info.st_ino) == (linked.st_dev, linked.st_ino), "diagnostic event inode changed")
                 result.append(
-                    {"path": path, "inode": info.st_ino, "major": os.major(info.st_dev), "minor": os.minor(info.st_dev)}
+                    {
+                        "path": path,
+                        "inode": info.st_ino,
+                        "major": os.major(info.st_dev),
+                        "minor": os.minor(info.st_dev),
+                        "directoryIdentity": {"dev": before.st_dev, "ino": before.st_ino},
+                    }
                 )
             finally:
                 os.close(descriptor)
@@ -789,6 +795,130 @@ class OomDiagnostics:
         self.baseline: dict[str, Any] | None = None
         self.monitor_context: dict[str, Any] | None = None
         self.exit_observed = False
+        self.custody: subprocess.Popen[bytes] | None = None
+        self.custody_started = False
+        self.last_watch: dict[str, Any] | None = None
+
+    def _custody_exchange(self, request: dict[str, Any]) -> dict[str, Any]:
+        _require(self.custody is not None, "diagnostic custody was not armed")
+        process = self.custody
+        _require(process.stdin is not None and process.stdout is not None, "diagnostic custody pipes unavailable")
+        deadline = time.monotonic() + min(2, self.ctx.timeout)
+        payload = (json.dumps(request) + "\n").encode("utf-8")
+        _require(len(payload) <= MAX_BYTES, "diagnostic custody request exceeded bound")
+        descriptor = process.stdin.fileno()
+        while payload:
+            _, ready, _ = select.select([], [descriptor], [], max(0, deadline - time.monotonic()))
+            _require(bool(ready), "diagnostic custody request deadline expired")
+            payload = payload[os.write(descriptor, payload) :]
+        raw = bytearray()
+        while not raw.endswith(b"\n"):
+            _require(len(raw) <= MAX_BYTES, "diagnostic custody response exceeded bound")
+            ready, _, _ = select.select([process.stdout], [], [], max(0, deadline - time.monotonic()))
+            _require(bool(ready), "diagnostic custody response deadline expired")
+            part = os.read(process.stdout.fileno(), MAX_BYTES + 1 - len(raw))
+            _require(bool(part), "diagnostic custody closed without response")
+            raw.extend(part)
+        _require(len(raw) <= MAX_BYTES and raw.count(b"\n") == 1, "diagnostic custody response framing invalid")
+        return json.loads(raw)
+
+    def _custody_sample(self, phase: str, *, request: dict[str, Any] | None = None) -> None:
+        record: dict[str, Any] = {
+            "name": "owned systemd OOM custody",
+            "phase": phase,
+            "attribution": "unresolved",
+        }
+        try:
+            record["snapshot"] = self._custody_exchange(
+                request or {"phase": phase, "lastSnapshotConmonWatch": self.last_watch}
+            )
+            record["availability"] = record["snapshot"].get("availability", "observed")
+        except Exception as error:  # noqa: BLE001 — evidence cannot replace the native result.
+            record.update(availability="error", reason=type(error).__name__)
+        self.ctx.observations.append(record)
+
+    def _start_custody(self, state: dict[str, Any], snapshot: dict[str, Any]) -> None:
+        if self.custody_started:
+            return
+        try:
+            _require(self.monitor_context is not None, "diagnostic custody lacks original monitor metadata")
+            now = time.monotonic()
+            work_deadline = getattr(self.ctx, "runtime_deadline", None)
+            expiry = work_deadline + 40 if type(work_deadline) in {int, float} else now + self.ctx.timeout + 40
+            request = {
+                "pid": state["Pid"],
+                "starttime": snapshot["hostInit"]["starttime"],
+                "markers": self.monitor_context["markers"],
+                "watch": self.monitor_context["watch"],
+                # Absolute expiry is independent of the driver's survival. It
+                # never renews a native work or shutdown allowance.
+                "deadline": min(now + 640, expiry),
+            }
+            self.custody_started = True
+            self.custody = subprocess.Popen(  # noqa: S603 — fixed helper, existing exact privilege boundary.
+                [*self.ctx._sudo, sys.executable, "-I", str(Path(__file__).with_name("runtime_oom_watch.py"))],  # noqa: SLF001
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+                close_fds=True,
+                bufsize=0,
+            )
+            _require(self.custody.stdin is not None, "diagnostic custody input unavailable")
+            os.set_blocking(self.custody.stdin.fileno(), False)
+            self._custody_sample("armed", request=request)
+        except Exception as error:  # noqa: BLE001 — diagnostic startup cannot suppress original work.
+            self.ctx.observations.append(
+                {
+                    "name": "owned systemd OOM custody",
+                    "phase": "armed",
+                    "availability": "error",
+                    "reason": type(error).__name__,
+                    "attribution": "unresolved",
+                }
+            )
+
+    def before_stop(self) -> None:
+        """Observe before dispatch; actual guarded request delivery stays unresolved."""
+        if self.custody_started:
+            self._custody_sample("before-stop-request")
+
+    def _before_inner_custody(self, phase: str, state: dict[str, Any], snapshot: dict[str, Any]) -> None:
+        if phase == "before-inner-memory":
+            self._start_custody(state, snapshot)
+
+    def _after_snapshot_custody(self, phase: str) -> None:
+        if self.custody_started and phase in {"after-inner-memory", "before-shutdown"}:
+            self._custody_sample(phase)
+
+    def close(self) -> None:
+        """EOF closes read-only host custody; uncertain cleanup remains diagnostic."""
+        process, self.custody = self.custody, None
+        if process is None:
+            return
+        availability = "observed"
+        try:
+            if process.stdin is not None:
+                process.stdin.close()
+            process.wait(timeout=MONITOR_CLEANUP_SECONDS)
+            _require(process.returncode == 0, "diagnostic custody helper failed")
+        except Exception:  # noqa: BLE001 — no host mutation or shutdown admission on cleanup failure.
+            availability = "unresolved"
+        finally:
+            if process.stdout is not None:
+                try:
+                    process.stdout.close()
+                except OSError:
+                    availability = "unresolved"
+        self.ctx.observations.append(
+            {
+                "name": "owned systemd OOM custody",
+                "phase": "cleanup",
+                "availability": availability,
+                "attribution": "unresolved",
+                "limits": "EOF requested; independent absolute helper expiry remains in force",
+            }
+        )
 
     def snapshot(self, phase: str, *, scope: str | None = None, scope_inode: int | None = None) -> None:
         """Record missing/invalid evidence as unresolved, never obstruct owned shutdown."""
@@ -799,9 +929,7 @@ class OomDiagnostics:
             "phase": phase,
             "availability": "unavailable",
             "attribution": "unresolved",
-            "limits": (
-                "non-atomic snapshots; no host ancestors or observer through shutdown; source correspondence unresolved"
-            ),
+            "limits": ("non-atomic snapshots; separate bounded custody observer; source correspondence unresolved"),
         }
         # Only fixed read-only inspect/collector calls use this copy. Its command
         # outcomes remain verbatim observations, never native admission checks.
@@ -852,6 +980,7 @@ class OomDiagnostics:
             _require(len(raw) <= MAX_BYTES, "diagnostic snapshot exceeded its byte bound")
             snapshot = json.loads(raw)
             record["snapshot"] = snapshot
+            self.last_watch = copy.deepcopy(snapshot.get("conmon", {}).get("watch"))
             if snapshot.get("conmon", {}).get("identityVerified") is True:
                 self.monitor_context = copy.deepcopy(snapshot["conmon"])
             leaf = snapshot["guestChain"][0]
@@ -866,16 +995,21 @@ class OomDiagnostics:
             elif phase == "before-inner-memory":
                 self.baseline = snapshot
             record["availability"] = "observed"
+            self._before_inner_custody(phase, state, snapshot)
         except Exception as error:  # noqa: BLE001 — evidence-only boundary must not obstruct native shutdown.
+            self.last_watch = None
             record["availability"] = "error"
             record["reason"] = f"{type(error).__name__}: {error}"
         self.ctx.observations.append(record)
+        self._after_snapshot_custody(phase)
 
     def after_exit(self, exact_cid: str, state: dict[str, Any]) -> None:
         """One host-only marker sample before cleanup; never re-open a dead PID."""
         if self.exit_observed:
             return
         self.exit_observed = True
+        if self.custody_started:
+            self._custody_sample("after-exit")
         record: dict[str, Any] = {
             "name": "owned systemd OOM diagnostic",
             "phase": "after-exit",
