@@ -1344,7 +1344,7 @@ class ToolDiagnosticTests(unittest.TestCase):
         cases = [
             ("READ_REGULAR_FILE", {"st_mode": 0o40755}),
             ("READ_OWNER", {"st_uid": 1001}),
-            ("READ_LINKS", {"st_nlink": 2}),
+            ("READ_LINKS", {"st_nlink": 0}),
             ("READ_MODE", {"st_mode": 0o104755}),
         ]
         for site, changes in cases:
@@ -1587,6 +1587,186 @@ class ToolDiagnosticTests(unittest.TestCase):
         )
         self.assertEqual(hosted.installed_tools(123, hosted.ToolDiagnostic(self.artifact)), observed)
         self.assertEqual(self.artifact, {})
+
+    def test_borrowed_os_tools_accept_stable_positive_link_counts(self) -> None:
+        for links in (1, 2, 64):
+            with self.subTest(links=links):
+                self.file.st_nlink = links
+                for mock in (self.open, self.fstat, self.read, self.close, self.run, self.remaining, self.lstat):
+                    mock.reset_mock()
+                accepted = hosted.installed_tools(123, self.diagnostic)
+                self.assertEqual(list(accepted), ["/usr/bin/systemctl", "/usr/bin/systemd-run", "/usr/bin/env"])
+                self.assertEqual([fact["identity"]["links"] for fact in accepted.values()], [links] * 3)
+                self.assertEqual(self.open.call_count, 3)
+                self.assertEqual(self.read.call_count, 3)
+                self.assertEqual(self.fstat.call_count, 6)
+                self.assertEqual(self.lstat.call_count, 39)
+                self.assertEqual(self.remaining.call_count, 6)
+                self.assertEqual(self.run.call_count, 3)
+                self.assertEqual(self.close.call_count, 3)
+                self.assertEqual(hosted.installed_tools(123, self.diagnostic), accepted)
+                self.assertEqual(self.artifact, {})
+
+    def test_strict_root_reader_keeps_single_link_rule_including_os_names(self) -> None:
+        paths = (
+            "/usr/bin/systemctl",
+            "/usr/bin/systemd-run",
+            "/usr/bin/env",
+            "/usr/bin/python3",
+            "/stage/parser",
+            "/stage/source",
+            "/stage/control.json",
+        )
+        for name in paths:
+            for links in (0, -1, 2, 64):
+                with self.subTest(path=name, links=links):
+                    self.artifact.clear()
+                    self.open.reset_mock()
+                    self.close.reset_mock()
+                    self.file.st_nlink = links
+                    path = Path(name)
+
+                    def metadata(current: Path, target: Path = path) -> SimpleNamespace:
+                        return self.file if current == target else self.directory
+
+                    self.lstat.side_effect = metadata
+                    self.assert_failure(
+                        "READ_LINKS", "REFUSED", lambda path=path: hosted.read_root(path, diagnostic=self.diagnostic)
+                    )
+                    self.close.assert_called_once_with(77)
+        self.read.assert_not_called()
+        self.run.assert_not_called()
+
+    def test_strict_root_reader_accepts_single_link_os_or_control_file(self) -> None:
+        for path in (Path("/usr/bin/env"), Path("/stage/control.json")):
+            with self.subTest(path=path):
+                self.lstat.side_effect = lambda current, target=path: self.file if current == target else self.directory
+                raw, info = hosted.read_root(path, diagnostic=self.diagnostic)
+                self.assertEqual(raw, b"\x7fELF")
+                self.assertEqual(info.links, 1)
+        self.assertEqual(self.read.call_args_list, [unittest.mock.call(77, hosted.LIMIT)] * 2)
+        self.assertEqual(self.artifact, {})
+        self.run.assert_not_called()
+
+    def test_unknown_borrowed_tool_selection_is_refused_before_io(self) -> None:
+        for tool in ("/usr/bin/env", "unknown", "env", Path("/usr/bin/env"), None, []):
+            with self.subTest(tool=tool), self.assertRaises(custody.CustodyError):
+                hosted._read_installed_tool(tool, self.diagnostic)
+        self.lstat.assert_not_called()
+        self.open.assert_not_called()
+        self.fstat.assert_not_called()
+        self.read.assert_not_called()
+        self.close.assert_not_called()
+        self.run.assert_not_called()
+        self.remaining.assert_not_called()
+        self.assertEqual(self.artifact, {})
+
+    def test_borrowed_reader_retains_other_file_guards_and_refuses_nonpositive_links(self) -> None:
+        cases = [
+            ("READ_REGULAR_FILE", {"st_mode": 0o40755}),
+            ("READ_OWNER", {"st_uid": 1001}),
+            ("READ_MODE", {"st_mode": 0o104755}),
+            ("READ_MODE", {"st_mode": 0o100777}),
+            ("READ_LINKS", {"st_nlink": 0}),
+            ("READ_LINKS", {"st_nlink": -1}),
+        ]
+        self.file.st_nlink = 3
+        for site, changes in cases:
+            with self.subTest(site=site, changes=changes):
+                self.artifact.clear()
+                self.open.reset_mock()
+                self.close.reset_mock()
+                self.fstat.return_value = SimpleNamespace(**(vars(self.file) | changes))
+                self.assert_failure(site, "REFUSED")
+                self.close.assert_called_once_with(77)
+        self.read.assert_not_called()
+        self.run.assert_not_called()
+
+    def test_borrowed_reader_detects_link_inode_and_content_metadata_drift(self) -> None:
+        self.file.st_nlink = 3
+        for field, value in (
+            ("st_nlink", 4),
+            ("st_nlink", 0),
+            ("st_ino", 99),
+            ("st_size", 99),
+            ("st_mtime_ns", 99),
+            ("st_ctime_ns", 99),
+        ):
+            changed = SimpleNamespace(**(vars(self.file) | {field: value}))
+            for site in ("READ_FINAL_FSTAT", "READ_FINAL_LSTAT"):
+                with self.subTest(field=field, value=value, site=site):
+                    self.artifact.clear()
+                    self.open.reset_mock()
+                    self.read.reset_mock()
+                    self.close.reset_mock()
+                    self.lstat.side_effect = self.metadata
+                    self.fstat.side_effect = [self.file, changed] if site == "READ_FINAL_FSTAT" else None
+                    visits = 0
+                    if site == "READ_FINAL_LSTAT":
+
+                        def metadata(path: Path, final: SimpleNamespace = changed) -> SimpleNamespace:
+                            nonlocal visits
+                            if path.name == "systemctl":
+                                visits += 1
+                                final_visit = 3
+                                if visits == final_visit:
+                                    return final
+                            return self.metadata(path)
+
+                        self.lstat.side_effect = metadata
+                    self.assert_failure(site, "REFUSED")
+                    self.read.assert_called_once_with(77, child.MAX_INTERPRETER)
+                    self.close.assert_called_once_with(77)
+        self.run.assert_not_called()
+
+    def test_borrowed_reader_resolves_alias_but_versions_original_fixed_name(self) -> None:
+        self.file.st_nlink = 3
+        original, resolved = Path("/usr/bin/env"), Path("/usr/lib/coreutils/env")
+
+        def metadata(path: Path) -> SimpleNamespace:
+            if path == original:
+                return SimpleNamespace(st_uid=0, st_mode=0o120777)
+            return self.metadata(path)
+
+        self.lstat.side_effect = metadata
+        with patch.object(Path, "readlink", return_value=resolved) as readlink:
+            accepted = hosted.installed_tools(123, self.diagnostic)
+        self.assertEqual(accepted[str(original)]["path"], str(resolved))
+        self.assertEqual(accepted[str(original)]["identity"]["links"], 3)
+        self.assertEqual(readlink.call_count, 2)
+        self.assertEqual(self.open.call_args.args[0], resolved)
+        self.assertEqual(self.run.call_args.args[0], [str(original), "--version"])
+        self.assertEqual(self.artifact, {})
+
+    def test_borrowed_content_hash_drift_still_refuses_final_observer_comparison(self) -> None:
+        self.file.st_nlink = 3
+        self.file.st_size = 7
+        self.read.side_effect = [b"\x7fELFone"] * 3 + [b"\x7fELFtwo"] * 3
+        bootstrap = {"uid": 1001, "gid": 1001, "deadlineNs": 123}
+        output = io.StringIO()
+        with (
+            patch.object(hosted.os, "umask"),
+            patch.object(hosted.os, "geteuid", return_value=0),
+            patch.object(hosted, "read_root", return_value=(json.dumps(bootstrap).encode(), None)),
+            patch.object(hosted, "audit_stage", return_value={}),
+            patch.object(hosted, "write_denial_probe", return_value={}),
+            patch.object(hosted, "Clock"),
+            patch.object(hosted, "cycle") as cycle,
+            patch.object(hosted.time, "monotonic_ns", return_value=0),
+            patch.object(sys, "stdout", output),
+        ):
+            self.assertEqual(hosted.observer_main("/synthetic-stage"), 1)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["outcome"], "retained-unknown")
+        self.assertEqual(cycle.call_count, 2)
+        self.assertEqual(self.read.call_count, 6)
+        self.assertEqual(self.run.call_count, 6)
+        self.assertNotIn("systemToolsFailure", result)
+        self.assertEqual(result["systemTools"]["/usr/bin/env"]["sha256"], hosted.digest(b"\x7fELFone"))
+        self.assertEqual(result["systemTools"]["/usr/bin/env"]["identity"]["links"], 3)
+        self.assertEqual(result["qualification"], "none")
+        self.assertFalse(result["policy_load_run"])
+        self.assertFalse(result["container_run"])
 
     def test_each_tool_identity_and_observer_failure_artifact(self) -> None:
         for position, tool in enumerate(("SYSTEMCTL", "SYSTEMD_RUN", "ENV")):

@@ -265,10 +265,23 @@ failure-category identifiers (`REFUSED`, `OS_ERROR`, `TIMEOUT`, `DECODE`,
 inferring its cause. This diagnostic
 survives a partial scan or a later close failure; accepted `systemTools` facts
 remain separate. It includes no exception text, command output or extra host
-observations. The scan still stops at its original first failure, uses the same
-trust, file, ELF, version and deadline checks, and runs the same commands and
-before/after tool comparison. This is diagnostic evidence only and changes no
-admission or runtime authority.
+observations. The scan still stops at its first failure and uses the original
+commands, deadlines and before/after tool comparison. The diagnostic itself
+adds no admission or runtime authority.
+
+A hosted observation refused `ENV / READ_LINKS / REFUSED`: the initial file
+identity failed the single-link predicate. It did not record the numeric link
+count or establish a packaging cause. The three fixed preinstalled OS tools
+(`systemctl`, `systemd-run` and `env`) are borrowed executables, so their private
+reader accepts a positive link count that remains stable in the full identity
+rechecks. Only those fixed selections reach this policy. The shared `read_root`
+entrypoint still requires exactly one link, even for a directly supplied OS-tool
+path; parser, interpreter, source, custody and control files gain no exception.
+Root ownership, trusted path traversal, no-follow open, regular-file and mode
+checks, byte bounds, ELF/version checks, hashing, full descriptor/path identity
+rechecks (including link count and timestamps), command arguments and budgets
+remain in place. This bounded OS-tool contract does not establish native runtime
+qualification or claim that the earlier runner had multiple links.
 
 `.github/docker-userns-unused-admission.json` is a manually reviewed semantic
 admission based on the audited Stage-1 Ubuntu 26 observation, bound to the

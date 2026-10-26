@@ -19,6 +19,7 @@ import sys
 import time
 from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import asdict, dataclass
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -47,6 +48,11 @@ CHILD_LIST_LIMIT = MAX_CHILDREN * 24
 PR_SET_CHILD_SUBREAPER = 36
 PR_GET_CHILD_SUBREAPER = 37
 _CANCELLATION = [False]
+_INSTALLED_TOOLS = {
+    "SYSTEMCTL": "/usr/bin/systemctl",
+    "SYSTEMD_RUN": "/usr/bin/systemd-run",
+    "ENV": "/usr/bin/env",
+}
 CONTROL_PREFIX = "containers-userns-control."
 CONTROL_LEAVES = {
     "binding.json",
@@ -265,10 +271,22 @@ def identity(info: os.stat_result) -> custody.FileIdentity:
     )
 
 
+class _RootReadPolicy(Enum):
+    STRICT = "strict"
+    BORROWED_OS_TOOL = "borrowed-os-tool"
+
+
 def read_root(
     path: Path, limit: int = LIMIT, diagnostic: ToolDiagnostic | None = None
 ) -> tuple[bytes, custody.FileIdentity]:
-    """Read one exact root file through a no-follow descriptor and recheck identity."""
+    """Read one exact single-link root file, including directly named OS executables."""
+    return _read_root(path, limit, diagnostic, _RootReadPolicy.STRICT)
+
+
+def _read_root(
+    path: Path, limit: int, diagnostic: ToolDiagnostic | None, policy: _RootReadPolicy
+) -> tuple[bytes, custody.FileIdentity]:
+    """Share the original descriptor checks under one private, closed link policy."""
     with tool_site(diagnostic, "READ_CANONICAL_PATH"):
         need(safe_path(path, diagnostic) == path)
     with tool_site(diagnostic, "READ_OPEN"):
@@ -281,7 +299,7 @@ def read_root(
         with tool_site(diagnostic, "READ_OWNER"):
             need(before.owner == 0)
         with tool_site(diagnostic, "READ_LINKS"):
-            need(before.links == 1)
+            need(before.links >= 1 if policy is _RootReadPolicy.BORROWED_OS_TOOL else before.links == 1)
         with tool_site(diagnostic, "READ_MODE"):
             need(not before.mode & 0o7022)
         with tool_site(diagnostic, "READ_BYTES"):
@@ -1777,19 +1795,26 @@ def audit_stage(stage: Path, bootstrap: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _read_installed_tool(
+    tool: str, diagnostic: ToolDiagnostic | None = None
+) -> tuple[Path, bytes, custody.FileIdentity]:
+    """Borrow only a fixed selected OS executable, retaining its stable positive link count."""
+    need(type(tool) is str and tool in _INSTALLED_TOOLS)
+    if diagnostic is not None:
+        diagnostic.tool = tool
+    path = safe_path(Path(_INSTALLED_TOOLS[tool]), diagnostic)
+    raw, info = _read_root(path, child.MAX_INTERPRETER, diagnostic, _RootReadPolicy.BORROWED_OS_TOOL)
+    return path, raw, info
+
+
 def installed_tools(deadline: int, diagnostic: ToolDiagnostic | None = None) -> dict[str, Any]:
     """Record actual preinstalled systemd tools under the explicit OS-integrity exception."""
     result = {}
-    for name, tool in (
-        ("/usr/bin/systemctl", "SYSTEMCTL"),
-        ("/usr/bin/systemd-run", "SYSTEMD_RUN"),
-        ("/usr/bin/env", "ENV"),
-    ):
+    for tool, name in _INSTALLED_TOOLS.items():
         if diagnostic is not None:
             diagnostic.tool = tool
         with tool_site(diagnostic, "TOOL_FACTS"):
-            path = safe_path(Path(name), diagnostic)
-            raw, info = read_root(path, child.MAX_INTERPRETER, diagnostic)
+            path, raw, info = _read_installed_tool(tool, diagnostic)
             with tool_site(diagnostic, "ELF_MAGIC"):
                 need(raw.startswith(b"\x7fELF"))
             output = command([name, "--version"], deadline, diagnostic)
