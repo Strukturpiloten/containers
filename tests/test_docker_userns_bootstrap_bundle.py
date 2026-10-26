@@ -23,12 +23,34 @@ from scripts import docker_userns_bootstrap_bundle as bundle
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def canonical_bootstrap() -> dict[str, object]:
-    """Compile the canonical template literal directly, never a duplicate verifier."""
+FULL_PROGRAM_BYTES = 17111
+FULL_PROGRAM_SHA256 = "3aa48b3adef2d2e2e2f8824701053dba649f34a530fa4c50b6e3e35c9556f164"
+
+
+def canonical_program() -> str:
+    """Read the single canonical literal env carrier, including its terminal try/except."""
     text = (ROOT / ".github/workflow-templates/ci.yml.j2").read_text()
-    begin = text.index("          # BEGIN FIXED USERNS ROOT BOOTSTRAP")
-    end = text.index("          # END FIXED USERNS ROOT BOOTSTRAP", begin)
-    code = "\n".join(line[10:] for line in text[begin:end].splitlines())
+    begin = text.index("            # BEGIN FIXED USERNS ROOT BOOTSTRAP")
+    end = text.index("        run: |\n", begin)
+    return "".join(line.removeprefix("            ") for line in text[begin:end].splitlines(keepends=True))
+
+
+def hosted_step() -> dict[str, object]:
+    """Read the generated step as GitHub receives it, without executing any workflow code."""
+    import yaml  # noqa: PLC0415 - existing locked dependency.
+
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+    return next(
+        step
+        for step in workflow["jobs"]["userns-custody-unused"]["steps"]
+        if step["name"] == "Observe two real hosted unused ownership cycles"
+    )
+
+
+def canonical_bootstrap() -> dict[str, object]:
+    """Compile definitions from the canonical carrier; never execute terminal root_main."""
+    program = canonical_program()
+    code = program[: program.index("# END FIXED USERNS ROOT BOOTSTRAP")]
     scope = {}
     exec(compile(code, "<canonical-root-bootstrap>", "exec"), scope)  # noqa: S102 - repository's exact inert functions.
     return scope
@@ -241,9 +263,9 @@ class BootstrapTests(unittest.TestCase):
             script = (
                 "import os,sys,time;from pathlib import Path;"
                 "text=Path(sys.argv[1]).read_text();"
-                "a=text.index('          # BEGIN FIXED USERNS ROOT BOOTSTRAP');"
-                "b=text.index('          # END FIXED USERNS ROOT BOOTSTRAP',a);scope={};"
-                "code=chr(10).join(line[10:] for line in text[a:b].splitlines());"
+                "a=text.index('            # BEGIN FIXED USERNS ROOT BOOTSTRAP');"
+                "b=text.index('            # END FIXED USERNS ROOT BOOTSTRAP',a);scope={};"
+                "code=chr(10).join(line.removeprefix('            ') for line in text[a:b].splitlines());"
                 "exec(compile(code,'<fixed-bootstrap>','exec'),scope);"
                 "\ntry: scope['read_input'](sys.argv[2],os.getuid(),100,time.monotonic_ns()+1000000000)"
                 "\nexcept ValueError: print('refused')"
@@ -348,6 +370,159 @@ class BootstrapTests(unittest.TestCase):
         self.assertFalse(rule["automerge"])
         self.assertIn("manually re-admit", rule["description"])
 
+    def test_literal_env_carrier_preserves_full_executed_program_and_source_boundaries(self) -> None:
+        step = hosted_step()
+        program, run = step["env"]["FIXED_ROOT_BOOTSTRAP"], step["run"]
+        self.assertEqual(program, canonical_program())
+        self.assertEqual(len(program.encode()), FULL_PROGRAM_BYTES)
+        self.assertEqual(hashlib.sha256(program.encode()).hexdigest(), FULL_PROGRAM_SHA256)
+        self.assertNotIn("${{", program)
+        self.assertNotIn("\0", program)
+        self.assertNotIn("BEGIN FIXED USERNS ROOT BOOTSTRAP", run)
+        self.assertNotIn("<<", run)
+        self.assertIn("FIXED_ROOT_BOOTSTRAP: |", (ROOT / ".github/workflow-templates/ci.yml.j2").read_text())
+        tree = ast.parse(program)
+        self.assertTrue(any(isinstance(node, ast.Try) for node in tree.body))
+        self.assertFalse(any(isinstance(node, ast.Name) and node.id == "__file__" for node in ast.walk(tree)))
+        self.assertFalse(
+            any(
+                isinstance(node, ast.Attribute)
+                and node.attr == "stdin"
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "sys"
+                for node in ast.walk(tree)
+            )
+        )
+        self.assertLess(len(run.encode()), 8192)
+        self.assertLess(run.index("${FIXED_ROOT_BOOTSTRAP:-}"), run.index("readonly FIXED_ROOT_BOOTSTRAP"))
+        self.assertLess(run.index("readonly FIXED_ROOT_BOOTSTRAP"), run.index("uv run"))
+        self.assertIn('capture_unused_artifact < /dev/null > "${artifact}"', run)
+        self.assertEqual(run.count("sudo --"), 1)
+
+    def inert_step(
+        self, directory: Path, *, status: int = 0, program: str | None = None, mutation: bool = False
+    ) -> tuple[subprocess.CompletedProcess[bytes], Path, Path, Path, Path]:
+        """Run short Bash with builtin-only workspace/privilege shims and hostile parent stdin."""
+        artifact = directory / "docker-userns-custody-unused.json"
+        argv_file, after, workspace = directory / "argv", directory / "after", directory / "workspace"
+        shim = r"""set -euo pipefail
+uv() {
+  printf called > "${PROBE_WORKSPACE}"
+  if [[ "${PROBE_MUTATE}" == 1 ]]; then
+    FIXED_ROOT_BOOTSTRAP=changed
+  fi
+}
+id() {
+  case "$1" in
+    -u) printf '%s\n' "${PROBE_UID}" ;;
+    -g) printf '%s\n' "${PROBE_GID}" ;;
+    *) return 94 ;;
+  esac
+}
+sudo() {
+  [[ -e "${artifact}" && -O "${artifact}" ]] || return 92
+  if IFS= read -r probe_line; then return 93; fi
+  printf '%s\0' "$@" > "${PROBE_ARGV}"
+  printf 'fixed-root-output\n'
+  printf 'shim-stderr\n' >&2
+  return "${PROBE_STATUS}"
+}
+"""
+        script = shim + hosted_step()["run"] + 'printf continued > "${PROBE_AFTER}"\n'
+        environment = {
+            "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+            "LANG": "C",
+            "LC_ALL": "C",
+            "RUNNER_TEMP": str(directory),
+            "PYTHON_VERSION": "3.14",
+            "SELECTED_MERGE": "a" * 40,
+            "GITHUB_EVENT_PATH": "event with spaces",
+            "GITHUB_RUN_ID": "17",
+            "GITHUB_RUN_ATTEMPT": "2",
+            "ImageVersion": "20261023.163.3",
+            "WORKFLOW_CANDIDATE": "b" * 40,
+            "PROBE_UID": str(os.getuid()),
+            "PROBE_GID": str(os.getgid()),
+            "PROBE_STATUS": str(status),
+            "PROBE_MUTATE": "1" if mutation else "0",
+            "PROBE_ARGV": str(argv_file),
+            "PROBE_AFTER": str(after),
+            "PROBE_WORKSPACE": str(workspace),
+        }
+        if program is not None:
+            environment["FIXED_ROOT_BOOTSTRAP"] = program
+        result = subprocess.run(  # noqa: S603 - inert Bash functions never dispatch sudo, uv or Python.
+            ["/bin/bash", "-c", script],
+            env=environment,
+            input=b"unexpected-parent-stdin\n",
+            capture_output=True,
+            timeout=2,
+            check=False,
+        )
+        return result, artifact, argv_file, after, workspace
+
+    def test_caller_capture_passes_one_quoted_program_exact_args_and_stdin_eof(self) -> None:
+        program = canonical_program()
+        for status in (0, 37):
+            with tempfile.TemporaryDirectory(prefix="containers-bootstrap space ") as directory:
+                target = Path(directory)
+                result, artifact, argv_file, after, workspace = self.inert_step(target, status=status, program=program)
+                expected = [
+                    "--",
+                    "/usr/bin/env",
+                    "-i",
+                    "PATH=/usr/sbin:/usr/bin:/sbin:/bin",
+                    "LANG=C",
+                    "LC_ALL=C",
+                    "/usr/bin/python3",
+                    "-I",
+                    "-B",
+                    "-S",
+                    "-c",
+                    program,
+                    str(target / "docker-userns-custody-bundle.json"),
+                    "a" * 40,
+                    "event with spaces",
+                    str(os.getuid()),
+                    str(os.getgid()),
+                    "17",
+                    "2",
+                    "20261023.163.3",
+                    "b" * 40,
+                ]
+                with self.subTest(status=status):
+                    self.assertEqual(result.returncode, status, result.stderr)
+                    self.assertEqual(artifact.stat().st_uid, os.getuid())
+                    self.assertEqual(artifact.read_bytes(), b"fixed-root-output\n")
+                    self.assertEqual(argv_file.read_bytes().split(b"\0")[:-1], [value.encode() for value in expected])
+                    self.assertEqual(after.exists(), status == 0)
+                    self.assertTrue(workspace.exists())
+                    self.assertEqual(result.stdout, b"")
+                    self.assertEqual(result.stderr, b"shim-stderr\n")
+
+    def test_missing_or_empty_program_refuses_before_workspace_or_privileged_command(self) -> None:
+        for program in (None, ""):
+            with tempfile.TemporaryDirectory() as directory:
+                result, artifact, argv_file, after, workspace = self.inert_step(Path(directory), program=program)
+                with self.subTest(program=program):
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(b"Fixed root bootstrap is required", result.stderr)
+                    self.assertFalse(artifact.exists())
+                    self.assertFalse(workspace.exists())
+                    self.assertFalse(argv_file.exists())
+                    self.assertFalse(after.exists())
+
+    def test_workspace_cannot_reassign_readonly_program_before_root_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result, _artifact, argv_file, after, workspace = self.inert_step(
+                Path(directory), program=canonical_program(), mutation=True
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(b"readonly variable", result.stderr)
+            self.assertTrue(workspace.exists())
+            self.assertFalse(argv_file.exists())
+            self.assertFalse(after.exists())
+
     def test_job_is_merge_only_without_secret_credentials_or_privileged_uv(self) -> None:
         import yaml  # noqa: PLC0415 - use the project's existing locked test dependency.
 
@@ -364,11 +539,12 @@ class BootstrapTests(unittest.TestCase):
         )
         self.assertIn("/usr/bin/env -i", run)
         self.assertIn("/usr/bin/python3 -I -B -S -", run)
-        before_verified_exec = run[: run.index("result = capture_observer")]
+        program = hosted_step()["env"]["FIXED_ROOT_BOOTSTRAP"]
+        before_verified_exec = program[: program.index("result = capture_observer")]
         self.assertNotIn('subprocess.run(["git"', before_verified_exec)
         self.assertIn("verify_bundle(read_input", before_verified_exec)
-        self.assertEqual(run.count("BEGIN FIXED USERNS ROOT BOOTSTRAP"), 1)
-        ast.parse(run[run.index("# BEGIN FIXED") : run.index("# END FIXED")])
+        self.assertEqual(program.count("BEGIN FIXED USERNS ROOT BOOTSTRAP"), 1)
+        ast.parse(program)
 
 
 if __name__ == "__main__":

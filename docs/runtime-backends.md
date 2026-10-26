@@ -311,3 +311,20 @@ Observer capture and the top-level observer decide their final return only
 after restoring prior signal handlers and propagating sticky cancellation.
 Known status, EOF and completed child cleanup do not turn cancellation into
 accepted success. No additional cleanup budget is created by these checks.
+
+The complete fixed root program is carried by the canonical step's literal
+`FIXED_ROOT_BOOTSTRAP` environment value. The short Bash step rejects an empty
+value and marks it readonly before any workspace command. Its existing caller
+capture function passes that one quoted value to isolated system Python with
+`-c`, the same nine following arguments, stdin from `/dev/null`, and job-user
+stdout capture. The decoded program, including the terminal error handler,
+remains unchanged; the YAML carrier indentation and its historical raw hash
+change. The program is neither loaded from the workspace nor evaluated by Bash.
+
+This keeps the Bash transport small while retaining the full workflow and
+ShellCheck validation. Published actionlint 1.7.12 writes a `run` script to its
+ShellCheck pipe before starting the reader; an oversized script can block on
+the available pipe capacity. Moving only the immutable program into the literal
+environment carrier avoids that defect without disabling checks, changing host
+settings or claiming an unreleased fixed tool version. Earlier cancelled or
+timed-out validation attempts remain nonpasses.

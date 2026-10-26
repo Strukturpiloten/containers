@@ -149,342 +149,350 @@ jobs:
         env:
           SELECTED_MERGE: ${{ github.sha }}
           WORKFLOW_CANDIDATE: ${{ github.workflow_sha }}
+          FIXED_ROOT_BOOTSTRAP: |
+            # BEGIN FIXED USERNS ROOT BOOTSTRAP
+            import base64, errno, hashlib, json, os, re, stat, sys, sysconfig, time
+            from pathlib import Path
+
+            CLOSED_FILES = (
+                'scripts/__init__.py', 'scripts/docker_userns_custody.py', 'scripts/docker_userns_custody_child.py',
+                'scripts/docker_userns_hosted.py', 'scripts/docker_userns_policy_source.py',
+                '.github/docker-userns-helper-closure.json', '.github/docker-userns-unused-admission.json',
+                '.github/docker-userns-policy-source.json',
+            )
+            MAX_BUNDLE = 2097152
+            ROOT_STAGE = None
+
+            def require(value):
+                if not value:
+                    raise ValueError('root-bootstrap-refused')
+
+            def unique(pairs):
+                result = {}
+                for key, value in pairs:
+                    require(key not in result)
+                    result[key] = value
+                return result
+
+            def exact(value, keys):
+                require(type(value) is dict and set(value) == set(keys))
+                return value
+
+            def sha256(raw):
+                return hashlib.sha256(raw).hexdigest()
+
+            def object_id(kind, raw):
+                return hashlib.sha1(kind.encode('ascii') + b' ' + str(len(raw)).encode('ascii') + b'\0' + raw,
+                                    usedforsecurity=False).hexdigest()
+
+            def tree(raw):
+                result, order, offset = {}, [], 0
+                while offset < len(raw):
+                    end = raw.index(b'\0', offset)
+                    mode, name = raw[offset:end].split(b' ', 1)
+                    require(mode in {b'40000', b'100644', b'100755'} and end + 21 <= len(raw))
+                    require(re.fullmatch(rb'[A-Za-z0-9_.-]{1,128}', name) and name not in {b'.', b'..'})
+                    name = name.decode('ascii')
+                    require(name not in result)
+                    result[name] = (mode, raw[end + 1:end + 21].hex())
+                    order.append(name.encode('ascii') + (b'/' if mode == b'40000' else b''))
+                    offset = end + 21
+                require(offset == len(raw) and order == sorted(order))
+                return result
+
+            def verify_bundle(raw, selected, head, base):
+                require(type(raw) is bytes and len(raw) <= MAX_BUNDLE)
+                require(all(type(value) is str and re.fullmatch(r'[0-9a-f]{40}', value) for value in (selected, head, base)))
+                value = exact(json.loads(raw, object_pairs_hook=unique), ('schemaVersion', 'context', 'objects', 'sources'))
+                require(type(value['schemaVersion']) is int and value['schemaVersion'] == 1)
+                context = exact(value['context'], ('candidate', 'head', 'base', 'run', 'attempt', 'imageOS', 'imageVersion',
+                                                       'workflow', 'checkout', 'repository', 'job', 'checkoutIdentity', 'deadlineNs'))
+                require((context['candidate'], context['head'], context['base']) == (selected, head, base))
+                require(context['workflow'] == selected and context['checkout'] == selected
+                        and context['repository'] == 'Strukturpiloten/containers' and context['job'] == 'userns-custody-unused'
+                        and context['checkoutIdentity'] == 'github-pr-merge')
+                require(type(value['objects']) is list and 1 <= len(value['objects']) <= 32)
+                objects, used, total = {}, set(), 0
+                for item in value['objects']:
+                    item = exact(item, ('oid', 'kind', 'data'))
+                    oid, kind = item['oid'], item['kind']
+                    require(type(oid) is str and re.fullmatch(r'[0-9a-f]{40}', oid) and oid not in objects)
+                    require(kind in ('commit', 'tree', 'blob') and type(item['data']) is str)
+                    content = base64.b64decode(item['data'], validate=True)
+                    require(0 < len(content) <= (8192 if kind == 'commit' else 262144))
+                    total += len(content)
+                    require(total <= 1048576 and object_id(kind, content) == oid)
+                    objects[oid] = (kind, content)
+                def get(kind, oid):
+                    require(oid in objects and objects[oid][0] == kind)
+                    used.add(oid)
+                    return objects[oid][1]
+                commit = get('commit', selected)
+                require(b'\n\n' in commit)
+                headers = commit.split(b'\n\n', 1)[0].split(b'\n')
+                require(re.fullmatch(rb'tree [0-9a-f]{40}', headers[0]))
+                require([row for row in headers if row.startswith(b'tree ')] == [headers[0]])
+                require([row[7:].decode('ascii') for row in headers if row.startswith(b'parent ')] == [base, head])
+                root = headers[0][5:].decode('ascii')
+                files = {}
+                for path in CLOSED_FILES:
+                    current = root
+                    components = path.split('/')
+                    for index, component in enumerate(components):
+                        entries = tree(get('tree', current))
+                        require(component in entries)
+                        mode, identifier = entries[component]
+                        if index + 1 == len(components):
+                            require(mode == b'100644')
+                            files[path] = get('blob', identifier)
+                        else:
+                            require(mode == b'40000')
+                            current = identifier
+                require(used == set(objects))
+                closure = json.loads(files['.github/docker-userns-helper-closure.json'], object_pairs_hook=unique)
+                require(type(closure) is dict and type(closure.get('schemaVersion')) is int
+                        and type(closure.get('stdlibOnly')) is bool)
+                require(closure == {'schemaVersion': 1, 'consumer': 'containers-ubuntu26-userns-unused',
+                                    'stdlibOnly': True, 'files': list(CLOSED_FILES)})
+                manifest = json.loads(files['.github/docker-userns-policy-source.json'], object_pairs_hook=unique)
+                require(manifest['schemaVersion'] == 1 and manifest['qualification'] == 'none')
+                source = manifest['source']
+                require(source['repository'] == 'Strukturpiloten/docker-lens' and source['license'] == 'MPL-2.0')
+                require(type(source['commit']) is str and re.fullmatch(r'[0-9a-f]{40}', source['commit']))
+                names = ('scripts/native-runner-apparmor.py', 'scripts/native_outer_diagnostic_capture.py', 'LICENSE')
+                require(type(source['files']) is list and len(source['files']) == 3)
+                specs = {}
+                for item in source['files']:
+                    item = exact(item, ('path', 'size', 'sha256'))
+                    require(item['path'] in names and item['path'] not in specs)
+                    require(type(item['size']) is int and 0 < item['size'] <= 65536)
+                    require(type(item['sha256']) is str and re.fullmatch(r'[0-9a-f]{64}', item['sha256']))
+                    specs[item['path']] = item
+                require(set(specs) == set(names) and type(value['sources']) is list and len(value['sources']) == 3)
+                sources = {}
+                for item in value['sources']:
+                    item = exact(item, ('path', 'data'))
+                    require(item['path'] in specs and item['path'] not in sources and type(item['data']) is str)
+                    content = base64.b64decode(item['data'], validate=True)
+                    spec = specs[item['path']]
+                    require(len(content) == spec['size'] and sha256(content) == spec['sha256'])
+                    sources[item['path']] = content
+                require(set(sources) == set(names))
+                return context, files, sources
+
+            def mark(info):
+                return (info.st_dev, info.st_ino, info.st_uid, info.st_gid, info.st_mode, info.st_nlink,
+                        info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+            def read_input(path, uid, limit, deadline):
+                require(time.monotonic_ns() < deadline)
+                descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC)
+                try:
+                    require(time.monotonic_ns() < deadline)
+                    before = os.fstat(descriptor)
+                    require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and before.st_uid == uid
+                            and before.st_size <= limit)
+                    data = bytearray()
+                    while len(data) <= limit:
+                        require(time.monotonic_ns() < deadline)
+                        part = os.read(descriptor, min(65536, limit + 1 - len(data)))
+                        if not part:
+                            break
+                        data.extend(part)
+                    require(len(data) <= limit and mark(before) == mark(os.fstat(descriptor)))
+                    require(time.monotonic_ns() < deadline)
+                    return bytes(data)
+                finally:
+                    os.close(descriptor)
+
+            def trusted_path(path):
+                # Inspect every traversed symlink target component, including intermediate links.
+                original = Path(path)
+                require(original.is_absolute())
+                pending, resolved, links = list(original.parts[1:]), Path('/'), 0
+                root = resolved.lstat()
+                require(root.st_uid == 0 and not root.st_mode & 0o022)
+                while pending:
+                    part = pending.pop(0)
+                    if part == '.':
+                        continue
+                    if part == '..':
+                        resolved = resolved.parent
+                        continue
+                    current = resolved / part
+                    info = current.lstat()
+                    require(info.st_uid == 0)
+                    if stat.S_ISLNK(info.st_mode):
+                        links += 1
+                        require(links <= 32)
+                        target = Path(os.readlink(current))
+                        if target.is_absolute():
+                            resolved = Path('/')
+                            pending = list(target.parts[1:]) + pending
+                        else:
+                            pending = list(target.parts) + pending
+                    else:
+                        require(not info.st_mode & 0o022 and (not pending or stat.S_ISDIR(info.st_mode)))
+                        resolved = current
+                return resolved
+
+            def create(path, content, deadline):
+                require(time.monotonic_ns() < deadline)
+                descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400)
+                try:
+                    require(time.monotonic_ns() < deadline)
+                    require(os.write(descriptor, content) == len(content))
+                    require(time.monotonic_ns() < deadline)
+                    os.fsync(descriptor)
+                    require(time.monotonic_ns() < deadline)
+                finally:
+                    os.close(descriptor)
+
+            def root_main(arguments):
+                global ROOT_STAGE
+                original_deadline = time.monotonic_ns() + 240000000000
+                require(os.geteuid() == 0 and len(arguments) == 9 and sys.implementation.name == 'cpython'
+                        and sys.version_info[:2] == (3, 14) and sys.flags.isolated == 1
+                        and sys.flags.no_site == 1 and sys.dont_write_bytecode)
+                os.umask(0o077)
+                bundle, selected, event_path, uid, gid, run, attempt, image_version, workflow = arguments
+                uid, gid = int(uid), int(gid)
+                require(0 < uid < 2**31 and 0 < gid < 2**31 and workflow == selected)
+                require(all(re.fullmatch(r'[1-9][0-9]{0,19}', value) for value in (run, attempt)))
+                require(re.fullmatch(r'[0-9]{8}\.[0-9]+\.[0-9]+', image_version))
+                require(event_path == '/home/runner/work/_temp/_github_workflow/event.json')
+                budget = read_input('/home/runner/work/_temp/docker-userns-custody-deadline', uid, 64, original_deadline)
+                require(re.fullmatch(rb'[1-9][0-9]{0,19}\n', budget))
+                original_deadline = min(original_deadline, int(budget))
+                require(time.monotonic_ns() < original_deadline)
+                event = json.loads(read_input(event_path, uid, 262144, original_deadline), object_pairs_hook=unique)
+                pr = event['pull_request']
+                require(event['number'] == 492 and type(event['number']) is int and pr['number'] == 492
+                        and type(pr['number']) is int)
+                require(event['repository']['full_name'] == 'Strukturpiloten/containers')
+                require(pr['head']['ref'] == 'TheRealBecks/issue442-main-reconciled')
+                require(all(pr[side]['repo']['full_name'] == 'Strukturpiloten/containers' for side in ('head', 'base')))
+                context, files, sources = verify_bundle(read_input(bundle, uid, MAX_BUNDLE, original_deadline), selected,
+                                                       pr['head']['sha'], pr['base']['sha'])
+                require(type(context['deadlineNs']) is int and context['deadlineNs'] == int(budget))
+                require(context['run'] == run and context['attempt'] == attempt and context['imageOS'] == 'ubuntu26'
+                        and context['imageVersion'] == image_version)
+                executable = trusted_path('/usr/bin/python3')
+                require(executable == Path(sys.executable).resolve(strict=True))
+                info = executable.stat()
+                require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_mode & 0o111
+                        and not info.st_mode & 0o7022 and info.st_size <= 16777216)
+                try:
+                    capabilities = os.getxattr(executable, 'security.capability')
+                except OSError as error:
+                    require(error.errno == errno.ENODATA)
+                else:
+                    require(not capabilities)
+                binary = executable.read_bytes()
+                require(binary.startswith(b'\x7fELF') and mark(info) == mark(executable.stat()))
+                stdlib = trusted_path(sysconfig.get_path('stdlib'))
+                interpreter = {'path': str(executable), 'sha256': sha256(binary), 'version': sys.version,
+                               'identity': list(mark(info)), 'stdlib': str(stdlib),
+                               'integrity': 'preinstalled-root-owned-OS-trust-base-not-publisher-checksum'}
+                stage = Path('/run') / ('containers-userns-stage.' + os.urandom(16).hex())
+                trusted_path('/run')
+                require(time.monotonic_ns() < original_deadline)
+                stage.mkdir(mode=0o700)
+                ROOT_STAGE = stage
+                require(time.monotonic_ns() < original_deadline)
+                for name in ('scripts', '.github', 'sdk'):
+                    require(time.monotonic_ns() < original_deadline)
+                    (stage / name).mkdir(mode=0o700)
+                    require(time.monotonic_ns() < original_deadline)
+                receipt = {'schema': 1, 'context': context, 'uid': uid, 'gid': gid, 'interpreter': interpreter,
+                           'helpers': {name: sha256(raw) for name, raw in files.items()},
+                           'deadlineNs': original_deadline,
+                           'source': {'commit': json.loads(files['.github/docker-userns-policy-source.json'])['source']['commit'],
+                                      'license': 'MPL-2.0', 'redistribution': 'transient-verified-source-only'}}
+                for name, content in files.items():
+                    create(stage / name, content, original_deadline)
+                for name, leaf in zip(('scripts/native-runner-apparmor.py', 'scripts/native_outer_diagnostic_capture.py', 'LICENSE'),
+                                      ('builder', 'capture', 'license'), strict=True):
+                    create(stage / 'sdk' / leaf, sources[name], original_deadline)
+                create(stage / 'probe', b'synthetic-root-owned-write-denial\n', original_deadline)
+                create(stage / 'bootstrap.json', json.dumps(receipt, sort_keys=True).encode('ascii'), original_deadline)
+                directory = os.open(stage, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                require(time.monotonic_ns() < original_deadline)
+                os.fsync(directory)
+                os.close(directory)
+                require(time.monotonic_ns() < original_deadline)
+                require(time.monotonic_ns() < receipt['deadlineNs'] - 60000000000)
+                sys.path.insert(0, str(stage))
+                from scripts.docker_userns_hosted import capture_observer
+                require(time.monotonic_ns() < receipt['deadlineNs'] - 60000000000)
+                result = capture_observer(stage, receipt)
+                require(len(result.stdout) <= 131073 and len(result.stderr) <= 32769)
+                try:
+                    artifact = json.loads(result.stdout, object_pairs_hook=unique)
+                    require(type(artifact) is dict and artifact.get('bootstrap') == receipt)
+                except (ValueError, TypeError):
+                    artifact = {'schemaVersion': 1, 'qualification': 'none', 'policy_load_run': False,
+                                'container_run': False, 'bootstrap': receipt, 'outcome': 'observer-failed-retained-unknown'}
+                artifact['observerCapture'] = result.proof
+                if not result.accepted:
+                    artifact['outcome'] = 'observer-failed-retained-unknown'
+                if result.accepted and result.returncode == 0:
+                    require(artifact.get('outcome') == 'closed-disposed-unused' and time.monotonic_ns() < receipt['deadlineNs'])
+                    leaves = [*CLOSED_FILES, 'sdk/builder', 'sdk/capture', 'sdk/license', 'probe', 'bootstrap.json']
+                    for directory_name, expected in (('scripts', {Path(name).name for name in CLOSED_FILES if name.startswith('scripts/')}),
+                                                     ('.github', {Path(name).name for name in CLOSED_FILES if name.startswith('.github/')}),
+                                                     ('sdk', {'builder', 'capture', 'license'})):
+                        require(set(os.listdir(stage / directory_name)) == expected)
+                    require(set(os.listdir(stage)) == {'scripts', '.github', 'sdk', 'probe', 'bootstrap.json'})
+                    for name in leaves:
+                        require(time.monotonic_ns() < receipt['deadlineNs'])
+                        target = stage / name
+                        observed = target.lstat()
+                        require(stat.S_ISREG(observed.st_mode) and observed.st_uid == 0 and observed.st_nlink == 1
+                                and stat.S_IMODE(observed.st_mode) == 0o400)
+                        target.unlink()
+                    for name in ('scripts', '.github', 'sdk'):
+                        require(time.monotonic_ns() < receipt['deadlineNs'])
+                        (stage / name).rmdir()
+                        require(time.monotonic_ns() < receipt['deadlineNs'])
+                    require(time.monotonic_ns() < receipt['deadlineNs'])
+                    stage.rmdir()
+                    require(time.monotonic_ns() < receipt['deadlineNs'])
+                    artifact['bootstrapStageDisposed'] = True
+                else:
+                    artifact['bootstrapStageDisposed'] = False
+                    artifact['retainedStage'] = str(stage)
+                print(json.dumps(artifact, sort_keys=True))
+                require(time.monotonic_ns() < receipt['deadlineNs'] or not result.accepted)
+                return 0 if result.accepted and result.returncode == 0 else 1
+            # END FIXED USERNS ROOT BOOTSTRAP
+            try:
+                raise SystemExit(root_main(sys.argv[1:]))
+            except Exception:
+                print(json.dumps({'schemaVersion': 1, 'qualification': 'none', 'policy_load_run': False,
+                                  'container_run': False, 'outcome': 'bootstrap-refused-or-retained-unknown',
+                                  'stageLocator': str(ROOT_STAGE) if ROOT_STAGE is not None else None}))
+                raise SystemExit(1) from None
         run: |
           set -euo pipefail
+          if [[ -z "${FIXED_ROOT_BOOTSTRAP:-}" ]]; then
+            printf '%s\n' 'Fixed root bootstrap is required' >&2
+            exit 1
+          fi
+          readonly FIXED_ROOT_BOOTSTRAP
           artifact="${RUNNER_TEMP}/docker-userns-custody-unused.json"
           handoff="${RUNNER_TEMP}/docker-userns-custody-bundle.json"
           printf '%s\n' '{"qualification":"none","policy_load_run":false,"container_run":false,"outcome":"bootstrap-not-started"}' > "${artifact}"
           uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.docker_userns_bootstrap_bundle --output "${handoff}"
           handoff_uid="$(id -u)"
           handoff_gid="$(id -g)"
-          sudo -- /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C \
-            /usr/bin/python3 -I -B -S - "${handoff}" "${SELECTED_MERGE}" "${GITHUB_EVENT_PATH}" \
-            "${handoff_uid}" "${handoff_gid}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" \
-            "${ImageVersion}" "${WORKFLOW_CANDIDATE}" > "${artifact}" <<'PY'
-          # BEGIN FIXED USERNS ROOT BOOTSTRAP
-          import base64, errno, hashlib, json, os, re, stat, sys, sysconfig, time
-          from pathlib import Path
-
-          CLOSED_FILES = (
-              'scripts/__init__.py', 'scripts/docker_userns_custody.py', 'scripts/docker_userns_custody_child.py',
-              'scripts/docker_userns_hosted.py', 'scripts/docker_userns_policy_source.py',
-              '.github/docker-userns-helper-closure.json', '.github/docker-userns-unused-admission.json',
-              '.github/docker-userns-policy-source.json',
-          )
-          MAX_BUNDLE = 2097152
-          ROOT_STAGE = None
-
-          def require(value):
-              if not value:
-                  raise ValueError('root-bootstrap-refused')
-
-          def unique(pairs):
-              result = {}
-              for key, value in pairs:
-                  require(key not in result)
-                  result[key] = value
-              return result
-
-          def exact(value, keys):
-              require(type(value) is dict and set(value) == set(keys))
-              return value
-
-          def sha256(raw):
-              return hashlib.sha256(raw).hexdigest()
-
-          def object_id(kind, raw):
-              return hashlib.sha1(kind.encode('ascii') + b' ' + str(len(raw)).encode('ascii') + b'\0' + raw,
-                                  usedforsecurity=False).hexdigest()
-
-          def tree(raw):
-              result, order, offset = {}, [], 0
-              while offset < len(raw):
-                  end = raw.index(b'\0', offset)
-                  mode, name = raw[offset:end].split(b' ', 1)
-                  require(mode in {b'40000', b'100644', b'100755'} and end + 21 <= len(raw))
-                  require(re.fullmatch(rb'[A-Za-z0-9_.-]{1,128}', name) and name not in {b'.', b'..'})
-                  name = name.decode('ascii')
-                  require(name not in result)
-                  result[name] = (mode, raw[end + 1:end + 21].hex())
-                  order.append(name.encode('ascii') + (b'/' if mode == b'40000' else b''))
-                  offset = end + 21
-              require(offset == len(raw) and order == sorted(order))
-              return result
-
-          def verify_bundle(raw, selected, head, base):
-              require(type(raw) is bytes and len(raw) <= MAX_BUNDLE)
-              require(all(type(value) is str and re.fullmatch(r'[0-9a-f]{40}', value) for value in (selected, head, base)))
-              value = exact(json.loads(raw, object_pairs_hook=unique), ('schemaVersion', 'context', 'objects', 'sources'))
-              require(type(value['schemaVersion']) is int and value['schemaVersion'] == 1)
-              context = exact(value['context'], ('candidate', 'head', 'base', 'run', 'attempt', 'imageOS', 'imageVersion',
-                                                     'workflow', 'checkout', 'repository', 'job', 'checkoutIdentity', 'deadlineNs'))
-              require((context['candidate'], context['head'], context['base']) == (selected, head, base))
-              require(context['workflow'] == selected and context['checkout'] == selected
-                      and context['repository'] == 'Strukturpiloten/containers' and context['job'] == 'userns-custody-unused'
-                      and context['checkoutIdentity'] == 'github-pr-merge')
-              require(type(value['objects']) is list and 1 <= len(value['objects']) <= 32)
-              objects, used, total = {}, set(), 0
-              for item in value['objects']:
-                  item = exact(item, ('oid', 'kind', 'data'))
-                  oid, kind = item['oid'], item['kind']
-                  require(type(oid) is str and re.fullmatch(r'[0-9a-f]{40}', oid) and oid not in objects)
-                  require(kind in ('commit', 'tree', 'blob') and type(item['data']) is str)
-                  content = base64.b64decode(item['data'], validate=True)
-                  require(0 < len(content) <= (8192 if kind == 'commit' else 262144))
-                  total += len(content)
-                  require(total <= 1048576 and object_id(kind, content) == oid)
-                  objects[oid] = (kind, content)
-              def get(kind, oid):
-                  require(oid in objects and objects[oid][0] == kind)
-                  used.add(oid)
-                  return objects[oid][1]
-              commit = get('commit', selected)
-              require(b'\n\n' in commit)
-              headers = commit.split(b'\n\n', 1)[0].split(b'\n')
-              require(re.fullmatch(rb'tree [0-9a-f]{40}', headers[0]))
-              require([row for row in headers if row.startswith(b'tree ')] == [headers[0]])
-              require([row[7:].decode('ascii') for row in headers if row.startswith(b'parent ')] == [base, head])
-              root = headers[0][5:].decode('ascii')
-              files = {}
-              for path in CLOSED_FILES:
-                  current = root
-                  components = path.split('/')
-                  for index, component in enumerate(components):
-                      entries = tree(get('tree', current))
-                      require(component in entries)
-                      mode, identifier = entries[component]
-                      if index + 1 == len(components):
-                          require(mode == b'100644')
-                          files[path] = get('blob', identifier)
-                      else:
-                          require(mode == b'40000')
-                          current = identifier
-              require(used == set(objects))
-              closure = json.loads(files['.github/docker-userns-helper-closure.json'], object_pairs_hook=unique)
-              require(type(closure) is dict and type(closure.get('schemaVersion')) is int
-                      and type(closure.get('stdlibOnly')) is bool)
-              require(closure == {'schemaVersion': 1, 'consumer': 'containers-ubuntu26-userns-unused',
-                                  'stdlibOnly': True, 'files': list(CLOSED_FILES)})
-              manifest = json.loads(files['.github/docker-userns-policy-source.json'], object_pairs_hook=unique)
-              require(manifest['schemaVersion'] == 1 and manifest['qualification'] == 'none')
-              source = manifest['source']
-              require(source['repository'] == 'Strukturpiloten/docker-lens' and source['license'] == 'MPL-2.0')
-              require(type(source['commit']) is str and re.fullmatch(r'[0-9a-f]{40}', source['commit']))
-              names = ('scripts/native-runner-apparmor.py', 'scripts/native_outer_diagnostic_capture.py', 'LICENSE')
-              require(type(source['files']) is list and len(source['files']) == 3)
-              specs = {}
-              for item in source['files']:
-                  item = exact(item, ('path', 'size', 'sha256'))
-                  require(item['path'] in names and item['path'] not in specs)
-                  require(type(item['size']) is int and 0 < item['size'] <= 65536)
-                  require(type(item['sha256']) is str and re.fullmatch(r'[0-9a-f]{64}', item['sha256']))
-                  specs[item['path']] = item
-              require(set(specs) == set(names) and type(value['sources']) is list and len(value['sources']) == 3)
-              sources = {}
-              for item in value['sources']:
-                  item = exact(item, ('path', 'data'))
-                  require(item['path'] in specs and item['path'] not in sources and type(item['data']) is str)
-                  content = base64.b64decode(item['data'], validate=True)
-                  spec = specs[item['path']]
-                  require(len(content) == spec['size'] and sha256(content) == spec['sha256'])
-                  sources[item['path']] = content
-              require(set(sources) == set(names))
-              return context, files, sources
-
-          def mark(info):
-              return (info.st_dev, info.st_ino, info.st_uid, info.st_gid, info.st_mode, info.st_nlink,
-                      info.st_size, info.st_mtime_ns, info.st_ctime_ns)
-
-          def read_input(path, uid, limit, deadline):
-              require(time.monotonic_ns() < deadline)
-              descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC)
-              try:
-                  require(time.monotonic_ns() < deadline)
-                  before = os.fstat(descriptor)
-                  require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and before.st_uid == uid
-                          and before.st_size <= limit)
-                  data = bytearray()
-                  while len(data) <= limit:
-                      require(time.monotonic_ns() < deadline)
-                      part = os.read(descriptor, min(65536, limit + 1 - len(data)))
-                      if not part:
-                          break
-                      data.extend(part)
-                  require(len(data) <= limit and mark(before) == mark(os.fstat(descriptor)))
-                  require(time.monotonic_ns() < deadline)
-                  return bytes(data)
-              finally:
-                  os.close(descriptor)
-
-          def trusted_path(path):
-              # Inspect every traversed symlink target component, including intermediate links.
-              original = Path(path)
-              require(original.is_absolute())
-              pending, resolved, links = list(original.parts[1:]), Path('/'), 0
-              root = resolved.lstat()
-              require(root.st_uid == 0 and not root.st_mode & 0o022)
-              while pending:
-                  part = pending.pop(0)
-                  if part == '.':
-                      continue
-                  if part == '..':
-                      resolved = resolved.parent
-                      continue
-                  current = resolved / part
-                  info = current.lstat()
-                  require(info.st_uid == 0)
-                  if stat.S_ISLNK(info.st_mode):
-                      links += 1
-                      require(links <= 32)
-                      target = Path(os.readlink(current))
-                      if target.is_absolute():
-                          resolved = Path('/')
-                          pending = list(target.parts[1:]) + pending
-                      else:
-                          pending = list(target.parts) + pending
-                  else:
-                      require(not info.st_mode & 0o022 and (not pending or stat.S_ISDIR(info.st_mode)))
-                      resolved = current
-              return resolved
-
-          def create(path, content, deadline):
-              require(time.monotonic_ns() < deadline)
-              descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400)
-              try:
-                  require(time.monotonic_ns() < deadline)
-                  require(os.write(descriptor, content) == len(content))
-                  require(time.monotonic_ns() < deadline)
-                  os.fsync(descriptor)
-                  require(time.monotonic_ns() < deadline)
-              finally:
-                  os.close(descriptor)
-
-          def root_main(arguments):
-              global ROOT_STAGE
-              original_deadline = time.monotonic_ns() + 240000000000
-              require(os.geteuid() == 0 and len(arguments) == 9 and sys.implementation.name == 'cpython'
-                      and sys.version_info[:2] == (3, 14) and sys.flags.isolated == 1
-                      and sys.flags.no_site == 1 and sys.dont_write_bytecode)
-              os.umask(0o077)
-              bundle, selected, event_path, uid, gid, run, attempt, image_version, workflow = arguments
-              uid, gid = int(uid), int(gid)
-              require(0 < uid < 2**31 and 0 < gid < 2**31 and workflow == selected)
-              require(all(re.fullmatch(r'[1-9][0-9]{0,19}', value) for value in (run, attempt)))
-              require(re.fullmatch(r'[0-9]{8}\.[0-9]+\.[0-9]+', image_version))
-              require(event_path == '/home/runner/work/_temp/_github_workflow/event.json')
-              budget = read_input('/home/runner/work/_temp/docker-userns-custody-deadline', uid, 64, original_deadline)
-              require(re.fullmatch(rb'[1-9][0-9]{0,19}\n', budget))
-              original_deadline = min(original_deadline, int(budget))
-              require(time.monotonic_ns() < original_deadline)
-              event = json.loads(read_input(event_path, uid, 262144, original_deadline), object_pairs_hook=unique)
-              pr = event['pull_request']
-              require(event['number'] == 492 and type(event['number']) is int and pr['number'] == 492
-                      and type(pr['number']) is int)
-              require(event['repository']['full_name'] == 'Strukturpiloten/containers')
-              require(pr['head']['ref'] == 'TheRealBecks/issue442-main-reconciled')
-              require(all(pr[side]['repo']['full_name'] == 'Strukturpiloten/containers' for side in ('head', 'base')))
-              context, files, sources = verify_bundle(read_input(bundle, uid, MAX_BUNDLE, original_deadline), selected,
-                                                     pr['head']['sha'], pr['base']['sha'])
-              require(type(context['deadlineNs']) is int and context['deadlineNs'] == int(budget))
-              require(context['run'] == run and context['attempt'] == attempt and context['imageOS'] == 'ubuntu26'
-                      and context['imageVersion'] == image_version)
-              executable = trusted_path('/usr/bin/python3')
-              require(executable == Path(sys.executable).resolve(strict=True))
-              info = executable.stat()
-              require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_mode & 0o111
-                      and not info.st_mode & 0o7022 and info.st_size <= 16777216)
-              try:
-                  capabilities = os.getxattr(executable, 'security.capability')
-              except OSError as error:
-                  require(error.errno == errno.ENODATA)
-              else:
-                  require(not capabilities)
-              binary = executable.read_bytes()
-              require(binary.startswith(b'\x7fELF') and mark(info) == mark(executable.stat()))
-              stdlib = trusted_path(sysconfig.get_path('stdlib'))
-              interpreter = {'path': str(executable), 'sha256': sha256(binary), 'version': sys.version,
-                             'identity': list(mark(info)), 'stdlib': str(stdlib),
-                             'integrity': 'preinstalled-root-owned-OS-trust-base-not-publisher-checksum'}
-              stage = Path('/run') / ('containers-userns-stage.' + os.urandom(16).hex())
-              trusted_path('/run')
-              require(time.monotonic_ns() < original_deadline)
-              stage.mkdir(mode=0o700)
-              ROOT_STAGE = stage
-              require(time.monotonic_ns() < original_deadline)
-              for name in ('scripts', '.github', 'sdk'):
-                  require(time.monotonic_ns() < original_deadline)
-                  (stage / name).mkdir(mode=0o700)
-                  require(time.monotonic_ns() < original_deadline)
-              receipt = {'schema': 1, 'context': context, 'uid': uid, 'gid': gid, 'interpreter': interpreter,
-                         'helpers': {name: sha256(raw) for name, raw in files.items()},
-                         'deadlineNs': original_deadline,
-                         'source': {'commit': json.loads(files['.github/docker-userns-policy-source.json'])['source']['commit'],
-                                    'license': 'MPL-2.0', 'redistribution': 'transient-verified-source-only'}}
-              for name, content in files.items():
-                  create(stage / name, content, original_deadline)
-              for name, leaf in zip(('scripts/native-runner-apparmor.py', 'scripts/native_outer_diagnostic_capture.py', 'LICENSE'),
-                                    ('builder', 'capture', 'license'), strict=True):
-                  create(stage / 'sdk' / leaf, sources[name], original_deadline)
-              create(stage / 'probe', b'synthetic-root-owned-write-denial\n', original_deadline)
-              create(stage / 'bootstrap.json', json.dumps(receipt, sort_keys=True).encode('ascii'), original_deadline)
-              directory = os.open(stage, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-              require(time.monotonic_ns() < original_deadline)
-              os.fsync(directory)
-              os.close(directory)
-              require(time.monotonic_ns() < original_deadline)
-              require(time.monotonic_ns() < receipt['deadlineNs'] - 60000000000)
-              sys.path.insert(0, str(stage))
-              from scripts.docker_userns_hosted import capture_observer
-              require(time.monotonic_ns() < receipt['deadlineNs'] - 60000000000)
-              result = capture_observer(stage, receipt)
-              require(len(result.stdout) <= 131073 and len(result.stderr) <= 32769)
-              try:
-                  artifact = json.loads(result.stdout, object_pairs_hook=unique)
-                  require(type(artifact) is dict and artifact.get('bootstrap') == receipt)
-              except (ValueError, TypeError):
-                  artifact = {'schemaVersion': 1, 'qualification': 'none', 'policy_load_run': False,
-                              'container_run': False, 'bootstrap': receipt, 'outcome': 'observer-failed-retained-unknown'}
-              artifact['observerCapture'] = result.proof
-              if not result.accepted:
-                  artifact['outcome'] = 'observer-failed-retained-unknown'
-              if result.accepted and result.returncode == 0:
-                  require(artifact.get('outcome') == 'closed-disposed-unused' and time.monotonic_ns() < receipt['deadlineNs'])
-                  leaves = [*CLOSED_FILES, 'sdk/builder', 'sdk/capture', 'sdk/license', 'probe', 'bootstrap.json']
-                  for directory_name, expected in (('scripts', {Path(name).name for name in CLOSED_FILES if name.startswith('scripts/')}),
-                                                   ('.github', {Path(name).name for name in CLOSED_FILES if name.startswith('.github/')}),
-                                                   ('sdk', {'builder', 'capture', 'license'})):
-                      require(set(os.listdir(stage / directory_name)) == expected)
-                  require(set(os.listdir(stage)) == {'scripts', '.github', 'sdk', 'probe', 'bootstrap.json'})
-                  for name in leaves:
-                      require(time.monotonic_ns() < receipt['deadlineNs'])
-                      target = stage / name
-                      observed = target.lstat()
-                      require(stat.S_ISREG(observed.st_mode) and observed.st_uid == 0 and observed.st_nlink == 1
-                              and stat.S_IMODE(observed.st_mode) == 0o400)
-                      target.unlink()
-                  for name in ('scripts', '.github', 'sdk'):
-                      require(time.monotonic_ns() < receipt['deadlineNs'])
-                      (stage / name).rmdir()
-                      require(time.monotonic_ns() < receipt['deadlineNs'])
-                  require(time.monotonic_ns() < receipt['deadlineNs'])
-                  stage.rmdir()
-                  require(time.monotonic_ns() < receipt['deadlineNs'])
-                  artifact['bootstrapStageDisposed'] = True
-              else:
-                  artifact['bootstrapStageDisposed'] = False
-                  artifact['retainedStage'] = str(stage)
-              print(json.dumps(artifact, sort_keys=True))
-              require(time.monotonic_ns() < receipt['deadlineNs'] or not result.accepted)
-              return 0 if result.accepted and result.returncode == 0 else 1
-          # END FIXED USERNS ROOT BOOTSTRAP
-          try:
-              raise SystemExit(root_main(sys.argv[1:]))
-          except Exception:
-              print(json.dumps({'schemaVersion': 1, 'qualification': 'none', 'policy_load_run': False,
-                                'container_run': False, 'outcome': 'bootstrap-refused-or-retained-unknown',
-                                'stageLocator': str(ROOT_STAGE) if ROOT_STAGE is not None else None}))
-              raise SystemExit(1) from None
-          PY
+          capture_unused_artifact() {
+            sudo -- /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C \
+              /usr/bin/python3 -I -B -S -c "${FIXED_ROOT_BOOTSTRAP}" "${handoff}" "${SELECTED_MERGE}" "${GITHUB_EVENT_PATH}" \
+              "${handoff_uid}" "${handoff_gid}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" \
+              "${ImageVersion}" "${WORKFLOW_CANDIDATE}"
+          }
+          capture_unused_artifact < /dev/null > "${artifact}"
       - name: Retain nonqualifying hosted unused custody observation
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
