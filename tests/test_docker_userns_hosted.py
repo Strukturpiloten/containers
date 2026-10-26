@@ -1243,5 +1243,390 @@ class HostedTests(unittest.TestCase):
                 hosted.timespan(value)
 
 
+class ToolDiagnosticTests(unittest.TestCase):
+    """Exercise original installed-tool operations with entirely synthetic OS facts."""
+
+    def setUp(self) -> None:
+        self.artifact = {}
+        self.diagnostic = hosted.ToolDiagnostic(self.artifact)
+        self.file = SimpleNamespace(
+            st_dev=1,
+            st_ino=2,
+            st_uid=0,
+            st_mode=0o100755,
+            st_nlink=1,
+            st_size=4,
+            st_mtime_ns=3,
+            st_ctime_ns=4,
+        )
+        self.directory = SimpleNamespace(st_uid=0, st_mode=0o40755)
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.lstat = self.stack.enter_context(patch.object(Path, "lstat", autospec=True, side_effect=self.metadata))
+        self.open = self.stack.enter_context(patch.object(hosted.os, "open", return_value=77))
+        self.fstat = self.stack.enter_context(patch.object(hosted.os, "fstat", return_value=self.file))
+        self.read = self.stack.enter_context(patch.object(child, "bytes_at", return_value=b"\x7fELF"))
+        self.close = self.stack.enter_context(patch.object(hosted.os, "close"))
+        self.run = self.stack.enter_context(patch.object(hosted.subprocess, "run", side_effect=self.version))
+        self.remaining = self.stack.enter_context(patch.object(hosted, "remaining", return_value=0.5))
+
+    def metadata(self, path: Path) -> SimpleNamespace:
+        return self.file if path.name in {"systemctl", "systemd-run", "env"} else self.directory
+
+    @staticmethod
+    def version(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            returncode=0, stdout=b"env 1\n" if argv[0].endswith("/env") else b"systemd 260\n", stderr=b""
+        )
+
+    def assert_failure(self, site: str, failure: str, operation: object = None) -> Exception:
+        if operation is None:
+
+            def operation() -> dict[str, object]:
+                return hosted.installed_tools(123, self.diagnostic)
+
+        with self.assertRaises(Exception) as raised:
+            operation()
+        self.assertEqual(self.artifact, {"systemToolsFailure": {"tool": "SYSTEMCTL", "site": site, "failure": failure}})
+        self.assertLessEqual(self.open.call_count, 1)
+        self.assertLessEqual(self.run.call_count, 1)
+        return raised.exception
+
+    def test_path_refusals_stop_before_open(self) -> None:
+        cases = [
+            ("PATH_ROOT_OWNER", "/", {"st_uid": 1001}),
+            ("PATH_ROOT_MODE", "/", {"st_mode": 0o40777}),
+            ("PATH_COMPONENT_OWNER", "/usr", {"st_uid": 1001}),
+            ("PATH_COMPONENT_MODE", "/usr", {"st_mode": 0o40777}),
+            ("PATH_COMPONENT_TYPE", "/usr", {"st_mode": 0o100755}),
+        ]
+        for site, target, changes in cases:
+            with self.subTest(site=site):
+                self.artifact.clear()
+
+                def metadata(path: Path, target: str = target, changes: dict[str, int] = changes) -> SimpleNamespace:
+                    if str(path) == target:
+                        return SimpleNamespace(**(vars(self.metadata(path)) | changes))
+                    return self.metadata(path)
+
+                self.lstat.side_effect = metadata
+                self.assert_failure(site, "REFUSED")
+                self.open.assert_not_called()
+        self.artifact.clear()
+        self.assert_failure("PATH_ABSOLUTE", "REFUSED", lambda: hosted.safe_path(Path("relative"), self.diagnostic))
+
+    def test_path_observation_and_symlink_failures(self) -> None:
+        for site, target in (("PATH_ROOT_LSTAT", "/"), ("PATH_COMPONENT_LSTAT", "/usr")):
+            with self.subTest(site=site):
+                self.artifact.clear()
+
+                def metadata(path: Path, target: str = target) -> SimpleNamespace:
+                    if str(path) == target:
+                        message = "private path and errno"
+                        raise OSError(message)
+                    return self.metadata(path)
+
+                self.lstat.side_effect = metadata
+                self.assert_failure(site, "OS_ERROR")
+        self.artifact.clear()
+        self.lstat.side_effect = lambda path: (
+            SimpleNamespace(st_uid=0, st_mode=0o120777) if str(path) == "/usr" else self.metadata(path)
+        )
+        with patch.object(Path, "readlink", side_effect=OSError("private link")):
+            self.assert_failure("PATH_READLINK", "OS_ERROR")
+        self.artifact.clear()
+        with patch.object(Path, "readlink", return_value=Path("/usr")) as readlink:
+            self.assert_failure("PATH_SYMLINK_LIMIT", "REFUSED")
+        self.assertEqual(readlink.call_count, hosted.MAX_LINKS)
+        self.open.assert_not_called()
+
+    def test_read_guards_and_operations(self) -> None:
+        cases = [
+            ("READ_REGULAR_FILE", {"st_mode": 0o40755}),
+            ("READ_OWNER", {"st_uid": 1001}),
+            ("READ_LINKS", {"st_nlink": 2}),
+            ("READ_MODE", {"st_mode": 0o104755}),
+        ]
+        for site, changes in cases:
+            with self.subTest(site=site):
+                self.artifact.clear()
+                self.open.reset_mock()
+                self.close.reset_mock()
+                self.fstat.return_value = SimpleNamespace(**(vars(self.file) | changes))
+                self.assert_failure(site, "REFUSED")
+                self.read.assert_not_called()
+                self.close.assert_called_once_with(77)
+        self.fstat.return_value = self.file
+        for site, mock in (
+            ("READ_OPEN", self.open),
+            ("READ_INITIAL_FSTAT", self.fstat),
+            ("READ_BYTES", self.read),
+            ("READ_CLOSE", self.close),
+        ):
+            with self.subTest(site=site):
+                self.artifact.clear()
+                self.open.reset_mock()
+                mock.side_effect = OSError("secret")
+                self.assert_failure(site, "OS_ERROR")
+                mock.side_effect = None
+        self.run.assert_not_called()
+
+    def test_read_rechecks_preserve_lazy_identity_checks(self) -> None:
+        changed = SimpleNamespace(**(vars(self.file) | {"st_ino": 99}))
+        for error in (changed, OSError("private fstat")):
+            with self.subTest(error=type(error).__name__):
+                self.artifact.clear()
+                self.open.reset_mock()
+                self.lstat.reset_mock()
+                self.fstat.side_effect = [self.file, error]
+                self.assert_failure("READ_FINAL_FSTAT", "OS_ERROR" if isinstance(error, Exception) else "REFUSED")
+                self.assertEqual(self.lstat.call_count, 8)  # Two original safe-path walks; no final lstat.
+        self.artifact.clear()
+        self.open.reset_mock()
+        self.fstat.side_effect = None
+        visits = 0
+
+        def metadata(path: Path) -> SimpleNamespace:
+            nonlocal visits
+            if path.name == "systemctl":
+                visits += 1
+                final_visit = 3
+                if visits == final_visit:
+                    return changed
+            return self.metadata(path)
+
+        self.lstat.side_effect = metadata
+        self.assert_failure("READ_FINAL_LSTAT", "REFUSED")
+        self.artifact.clear()
+        self.open.reset_mock()
+        visits = 0
+
+        def failed_metadata(path: Path) -> SimpleNamespace:
+            nonlocal visits
+            if path.name == "systemctl":
+                visits += 1
+                final_visit = 3
+                if visits == final_visit:
+                    message = "private final lstat"
+                    raise OSError(message)
+            return self.metadata(path)
+
+        self.lstat.side_effect = failed_metadata
+        self.assert_failure("READ_FINAL_LSTAT", "OS_ERROR")
+        self.run.assert_not_called()
+
+    def test_canonical_path_and_cleanup_masking_keep_first_failure(self) -> None:
+        with patch.object(hosted, "safe_path", return_value=Path("/other")):
+            self.assert_failure(
+                "READ_CANONICAL_PATH", "REFUSED", lambda: hosted.read_root(Path("/tool"), diagnostic=self.diagnostic)
+            )
+        self.artifact.clear()
+        first = OSError("secret read contents")
+        cleanup = OSError("secret close contents")
+        self.read.side_effect = first
+        self.close.side_effect = cleanup
+        self.assertIs(self.assert_failure("READ_BYTES", "OS_ERROR"), cleanup)
+        self.run.assert_not_called()
+        self.assertNotIn("secret", json.dumps(self.artifact))
+        self.assertIs(cleanup.__context__, first)
+
+    def test_recorder_failure_preserves_original_exception_through_nested_fallback(self) -> None:
+        original = OSError("original private operation", 123)
+        recorder_failure = RuntimeError("private recorder text")
+        self.read.side_effect = original
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with (
+            patch.object(hosted.ToolDiagnostic, "record", side_effect=recorder_failure) as record,
+            patch.object(sys, "stdout", stdout),
+            patch.object(sys, "stderr", stderr),
+            self.assertRaises(OSError) as raised,
+        ):
+            hosted.installed_tools(123, self.diagnostic)
+        self.assertIs(raised.exception, original)
+        self.assertEqual(raised.exception.args, ("original private operation", 123))
+        self.assertEqual(
+            record.call_args_list,
+            [unittest.mock.call("READ_BYTES", original), unittest.mock.call("TOOL_FACTS", original)],
+        )
+        self.assertEqual(self.artifact, {})
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(stderr.getvalue(), "")
+        self.open.assert_called_once()
+        self.read.assert_called_once_with(77, child.MAX_INTERPRETER)
+        self.close.assert_called_once_with(77)
+        self.run.assert_not_called()
+        self.remaining.assert_not_called()
+
+    def test_command_failures_keep_original_order_and_bounds(self) -> None:
+        operations = [
+            ("COMMAND_DEADLINE_ENTRY", "REFUSED", self.remaining, [custody.CustodyError()]),
+            ("COMMAND_RUN", "OS_ERROR", self.run, [OSError("secret command")]),
+            (
+                "COMMAND_RUN",
+                "TIMEOUT",
+                self.run,
+                [hosted.subprocess.TimeoutExpired("private argv", 1, output=b"secret")],
+            ),
+            ("COMMAND_DEADLINE_COMPLETION", "REFUSED", self.remaining, [0.5, custody.CustodyError()]),
+        ]
+        for site, category, mock, values in operations:
+            with self.subTest(site=site, category=category):
+                self.artifact.clear()
+                self.open.reset_mock()
+                self.run.reset_mock()
+                self.remaining.reset_mock()
+                mock.side_effect = values
+                self.assert_failure(site, category)
+                if site == "COMMAND_DEADLINE_ENTRY":
+                    self.run.assert_not_called()
+                mock.side_effect = self.version if mock is self.run else None
+        for site, changes in (
+            ("COMMAND_EXIT", {"returncode": 1}),
+            ("COMMAND_STDOUT_BOUND", {"stdout": b"x" * (hosted.LIMIT + 1)}),
+            ("COMMAND_STDERR_BOUND", {"stderr": b"x" * (hosted.LIMIT + 1)}),
+        ):
+            with self.subTest(site=site):
+                self.artifact.clear()
+                self.open.reset_mock()
+                self.run.reset_mock()
+                self.run.side_effect = None
+                self.run.return_value = SimpleNamespace(
+                    **({"returncode": 0, "stdout": b"systemd 260\n", "stderr": b""} | changes)
+                )
+                self.assert_failure(site, "REFUSED")
+        self.artifact.clear()
+        self.assert_failure(
+            "COMMAND_ALLOWLIST", "REFUSED", lambda: hosted.command(["/untrusted"], 123, self.diagnostic)
+        )
+
+    def test_version_and_fact_failures_never_scan_later_tools(self) -> None:
+        cases = [
+            ("VERSION_ASCII", "DECODE", b"\xffsecret"),
+            ("VERSION_FIRST_LINE", "EMPTY_OUTPUT", b""),
+            ("VERSION_PRINTABLE", "REFUSED", b"secret\x00"),
+            ("VERSION_PRINTABLE", "REFUSED", b"x" * 257),
+            ("VERSION_SYSTEMD_PATTERN", "REFUSED", b"unexpected secret version"),
+        ]
+        for site, category, output in cases:
+            with self.subTest(site=site, output=output):
+                self.artifact.clear()
+                self.open.reset_mock()
+                self.run.reset_mock()
+                self.run.side_effect = None
+                self.run.return_value = SimpleNamespace(returncode=0, stdout=output, stderr=b"secret ignored stderr")
+                self.assert_failure(site, category)
+                self.assertEqual(self.run.call_args.args[0], ["/usr/bin/systemctl", "--version"])
+                self.assertNotIn("secret", json.dumps(self.artifact))
+        self.artifact.clear()
+        self.open.reset_mock()
+        self.run.reset_mock()
+        self.read.return_value = b"not ELF secret"
+        self.assert_failure("ELF_MAGIC", "REFUSED")
+        self.run.assert_not_called()
+        self.artifact.clear()
+        self.open.reset_mock()
+        self.read.return_value = b"\x7fELF"
+        self.run.side_effect = self.version
+        with patch.object(hosted, "asdict", side_effect=ValueError("private identity")):
+            self.assert_failure("FACT_SERIALIZATION", "INTERNAL")
+
+    def test_success_facts_calls_and_recheck_equality_are_unchanged(self) -> None:
+        calls = MagicMock()
+        for name, mock in (
+            ("lstat", self.lstat),
+            ("open", self.open),
+            ("fstat", self.fstat),
+            ("read", self.read),
+            ("close", self.close),
+            ("run", self.run),
+            ("remaining", self.remaining),
+        ):
+            calls.attach_mock(mock, name)
+        observed = hosted.installed_tools(123, self.diagnostic)
+        original_order = (
+            ["lstat"] * 8
+            + ["open", "fstat", "read", "fstat", "lstat", "close"]
+            + ["lstat"] * 4
+            + ["remaining", "run", "remaining"]
+        )
+        self.assertEqual([call[0] for call in calls.mock_calls], original_order * 3)
+        expected = {}
+        for path in ("/usr/bin/systemctl", "/usr/bin/systemd-run", "/usr/bin/env"):
+            expected[path] = {
+                "path": path,
+                "sha256": hosted.digest(b"\x7fELF"),
+                "identity": asdict(hosted.identity(self.file)),
+                "version": "env 1" if path.endswith("/env") else "systemd 260",
+                "integrity": "preinstalled-root-owned-OS-tool-not-publisher-checksum",
+            }
+        self.assertEqual(observed, expected)
+        self.assertEqual(self.artifact, {})
+        self.assertEqual(self.lstat.call_count, 39)
+        self.assertEqual(self.fstat.call_count, 6)
+        self.assertEqual(self.remaining.call_count, 6)
+        self.assertEqual(self.close.call_args_list, [unittest.mock.call(77)] * 3)
+        self.assertEqual(self.read.call_args_list, [unittest.mock.call(77, child.MAX_INTERPRETER)] * 3)
+        self.assertEqual(
+            self.open.call_args_list,
+            [unittest.mock.call(Path(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC) for path in expected],
+        )
+        self.assertEqual(
+            self.run.call_args_list,
+            [
+                unittest.mock.call(
+                    [path, "--version"],
+                    stdin=hosted.subprocess.DEVNULL,
+                    capture_output=True,
+                    env=hosted.ENV,
+                    cwd="/",
+                    timeout=0.5,
+                    check=False,
+                )
+                for path in expected
+            ],
+        )
+        self.assertEqual(hosted.installed_tools(123, hosted.ToolDiagnostic(self.artifact)), observed)
+        self.assertEqual(self.artifact, {})
+
+    def test_each_tool_identity_and_observer_failure_artifact(self) -> None:
+        for position, tool in enumerate(("SYSTEMCTL", "SYSTEMD_RUN", "ENV")):
+            with self.subTest(tool=tool):
+                self.artifact.clear()
+                self.run.reset_mock()
+                self.read.side_effect = [b"\x7fELF"] * position + [b"private invalid file"]
+                with self.assertRaises(custody.CustodyError):
+                    hosted.installed_tools(123, self.diagnostic)
+                self.assertEqual(
+                    self.artifact["systemToolsFailure"], {"tool": tool, "site": "ELF_MAGIC", "failure": "REFUSED"}
+                )
+                self.assertEqual(self.run.call_count, position)
+        bootstrap = {"uid": 1001, "gid": 1001, "deadlineNs": 123}
+        output = io.StringIO()
+
+        def fail(_deadline: int, diagnostic: hosted.ToolDiagnostic) -> None:
+            with hosted.tool_site(diagnostic, "READ_OPEN"):
+                message = "private exception"
+                raise OSError(message)
+
+        with (
+            patch.object(hosted.os, "umask"),
+            patch.object(hosted.os, "geteuid", return_value=0),
+            patch.object(hosted, "read_root", return_value=(json.dumps(bootstrap).encode(), None)),
+            patch.object(hosted, "installed_tools", side_effect=fail),
+            patch.object(hosted, "audit_stage") as audit,
+            patch.object(hosted, "write_denial_probe") as probe,
+            patch.object(sys, "stdout", output),
+        ):
+            self.assertEqual(hosted.observer_main("/synthetic-stage"), 1)
+        result = json.loads(output.getvalue())
+        self.assertEqual(
+            result["systemToolsFailure"], {"tool": "SYSTEMCTL", "site": "READ_OPEN", "failure": "OS_ERROR"}
+        )
+        self.assertNotIn("systemTools", result)
+        self.assertNotIn("private exception", output.getvalue())
+        audit.assert_not_called()
+        probe.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

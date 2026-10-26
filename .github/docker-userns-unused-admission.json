@@ -6,7 +6,7 @@
   "contracts": {
     "scripts/docker_userns_custody.py": "44a21053ce6d584dcab63bb37cfd8c3e28193fea1d9f9851ae908906e84492a7",
     "scripts/docker_userns_custody_child.py": "6a73a4a8fdef7f1887efd62c7bfdbb2fc9490daa502899d231ad66fb8fdf1268",
-    "scripts/docker_userns_hosted.py": "eb920bbdac556139110df403074d171b3812e18d9688ebdac06fb26ebba32946",
+    "scripts/docker_userns_hosted.py": "032532c02f5783d2d7f27f80da1fdb5bc052fd7239642659093d31d0e629b403",
     "scripts/docker_userns_policy_source.py": "cafc4121a424b3053528a5c8284314decdcf370878666c39edc83c15b2234927",
     ".github/docker-userns-helper-closure.json": "48d06e8cb16f495b32a0037d868c7d057a9040e2756c420438a2a302a7ca359f"
   },

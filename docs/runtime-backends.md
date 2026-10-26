@@ -258,6 +258,18 @@ integrity exception, with actual versions, hashes and fresh identities recorded;
 no project/vendor checksum or new downloaded tool is claimed. Helper/source
 hashes and fresh identities are rechecked across both cycles.
 
+The installed-tool scan records its first refusal in `systemToolsFailure`, with
+closed tool (`SYSTEMCTL`, `SYSTEMD_RUN` or `ENV`), operation-site and
+failure-category identifiers (`REFUSED`, `OS_ERROR`, `TIMEOUT`, `DECODE`,
+`EMPTY_OUTPUT` or `INTERNAL`). Categories describe the failed operation, without
+inferring its cause. This diagnostic
+survives a partial scan or a later close failure; accepted `systemTools` facts
+remain separate. It includes no exception text, command output or extra host
+observations. The scan still stops at its original first failure, uses the same
+trust, file, ELF, version and deadline checks, and runs the same commands and
+before/after tool comparison. This is diagnostic evidence only and changes no
+admission or runtime authority.
+
 `.github/docker-userns-unused-admission.json` is a manually reviewed semantic
 admission based on the audited Stage-1 Ubuntu 26 observation, bound to the
 active source manifest and helper contracts. It never compares historical

@@ -170,12 +170,55 @@ def cancellation_scope() -> Iterator[None]:
         _CANCELLATION[0] = previous_flag or _CANCELLATION[0]
 
 
-def safe_path(path: Path) -> Path:
+@dataclass
+class ToolDiagnostic:
+    """Retain only the first closed installed-tool refusal, separate from accepted facts."""
+
+    artifact: dict[str, Any]
+    tool: str = "SYSTEMCTL"
+
+    def record(self, site: str, error: Exception) -> None:
+        """Never serialize exception text, command output, paths or numeric OS metadata."""
+        if "systemToolsFailure" in self.artifact:
+            return
+        if isinstance(error, custody.CustodyError):
+            failure = "REFUSED"
+        elif isinstance(error, subprocess.TimeoutExpired):
+            failure = "TIMEOUT"
+        elif isinstance(error, OSError):
+            failure = "OS_ERROR"
+        elif isinstance(error, UnicodeError):
+            failure = "DECODE"
+        elif isinstance(error, IndexError):
+            failure = "EMPTY_OUTPUT"
+        else:
+            failure = "INTERNAL"
+        self.artifact["systemToolsFailure"] = {"tool": self.tool, "site": site, "failure": failure}
+
+
+@contextmanager
+def tool_site(diagnostic: ToolDiagnostic | None, site: str) -> Iterator[None]:
+    """Record an original operation's first failure before preserving its propagation."""
+    try:
+        yield
+    except Exception as error:
+        if diagnostic is not None:
+            with suppress(Exception):
+                diagnostic.record(site, error)
+        raise
+
+
+def safe_path(path: Path, diagnostic: ToolDiagnostic | None = None) -> Path:
     """Check every root-owned component traversed by the installed OS symlink chain."""
-    need(path.is_absolute())
+    with tool_site(diagnostic, "PATH_ABSOLUTE"):
+        need(path.is_absolute())
     pending, resolved, links = list(path.parts[1:]), Path("/"), 0
-    root = resolved.lstat()
-    need(root.st_uid == 0 and not root.st_mode & 0o022)
+    with tool_site(diagnostic, "PATH_ROOT_LSTAT"):
+        root = resolved.lstat()
+    with tool_site(diagnostic, "PATH_ROOT_OWNER"):
+        need(root.st_uid == 0)
+    with tool_site(diagnostic, "PATH_ROOT_MODE"):
+        need(not root.st_mode & 0o022)
     while pending:
         part = pending.pop(0)
         if part == ".":
@@ -184,19 +227,26 @@ def safe_path(path: Path) -> Path:
             resolved = resolved.parent
             continue
         current = resolved / part
-        info = current.lstat()
-        need(info.st_uid == 0)
+        with tool_site(diagnostic, "PATH_COMPONENT_LSTAT"):
+            info = current.lstat()
+        with tool_site(diagnostic, "PATH_COMPONENT_OWNER"):
+            need(info.st_uid == 0)
         if stat.S_ISLNK(info.st_mode):
             links += 1
-            need(links <= MAX_LINKS)
-            target = current.readlink()
+            with tool_site(diagnostic, "PATH_SYMLINK_LIMIT"):
+                need(links <= MAX_LINKS)
+            with tool_site(diagnostic, "PATH_READLINK"):
+                target = current.readlink()
             if target.is_absolute():
                 resolved = Path("/")
                 pending = list(target.parts[1:]) + pending
             else:
                 pending = list(target.parts) + pending
         else:
-            need(not info.st_mode & 0o022 and (not pending or stat.S_ISDIR(info.st_mode)))
+            with tool_site(diagnostic, "PATH_COMPONENT_MODE"):
+                need(not info.st_mode & 0o022)
+            with tool_site(diagnostic, "PATH_COMPONENT_TYPE"):
+                need(not pending or stat.S_ISDIR(info.st_mode))
             resolved = current
     return resolved
 
@@ -215,18 +265,35 @@ def identity(info: os.stat_result) -> custody.FileIdentity:
     )
 
 
-def read_root(path: Path, limit: int = LIMIT) -> tuple[bytes, custody.FileIdentity]:
+def read_root(
+    path: Path, limit: int = LIMIT, diagnostic: ToolDiagnostic | None = None
+) -> tuple[bytes, custody.FileIdentity]:
     """Read one exact root file through a no-follow descriptor and recheck identity."""
-    need(safe_path(path) == path)
-    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    with tool_site(diagnostic, "READ_CANONICAL_PATH"):
+        need(safe_path(path, diagnostic) == path)
+    with tool_site(diagnostic, "READ_OPEN"):
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
-        before = identity(os.fstat(descriptor))
-        need(stat.S_ISREG(before.mode) and before.owner == 0 and before.links == 1 and not before.mode & 0o7022)
-        raw = child.bytes_at(descriptor, limit)
-        need(identity(os.fstat(descriptor)) == before and identity(path.lstat()) == before)
+        with tool_site(diagnostic, "READ_INITIAL_FSTAT"):
+            before = identity(os.fstat(descriptor))
+        with tool_site(diagnostic, "READ_REGULAR_FILE"):
+            need(stat.S_ISREG(before.mode))
+        with tool_site(diagnostic, "READ_OWNER"):
+            need(before.owner == 0)
+        with tool_site(diagnostic, "READ_LINKS"):
+            need(before.links == 1)
+        with tool_site(diagnostic, "READ_MODE"):
+            need(not before.mode & 0o7022)
+        with tool_site(diagnostic, "READ_BYTES"):
+            raw = child.bytes_at(descriptor, limit)
+        with tool_site(diagnostic, "READ_FINAL_FSTAT"):
+            need(identity(os.fstat(descriptor)) == before)
+        with tool_site(diagnostic, "READ_FINAL_LSTAT"):
+            need(identity(path.lstat()) == before)
         return raw, before
     finally:
-        os.close(descriptor)
+        with tool_site(diagnostic, "READ_CLOSE"):
+            os.close(descriptor)
 
 
 def group(path: str) -> custody.Group:
@@ -788,21 +855,35 @@ class HostPort:
         return repeated
 
 
-def command(argv: list[str], deadline: int) -> bytes:
+def tool_remaining(deadline: int, diagnostic: ToolDiagnostic | None) -> float:
+    """Instrument the original timeout expression without changing command evaluation order."""
+    with tool_site(diagnostic, "COMMAND_DEADLINE_ENTRY"):
+        return remaining(deadline)
+
+
+def command(argv: list[str], deadline: int, diagnostic: ToolDiagnostic | None = None) -> bytes:
     """Run only reviewed root-owned systemd management commands with a finite allowance."""
-    need(argv[0] in {"/usr/bin/systemctl", "/usr/bin/systemd-run"} or argv == ["/usr/bin/env", "--version"])
-    safe_path(Path(argv[0]))
-    result = subprocess.run(  # noqa: S603 - closed root-owned systemd argv, no shell.
-        argv,
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        env=ENV,
-        cwd="/",
-        timeout=min(1.0, remaining(deadline)),
-        check=False,
-    )
-    remaining(deadline)
-    need(result.returncode == 0 and len(result.stdout) <= LIMIT and len(result.stderr) <= LIMIT)
+    with tool_site(diagnostic, "COMMAND_ALLOWLIST"):
+        need(argv[0] in {"/usr/bin/systemctl", "/usr/bin/systemd-run"} or argv == ["/usr/bin/env", "--version"])
+    safe_path(Path(argv[0]), diagnostic)
+    with tool_site(diagnostic, "COMMAND_RUN"):
+        result = subprocess.run(  # noqa: S603 - closed root-owned systemd argv, no shell.
+            argv,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            env=ENV,
+            cwd="/",
+            timeout=min(1.0, tool_remaining(deadline, diagnostic)),
+            check=False,
+        )
+    with tool_site(diagnostic, "COMMAND_DEADLINE_COMPLETION"):
+        remaining(deadline)
+    with tool_site(diagnostic, "COMMAND_EXIT"):
+        need(result.returncode == 0)
+    with tool_site(diagnostic, "COMMAND_STDOUT_BOUND"):
+        need(len(result.stdout) <= LIMIT)
+    with tool_site(diagnostic, "COMMAND_STDERR_BOUND"):
+        need(len(result.stderr) <= LIMIT)
     return result.stdout
 
 
@@ -1696,24 +1777,39 @@ def audit_stage(stage: Path, bootstrap: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def installed_tools(deadline: int) -> dict[str, Any]:
+def installed_tools(deadline: int, diagnostic: ToolDiagnostic | None = None) -> dict[str, Any]:
     """Record actual preinstalled systemd tools under the explicit OS-integrity exception."""
     result = {}
-    for name in ("/usr/bin/systemctl", "/usr/bin/systemd-run", "/usr/bin/env"):
-        path = safe_path(Path(name))
-        raw, info = read_root(path, child.MAX_INTERPRETER)
-        need(raw.startswith(b"\x7fELF"))
-        version = command([name, "--version"], deadline).decode("ascii", "strict").splitlines()[0]
-        need(re.fullmatch(r"[^\x00\n]{1,256}", version))
-        if name != "/usr/bin/env":
-            need(re.fullmatch(r"systemd [0-9][^\x00]{0,256}", version))
-        result[name] = {
-            "path": str(path),
-            "sha256": digest(raw),
-            "identity": asdict(info),
-            "version": version,
-            "integrity": "preinstalled-root-owned-OS-tool-not-publisher-checksum",
-        }
+    for name, tool in (
+        ("/usr/bin/systemctl", "SYSTEMCTL"),
+        ("/usr/bin/systemd-run", "SYSTEMD_RUN"),
+        ("/usr/bin/env", "ENV"),
+    ):
+        if diagnostic is not None:
+            diagnostic.tool = tool
+        with tool_site(diagnostic, "TOOL_FACTS"):
+            path = safe_path(Path(name), diagnostic)
+            raw, info = read_root(path, child.MAX_INTERPRETER, diagnostic)
+            with tool_site(diagnostic, "ELF_MAGIC"):
+                need(raw.startswith(b"\x7fELF"))
+            output = command([name, "--version"], deadline, diagnostic)
+            with tool_site(diagnostic, "VERSION_ASCII"):
+                decoded = output.decode("ascii", "strict")
+            with tool_site(diagnostic, "VERSION_FIRST_LINE"):
+                version = decoded.splitlines()[0]
+            with tool_site(diagnostic, "VERSION_PRINTABLE"):
+                need(re.fullmatch(r"[^\x00\n]{1,256}", version))
+            if name != "/usr/bin/env":
+                with tool_site(diagnostic, "VERSION_SYSTEMD_PATTERN"):
+                    need(re.fullmatch(r"systemd [0-9][^\x00]{0,256}", version))
+            with tool_site(diagnostic, "FACT_SERIALIZATION"):
+                result[name] = {
+                    "path": str(path),
+                    "sha256": digest(raw),
+                    "identity": asdict(info),
+                    "version": version,
+                    "integrity": "preinstalled-root-owned-OS-tool-not-publisher-checksum",
+                }
     return result
 
 
@@ -1949,7 +2045,7 @@ def observer_main(stage_name: str) -> int:
             and type(bootstrap["gid"]) is int
             and bootstrap["gid"] > 0
         )
-        result["systemTools"] = installed_tools(bootstrap["deadlineNs"])
+        result["systemTools"] = installed_tools(bootstrap["deadlineNs"], ToolDiagnostic(result))
         result["staging"] = audit_stage(stage, bootstrap)
         result["writeProbe"] = write_denial_probe(stage, bootstrap, Clock())
         for killed in (False, True):
@@ -1958,7 +2054,7 @@ def observer_main(stage_name: str) -> int:
             plan = CyclePlan(stage, bootstrap, min(bootstrap["deadlineNs"], time.monotonic_ns() + CYCLE_NS), killed)
             cycle(plan, progress)
             need(audit_stage(stage, bootstrap) == result["staging"])
-        need(installed_tools(bootstrap["deadlineNs"]) == result["systemTools"])
+        need(installed_tools(bootstrap["deadlineNs"], ToolDiagnostic(result)) == result["systemTools"])
         result["outcome"] = "closed-disposed-unused"
         status = 0
     except Exception:  # noqa: BLE001 - preserve unresolved custody and avoid exposing protected raw inputs.
