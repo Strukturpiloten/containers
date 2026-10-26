@@ -41,6 +41,22 @@ jobs:
         with:
           version: ${{ env.ACTIONLINT_VERSION }}
 
+      - name: Observe runner security cohort (read-only)
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.docker_runner_security \
+            --output "${RUNNER_TEMP}/docker-runner-security.json"
+      - name: Retain runner security observation
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: docker-runner-security
+          path: ${{ runner.temp }}/docker-runner-security.json
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Validate repository
         shell: bash
         env:

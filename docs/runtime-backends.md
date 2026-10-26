@@ -49,6 +49,30 @@ original error. Global prune and ambient-store cleanup are prohibited.
 
 ## CI prerequisites and evidence
 
+The validate job captures a bounded, read-only security snapshot before repository checks and retains
+only `docker-runner-security.json` for seven days. This describes the AMD64 validate-job host and the
+collector process; it cannot establish the security context of a guest, RootlessKit, an ARM64 job,
+or a native smoke-test job. Later experiments must collect their own cohort. The snapshot cannot
+attribute a launch failure, qualify native support, or waive existing checks or runtime budgets.
+
+The closed JSON records kernel release and architecture, AppArmor enablement and its restriction
+on unprivileged user namespaces, the user-namespace limit, and optional collector-process Seccomp,
+NoNewPrivs and profile kind. It excludes hostnames, UIDs, environment values, raw paths, profile
+names and raw command output. Unavailable or malformed observations have explicit unknown states.
+Only the existing fixed system `apparmor_parser --version` may run, without elevation and only from
+a non-root collector after regular-file, ownership, permissions and ELF checks. Its bounded binary
+hash and public file identity are checked around the query; its version is an observation without
+a minimum-version admission rule. The query has a one-second limit, a 4 KiB output limit and owned
+process-group cleanup. The complete collector has a four-second observation budget and emits at
+most 8 KiB of JSON. It never loads policy, changes sysctls, installs tools or invokes a runtime.
+
+Unavailable facts are ordinary JSON; collector implementation and artifact-upload failures are
+not masked. The existing pinned `actions/upload-artifact` reference is reused. Its Jinja reference
+is already covered by Renovate's pinned-action custom manager and its generated workflow reference
+by the GitHub Actions manager. No pin or manager changes are needed. The optional OS-provided parser
+uses the existing runner-environment integrity exception: no parser version is selected and no
+independent package checksum is claimed.
+
 Docker-selected jobs require Docker CLI/daemon, containerd, systemd, `ip`,
 GNU Coreutils `timeout` and existing Skopeo tooling. Before native services or
 disk sampling, the existing command owner qualifies `gnutimeout` when present,
