@@ -168,7 +168,7 @@
         "/^\\.github/workflow-templates/.+\\.yml\\.j2$/"
       ],
       "matchStrings": [
-        "uses:\\s*(?<depName>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@(?<currentDigest>[a-f0-9]{40})\\s+#\\s*(?<currentValue>v?\\d+\\.\\d+\\.\\d+)"
+        "uses:\\s*(?<depName>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@(?<currentDigest>[a-f0-9]{40})\\s+#\\s*(?<currentValue>v?\\d+(?:\\.\\d+){0,2})"
       ],
       "datasourceTemplate": "github-tags",
       "versioningTemplate": "semver-coerced"
@@ -258,6 +258,19 @@
       "packageNameTemplate": "composer/composer",
       "datasourceTemplate": "github-releases",
       "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "description": "Track the canonical Python interpreter alongside project requirements",
+      "managerFilePatterns": [
+        "/^\\.github/automation\\.yml$/"
+      ],
+      "matchStrings": [
+        "PYTHON_VERSION:\\s*\"?(?<currentValue>\\d+\\.\\d+(?:\\.\\d+)?)\"?"
+      ],
+      "depNameTemplate": "python",
+      "datasourceTemplate": "python-version",
+      "versioningTemplate": "python"
     }
   ],
   "github-actions": {
@@ -274,9 +287,15 @@
   "packageRules": [
     {
       "description": "Review both Grype architecture release assets in one update",
-      "matchManagers": ["custom.regex"],
-      "matchDatasources": ["github-release-attachments"],
-      "matchPackageNames": ["anchore/grype"],
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "github-release-attachments"
+      ],
+      "matchPackageNames": [
+        "anchore/grype"
+      ],
       "groupName": "Grype scanner archives",
       "automerge": false
     },
@@ -566,6 +585,23 @@
         ".github/actions/**",
         ".github/workflow-templates/**"
       ]
+    },
+    {
+      "description": "Update PHP and Alpine versions together while preserving the FPM Alpine variant",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "docker.io/php"
+      ],
+      "matchFileNames": [
+        "images/nextcloud/nextcloud-phpfpm/container.yaml",
+        "images/typo3/typo3-phpfpm/container.yaml"
+      ],
+      "versioning": "regex:^(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)-(?<compatibility>fpm-alpine)(?<build>\\d+)\\.(?<revision>\\d+)$"
     },
     {
       "description": "PHP extension and Composer version updates require human review",
@@ -944,6 +980,20 @@
         "digest"
       ],
       "groupName": "Docker Ubuntu 26.04 distro base"
+    },
+    {
+      "description": "Coordinate reviewed Python runtime, project constraint and lockfile migrations",
+      "matchDatasources": [
+        "python-version"
+      ],
+      "matchPackageNames": [
+        "python"
+      ],
+      "groupName": "Python runtime",
+      "automerge": false
     }
+  ],
+  "gitIgnoredAuthors": [
+    "/^41898282\\+github-actions\\[bot\\]@users\\.noreply\\.github\\.com$/"
   ]
 }

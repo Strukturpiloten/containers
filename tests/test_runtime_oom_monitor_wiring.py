@@ -56,6 +56,12 @@ class MonitorWiringTests(unittest.TestCase):
         events = []
         diagnostics.snapshot.side_effect = events.append
 
+        def load_fixture(_name: str, _container: str, _archive: object) -> str:
+            events.append("ordinary-work-start")
+            raise ProbeError(WORK_REFUSAL)
+
+        ctx.load_fixture_archive.side_effect = load_fixture
+
         def docker(_ctx: object, _budget: object, _container: str, name: str, *_args: object) -> str:
             if name == "read Docker API versions":
                 return json.dumps({"Version": "29.8.2", "ApiVersion": "1.53", "MinAPIVersion": "1.44"})

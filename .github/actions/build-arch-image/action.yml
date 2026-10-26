@@ -91,6 +91,7 @@ runs:
           --image-name "${IMAGE_NAME}" \
           --archive "${IMAGE_PATH}" \
           --arch "${IMAGE_ARCH}" \
+          --outer-engine profile \
           --evidence "${RUNNER_TEMP}/runtime-evidence/${IMAGE_NAME}-${IMAGE_ARCH}.json" \
           --sudo "${runtime_args[@]}"
 

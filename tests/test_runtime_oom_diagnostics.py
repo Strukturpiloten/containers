@@ -66,6 +66,24 @@ def _context() -> MagicMock:
 
 
 class OomDiagnosticTests(unittest.TestCase):
+    def test_docker_retains_state_but_never_fabricates_conmon_custody(self) -> None:
+        ctx = _context()
+        ctx.outer_engine = "docker"
+        state = {"Running": True, "Pid": 123, "OOMKilled": False}
+        ctx.podman.return_value = json.dumps(state)
+        observer = diagnostics.OomDiagnostics(ctx, CONTAINER)
+        observer.snapshot("before-inner-memory", scope=SCOPE, scope_inode=40)
+        observer.snapshot("after-inner-memory")
+        observer.after_exit(CONTAINER, {"Running": False, "Pid": 0, "OOMKilled": True, "ExitCode": 0})
+        ctx.command.assert_not_called()
+        self.assertIsNone(observer.custody)
+        self.assertEqual(len(ctx.observations), 3)
+        self.assertTrue(ctx.observations[-1]["ociState"]["OOMKilled"])
+        for record in ctx.observations:
+            self.assertEqual(record["availability"], "backend-not-applicable")
+            self.assertEqual(record["attribution"], "unresolved")
+            self.assertEqual(record["sources"]["conmonMarkers"], "not-applicable")
+
     def test_counter_fixture_preserves_local_and_hierarchical_fields_and_missing_support(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -318,6 +336,8 @@ class OomDiagnosticTests(unittest.TestCase):
         with (
             patch("scripts.runtime_tests.RuntimeContext", return_value=ctx),
             patch.object(ctx, "load_archive", return_value={}),
+            patch.object(ctx, "bind_guest_profile"),
+            patch.object(ctx, "prepare", return_value={"engine": "podman", "clientVersion": "podman version fixture"}),
             patch.object(ctx, "cleanup"),
             patch("scripts.runtime_tests._docker"),
             patch(

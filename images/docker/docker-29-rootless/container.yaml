@@ -1,10 +1,10 @@
 # yaml-language-server: $schema=../../../container.schema.json
 schemaVersion: 1
 name: docker-29-rootless
-version: v29.8.2
+version: v29.9.2
 image: ghcr.io/strukturpiloten/docker-29-rootless
 title: Docker Engine 29 rootless
-description: Upstream Docker Engine 29.8.2 static payload on maintained Alpine, rootless daemon
+description: Upstream Docker Engine 29.9.2 static payload on maintained Alpine, rootless daemon
 tests:
   docker:
     mode: rootless
@@ -20,7 +20,7 @@ build:
   payload: images/docker/upstream/29/payload.yaml
   args:
     ALPINE_IMAGE:
-      value: docker.io/library/alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+      value: docker.io/library/alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
       type: external-image
 dependencies:
   internal: []

@@ -2,10 +2,10 @@
 # yaml-language-server: $schema=../../../container.schema.json
 schemaVersion: 1
 name: docker-29-conformance-rootless
-version: v29.8.2
+version: v29.9.2
 image: ghcr.io/strukturpiloten/docker-29-conformance-rootless
 title: Docker 29 systemd conformance rootless
-description: Upstream Docker Engine 29.8.2 on Debian 13, dedicated rootless systemd conformance fixture
+description: Upstream Docker Engine 29.9.2 on Debian 13, dedicated rootless systemd conformance fixture
 tests:
   docker:
     mode: rootless
@@ -22,7 +22,7 @@ build:
   payload: images/docker/upstream/29/payload.yaml
   args:
     DISTRO_IMAGE:
-      value: docker.io/library/debian:13@sha256:913f6706df59a68922d1dd08f78c2476560a8d367897200a6005b00e5f67c2d5
+      value: docker.io/library/debian:13@sha256:4c25275446ca371766b8b093c696782eabce06263fccacb8d5d813b3dc44b308
       type: external-image
     DISTRO_ID:
       value: 'debian-13'
@@ -49,6 +49,8 @@ inputs:
   - images/docker/upstream/payload.Containerfile
   - images/docker/upstream/fetch-payload.sh
   - scripts/runtime_docker_systemd.py
+  - scripts/runtime_oom_diagnostics.py
+  - scripts/runtime_oom_watch.py
   - shared/oci-labels.env
 lifecycle:
   state: maintained
@@ -56,7 +58,7 @@ lifecycle:
   reviewAfter: '2026-10-27'
   supportBoundary: >-
     Verified upstream Docker archive inputs on maintained Debian 13; native conformance remains unqualified.
-    Dedicated privileged isolated conformance fixture; guest systemd needs crun-specific cgroup delegation.
+    Dedicated privileged isolated conformance fixture; guest systemd requires verified private cgroup-v2 delegation and backend-specific exec placement.
     Devices remain subject to native Engine/runc behavior and are not repaired by this profile.
   requiredRuntimeProfiles:
     - docker

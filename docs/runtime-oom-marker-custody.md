@@ -4,6 +4,10 @@ The systemd Docker fixture retains its strict native success predicates, includi
 outer `OOMKilled=false` and a verified orderly zero exit. Diagnostic observations
 cannot excuse failures or qualify an image.
 
+The marker observer applies to Podman outer runs. Docker outer runs retain actual
+Docker state while reporting conmon sources as backend-not-applicable with
+unresolved attribution. No conmon marker or held PID identity is invented there.
+
 Before releasing the inner memory allocator, the optional host observer uses only
 the existing exact-container monitor metadata. It holds the original PID1 pidfd
 and starttime, original marker parent descriptors, an inotify watch on each held
@@ -46,6 +50,16 @@ cleanup half a second. It accepts eight phase requests, 32 directory events,
 interfaces and uncertain helper cleanup remain diagnostics, never admission.
 EOF, error and timeout close the helper's read-only descriptors; uncertain driver
 cleanup retains the helper's independent absolute expiry.
+If the input pipe closes or the owned helper exits, the client can retain one
+buffered terminal error record within the same exchange deadline and byte cap.
+Only the closed versioned error schema is retained; missing, late, partial,
+oversized or unknown records stay explicitly unavailable. Later phases may show
+that previously retained error, without restarting or retrying the helper.
+Terminal validation closes every nested watch, file identity, counter and
+completed-content record, including numeric ranges, hashes and read intervals.
+The watch must match the original owned source. Exception classes and uncertainty
+labels use the producer's fixed vocabulary; unknown text or fields are rejected
+before caching or forwarding. Producer schema changes require receiver review.
 
 The existing snapshot evidence schema and historical native evidence are retained.
 No image recipe, software version, dependency, pin or operational workflow changes

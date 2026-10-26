@@ -21,6 +21,12 @@ from scripts.runtime_errors import ProbeError
 ROOT = Path(__file__).resolve().parents[1]
 METADATA = ROOT / "images/docker/docker-29-rootless/container.yaml"
 CONTAINERS = ["a" * 64, "b" * 64]
+OUTER_RUNTIME = {
+    "engine": "podman",
+    "clientVersion": "podman version 5.4.2",
+    "rootMode": "rootful",
+    "storage": "invocation-owned",
+}
 _READ_TEXT = Path.read_text
 
 
@@ -48,8 +54,8 @@ def _podman_command(args: list[str], **_kwargs: object) -> subprocess.CompletedP
     elif "{{.Architecture}}" in args:
         output = "amd64"
     elif "--version" in args:
-        output = "podman fixture"
-    elif "{{.State.Running}}" in args:
+        output = OUTER_RUNTIME["clientVersion"]
+    elif "{{.Host.Security.Rootless}}" in args or "{{.State.Running}}" in args:
         output = "false"
     elif "{{.Id}}" in args:
         output = args[-1]
@@ -115,6 +121,9 @@ class RuntimeEntrypointTests(unittest.TestCase):
             self.assertFalse(store.exists())
             evidence = json.loads(evidence_path.read_text())
             self.assertEqual(evidence["status"], "failed")
+            self.assertEqual(evidence["host"]["outerEngineSelection"], "podman")
+            self.assertEqual(evidence["host"]["outerRuntime"], OUTER_RUNTIME)
+            self.assertEqual(evidence["host"]["podmanVersion"], OUTER_RUNTIME["clientVersion"])
             self.assertIn("workload shutdown failure", evidence["error"])
             self.assertIn("original native startup failure", evidence["errorTraceback"])
             self.assertIn("workload shutdown failure", evidence["errorTraceback"])
@@ -144,6 +153,7 @@ class RuntimeEntrypointTests(unittest.TestCase):
             context.observations = []
             context.load_archive.return_value = {}
             context.podman.return_value = "podman fixture"
+            context.prepare.return_value = dict(OUTER_RUNTIME)
             context.cleanup.side_effect = ValueError("unexpected cleanup failure")
             args = argparse.Namespace(
                 metadata=str(METADATA),
@@ -159,12 +169,16 @@ class RuntimeEntrypointTests(unittest.TestCase):
             original_sigterm = signal.getsignal(signal.SIGTERM)
             with (
                 patch("scripts.runtime_tests.RuntimeContext", return_value=context),
-                patch("scripts.runtime_tests._docker", side_effect=ProbeError("primary failure")),
+                patch("scripts.runtime_tests._docker", side_effect=ProbeError("primary failure")) as workload,
             ):
                 evidence = runtime_tests.run(args)
             self.assertEqual(signal.getsignal(signal.SIGTERM), original_sigterm)
+            context.prepare.assert_called_once_with()
+            context.cleanup.assert_called_once_with()
+            workload.assert_called_once()
             self.assertEqual(json.loads(evidence_path.read_text()), evidence)
             self.assertEqual(evidence["status"], "failed")
+            self.assertEqual(evidence["host"]["outerRuntime"], OUTER_RUNTIME)
             self.assertIn("primary failure", evidence["error"])
             self.assertIn("primary failure", evidence["errorTraceback"])
             self.assertIn("unexpected cleanup failure", evidence["cleanupError"])

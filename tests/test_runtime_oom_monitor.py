@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -824,6 +825,227 @@ class MarkerCustodyTests(unittest.TestCase):
 
 
 class CustodyProtocolTests(unittest.TestCase):
+    def watch_fixture(self) -> dict:
+        return {
+            "availability": "observed",
+            "file": "memory.events",
+            "path": CURRENT,
+            "inode": 20,
+            "major": 0,
+            "minor": 1,
+            "fd": 7,
+            "wd": 1,
+            "rawKernelDevice": "1",
+            "deviceEncoding": "Linux raw kernel dev_t; 20 minor bits",
+            "directoryIdentity": {"dev": os.makedev(0, 1), "ino": 10},
+        }
+
+    def closed_observer(
+        self, payload: bytes, *, exited: bool = False, watch: dict | None = None
+    ) -> diagnostics.OomDiagnostics:
+        ctx = MagicMock()
+        ctx.timeout, ctx.observations = 1, []
+        observer = diagnostics.OomDiagnostics(ctx, CID)
+        observer.custody_watch = copy.deepcopy(self.watch_fixture() if watch is None else watch)
+        unused_reader, input_writer = os.pipe()
+        os.close(unused_reader)
+        output_reader, output_writer = os.pipe()
+        os.write(output_writer, payload)
+        os.close(output_writer)
+        process = MagicMock()
+        process.stdin = os.fdopen(input_writer, "wb", buffering=0)
+        process.stdout = os.fdopen(output_reader, "rb", buffering=0)
+        process.poll.return_value = 0 if exited else None
+        self.addCleanup(process.stdin.close)
+        self.addCleanup(process.stdout.close)
+        observer.custody = process
+        return observer
+
+    def terminal_fixture(self) -> dict:
+        return {
+            "schemaVersion": 1,
+            "availability": "error",
+            "attribution": "unresolved",
+            "reason": "ValueError",
+            "events": [
+                {"candidate": 0, "mask": custody.IN_CREATE, "observedMonotonicNs": 123, "originalPidAlive": True}
+            ],
+            "uncertainty": ["conmon watch continuity unresolved"],
+            "originalConmonWatch": self.watch_fixture(),
+            "exitObservedMonotonicNs": None,
+        }
+
+    def complex_terminal_fixture(self) -> dict:
+        case = MarkerCustodyTests()
+        with tempfile.TemporaryDirectory() as directory:
+            request, marker, group = case.fixture(Path(directory))
+            original = request["watch"]
+            request["watch"] = diagnostics._match_watch(
+                [
+                    {
+                        "fd": original["fd"],
+                        "wd": original["wd"],
+                        "inode": original["inode"],
+                        "major": original["major"],
+                        "minor": original["minor"],
+                        "rawKernelDevice": f"{(original['major'] << 20) | original['minor']:x}",
+                    }
+                ],
+                [{key: original[key] for key in ("path", "inode", "major", "minor", "directoryIdentity")}],
+            )
+            observer = case.observer(request, group)
+            try:
+                marker.write_bytes(b"sealed terminal marker")
+                observer.drain()
+                observer.observe_watch({"availability": "unresolved"})
+                return {
+                    "schemaVersion": 1,
+                    "availability": "error",
+                    "attribution": "unresolved",
+                    "reason": "ValueError",
+                    "events": copy.deepcopy(observer.events),
+                    "originalConmonWatch": copy.deepcopy(observer.watch),
+                    "exitObservedMonotonicNs": observer.exited_at,
+                    "uncertainty": list(observer.reasons),
+                }
+            finally:
+                case.doCleanups()
+
+    def test_real_producer_marker_watch_and_completed_hash_survive_closed_terminal_validation(self) -> None:
+        terminal = self.complex_terminal_fixture()
+        observer = self.closed_observer((json.dumps(terminal) + "\n").encode(), watch=terminal["originalConmonWatch"])
+        observer._custody_sample("after-exit")
+        result = observer.ctx.observations[-1]["snapshot"]
+        self.assertEqual(result["availability"], "error")
+        self.assertEqual(result["events"], terminal["events"])
+        self.assertEqual(result["originalConmonWatch"], terminal["originalConmonWatch"])
+        completed = next(event["completedContent"] for event in result["events"] if "completedContent" in event)
+        self.assertEqual(completed["sha256"], hashlib.sha256(b"sealed terminal marker").hexdigest())
+        self.assertEqual(completed["bytesRead"], len(b"sealed terminal marker"))
+        self.assertEqual(result["uncertainty"], ["conmon watch continuity unresolved"])
+        self.assertEqual(observer.custody_terminal, terminal)
+
+    def test_terminal_optional_payloads_and_opaque_text_are_recursively_closed(self) -> None:
+        terminal = self.complex_terminal_fixture()
+        create = next(index for index, event in enumerate(terminal["events"]) if event["mask"] & custody.IN_CREATE)
+        close = next(index for index, event in enumerate(terminal["events"]) if "completedContent" in event)
+        opaque_text = "protected fixture text"
+        changes = (
+            (("originalConmonWatch",), {"rawMessage": opaque_text}),
+            (("originalConmonWatch", "rawMessage"), opaque_text),
+            (("originalConmonWatch", "directoryIdentity", "rawMessage"), opaque_text),
+            (("originalConmonWatch", "path"), "/other-owned-scope"),
+            (("originalConmonWatch", "fd"), True),
+            (("originalConmonWatch", "rawKernelDevice"), "bad"),
+            (("events", create, "fileIdentity", "rawMessage"), opaque_text),
+            (("events", create, "fileIdentity", "uid"), opaque_text),
+            (("events", create, "counters", "memory.events", "rawMessage"), opaque_text),
+            (("events", create, "counters", "memory.events", "oom"), opaque_text),
+            (("events", close, "completedContent"), {"rawMessage": opaque_text}),
+            (("events", close, "completedContent", "fileIdentity", "dev"), opaque_text),
+            (("events", close, "completedContent", "version", "rawMessage"), opaque_text),
+            (("events", close, "completedContent", "readIntervalMonotonicNs", "rawMessage"), opaque_text),
+            (("events", close, "completedContent", "sha256"), opaque_text),
+            (("events", close, "completedContent", "limits"), opaque_text),
+            (("events", close, "completedContent", "bytesRead"), diagnostics.MAX_FILE_BYTES + 1),
+            (("events", close, "completedContent", "observedWriteEpoch"), diagnostics.MAX_GROUPS + 1),
+            (("events", close, "mask"), -1),
+            (("events", close, "mask"), True),
+            (("reason",), "ProtectedFixtureText"),
+            (("uncertainty",), [opaque_text]),
+            (("uncertainty",), ["conmon watch continuity unresolved"] * 2),
+        )
+        for path, value in changes:
+            changed = copy.deepcopy(terminal)
+            target = changed
+            for component in path[:-1]:
+                target = target[component]
+            target[path[-1]] = value
+            with self.subTest(path=path):
+                observer = self.closed_observer(
+                    (json.dumps(changed) + "\n").encode(), watch=terminal["originalConmonWatch"]
+                )
+                observer._custody_sample("after-exit")
+                result = observer.ctx.observations[-1]["snapshot"]
+                self.assertEqual(result["availability"], "unavailable")
+                self.assertIsNone(observer.custody_terminal)
+                self.assertNotIn(opaque_text, json.dumps(observer.ctx.observations))
+                self.assertNotIn("ProtectedFixtureText", json.dumps(observer.ctx.observations))
+
+    def test_known_constructor_error_without_observer_fields_remains_available(self) -> None:
+        terminal = {
+            "schemaVersion": 1,
+            "availability": "error",
+            "attribution": "unresolved",
+            "reason": "FileNotFoundError",
+        }
+        observer = self.closed_observer((json.dumps(terminal) + "\n").encode())
+        observer._custody_sample("armed")
+        self.assertEqual(observer.ctx.observations[-1]["snapshot"]["reason"], "FileNotFoundError")
+        self.assertEqual(observer.custody_terminal, terminal)
+
+    def test_buffered_terminal_error_survives_broken_pipe_or_already_exited_helper(self) -> None:
+        for exited in (False, True):
+            with self.subTest(exited=exited):
+                terminal = self.terminal_fixture()
+                observer = self.closed_observer((json.dumps(terminal) + "\n").encode(), exited=exited)
+                observer._custody_sample("before-stop-request")
+                record = observer.ctx.observations[-1]
+                self.assertEqual(record["availability"], "error")
+                self.assertEqual(record["snapshot"]["reason"], "ValueError")
+                self.assertEqual(record["snapshot"]["events"], terminal["events"])
+                self.assertEqual(record["snapshot"]["terminalReceipt"], "buffered-after-input-closed")
+                record["snapshot"]["events"].clear()
+                with patch.object(diagnostics.os, "read") as read, patch.object(diagnostics.os, "write") as write:
+                    observer._custody_sample("after-exit")
+                read.assert_not_called()
+                write.assert_not_called()
+                cached = observer.ctx.observations[-1]["snapshot"]
+                self.assertEqual(cached["events"], terminal["events"])
+                self.assertEqual(cached["terminalReceipt"], "previously-retained-terminal")
+                self.assertEqual(cached["attribution"], "unresolved")
+                observer.ctx.command.assert_not_called()
+
+    def test_absent_partial_or_unknown_terminal_record_stays_unavailable(self) -> None:
+        terminal = self.terminal_fixture()
+        payloads = (
+            b"",
+            b"partial",
+            b"{}\n",
+            (json.dumps({**terminal, "schemaVersion": 2}) + "\n").encode(),
+            (json.dumps({**terminal, "rawStderr": "protected fixture text"}) + "\n").encode(),
+            (json.dumps({**terminal, "events": [{"rawMessage": "protected fixture text"}]}) + "\n").encode(),
+            (json.dumps({**terminal, "uncertainty": [{"rawMessage": "protected fixture text"}]}) + "\n").encode(),
+        )
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                observer = self.closed_observer(payload)
+                observer._custody_sample("after-exit")
+                result = observer.ctx.observations[-1]["snapshot"]
+                self.assertEqual(result["availability"], "unavailable")
+                self.assertEqual(result["reason"], "terminal-record-unavailable-or-invalid")
+                self.assertIsNone(observer.custody_terminal)
+                self.assertNotIn("protected fixture text", json.dumps(observer.ctx.observations))
+
+    def test_terminal_drain_never_renews_deadline_or_exceeds_response_bound(self) -> None:
+        payload = (json.dumps(self.terminal_fixture()) + "\n").encode()
+        observer = self.closed_observer(payload)
+        with (
+            patch.object(diagnostics.time, "monotonic", side_effect=[100, 100.1, 101.1]),
+            patch.object(diagnostics.os, "read") as read,
+        ):
+            result = observer._custody_exchange({"phase": "after-exit"})
+        read.assert_not_called()
+        self.assertEqual(result["availability"], "unavailable")
+        self.assertIsNone(observer.custody_terminal)
+        observer = self.closed_observer(b"x", exited=True)
+        with patch.object(diagnostics.os, "read", return_value=b"x" * (diagnostics.MAX_BYTES + 1)) as read:
+            result = observer._custody_exchange({"phase": "after-exit"})
+        self.assertEqual(read.call_count, 1)
+        self.assertEqual(read.call_args.args[1], diagnostics.MAX_BYTES + 1)
+        self.assertEqual(result["availability"], "unavailable")
+        self.assertIsNone(observer.custody_terminal)
+
     def test_eof_partial_input_and_expired_input_are_bounded(self) -> None:
         for value in (b"", b"partial", None):
             with self.subTest(value=value):

@@ -9,6 +9,7 @@ import copy
 import json
 import math
 import re
+import shutil
 import signal as signals
 import time
 from itertools import pairwise
@@ -38,6 +39,12 @@ SYSTEMD_OPTIONS = (
     "--systemd=always",
     "--annotation",
     "run.oci.systemd.subgroup=container",
+)
+DOCKER_SYSTEMD_OPTIONS = (
+    "--tmpfs",
+    "/run:rw,nosuid,nodev,size=64m,mode=755",
+    "--tmpfs",
+    "/run/lock:rw,nosuid,nodev,size=16m,mode=755",
 )
 USER_MANAGER = (
     "runuser",
@@ -724,10 +731,62 @@ def _journal_boundary_evidence(output: str) -> dict[str, Any]:
     }
 
 
+def systemd_options(ctx: RuntimeContext) -> tuple[str, ...]:
+    """Select only the declared outer backend's guest launch prerequisites."""
+    if getattr(ctx, "outer_engine", "podman") == "docker":
+        if ctx.name != "docker-29-conformance-rootless" or vars(ctx).get("declared_launcher") != "systemd":
+            raise ProbeError("Docker systemd options require the reviewed declared fixture")
+        return DOCKER_SYSTEMD_OPTIONS
+    return SYSTEMD_OPTIONS
+
+
+def _verify_docker_runtime(ctx: RuntimeContext) -> None:
+    raw = ctx.podman("read selected outer Docker systemd prerequisites", "info", "--format", "{{json .}}")
+    info = json.loads(raw)
+    runtime = info.get("Runtimes", {}).get("runc", {})
+    security = info.get("SecurityOptions")
+    executable = shutil.which("runc")
+    if (
+        info.get("CgroupDriver") != "systemd"
+        or info.get("CgroupVersion") != "2"
+        or info.get("DefaultRuntime") != "runc"
+        or not isinstance(security, list)
+        or any("rootless" in str(value) for value in security)
+        or not executable
+        or not executable.startswith("/")
+        or runtime.get("path") not in {"runc", executable}
+        or info.get("DockerRootDir") != str(ctx.directory / "root")
+    ):
+        raise ProbeError("private Docker systemd guest requires rootful cgroup-v2/systemd and the selected runc")
+    version = ctx.command("read selected Docker runc version", [*ctx._sudo, executable, "--version"])  # noqa: SLF001
+    if len(version) > MAX_VERSION_REPORT or not re.fullmatch(
+        r"runc version [0-9]+\.[0-9]+\.[0-9]+(?:[^\n]*)", version.splitlines()[0] if version else ""
+    ):
+        raise ProbeError("selected Docker runc version report is unavailable or invalid")
+    digest = ctx.command("hash selected Docker runc executable", [*ctx._sudo, "sha256sum", executable])  # noqa: SLF001
+    if not re.fullmatch(r"[0-9a-f]{64}  /[^\n]+", digest):
+        raise ProbeError("selected Docker runc executable hash was unavailable")
+    ctx.checks.append(
+        {
+            "name": "outer Docker runtime prerequisite observation",
+            "status": "passed",
+            "path": executable,
+            "sha256": digest.split()[0],
+            "rawVersionReport": version,
+            "source": "private daemon default-runtime declaration plus installed executable readback",
+            "declaredRuntimePath": runtime["path"],
+            "taskExecutableCorrespondence": "unresolved; daemon declaration is not a held task executable identity",
+        }
+    )
+
+
 def verify_runtime(ctx: RuntimeContext) -> None:
     """Verify the actual rootful launcher and crun version before starting a guest."""
     uid = ctx.command("systemd outer runtime identity", [*ctx._sudo, "id", "-u"])  # noqa: SLF001
-    ctx.assert_equal("systemd requires rootful outer Podman", uid, "0")
+    ctx.assert_equal("systemd requires rootful outer runtime", uid, "0")
+    if getattr(ctx, "outer_engine", "podman") == "docker":
+        _verify_docker_runtime(ctx)
+        return
     raw = ctx.podman(
         "inspect selected systemd OCI runtime", "--runtime", "crun", "info", "--format", "{{json .Host.OCIRuntime}}"
     )

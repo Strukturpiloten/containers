@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import sys
 import tempfile
@@ -9,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.evidence_gate import EvidenceError, main, verify_architecture
+from scripts.evidence_gate import EvidenceError, _outer_runtime, _systemd_phase_backends, main, verify_architecture
 
 NAME = "example"
 IMAGE = "ghcr.io/strukturpiloten/example"
@@ -30,7 +31,20 @@ RUNTIME = {
     "profile": "docker",
     "status": "passed",
     "imageIdentity": IDENTITY,
-    "host": {"architecture": "x86_64"},
+    "host": {
+        "architecture": "x86_64",
+        "outerEngineSelection": "profile",
+        "outerRuntime": {
+            "engine": "docker",
+            "clientVersion": "Docker version 29.8.2",
+            "serverVersion": "29.8.2",
+            "containerdVersion": "containerd 2.2.0",
+            "systemdVersion": "systemd 259",
+            "rootMode": "rootful",
+            "endpoint": "private-unix",
+            "storage": "invocation-owned",
+        },
+    },
     "runId": "123",
     "runAttempt": "1",
     "checks": [{"name": "Docker CLI", "status": "passed"}],
@@ -54,6 +68,38 @@ SCAN = {
 
 
 class ArchitectureEvidenceTests(unittest.TestCase):
+    def test_each_required_systemd_phase_proves_the_same_private_docker_policy(self) -> None:
+        configuration = {"mode": "rootless", "launcher": "systemd"}
+        record = copy.deepcopy(RUNTIME)
+        record["phases"] = [
+            {
+                "phase": name,
+                "status": "passed",
+                "cleanupVerified": True,
+                "imageIdentity": copy.deepcopy(IDENTITY),
+                "checks": [{"name": "independent native phase result", "status": "passed"}],
+                "outerRuntime": copy.deepcopy(RUNTIME["host"]["outerRuntime"]),
+            }
+            for name in ("clean-control", "enforcement")
+        ]
+        _systemd_phase_backends(record, "docker", configuration)
+        for change in ("missing", "engine", "cleanup", "identity", "phase", "skip"):
+            changed = copy.deepcopy(record)
+            if change == "missing":
+                changed["phases"].pop()
+            elif change == "engine":
+                changed["phases"][0]["outerRuntime"]["engine"] = "podman"
+            elif change == "cleanup":
+                changed["phases"][1]["cleanupVerified"] = False
+            elif change == "identity":
+                changed["phases"][1]["imageIdentity"]["archiveSha256"] = "e" * 64
+            elif change == "phase":
+                changed["phases"].reverse()
+            else:
+                changed["phases"][1]["checks"][0]["status"] = "skipped"
+            with self.subTest(change=change), self.assertRaises(EvidenceError):
+                _systemd_phase_backends(changed, "docker", configuration)
+
     def _verify(self, *, runtime: dict = RUNTIME, scan: dict = SCAN) -> None:
         with (
             patch(
@@ -122,6 +168,47 @@ class ArchitectureEvidenceTests(unittest.TestCase):
 
     def test_same_run_prior_attempt_is_accepted(self) -> None:
         self._verify()
+
+    def test_wrong_or_unobserved_outer_runtime_cannot_admit_an_archive(self) -> None:
+        for key, value in (
+            ("engine", "podman"),
+            ("rootMode", "rootless"),
+            ("storage", "shared"),
+            ("endpoint", "ambient"),
+            ("clientVersion", ""),
+            ("serverVersion", "unknown"),
+            ("containerdVersion", "unknown"),
+            ("systemdVersion", ""),
+        ):
+            record = json.loads(json.dumps(RUNTIME))
+            record["host"]["outerRuntime"][key] = value
+            with self.subTest(key=key), self.assertRaises(EvidenceError):
+                self._verify(runtime=record)
+        for change in ({"outerEngineSelection": "docker"}, {"podmanVersion": "podman version 5.4.2"}):
+            record = json.loads(json.dumps(RUNTIME))
+            record["host"].update(change)
+            with self.subTest(change=change), self.assertRaises(EvidenceError):
+                self._verify(runtime=record)
+
+    def test_non_docker_profiles_derive_podman_not_image_name_or_inner_mode(self) -> None:
+        for profile in ("podman", "phpFpm", "notifyPush"):
+            record = {
+                "host": {
+                    "outerEngineSelection": "profile",
+                    "podmanVersion": "podman version 5.4.2",
+                    "outerRuntime": {
+                        "engine": "podman",
+                        "clientVersion": "podman version 5.4.2",
+                        "rootMode": "rootful",
+                        "storage": "invocation-owned",
+                    },
+                }
+            }
+            with self.subTest(profile=profile):
+                _outer_runtime(record, profile)
+                record["host"]["outerRuntime"]["engine"] = "docker"
+                with self.assertRaises(EvidenceError):
+                    _outer_runtime(record, profile)
 
     def test_missing_or_mismatched_identity_is_rejected(self) -> None:
         with self.assertRaises(EvidenceError):
