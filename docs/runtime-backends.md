@@ -227,3 +227,87 @@ every image. A merge can publish images and finalize releases after its gates.
 Non-publishing PR checks do not authorize that action: obtain publication
 authorization before merging. Never change the publisher or skip its gates to
 evade this boundary.
+
+## Hosted unused userns custody seam
+
+The PR-492-only `userns-custody-unused` AMD64 Ubuntu 26 job exercises two real
+unused ownership cycles: normal close and deliberate loss of the exact root
+coordinator after durable arm. An independent root observer authenticates the
+original service, waits for its finalization and process/cgroup termination,
+and disposes only known custody/control leaves. Each cycle has at most 120
+seconds, with work ending 60 seconds before its original final deadline. The
+second cycle also remains capped by the original 240-second experiment
+allowance recorded before checkout/setup; bootstrap never renews it. Unknown
+start, identity, lifetime or disposal results fail and retain owned data. The
+root-only immutable `start.json` binds the exact arm intent, generation,
+control/custody identities and original handshake end before the single service
+start. The foundation intent-read checks W; the service binder checks the
+stricter original handshake end before and after intent-read and READY. ACK
+binds that end and the protected record hash; service startup never derives a
+fresh handshake allowance.
+
+The canonical CI template contains the sole fixed root-bootstrap verifier. An
+unprivileged driver supplies a bounded connected Git commit/tree/blob proof
+and fetches the existing pinned DockerLens source closure. Root verifies the
+workflow-selected immutable merge commit, ordered event parents, exact helper
+closure and source bytes before copying or importing helpers. Root uses the
+preinstalled root-owned system Python with isolated/no-site execution; uv and
+checkout code run only unprivileged before this verification. The system
+interpreter, standard library, environment clearer and systemd clients are an explicit OS trust-base
+integrity exception, with actual versions, hashes and fresh identities recorded;
+no project/vendor checksum or new downloaded tool is claimed. Helper/source
+hashes and fresh identities are rechecked across both cycles.
+
+`.github/docker-userns-unused-admission.json` is a manually reviewed semantic
+admission based on the audited Stage-1 Ubuntu 26 observation, bound to the
+active source manifest and helper contracts. It never compares historical
+inodes, PIDs or boot IDs. Source, parser-contract or helper updates invalidate
+it. The existing Renovate source/parser manager remains the single pin owner;
+humans must review and update admission rather than automatically rewriting
+host fingerprints. The helper version authority is the selected Git tree, so
+there is no self-referential commit pin. The new template/generated job reuses
+the existing checkout/upload Action pins and runner configuration; ordinary
+validation, dry-parse and publishing consumers retain their existing behavior.
+
+The artifact reports `qualification=none`, `policy_load_run=false` and
+`container_run=false`. Its `boundaryKind=unused-coordinator` identifies the
+actual coordinator exclusion cgroup; it proves no Docker runtime-slice
+placement. No profile load/remove, container operation, runtime API, sysctl
+change or persistent unit is involved. A fixed credential-dropped child only
+queries the held parser's version or attempts a write to a synthetic root-owned
+leaf. Deliberate coordinator SIGKILL does not test cancellation of the entire
+GitHub job or runner loss. Offline tests use synthetic providers; hosted
+execution and an independent exact-source artifact audit are still required
+before considering a subsequent load/guest experiment.
+
+The bootstrap supervises only its fixed verified observer argv. It requires one
+kernel thread, no pre-existing children and waitable SIGCHLD semantics, then
+sets and verifies a process-local Linux subreaper. Capture enforces stdout and
+stderr limits while the process is alive and requires both EOFs, the recorded
+observer exit status and kernel ECHILD before acceptance. Timeout, cancellation,
+overflow or unknown child membership remain failures. Teardown uses the same
+original D, with a fixed reserve inside it; no positive minimum renews an expired
+allowance. Only this process's bounded direct/adopted child list is considered,
+and waitid/pidfd membership precedes signals. There is no process-wide scan or
+process-group sweep. Independent systemd owners remain outside this descendant
+custody and retain their existing lease/deadline and explicit cleanup proof.
+
+The fork coordinator is held immediately and cannot start custody work until
+its parent validates its exact identity and grants its pipe handshake. Failure
+teardown may terminate that still-owned child before arm; this never counts as
+the deliberate post-arm SIGKILL acceptance cycle. A failed pidfd or handshake,
+observer error or cancellation still attempts exact-child termination/reaping
+before original D, retaining unknown completion honestly. Cancellation wins
+over a pending normal close, including cancellation seen during owner
+observation. A cancellation first seen during the durable close or receipt write
+cannot publish accepted normal evidence; a final post-write check refuses
+success without overwriting terminal metadata. The initial write-denial probe
+intersects its parent five-second work and six-second cleanup caps, captured
+once at phase entry, with original bootstrap W/D. The child's independent alarm
+grants no new allowance. Handoff/event/budget files open nonblocking and must
+pass regular-file, ownership, link and bounded stable-read checks before use.
+
+Observer capture and the top-level observer decide their final return only
+after restoring prior signal handlers and propagating sticky cancellation.
+Known status, EOF and completed child cleanup do not turn cancellation into
+accepted success. No additional cleanup budget is created by these checks.

@@ -415,23 +415,20 @@ def build(interpreter: Interpreter, sources: tuple[Source, ...], lease: Build, c
             lifetime is Lifetime.DEAD and status == 0 and clock.now_ns() < lease.deadline_ns,
             dead=lifetime is Lifetime.DEAD,
         )
-        try:
-            actual = json.loads(proof, object_pairs_hook=_unique)
-        except ValueError:
-            raise ChildError(dead=lifetime is Lifetime.DEAD) from None
-        _need(
-            type(actual) is dict
-            and all(type(actual.get(key)) is int for key in ("schema", "uid", "gid", "nnp"))
-            and actual
-            == {"schema": 1, "uid": lease.uid, "gid": lease.gid, "groups": [], "nnp": 1, "capabilities": "zero"}
-            and _interpreter(interpreter) == before,
-            dead=lifetime is Lifetime.DEAD,
-        )
+        _privilege_receipt(proof, lease)
+        _need(_interpreter(interpreter) == before, dead=lifetime is Lifetime.DEAD)
         _need(clock.now_ns() < lease.deadline_ns, dead=lifetime is Lifetime.DEAD)
         return Outcome(output, dead=True)
 
     except Exception as error:
         raise ChildError(lifetime=lifetime) from error
+
+
+def _privilege_receipt(proof: bytes, lease: Build) -> None:
+    """Require a duplicate-free closed receipt with integer IDs/schema/NNP, never bool or float."""
+    actual = json.loads(proof, object_pairs_hook=_unique)
+    _need(type(actual) is dict and all(type(actual.get(key)) is int for key in ("schema", "uid", "gid", "nnp")))
+    _need(actual == {"schema": 1, "uid": lease.uid, "gid": lease.gid, "groups": [], "nnp": 1, "capabilities": "zero"})
 
 
 def _unique(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -440,3 +437,109 @@ def _unique(pairs: list[tuple[str, object]]) -> dict[str, object]:
         _need(key not in result)
         result[key] = value
     return result
+
+
+# Reuse the same pre-import credential/NNP checks, but expose only two fixed probes.
+PROBE_CODE = (
+    CODE[: CODE.index("os.close(int(interpreter))")].replace(
+        "interpreter, receipt, first, second, name, uid, gid, seconds = sys.argv[1:]",
+        "interpreter, receipt, target, kind, uid, gid, seconds = sys.argv[1:]",
+    )
+    + r"""
+os.close(int(interpreter))
+proof = {"schema": 1, "uid": uid, "gid": gid, "groups": [], "nnp": 1, "capabilities": "zero"}
+raw = json.dumps(proof, sort_keys=True).encode("ascii")
+if os.write(int(receipt), raw) != len(raw):
+    raise SystemExit(1)
+os.close(int(receipt))
+target = int(target)
+if kind == "parser-version":
+    if os.execve not in os.supports_fd:
+        raise SystemExit(1)
+    os.set_inheritable(target, False)
+    os.execve(target, ["apparmor_parser", "--config-file=/dev/null", "--skip-cache", "--jobs=0", "--version"],
+              {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C", "LC_ALL": "C"})
+elif kind == "write-denial":
+    try:
+        descriptor = os.open("/proc/self/fd/" + str(target), os.O_WRONLY)
+    except PermissionError:
+        sys.stdout.buffer.write(b"write-denied\n")
+    else:
+        os.close(descriptor)
+        raise SystemExit(1)
+else:
+    raise SystemExit(1)
+"""
+)
+
+
+def probe(interpreter: Interpreter, target: int, kind: str, lease: Build, clock: Clock) -> Outcome:
+    """Run a fixed version-only or synthetic permission probe after complete ID drop."""
+    _need(
+        kind in {"parser-version", "write-denial"}
+        and type(lease.uid) is int
+        and type(lease.gid) is int
+        and lease.uid > 0
+        and lease.gid > 0
+        and os.geteuid() == 0
+        and clock.now_ns() < lease.deadline_ns < lease.cleanup_deadline_ns
+    )
+    before = _interpreter(interpreter)
+    target_mark = file_mark(os.fstat(target))
+    _need(os.fstat(target).st_uid == 0 and not os.fstat(target).st_mode & 0o7022)
+    if kind == "parser-version":
+        _need(bytes_at(target, MAX_INTERPRETER).startswith(b"\x7fELF"))
+    read, write = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
+    process, attempted, dead = None, False, False
+    try:
+        seconds = min(5, (lease.deadline_ns - clock.now_ns()) // 1_000_000_000)
+        _need(os.geteuid() == 0 and seconds >= 1 and lease.deadline_ns < lease.cleanup_deadline_ns)
+        attempted = True
+        process = subprocess.Popen(  # noqa: S603 - held OS interpreter and closed fixed probe code.
+            [
+                f"/proc/self/fd/{interpreter.descriptor}",
+                "-I",
+                "-B",
+                "-S",
+                "-c",
+                PROBE_CODE,
+                str(interpreter.descriptor),
+                str(write),
+                str(target),
+                kind,
+                str(lease.uid),
+                str(lease.gid),
+                str(seconds),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=ENV,
+            cwd="/",
+            close_fds=True,
+            start_new_session=True,
+            user=lease.uid,
+            group=lease.gid,
+            extra_groups=(),
+            pass_fds=(interpreter.descriptor, write, target),
+        )
+        os.close(write)
+        write = -1
+        output, proof = _capture(process, read, lease, clock)
+        status, dead = _stop(process, lease, clock)
+        _need(status == 0 and dead and clock.now_ns() < lease.deadline_ns, dead=dead)
+        _privilege_receipt(proof, lease)
+        _need(_interpreter(interpreter) == before and file_mark(os.fstat(target)) == target_mark, dead=dead)
+        _need(clock.now_ns() < lease.deadline_ns, dead=dead)
+        return Outcome(output, dead=True)
+    except Exception as error:
+        if process is not None and not dead:
+            with suppress(Exception):
+                _, dead = _stop(process, lease, clock)
+        raise ChildError(
+            lifetime=Lifetime.DEAD if dead else Lifetime.UNKNOWN if attempted else Lifetime.NEVER_STARTED
+        ) from error
+    finally:
+        _close_pipes((write, read), None)
+        if process is not None and process.stdout is not None:
+            process.stdout.close()

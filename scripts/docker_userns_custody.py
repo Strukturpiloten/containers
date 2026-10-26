@@ -1,4 +1,4 @@
-"""Unused-only custody foundation; real bootstrap, host and supervisor adapters are absent."""
+"""Unused-only custody foundation; hosted adapters are kept in a separate module."""
 
 from __future__ import annotations
 
@@ -224,6 +224,7 @@ class Request:
     original_deadline_ns: int
     uid: int
     gid: int
+    # Compatibility field: the actual unused coordinator exclusion cgroup, never a runtime slice.
     runtime_slice: Group
 
 
@@ -306,6 +307,7 @@ class Lease:
     deadline_ns: int
     work_until_ns: int
     coordinator: Process
+    # Compatibility field: the actual unused coordinator exclusion cgroup, never a runtime slice.
     runtime_slice: Group
     manifest_sha256: str
     source_commit: str
@@ -316,6 +318,14 @@ class Lease:
     policy_sha256: str | None
     uid: int
     gid: int
+
+
+@dataclass(frozen=True)
+class ArmIntent:
+    """Exact durable attempted arm generation; READY does not authorize finalization."""
+
+    lease: Lease
+    generation: int
 
 
 @dataclass(frozen=True)
@@ -343,7 +353,7 @@ class OwnerObservation:
 class SupervisorPort(Protocol):
     """Only unused ownership operations; no shell, parser or arbitrary command API."""
 
-    def start_unused_owner(self, lease: Lease, deadline_ns: int) -> OwnerObservation:
+    def start_unused_owner(self, intent: ArmIntent, deadline_ns: int) -> OwnerObservation:
         """Start one unused owner and return its observed ACK."""
         ...
 
@@ -588,6 +598,7 @@ def _observation(admission: Admission, request: Request, observation: Observatio
     )
     _process(observation.coordinator)
     _caller(observation.coordinator)
+    _need(request.runtime_slice == observation.coordinator.cgroup and request.runtime_slice.path != "/")
     _need(
         len(observation.features) == len(FEATURES)
         and all(type(item) is bytes and len(item) <= MAX_FEATURE for item in observation.features)
@@ -857,6 +868,7 @@ def _validate(record: Record, locator: Locator) -> None:
     _run(lease.run)
     _process(lease.coordinator)
     _group(lease.runtime_slice)
+    _need(lease.runtime_slice == lease.coordinator.cgroup and lease.runtime_slice.path != "/")
     _cohort(lease.cohort)
     _integer(record.generation, minimum=1)
     for value in (lease.start_ns, lease.deadline_ns, lease.work_until_ns):
@@ -1171,31 +1183,58 @@ def _coordinator(observation: OwnerObservation, lease: Lease, clock: Clock, life
     _need(observation.group_absent if lifetime is Lifetime.DEAD else not observation.group_absent)
 
 
+def read_owner_intent(locator: Locator, expected: ArmIntent, clock: Clock) -> ArmIntent:
+    """Read strict unresolved intent before W; the hosted start binder also enforces its original handshake end."""
+    _need(type(expected) is ArmIntent and type(expected.lease) is Lease)
+    _integer(expected.generation, minimum=1)
+    with _store(locator) as store:
+        record = store.load()
+        _budget(clock, record.lease, record.lease.work_until_ns)
+        _need(
+            record.state is State.ARM_INTENT
+            and record.owner_attempted
+            and record.owner is None
+            and not record.child_pending
+            and ArmIntent(record.lease, record.generation) == expected
+        )
+    _budget(clock, expected.lease, expected.lease.work_until_ns)
+    return expected
+
+
 def arm_unused(locator: Locator, supervisor: SupervisorPort | None, clock: Clock) -> None:
-    """Attempt one outside-slice owner handshake; no adapter or retry is supplied."""
+    """Persist one intent; authenticate outside the lock; commit only unchanged intent."""
     with _store(locator) as store:
         record = _settled(store, clock, work=True)
+        _caller(record.lease.coordinator)
         now = _clock(clock, record.lease)
         _need(record.state is State.PREPARED and supervisor is not None and now < record.lease.work_until_ns)
         record = _next(record, State.ARM_INTENT, owner_attempted=True)
-        _persist(store, record, clock, record.lease.work_until_ns)
         end = min(record.lease.work_until_ns, now + HANDSHAKE_NS)
-        try:
+        _persist(store, record, clock, end)
+    intent = ArmIntent(record.lease, record.generation)
+    try:
+        _budget(clock, record.lease, end)
+        observation = supervisor.start_unused_owner(intent, end)
+        _budget(clock, record.lease, end)
+        _owner(observation, record.lease, clock, Lifetime.LIVE)
+        with _store(locator) as store:
+            current = store.load()
+            _need(current == record)
+            _caller(current.lease.coordinator)
             _budget(clock, record.lease, end)
-            observation = supervisor.start_unused_owner(record.lease, end)
-            _budget(clock, record.lease, end)
-            _owner(observation, record.lease, clock, Lifetime.LIVE)
-            _budget(clock, record.lease, end)
+            # Only manager/pidfd/kernel readback here: no RPC or custody reopen.
             repeated = supervisor.inspect_owner(record.lease, observation.owner, end)
             _budget(clock, record.lease, end)
             _owner(repeated, record.lease, clock, Lifetime.LIVE)
-            _need(repeated.owner == observation.owner and _clock(clock, record.lease) < end)
+            _need(repeated.owner == observation.owner)
             _persist(store, _next(record, State.ARMED, owner=observation.owner), clock, end)
-        except Exception as error:
-            _retain(store, record, clock)
-            raise CustodyError(locator) from error
         _budget(clock, record.lease, end)
-    _budget(clock, record.lease, end)
+    except Exception as error:
+        # Never overwrite changed/foreign/terminal state after releasing the lock.
+        with suppress(CustodyError, OSError, ValueError), _store(locator) as store:
+            if store.load() == record:
+                _retain(store, record, clock)
+        raise CustodyError(locator) from error
 
 
 def request_close_unused(locator: Locator, supervisor: SupervisorPort | None, clock: Clock) -> None:

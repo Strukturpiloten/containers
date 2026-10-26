@@ -13,7 +13,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import ExitStack, contextmanager
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -104,7 +104,8 @@ class Supervisor:
         )
         return self.corrupt(observation) if self.corrupt is not None else observation
 
-    def start_unused_owner(self, lease: custody.Lease, _deadline_ns: int) -> custody.OwnerObservation:
+    def start_unused_owner(self, intent: custody.ArmIntent, _deadline_ns: int) -> custody.OwnerObservation:
+        lease = intent.lease
         self.starts += 1
         if self.fail_start:
             raise RuntimeError
@@ -191,9 +192,7 @@ class CustodyTests(unittest.TestCase):
             "github-pr-merge",
         )
         coordinator = custody.Process(os.getpid(), 101, os.getpgid(0), 0, custody.Group("/coordinator", 1, 77))
-        self.request = custody.Request(
-            run, self.clock.time + custody.MAX_TOTAL_NS, 1001, 1002, custody.Group("/controlled/runtime", 1, 99)
-        )
+        self.request = custody.Request(run, self.clock.time + custody.MAX_TOTAL_NS, 1001, 1002, coordinator.cgroup)
         observation = custody.Observation(
             run,
             self.cohort,
@@ -447,7 +446,7 @@ class CustodyTests(unittest.TestCase):
                 obs,
                 owner=replace(
                     obs.owner,
-                    process=replace(obs.owner.process, cgroup=custody.Group("/controlled/runtime/inside", 1, 100)),
+                    process=replace(obs.owner.process, cgroup=custody.Group("/coordinator/inside", 1, 100)),
                 ),
             ),
             lambda obs: replace(
@@ -768,6 +767,127 @@ class CustodyTests(unittest.TestCase):
             )
         with custody._store(locator), self.assertRaises(custody.CustodyError):
             custody.arm_unused(locator, Supervisor(self.clock), self.clock)
+
+    def test_owner_reads_exact_intent_while_starter_waits_without_lock_recursion(self) -> None:
+        locator = self.prepare()
+        supervisor = Supervisor(self.clock)
+        original = supervisor.start_unused_owner
+        seen = []
+
+        def ready(intent: custody.ArmIntent, deadline: int) -> custody.OwnerObservation:
+            before = self.record(locator)
+            seen.append(custody.read_owner_intent(locator, intent, self.clock))
+            self.assertEqual(self.record(locator), before)
+            self.assertEqual(before.state, custody.State.ARM_INTENT)
+            with self.assertRaises(custody.CustodyError):
+                custody.read_owner_intent(locator, replace(intent, generation=intent.generation + 1), self.clock)
+            return original(intent, deadline)
+
+        supervisor.start_unused_owner = ready
+        custody.arm_unused(locator, supervisor, self.clock)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(self.record(locator).generation, seen[0].generation + 1)
+        with self.assertRaises(custody.CustodyError):
+            custody.read_owner_intent(locator, seen[0], self.clock)
+
+    def test_competing_close_changes_intent_and_is_never_overwritten_or_promoted(self) -> None:
+        locator = self.prepare()
+        supervisor = Supervisor(self.clock)
+        original = supervisor.start_unused_owner
+        changed = []
+
+        def compete(intent: custody.ArmIntent, deadline: int) -> custody.OwnerObservation:
+            with self.assertRaises(custody.CustodyError):
+                custody.request_close_unused(locator, supervisor, self.clock)
+            changed.append(self.record(locator))
+            return original(intent, deadline)
+
+        supervisor.start_unused_owner = compete
+        with self.assertRaises(custody.CustodyError):
+            custody.arm_unused(locator, supervisor, self.clock)
+        self.assertEqual(self.record(locator), changed[0])
+        self.assertEqual(changed[0].state, custody.State.RETAINED)
+        self.assertEqual(supervisor.inspections, 0)
+
+    def test_arm_rechecks_actual_coordinator_after_ready(self) -> None:
+        locator = self.prepare()
+        supervisor = Supervisor(self.clock)
+        original = supervisor.start_unused_owner
+
+        def replaced(intent: custody.ArmIntent, deadline: int) -> custody.OwnerObservation:
+            observation = original(intent, deadline)
+            self.stack.enter_context(patch.object(custody, "_self_start", return_value=999))
+            return observation
+
+        supervisor.start_unused_owner = replaced
+        with self.assertRaises(custody.CustodyError):
+            custody.arm_unused(locator, supervisor, self.clock)
+        self.assertEqual(self.record(locator).state, custody.State.RETAINED)
+        self.assertEqual(supervisor.inspections, 0)
+
+    def test_changed_generation_or_lease_after_ready_is_never_overwritten(self) -> None:
+        for change in ("generation", "lease"):
+            locator = self.prepare()
+            supervisor = Supervisor(self.clock)
+            changed = []
+            context = SimpleNamespace(
+                change=change, locator=locator, changed=changed, start=supervisor.start_unused_owner
+            )
+
+            def mutate(
+                intent: custody.ArmIntent, deadline: int, *, context: SimpleNamespace = context
+            ) -> custody.OwnerObservation:
+                record = self.record(context.locator)
+                updated = replace(record, generation=record.generation + 1)
+                if context.change == "lease":
+                    updated = replace(updated, lease=replace(record.lease, manifest_sha256="f" * 64))
+                # Fault injection bypasses the valid writer, but retains valid finite schema/hash framing.
+                data = custody._json(asdict(updated))
+                directory = self.directory(context.locator)
+                (directory / "state.json").write_bytes(data)
+                with (directory / "journal").open("ab") as stream:
+                    stream.write(custody._json({"generation": updated.generation, "sha256": digest(data)}) + b"\n")
+                context.changed.append(updated)
+                return context.start(intent, deadline)
+
+            supervisor.start_unused_owner = mutate
+            with self.subTest(change=change), self.assertRaises(custody.CustodyError):
+                custody.arm_unused(locator, supervisor, self.clock)
+            self.assertEqual(self.record(locator), changed[0])
+            self.assertEqual(supervisor.inspections, 0)
+
+    def test_handshake_crossing_on_lock_reacquisition_never_commits_arm(self) -> None:
+        locator = self.prepare()
+        supervisor = Supervisor(self.clock)
+        original = custody._store
+        calls = 0
+        reacquire_call = 2
+
+        @contextmanager
+        def delayed(locator: custody.Locator) -> Iterator[custody._Store]:
+            nonlocal calls
+            with original(locator) as store:
+                calls += 1
+                if calls == reacquire_call:
+                    self.clock.time += custody.HANDSHAKE_NS
+                yield store
+
+        with patch.object(custody, "_store", side_effect=delayed), self.assertRaises(custody.CustodyError):
+            custody.arm_unused(locator, supervisor, self.clock)
+        self.assertEqual(supervisor.inspections, 0)
+        self.assertEqual(self.record(locator).state, custody.State.RETAINED)
+
+    def test_unused_boundary_must_be_actual_nonroot_coordinator_cgroup(self) -> None:
+        self.request = replace(self.request, runtime_slice=custody.Group("/invented", 1, 100))
+        with self.assertRaises(custody.CustodyError):
+            self.prepare()
+        self.request = replace(self.request, runtime_slice=custody.Group("/", 1, 1))
+        self.host.observation = replace(
+            self.host.observation,
+            coordinator=replace(self.host.observation.coordinator, cgroup=self.request.runtime_slice),
+        )
+        with self.assertRaises(custody.CustodyError):
+            self.prepare()
 
     def test_no_mutation_or_production_entrypoint_exists(self) -> None:
         self.assertEqual(
