@@ -13,6 +13,36 @@
   "customManagers": [
     {
       "customType": "regex",
+      "description": "Own the active unprivileged userns diagnostic source branch digest",
+      "managerFilePatterns": [
+        "/^\\.github/docker-userns-policy-source\\.json$/"
+      ],
+      "matchStrings": [
+        "\"repository\":\\s*\"Strukturpiloten/docker-lens\",\\s*\"ref\":\\s*\"(?<currentValue>TheRealBecks/issue127)\",\\s*\"commit\":\\s*\"(?<currentDigest>[a-f0-9]{40})\""
+      ],
+      "depNameTemplate": "Strukturpiloten/docker-lens",
+      "packageNameTemplate": "Strukturpiloten/docker-lens",
+      "datasourceTemplate": "github-digest",
+      "versioningTemplate": "exact"
+    },
+    {
+      "customType": "regex",
+      "description": "Review the active AppArmor parser contract version against official GitLab tags",
+      "managerFilePatterns": [
+        "/^\\.github/docker-userns-policy-source\\.json$/"
+      ],
+      "matchStrings": [
+        "\"repository\":\\s*\"apparmor/apparmor\",\\s*\"expectedVersion\":\\s*\"(?<currentValue>\\d+\\.\\d+\\.\\d+)\""
+      ],
+      "depNameTemplate": "apparmor/apparmor",
+      "packageNameTemplate": "apparmor/apparmor",
+      "datasourceTemplate": "gitlab-tags",
+      "registryUrlTemplate": "https://gitlab.com",
+      "extractVersionTemplate": "^v(?<version>\\d+\\.\\d+\\.\\d+)$",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
       "description": "Update each Grype release and architecture archive checksum together",
       "managerFilePatterns": [
         "/^\\.github\\/actions\\/scan-vulnerabilities\\/action\\.yml$/"
@@ -285,6 +315,26 @@
     "dependencyDashboardApproval": false
   },
   "packageRules": [
+    {
+      "description": "Require coordinated human review of diagnostic source hashes and parser contracts; no load admission",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "github-digest",
+        "gitlab-tags"
+      ],
+      "matchFileNames": [
+        ".github/docker-userns-policy-source.json"
+      ],
+      "matchPackageNames": [
+        "Strukturpiloten/docker-lens",
+        "apparmor/apparmor"
+      ],
+      "groupName": "Userns compile-only source and parser review",
+      "dependencyDashboardApproval": true,
+      "automerge": false
+    },
     {
       "description": "Review both Grype architecture release assets in one update",
       "matchManagers": [

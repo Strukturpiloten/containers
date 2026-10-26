@@ -77,6 +77,45 @@ jobs:
           uv run --frozen --group docs --python "${PYTHON_VERSION}" python -m scripts.documentation \
             --output "${RUNNER_TEMP}/docs-preview"
 
+  userns-dryparse:
+    name: Nonqualifying Ubuntu 26 userns compile-only observation
+    needs: validate
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.number == 492 &&
+      github.repository == 'Strukturpiloten/containers' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'TheRealBecks/issue442-main-reconciled'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Check out owned PR merge candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install uv
+        uses: ./.github/actions/setup-uv
+        with:
+          version: ${{ env.UV_VERSION }}
+      - name: Compile canonical userns policy without loading
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.docker_userns_dryparse \
+            --output "${RUNNER_TEMP}/docker-userns-dryparse.json"
+      - name: Retain nonqualifying compile-only observation
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: docker-userns-dryparse
+          path: ${{ runner.temp }}/docker-userns-dryparse.json
+          if-no-files-found: error
+          retention-days: 7
+
   plan:
     name: Plan pull-request builds
     needs: validate

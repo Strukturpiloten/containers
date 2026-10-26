@@ -49,6 +49,59 @@ original error. Global prune and ambient-store cleanup are prohibited.
 
 ## CI prerequisites and evidence
 
+### PR492 compile-only user-namespace observation
+
+The dedicated userns-dryparse CI job is restricted to same-repository PR492 on
+TheRealBecks/issue442-main-reconciled, executing the workflow's immutable merge candidate on the
+AMD64 Ubuntu 26 host. Actual checkout HEAD must equal GITHUB_SHA; the source-checked PR head is
+recorded separately and verified as the merge's second parent using fixed read-only Git without
+replacement objects or lazy fetching. It independently checks the event, checkout, run/attempt,
+host distribution, AppArmor controls,
+kernel features and process capabilities. Its artifact has consumer
+containers-ubuntu26-userns-dryparse, scope hostcompile-only and qualification none.
+The planned fixture is docker-20.10-rootless, but no image build, container run, bootstrap,
+policy load or host-policy change occurs. Ordinary smoke jobs and Required CI are unchanged.
+
+[The active source manifest](../.github/docker-userns-policy-source.json) pins the unchanged
+DockerLens TheRealBecks/issue127 candidate by commit, exact builder/helper dependency-closure
+sizes and hashes, and MPL-2.0 license bytes/provenance. Public HTTPS retrieval accepts only those
+immutable allowlisted resources, without credentials or redirects, into private nonsymlink custody.
+An isolated non-root Python child invokes only the pure profile_bytes builder. The historical
+dockerlens-127 profile-name prefix is only an identifier, not DockerLens consumer authority:
+the actual Containers run/attempt and fresh nonce bind it. The policy name and ABI-4 bytes are not
+rewritten; no native acceptance receipt or old producer admission is reused.
+
+The preinstalled, root-owned regular ELF parser must be exactly 5.0.2, without SUID/SGID or file
+capabilities. The isolated child sets and verifies NoNewPrivs=1 and zero effective, permitted,
+inheritable and ambient capabilities before same-process exec; a separate closed receipt channel
+is closed before exec. The capability bounding set need not be zero and supplies no admission.
+Fixed options bypass config/cache, select single-process compilation, explicitly enable all
+warnings and make them fatal, bind the trusted base/include directory, and skip kernel loading.
+Exact canonical bytes are stdin; there is no policy-file operand or fallback. Relevant kernel
+namespace and policy-version features must be known. Parser/ABI-4 and feature bytes, identity and
+hashes are checked before/after each query; the artifact retains exact bounded ABI-4 bytes, selected
+host facts, and only output counts/hashes and closed failure reasons.
+
+Each child has CPU, output, wall-time and owned-group termination/reaping bounds; the observation
+budget is 30 seconds, output is at most 128 KiB, and the workflow step has a one-minute timeout.
+Local tests mock parser, network and kernel observations. Substitution, drift, warnings, unsupported
+or missing facts, timeout/cancellation or uncertain child cleanup refuse the observation.
+Even a successful compile is nonqualifying: it gives no guest label, native runtime support,
+ARM64 evidence or attribution for the earlier RootlessKit failure. Loading policy needs a separately
+reviewed cohort and independent finalizer; Stage 1 has no load-stage transition.
+
+The manifest is the unique Renovate owner for the active DockerLens github-digest branch pin and
+official apparmor/apparmor GitLab-tag parser version. Both share mandatory dashboard/human review
+and disabled automerge; file hashes and parser contract must be reviewed together. Mismatched bytes
+or an unreviewed parser-version change fail closed. Historic evidence has no matching manager path.
+Existing checkout/upload Action pins and their template/generated managers are reused. Observed
+preinstalled parser/ABI hashes use the explicit diagnostics-system-tool integrity exception, not
+vendor checksums; no parser is downloaded or installed. The upstream
+[5.0.2 contract](https://gitlab.com/apparmor/apparmor/-/tree/909affc32a13d14ae3a7ccf44d325ae63ce11baf)
+defines only this compile command; no loaded cohort has been admitted.
+
+### Validate-host diagnostics
+
 The validate job captures a bounded, read-only security snapshot before repository checks and retains
 only `docker-runner-security.json` for seven days. This describes the AMD64 validate-job host and the
 collector process; it cannot establish the security context of a guest, RootlessKit, an ARM64 job,
