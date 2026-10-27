@@ -26,7 +26,7 @@ runs:
         sudo apt-get install --yes --no-install-recommends podman skopeo
 
     - name: Download build plan
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         name: container-build-plan
         path: ${{ runner.temp }}/container-build-plan
@@ -37,21 +37,21 @@ runs:
         version: ${{ env.UV_VERSION }}
 
     - name: Download architecture image archives
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         pattern: ${{ fromJSON(inputs.entry).name }}-*-oci-archive
         path: ${{ runner.temp }}/oci-archives
         merge-multiple: true
 
     - name: Download native runtime evidence
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         pattern: ${{ fromJSON(inputs.entry).name }}-*-runtime-evidence
         path: ${{ runner.temp }}/runtime-evidence
         merge-multiple: true
 
     - name: Download vulnerability reports
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         pattern: ${{ fromJSON(inputs.entry).name }}-*-vulnerability-report
         path: ${{ runner.temp }}/scan-reports
@@ -145,7 +145,7 @@ runs:
           --default-branch "${{ inputs.default-branch }}"
 
     - name: Upload build result
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: ${{ steps.publish.outputs.image_name }}-build-result
         path: ${{ steps.publish.outputs.build_result }}
