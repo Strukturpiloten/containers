@@ -1820,6 +1820,81 @@ class PreparationWireTests(unittest.TestCase):
         }
         self.detail = {"schema": 1, "context": "CUSTODY", "site": "C_CREATE_W02", "failure": "OS_ERROR"}
 
+    def test_build_status_wire_accepts_eighteen_pairs_only_with_exact_original_refusal(self) -> None:
+        fault = {"schema": 1, "context": "CHILD_PARENT", "site": "B_BUILD_STATUS_REFUSAL", "failure": "REFUSED"}
+        for termination in (
+            "EXIT_NONZERO",
+            "SIGNAL_ALRM",
+            "SIGNAL_XCPU",
+            "SIGNAL_XFSZ",
+            "SIGNAL_KILL",
+            "OTHER_SIGNAL",
+        ):
+            for receipt in ("MATCH", "EMPTY", "MISMATCH"):
+                observation = {"schema": 1, "terminationForm": termination, "receiptCheck": receipt}
+                record = {**self.base, "workFailure": fault, "buildStatusObservation": observation}
+                self.assertEqual(hosted._failure_diagnostic(record), record)
+                self.assertLessEqual(len(json.dumps(observation).encode("ascii")), child.BUILD_STATUS_LIMIT)
+        observation = {"schema": 1, "terminationForm": "SIGNAL_KILL", "receiptCheck": "MATCH"}
+        invalid = (
+            None,
+            [],
+            {},
+            {**observation, "schema": True},
+            {**observation, "schema": 1.0},
+            {**observation, "terminationForm": "SIGKILL"},
+            {**observation, "receiptCheck": "UNOBSERVED"},
+            {**observation, "receiptCheck": 1},
+            {**observation, "raw": "private"},
+        )
+        for value in invalid:
+            self.assertEqual(
+                hosted._failure_diagnostic({**self.base, "workFailure": fault, "buildStatusObservation": value}),
+                {**self.base, "workFailure": fault},
+            )
+        for detail in (None, {}, self.detail, {**fault, "failure": "OS_ERROR"}):
+            record = {**self.base, "workFailure": detail, "buildStatusObservation": observation}
+            self.assertNotIn("buildStatusObservation", hosted._failure_diagnostic(record))
+        self.assertEqual(hosted._failure_diagnostic({**self.base, "buildStatusObservation": observation}), self.base)
+        for phase in ("binding", "owner", "close"):
+            base = {**self.base, "phase": phase}
+            self.assertEqual(
+                hosted._failure_diagnostic({**base, "workFailure": fault, "buildStatusObservation": observation}), base
+            )
+
+    def test_extra_validation_failure_keeps_original_single_write_and_duplicate_rejection(self) -> None:
+        fault = ("CHILD_PARENT", "B_BUILD_STATUS_REFUSAL", "REFUSED")
+        control = hosted.Control.__new__(hosted.Control)
+        control.phase, control.write = "prepare", MagicMock()
+        with patch.object(hosted.time, "monotonic_ns", return_value=17):
+            control.failure(OSError(), 100, work_failure=fault, build_status=("SIGNAL_ALRM", "EMPTY"))
+        value = control.write.call_args.args[1]
+        self.assertEqual(
+            value["buildStatusObservation"], {"schema": 1, "terminationForm": "SIGNAL_ALRM", "receiptCheck": "EMPTY"}
+        )
+        control.write.assert_called_once()
+        control.write.reset_mock()
+        with patch.object(child, "build_status_observation", side_effect=MemoryError):
+            control.failure(OSError(), 100, work_failure=fault, build_status=("SIGNAL_ALRM", "EMPTY"))
+            normalized = hosted._failure_diagnostic(value)
+        self.assertIn("workFailure", normalized)
+        self.assertNotIn("buildStatusObservation", normalized)
+        self.assertIn("workFailure", control.write.call_args.args[1])
+        self.assertNotIn("buildStatusObservation", control.write.call_args.args[1])
+        control.write.assert_called_once()
+        control.write.reset_mock()
+        control.write.side_effect = OSError
+        with self.assertRaises(OSError):
+            control.failure(OSError(), 100, work_failure=fault, build_status=("SIGNAL_ALRM", "EMPTY"))
+        control.write.assert_called_once()
+        control.path, control.check = Path("/synthetic"), MagicMock()
+        raw = json.dumps(value).replace('"receiptCheck": "EMPTY"', '"receiptCheck": "EMPTY", "receiptCheck": "MATCH"')
+        with (
+            patch.object(hosted, "read_root", return_value=(raw.encode(), None)),
+            self.assertRaises(custody.CustodyError),
+        ):
+            control.read("failure.json")
+
     def test_optional_detail_is_closed_and_invalid_detail_keeps_only_valid_base(self) -> None:
         self.assertEqual(hosted._failure_diagnostic(self.base), self.base)
         self.assertEqual(
@@ -1964,6 +2039,40 @@ class CoordinatorObservationTests(unittest.TestCase):
             self.hosted.record.lease.coordinator,
             self.fixture.clock.time + hosted.CYCLE_NS,
         )
+
+    def test_status_pair_resets_and_survives_cleanup_without_masking_original_publication(self) -> None:
+        status_fixture = fixtures.BuildStatusObservationTests(methodName="runTest")
+        status_fixture.setUp()
+        self.original = OSError("private prepare")
+        release = OSError("private cleanup")
+
+        def prepare(_arguments: object, observer: child.WorkObserver | None) -> None:
+            self.assertIsNone(self.control.preparation_failure)
+            self.assertIsNone(self.control.preparation_status)
+            self.assertIs(type(observer), child.WorkObserver)
+            claim = child.refused(observer, "CHILD_PARENT", "B_BUILD_STATUS_REFUSAL")
+            observer.observe_status(claim, 1, status_fixture.lease, status_fixture.proof)
+            observer.finish_status(completed=True)
+            raise self.original
+
+        self.control.preparation_status = ("SIGNAL_KILL", "EMPTY")
+        self.prepare.side_effect, self.close.side_effect = prepare, release
+        with patch.object(child, "_runtime_qualified", return_value=True), self.assertRaises(OSError) as raised:
+            self.run_coordinator()
+        self.assertIs(raised.exception, release)
+        self.assertEqual(self.control.preparation_status, ("EXIT_NONZERO", "MATCH"))
+        self.assertEqual(self.control.preparation_failure, ("CHILD_PARENT", "B_BUILD_STATUS_REFUSAL", "REFUSED"))
+        self.close.side_effect = None
+        with (
+            patch.object(child, "_runtime_qualified", return_value=True),
+            patch.object(hosted.os, "open", side_effect=(71, 72, 73)),
+            patch.object(hosted, "_sealed_build_status", side_effect=MemoryError),
+            self.assertRaises(OSError) as raised,
+        ):
+            self.run_coordinator()
+        self.assertIs(raised.exception, self.original)
+        self.assertEqual(self.control.preparation_failure, ("CHILD_PARENT", "B_BUILD_STATUS_REFUSAL", "REFUSED"))
+        self.assertIsNone(self.control.preparation_status)
 
     def work_fault(self, _arguments: object, observer: child.WorkObserver | None) -> None:
         self.assertIsNone(self.control.preparation_failure)

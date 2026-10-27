@@ -566,6 +566,7 @@ class Control:
     def __init__(self, path: Path, *, create: bool = False) -> None:
         """Create or authenticate one private finite control directory."""
         self.preparation_failure: tuple[str, str, str] | None = None
+        self.preparation_status: tuple[str, str] | None = None
         need(path.parent == Path("/run") and re.fullmatch(re.escape(CONTROL_PREFIX) + r"[0-9a-f]{32}", path.name))
         if create:
             path.mkdir(mode=0o700)
@@ -620,7 +621,14 @@ class Control:
         need(type(value) is dict)
         return value
 
-    def failure(self, error: Exception, deadline: int, *, work_failure: tuple[str, str, str] | None = None) -> None:
+    def failure(
+        self,
+        error: Exception,
+        deadline: int,
+        *,
+        work_failure: tuple[str, str, str] | None = None,
+        build_status: tuple[str, str] | None = None,
+    ) -> None:
         """Keep the existing diagnostic and optionally one sealed closed preparation fault."""
         need(self.phase in {"control", "admission", "prepare", "binding", "arm", "commit", "close", "finish", "owner"})
         locator = error.locator if isinstance(error, custody.CustodyError) else None
@@ -642,6 +650,18 @@ class Control:
             detail = child.work_failure({"schema": 1, "context": context, "site": site, "failure": failure})
             if detail is not None:
                 value["workFailure"] = detail
+        with suppress(Exception):
+            if (
+                self.phase == "prepare"
+                and type(build_status) is tuple
+                and len(build_status) == len(child.BUILD_STATUS_FIELDS)
+            ):
+                detail = child.build_status_observation(
+                    {"schema": 1, "terminationForm": build_status[0], "receiptCheck": build_status[1]},
+                    value.get("workFailure"),
+                )
+                if detail is not None:
+                    value["buildStatusObservation"] = detail
         self.write("failure.json", value, deadline)
 
     def listen(self, name: str) -> socket.socket:
@@ -1460,11 +1480,25 @@ def _sealed_preparation(observer: child.WorkObserver | None) -> tuple[str, str, 
     return None
 
 
+def _sealed_build_status(observer: child.WorkObserver | None) -> tuple[str, str] | None:
+    if type(observer) is child.WorkObserver:
+        with suppress(Exception):
+            pair = observer.status_snapshot()
+            if type(pair) is tuple and len(pair) == len(child.BUILD_STATUS_FIELDS):
+                detail = child.build_status_observation(
+                    {"schema": 1, "terminationForm": pair[0], "receiptCheck": pair[1]}, observer.snapshot()
+                )
+                if detail is not None:
+                    return detail["terminationForm"], detail["receiptCheck"]
+    return None
+
+
 def coordinator_main(
     stage: Path, control: Control, bootstrap: dict[str, Any], observer: custody.Process, deadline: int
 ) -> int:
     """Prepare/arm as the actual root caller, then await its independent observer."""
     control.preparation_failure = None
+    control.preparation_status = None
     work_observer = child.new_observer()
     clock = Clock(**child.observer_args(work_observer))
     with ExitStack() as stack:
@@ -1502,6 +1536,8 @@ def coordinator_main(
                 record = read_record(locator, **child.observer_args(work_observer))
         finally:
             control.preparation_failure = _sealed_preparation(work_observer)
+            with suppress(Exception):
+                control.preparation_status = _sealed_build_status(work_observer)
         control.phase = "binding"
         control.write(
             "binding.json",
@@ -1658,7 +1694,7 @@ class CycleObserver:
                 listener.close()
                 os.close(read)
                 os.close(gate_write)
-                self.control.preparation_failure = None
+                self.control.preparation_failure, self.control.preparation_status = None, None
                 try:
                     os.setsid()
                     raw = encoded(asdict(process(os.getpid()))) + b"\n"
@@ -1677,7 +1713,12 @@ class CycleObserver:
                     )
                 except Exception as error:  # noqa: BLE001 - closed diagnostic, never raw privileged output.
                     with suppress(custody.CustodyError, OSError, ValueError):
-                        self.control.failure(error, self.plan.deadline, work_failure=self.control.preparation_failure)
+                        self.control.failure(
+                            error,
+                            self.plan.deadline,
+                            work_failure=self.control.preparation_failure,
+                            build_status=self.control.preparation_status,
+                        )
                     status = 1
                 os._exit(status)
             self.coordinator = ChildCustody(pid)
@@ -1868,13 +1909,18 @@ class CycleObserver:
 
 def _failure_diagnostic(value: object) -> dict[str, Any]:
     need(type(value) is dict)
-    base = {key: item for key, item in value.items() if key != "workFailure"} if "workFailure" in value else value
+    base = {key: item for key, item in value.items() if key not in {"workFailure", "buildStatusObservation"}}
     result = exact(base, {"schema", "diagnosticOnly", "phase", "ns", "custodyLocator", "childPending"})
     need(result["schema"] == 1 and result["diagnosticOnly"] is True)
     if result["phase"] == "prepare" and "workFailure" in value:
         detail = child.work_failure(value["workFailure"])
         if detail is not None:
             result["workFailure"] = detail
+    with suppress(Exception):
+        if result["phase"] == "prepare" and "buildStatusObservation" in value:
+            observation = child.build_status_observation(value["buildStatusObservation"], result.get("workFailure"))
+            if observation is not None:
+                result["buildStatusObservation"] = observation
     return result
 
 

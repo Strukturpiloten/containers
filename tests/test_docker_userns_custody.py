@@ -9,7 +9,9 @@ import importlib.abc
 import io
 import json
 import os
+import signal
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -1793,6 +1795,655 @@ class ChildObservationTests(unittest.TestCase):
                 else:
                     self.assertIsNone(observer.snapshot())
                 self.assertEqual(self.stop.call_count, 1 if dead else 2)
+
+
+class BuildStatusObservationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.lease = child.Build("inert", 1001, 1002, 100, 200)
+        self.proof = json.dumps(
+            {"schema": 1, "uid": 1001, "gid": 1002, "groups": [], "nnp": 1, "capabilities": "zero"}
+        ).encode("ascii")
+        self.fault = {"schema": 1, "context": "CHILD_PARENT", "site": "B_BUILD_STATUS_REFUSAL", "failure": "REFUSED"}
+        self.clock = MagicMock()
+
+    def refuse(self, observer: child.WorkObserver | None, proof: object, status: object = 1) -> child.ChildError:
+        with (
+            patch.object(child, "_preflight", return_value=(None, 1)),
+            patch.object(child, "_execute", return_value=(b"private output", proof, status, child.Lifetime.DEAD)),
+            patch.object(
+                child, "_execute_observed", return_value=(b"private output", proof, status, child.Lifetime.DEAD)
+            ),
+            self.assertRaises(child.ChildError) as raised,
+        ):
+            child.build(None, (), self.lease, self.clock, observer=observer)
+        self.assertIs(raised.exception.lifetime, child.Lifetime.DEAD)
+        self.assertEqual(raised.exception.args, ("child-refused",))
+        self.clock.now_ns.assert_not_called()
+        return raised.exception
+
+    def test_all_eighteen_closed_pairs_use_the_same_bytes_and_no_observer(self) -> None:
+        statuses = (
+            (19, "EXIT_NONZERO"),
+            (-signal.SIGALRM, "SIGNAL_ALRM"),
+            (-signal.SIGXCPU, "SIGNAL_XCPU"),
+            (-signal.SIGXFSZ, "SIGNAL_XFSZ"),
+            (-signal.SIGKILL, "SIGNAL_KILL"),
+            (-signal.SIGTERM, "OTHER_SIGNAL"),
+        )
+        for status, termination in statuses:
+            for proof, receipt in ((self.proof, "MATCH"), (b"", "EMPTY"), (b"{", "MISMATCH")):
+                with self.subTest(status=status, receipt=receipt):
+                    observer = child.WorkObserver()
+                    with (
+                        patch.object(child, "_runtime_qualified", return_value=True),
+                        patch.object(child, "_privilege_receipt", wraps=child._privilege_receipt) as parser,
+                        child.observing(observer),
+                    ):
+                        self.refuse(observer, proof, status)
+                        self.assertIsNone(observer.status_snapshot())
+                    self.assertEqual(observer.snapshot(), self.fault)
+                    self.assertEqual(observer.status_snapshot(), (termination, receipt))
+                    if proof:
+                        parser.assert_called_once_with(proof, self.lease, observer=None)
+                        self.assertIs(parser.call_args.args[0], proof)
+                    else:
+                        parser.assert_not_called()
+
+    def test_receipt_schema_and_ascii_parse_failures_are_only_mismatches(self) -> None:
+        actual = json.loads(self.proof)
+        variants = [b"{", b"[]", b"null", b"true", b'{"schema":1,"schema":1}', b"NaN", b"1e100000"]
+        for key, value in (
+            ("schema", True),
+            ("uid", True),
+            ("gid", 7),
+            ("groups", [1001]),
+            ("nnp", 0),
+            ("capabilities", "nonzero"),
+            ("extra", "private"),
+        ):
+            variants.append(json.dumps({**actual, key: value}).encode("ascii"))
+        variants.append(self.proof.replace(b'"zero"', b'"\\u0000"'))
+        for proof in variants:
+            with self.subTest(proof=proof):
+                observer = child.WorkObserver()
+                with patch.object(child, "_runtime_qualified", return_value=True), child.observing(observer):
+                    self.refuse(observer, proof)
+                self.assertEqual(observer.status_snapshot(), ("EXIT_NONZERO", "MISMATCH"))
+
+    def test_success_keeps_original_parser_once_and_ineligible_statuses_never_enrich(self) -> None:
+        observer = child.WorkObserver()
+        self.clock.now_ns.return_value = 1
+        with (
+            patch.object(child, "_preflight", return_value=(None, 1)),
+            patch.object(child, "_execute_observed", return_value=(b"policy", self.proof, 0, child.Lifetime.DEAD)),
+            patch.object(child, "_interpreter", return_value=None),
+            patch.object(child, "_runtime_qualified") as qualification,
+            patch.object(child, "_privilege_receipt", wraps=child._privilege_receipt) as parser,
+            child.observing(observer),
+        ):
+            self.assertEqual(
+                child.build(None, (), self.lease, self.clock, observer=observer), child.Outcome(b"policy", dead=True)
+            )
+        parser.assert_called_once_with(self.proof, self.lease, observer=observer)
+        qualification.assert_not_called()
+        self.assertIsNone(observer.snapshot())
+        self.assertIsNone(observer.status_snapshot())
+        for status, lifetime in ((True, child.Lifetime.DEAD), (None, child.Lifetime.DEAD), (1, child.Lifetime.UNKNOWN)):
+            observer = child.WorkObserver()
+            with (
+                patch.object(child, "_preflight", return_value=(None, 1)),
+                patch.object(child, "_execute_observed", return_value=(b"", self.proof, status, lifetime)),
+                patch.object(child, "_privilege_receipt") as parser,
+                patch.object(child, "_runtime_qualified") as qualification,
+                child.observing(observer),
+                self.assertRaises(child.ChildError),
+            ):
+                child.build(None, (), self.lease, self.clock, observer=observer)
+            parser.assert_not_called()
+            qualification.assert_not_called()
+
+    def test_domain_failures_consume_attempt_before_a_later_valid_identical_refusal(self) -> None:
+        class BytesSubclass(bytes):
+            pass
+
+        class IntSubclass(int):
+            pass
+
+        class BuildSubclass(child.Build):
+            pass
+
+        class Proxy:
+            def __getattribute__(self, _name: str) -> object:
+                raise AssertionError
+
+        proofs = [
+            None,
+            "",
+            bytearray(self.proof),
+            BytesSubclass(self.proof),
+            Proxy(),
+            b"x" * (child.MAX_POLICY + 1),
+            b"\xef\xbb\xbf{}",
+            b"\xff\xfe{}",
+            b"\xfe\xff{}",
+            b"\x00\x00\xfe\xff{}",
+            b"{}\x00",
+            b"\xc2\xa0{}",
+            "{}".encode("utf-16-le"),
+            "{}".encode("utf-32-be"),
+        ]
+        cases = [(self.lease, proof) for proof in proofs]
+        cases.extend(
+            (lease, self.proof)
+            for lease in (
+                Proxy(),
+                BuildSubclass("inert", 1001, 1002, 100, 200),
+                replace(self.lease, uid=True),
+                replace(self.lease, gid=IntSubclass(1002)),
+                replace(self.lease, uid=Proxy()),
+            )
+        )
+        for lease, proof in cases:
+            with self.subTest(lease=type(lease), proof=type(proof)):
+                observer = child.WorkObserver()
+                with (
+                    patch.object(child, "_runtime_qualified", return_value=True),
+                    patch.object(child, "_privilege_receipt") as parser,
+                    child.observing(observer),
+                ):
+                    original, self.lease = self.lease, lease
+                    try:
+                        self.refuse(observer, proof)
+                    finally:
+                        self.lease = original
+                    self.refuse(observer, self.proof)
+                parser.assert_not_called()
+                self.assertEqual(observer.snapshot(), self.fault)
+                self.assertIsNone(observer.status_snapshot())
+
+    def test_unexpected_parser_errors_and_new_boundary_faults_never_retry_or_mask(self) -> None:
+        failures = (
+            UnicodeDecodeError("ascii", b"x", 0, 1, "private"),
+            ValueError("numeric limit"),
+            RecursionError("private"),
+            MemoryError("private"),
+            RuntimeError("private"),
+        )
+        for failure in failures:
+            observer = child.WorkObserver()
+            with (
+                patch.object(child, "_runtime_qualified", return_value=True),
+                patch.object(child, "_privilege_receipt", side_effect=[failure, None]) as parser,
+                child.observing(observer),
+            ):
+                first = self.refuse(observer, self.proof)
+                self.refuse(observer, self.proof)
+            self.assertIsNot(first.__cause__, failure)
+            self.assertEqual(parser.call_count, 1)
+            self.assertEqual(observer.snapshot(), self.fault)
+            self.assertIsNone(observer.status_snapshot())
+        boundaries = (
+            (child, "_runtime_qualified"),
+            (child, "_build_status_pair"),
+            (child, "_termination_form"),
+            (child.WorkObserver, "_claim_status"),
+            (child.WorkObserver, "_take_status_claim"),
+            (child.WorkObserver, "_record_status"),
+            (child.WorkObserver, "observe_status"),
+            (child.WorkObserver, "finish_status"),
+        )
+        for owner, name in boundaries:
+            with self.subTest(boundary=name):
+                observer = child.WorkObserver()
+                with patch.object(child, "_runtime_qualified", return_value=True), child.observing(observer):
+                    with patch.object(owner, name, side_effect=MemoryError("private")):
+                        self.refuse(observer, self.proof)
+                    with patch.object(child, "_privilege_receipt") as parser:
+                        self.refuse(observer, self.proof)
+                    parser.assert_not_called()
+                self.assertEqual(observer.snapshot(), self.fault)
+                self.assertIsNone(observer.status_snapshot())
+
+    def test_existing_faults_and_inactive_muted_sealed_or_failed_recording_do_not_parse(self) -> None:
+        for mode in ("none", "inactive", "muted", "sealed", "other", "identical", "recording"):
+            with self.subTest(mode=mode), ExitStack() as stack:
+                observer = None if mode == "none" else child.WorkObserver()
+                stack.enter_context(patch.object(child, "_runtime_qualified", return_value=True))
+                parser = stack.enter_context(patch.object(child, "_privilege_receipt"))
+                if mode not in {"none", "inactive", "sealed"}:
+                    stack.enter_context(child.observing(observer))
+                if mode == "sealed":
+                    with child.observing(observer):
+                        pass
+                if mode == "muted":
+                    stack.enter_context(child.muted(observer))
+                if mode == "other":
+                    child.refused(observer, "CHILD_PARENT", "B_BUILD_G03")
+                if mode == "identical":
+                    child.refused(observer, "CHILD_PARENT", "B_BUILD_STATUS_REFUSAL")
+                if mode == "recording":
+                    stack.enter_context(patch.object(child.WorkObserver, "record", side_effect=MemoryError))
+                self.refuse(observer, self.proof)
+                self.refuse(observer, self.proof)
+                parser.assert_not_called()
+
+    def test_runtime_is_exact_resident_cpython_final_and_never_retried(self) -> None:
+        expected = sys.implementation.name == "cpython" and tuple(sys.version_info) == (3, 14, 4, "final", 0)
+        self.assertEqual(child._runtime_qualified(), expected)
+        final = (3, 14, 4, "final", 0)
+
+        class StringSubclass(str):
+            __slots__ = ()
+
+        class TupleSubclass(tuple):
+            __slots__ = ()
+
+        variants = [
+            (3, 14, 3, "final", 0),
+            (3, 14, 5, "final", 0),
+            (3, 15, 4, "final", 0),
+            (3, 14, 4, "candidate", 0),
+            (3, 14, 4, "final", 1),
+            (3, 14, True, "final", 0),
+            (3, 14, 4, b"final", 0),
+            (3, 14, 4, "final"),
+            None,
+            SimpleNamespace(),
+            TupleSubclass(final),
+            (3, 14, 4, StringSubclass("final"), 0),
+        ]
+        for version in variants:
+            with (
+                self.subTest(version=version),
+                patch.object(child, "_RUNTIME_VERSION_TYPE", tuple),
+                patch.object(sys, "version_info", version),
+                patch.object(sys, "implementation", SimpleNamespace(name="cpython", version=final)),
+            ):
+                self.assertFalse(child._runtime_qualified())
+        for implementation in (None, SimpleNamespace(name="pypy", version=final)):
+            with patch.object(sys, "implementation", implementation):
+                self.assertFalse(child._runtime_qualified())
+        for implementation in (
+            SimpleNamespace(name=StringSubclass("cpython"), version=final),
+            SimpleNamespace(name="cpython", version=(3, 14, 5, "final", 0)),
+        ):
+            with (
+                patch.object(child, "_RUNTIME_VERSION_TYPE", tuple),
+                patch.object(sys, "version_info", final),
+                patch.object(sys, "implementation", implementation),
+            ):
+                self.assertFalse(child._runtime_qualified())
+        with patch.object(sys, "implementation", SimpleNamespace()), self.assertRaises(AttributeError):
+            child._runtime_qualified()
+        observer = child.WorkObserver()
+        with child.observing(observer):
+            with patch.object(child, "_runtime_qualified", return_value=False):
+                self.refuse(observer, self.proof)
+            with (
+                patch.object(child, "_runtime_qualified", return_value=True),
+                patch.object(child, "_privilege_receipt") as parser,
+            ):
+                self.refuse(observer, self.proof)
+            parser.assert_not_called()
+        self.assertEqual(observer.snapshot(), self.fault)
+        self.assertIsNone(observer.status_snapshot())
+
+    def test_actual_numeric_limit_error_is_absent_instead_of_mismatch(self) -> None:
+        previous = sys.get_int_max_str_digits()
+        self.addCleanup(sys.set_int_max_str_digits, previous)
+        sys.set_int_max_str_digits(640)
+        observer = child.WorkObserver()
+        with patch.object(child, "_runtime_qualified", return_value=True), child.observing(observer):
+            self.refuse(observer, b"9" * 700)
+            with patch.object(child, "_privilege_receipt") as parser:
+                self.refuse(observer, self.proof)
+            parser.assert_not_called()
+        self.assertEqual(observer.snapshot(), self.fault)
+        self.assertIsNone(observer.status_snapshot())
+
+    def test_pair_conflict_snapshot_failure_and_claim_identity_are_independent(self) -> None:
+        observer = child.WorkObserver()
+        with patch.object(child, "_runtime_qualified", return_value=True), child.observing(observer):
+            claim = child.refused(observer, "CHILD_PARENT", "B_BUILD_STATUS_REFUSAL")
+            with patch.object(child, "_privilege_receipt") as parser:
+                observer.observe_status(object(), 1, self.lease, self.proof)
+                observer.observe_status(claim, 1, self.lease, self.proof)
+            parser.assert_not_called()
+        self.assertEqual(observer.snapshot(), self.fault)
+        self.assertIsNone(observer.status_snapshot())
+        observer = child.WorkObserver()
+        with patch.object(child, "_runtime_qualified", return_value=True), child.observing(observer):
+            self.refuse(observer, self.proof)
+        with patch.object(child, "build_status_observation", side_effect=MemoryError):
+            self.assertIsNone(observer.status_snapshot())
+        self.assertIsNone(observer.status_snapshot())
+        self.assertEqual(observer.snapshot(), self.fault)
+
+    def test_pair_recording_is_idempotent_but_conflict_or_malformed_pair_is_permanent(self) -> None:
+        for second in (("EXIT_NONZERO", "MATCH"), ("SIGNAL_KILL", "EMPTY"), ["EXIT_NONZERO", "MATCH"], (True, "MATCH")):
+            observer = child.WorkObserver()
+            with patch.object(child, "_runtime_qualified", return_value=True), child.observing(observer):
+                self.refuse(observer, self.proof)
+                observer._record_status(second)
+                observer._record_status(("EXIT_NONZERO", "MATCH"))
+                with patch.object(child, "_privilege_receipt") as parser:
+                    self.refuse(observer, self.proof)
+                parser.assert_not_called()
+            expected = (
+                ("EXIT_NONZERO", "MATCH") if type(second) is tuple and second == ("EXIT_NONZERO", "MATCH") else None
+            )
+            self.assertEqual(observer.status_snapshot(), expected)
+            self.assertEqual(observer.snapshot(), self.fault)
+
+    def test_witness_allocation_error_drops_pair_only(self) -> None:
+        observer = child.WorkObserver()
+        with child.observing(observer):
+            with patch.object(child, "object", side_effect=MemoryError, create=True):
+                self.refuse(observer, self.proof)
+            with patch.object(child, "_privilege_receipt") as parser:
+                self.refuse(observer, self.proof)
+            parser.assert_not_called()
+        self.assertEqual(observer.snapshot(), self.fault)
+        self.assertIsNone(observer.status_snapshot())
+
+    def test_enrichment_error_preserves_original_guard_exception_identity_args_and_cause(self) -> None:
+        for observed in (False, True):
+            observer = child.WorkObserver() if observed else None
+            original = child.ChildError(dead=True)
+            cause = OSError("private preexisting cause")
+            original.__cause__ = cause
+            with (
+                patch.object(child, "_need", side_effect=original) as guard,
+                patch.object(child, "_runtime_qualified", side_effect=MemoryError),
+                child.observing(observer),
+            ):
+                raised = self.refuse(observer, self.proof)
+            predicate = False
+            guard.assert_called_once_with(predicate, dead=True)
+            self.assertIs(raised.__cause__, original)
+            self.assertEqual(original.args, ("child-refused",))
+            self.assertIs(original.__cause__, cause)
+
+    def test_partial_recording_error_drops_pair_only(self) -> None:
+        observer = child.WorkObserver()
+        original = child.WorkObserver._record_status
+
+        def partial(current: child.WorkObserver, pair: object) -> None:
+            original(current, pair)
+            raise MemoryError
+
+        with (
+            child.observing(observer),
+            patch.object(child, "_runtime_qualified", return_value=True),
+            patch.object(child.WorkObserver, "_record_status", partial),
+        ):
+            self.refuse(observer, self.proof)
+        self.assertEqual(observer.snapshot(), self.fault)
+        self.assertIsNone(observer.status_snapshot())
+
+    def test_cold_classifier_matrix_has_no_new_io_and_never_reopens_an_attempt(self) -> None:
+        if not child._runtime_qualified():
+            self.skipTest("cold semantic proof requires CPython 3.14.4 final")
+        source = (REPO / "scripts/docker_userns_custody_child.py").read_text()
+        setup = (
+            "import sys, types, builtins, time, select\n"
+            "module = types.ModuleType('inert_child'); sys.modules[module.__name__] = module\n"
+            f"exec(compile({source!r}, '<inert-child>', 'exec'), module.__dict__)\n"
+            f"ordinary = {self.proof!r}\n"
+        )
+        cases = (
+            "match",
+            "empty",
+            "malformed",
+            "duplicate",
+            "bool-schema",
+            "escaped-match",
+            "escaped-nul",
+            "bounded-integer",
+            "bounded-float",
+            "bounded-exponent",
+            "nested",
+            "nested-malformed",
+            "numeric-limit",
+            "nested-deep",
+            "injected-decoder",
+            "injected-value",
+            "injected-recursion",
+            "injected-allocation",
+            "default-none",
+            "inactive",
+            "muted",
+            "sealed",
+            "other-first",
+            "identical-first",
+            "zero-status",
+            "bool-status",
+            "unknown-status",
+            "unknown-lifetime",
+            "unsupported-runtime",
+            "bom",
+            "utf16",
+            "utf32",
+            "non-ascii",
+            "nul",
+            "oversize",
+            "bytes-subclass",
+            "build-subclass",
+        )
+        # Every case starts a new interpreter. Setup imports the inert parent module,
+        # but never invokes its parser or imports/prewarms any codec for the test.
+        exercise = r"""
+lease = module.Build('inert', 1001, 1002, 100, 200)
+proof, expected, expected_calls = ordinary, ('EXIT_NONZERO', 'MATCH'), 1
+status, lifetime = 1, module.Lifetime.DEAD
+if case == 'empty': proof, expected, expected_calls = b'', ('EXIT_NONZERO', 'EMPTY'), 0
+elif case == 'malformed': proof, expected = b'{', ('EXIT_NONZERO', 'MISMATCH')
+elif case == 'duplicate': proof, expected = b'{"x":{"a":1,"a":2}}', ('EXIT_NONZERO', 'MISMATCH')
+elif case == 'bool-schema':
+    proof, expected = ordinary.replace(b'"schema": 1', b'"schema": true'), ('EXIT_NONZERO', 'MISMATCH')
+elif case == 'escaped-match': proof = ordinary.replace(b'"zero"', br'"z\u0065ro"')
+elif case == 'escaped-nul': proof, expected = ordinary.replace(b'"zero"', br'"\u0000"'), ('EXIT_NONZERO', 'MISMATCH')
+elif case == 'bounded-integer': proof, expected = b'9' * 1024, ('EXIT_NONZERO', 'MISMATCH')
+elif case == 'bounded-float': proof, expected = b'0.' + b'1' * 1022, ('EXIT_NONZERO', 'MISMATCH')
+elif case == 'bounded-exponent': proof, expected = b'1e' + b'9' * 1022, ('EXIT_NONZERO', 'MISMATCH')
+elif case == 'nested': proof, expected = b'[' * 64 + b'0' + b']' * 64, ('EXIT_NONZERO', 'MISMATCH')
+elif case == 'nested-malformed': proof, expected = b'[' * 64 + b'0' + b']' * 63, ('EXIT_NONZERO', 'MISMATCH')
+elif case == 'numeric-limit':
+    proof, expected = b'9' * 700, None
+    sys.set_int_max_str_digits(640)
+elif case == 'nested-deep':
+    proof, expected = b'[' * 480 + b'0' + b']' * 480, ('EXIT_NONZERO', 'MISMATCH')
+elif case.startswith('injected-'): expected = None
+elif case in ('default-none', 'inactive', 'muted', 'sealed', 'other-first', 'identical-first'):
+    expected, expected_calls = None, 0
+elif case == 'zero-status': status, expected, expected_calls = 0, None, 0
+elif case == 'bool-status': status, expected, expected_calls = True, None, 0
+elif case == 'unknown-status': status, expected, expected_calls = None, None, 0
+elif case == 'unknown-lifetime': lifetime, expected, expected_calls = module.Lifetime.UNKNOWN, None, 0
+elif case == 'unsupported-runtime': expected, expected_calls = None, 0
+elif case == 'bom': proof, expected, expected_calls = b'\xef\xbb\xbf{}', None, 0
+elif case == 'utf16': proof, expected, expected_calls = b'{\x00}\x00', None, 0
+elif case == 'utf32': proof, expected, expected_calls = b'\x00\x00\x00{\x00\x00\x00}', None, 0
+elif case == 'non-ascii': proof, expected, expected_calls = b'\xc2\xa0{}', None, 0
+elif case == 'nul': proof, expected, expected_calls = b'{}\x00', None, 0
+elif case == 'oversize': proof, expected, expected_calls = b'9' * 1025, None, 0
+elif case == 'bytes-subclass':
+    class BytesSubclass(bytes): pass
+    proof, expected, expected_calls = BytesSubclass(ordinary), None, 0
+elif case == 'build-subclass':
+    class BuildSubclass(module.Build): pass
+    lease, expected, expected_calls = BuildSubclass('inert', 1001, 1002, 100, 200), None, 0
+assert len(proof) <= (1025 if case == 'oversize' else module.MAX_POLICY)
+assert module._runtime_qualified()
+parser, decoder = module._privilege_receipt, module.json.loads
+parser_calls, guard_clocks, forbidden_calls = [], [], []
+held = [proof, status, lifetime]
+class Clock:
+    def now_ns(self):
+        guard_clocks.append(True)
+        return 100
+clock = Clock()
+# These are inert execution/preflight facts, never CODE, a child, a credential
+# transition, a seal, or a runtime operation. The operational parser stays intact.
+module._preflight = lambda *args, **kwargs: (None, 1)
+module._execute = lambda *args, **kwargs: (b'inert-output', *held)
+module._execute_observed = module._execute
+faults = {
+    'injected-decoder': UnicodeDecodeError('ascii', b'x', 0, 1, 'inert'),
+    'injected-value': ValueError('inert numeric limit'),
+    'injected-recursion': RecursionError('inert'),
+    'injected-allocation': MemoryError('inert'),
+}
+if case in faults:
+    def decoder_fault(*args, **kwargs): raise faults[case]
+    module.json.loads = decoder_fault
+observer = None if case == 'default-none' else module.WorkObserver()
+if case == 'sealed':
+    with module.observing(observer): pass
+saved_streams = (sys.stdout, sys.stderr, sys.__stdout__, sys.__stderr__, sys.stdin, sys.__stdin__)
+implementation_name = sys.implementation.name
+class ForbiddenOperation(BaseException): pass
+
+def forbidden(name):
+    def stop(*args, **kwargs):
+        forbidden_calls.append(name)
+        raise ForbiddenOperation(name)
+    return stop
+
+def audit(event, args):
+    if event in ('open', 'import') or event.startswith(('subprocess.', 'os.exec', 'os.fork', 'socket.')):
+        forbidden('audit:' + event)()
+
+# Audit events alone do not cover clocks/read/pread/stat/wait/selector/output.
+# Replace the already resident call sites independently before any parsing.
+for name in ('time', 'time_ns', 'monotonic', 'monotonic_ns', 'perf_counter', 'perf_counter_ns',
+             'process_time', 'process_time_ns', 'thread_time', 'thread_time_ns', 'sleep',
+             'clock_gettime', 'clock_gettime_ns', 'get_clock_info'):
+    if hasattr(time, name): setattr(time, name, forbidden('clock:' + name))
+for name in ('open', 'read', 'pread', 'readv', 'preadv', 'stat', 'lstat', 'fstat', 'statvfs', 'fstatvfs',
+             'readlink', 'listdir', 'scandir', 'access', 'wait', 'waitpid', 'waitid', 'wait3', 'wait4',
+             'getpid', 'getppid',
+             'getpgid', 'getsid', 'getuid', 'geteuid', 'getresuid', 'getgid', 'getegid', 'getresgid', 'getgroups',
+             'kill', 'killpg', 'times', 'write', 'writev', 'pwrite', 'pwritev', 'sendfile', 'copy_file_range',
+             'fdopen', 'pidfd_open', 'posix_spawn', 'posix_spawnp', 'fork', 'forkpty', 'system', 'popen'):
+    for resident in (module.os, sys.modules['posix']):
+        if hasattr(resident, name): setattr(resident, name, forbidden('os:' + name))
+original_popen = module.subprocess.Popen
+for name in ('poll', 'wait', 'communicate', 'send_signal', 'terminate', 'kill'):
+    setattr(original_popen, name, forbidden('popen:' + name))
+for name in ('Popen', 'run', 'call', 'check_call', 'check_output', 'getoutput', 'getstatusoutput'):
+    setattr(module.subprocess, name, forbidden('subprocess:' + name))
+selector_classes = tuple(value for value in vars(module.selectors).values()
+                         if isinstance(value, type) and issubclass(value, module.selectors.BaseSelector))
+for kind in selector_classes:
+    for name in ('select', 'register', 'unregister', 'modify', 'close'):
+        setattr(kind, name, forbidden('selector:' + name))
+for name in ('DefaultSelector', 'SelectSelector', 'PollSelector', 'EpollSelector', 'KqueueSelector', 'DevpollSelector'):
+    if hasattr(module.selectors, name): setattr(module.selectors, name, forbidden('selector:' + name))
+for name in ('select', 'poll', 'epoll', 'kqueue', 'devpoll'):
+    if hasattr(select, name): setattr(select, name, forbidden('select:' + name))
+builtins.open, builtins.print = forbidden('builtins:open'), forbidden('output:print')
+class OutputTrap:
+    def __init__(self): self.buffer = self
+    write, writelines, flush, fileno, read, readinto, readline, readlines = (
+        forbidden('stream:' + name)
+        for name in ('write', 'writelines', 'flush', 'fileno', 'read', 'readinto', 'readline', 'readlines'))
+sys.stdout, sys.stderr, sys.__stdout__, sys.__stderr__, sys.stdin, sys.__stdin__ = (OutputTrap() for _ in range(6))
+sys.addaudithook(audit)
+
+def profile(frame, event, arg):
+    if event == 'call' and frame.f_code is parser.__code__:
+        parser_calls.append((frame.f_locals['proof'] is held[0], frame.f_locals['observer'] is None))
+
+def build_failure():
+    try:
+        module.build(None, (), lease, clock, observer=observer)
+    except module.ChildError as error:
+        assert error.args == ('child-refused',) and error.lifetime is held[2]
+        assert type(error.__cause__) is module.ChildError
+    else: raise AssertionError('build unexpectedly succeeded')
+
+def attempt():
+    if case == 'other-first': module.refused(observer, 'CHILD_PARENT', 'B_BUILD_G03')
+    if case == 'identical-first': module.refused(observer, 'CHILD_PARENT', 'B_BUILD_STATUS_REFUSAL')
+    if case == 'unsupported-runtime': sys.implementation.name = 'pypy'
+    build_failure()
+    assert len(parser_calls) == expected_calls
+    assert all(same_bytes and no_observer for same_bytes, no_observer in parser_calls)
+    assert len(guard_clocks) == int(case == 'zero-status')
+    # Restore injected decoder/runtime errors and offer a normal receipt. A first
+    # eligible refusal never gets another parser call or a replacement observation.
+    module.json.loads = decoder
+    sys.implementation.name = implementation_name
+    if case not in ('zero-status', 'bool-status', 'unknown-status', 'unknown-lifetime'):
+        held[:] = [ordinary, 1, module.Lifetime.DEAD]
+    build_failure()
+    assert len(parser_calls) == expected_calls
+    assert len(guard_clocks) == 2 * int(case == 'zero-status')
+
+try:
+    # Prove one representative of EVERY operation family is stopped without
+    # touching a file/descriptor/clock/process/selector/output or importing a codec.
+    self_checks = (
+        lambda: builtins.open('/inert-never-opened'), lambda: time.monotonic_ns(),
+        lambda: module.os.read(-1, 1), lambda: module.os.pread(-1, 1, 0),
+        lambda: module.os.stat('/inert-never-statted'), lambda: module.os.getpid(),
+        lambda: module.os.waitpid(-1, 0), lambda: original_popen.poll(None),
+        lambda: original_popen.wait(None), lambda: module.subprocess.Popen([]),
+        lambda: module.selectors.BaseSelector.select(None), lambda: module.selectors.DefaultSelector(),
+        lambda: select.select([], [], [], 0), lambda: module.os.write(-1, b'inert'),
+        lambda: sys.stdout.write('inert'), lambda: sys.stderr.buffer.write(b'inert'),
+        lambda: sys.__stdout__.write('inert'), lambda: sys.stdin.buffer.read(1),
+        lambda: builtins.__import__('inert_cold_forbidden_module'),
+        lambda: sys.audit('open', 'inert-never-opened', 'r', 0),
+        lambda: sys.audit('socket.__new__', None, 0, 0, 0),
+        lambda: sys.audit('subprocess.Popen', 'inert', [], None, None),
+    )
+    for check in self_checks:
+        before = len(forbidden_calls)
+        try: check()
+        except ForbiddenOperation: pass
+        else: raise AssertionError('sentinel failed')
+        assert len(forbidden_calls) == before + 1
+    forbidden_calls.clear()
+    sys.setprofile(profile)
+    if case == 'inactive': attempt()
+    elif case == 'muted':
+        with module.observing(observer), module.muted(observer): attempt()
+    else:
+        with module.observing(observer): attempt()
+    sys.setprofile(None)
+    assert module._privilege_receipt is parser
+    assert not forbidden_calls
+    if observer is not None:
+        pair = observer.status_snapshot()
+        assert pair == expected, (pair, expected)
+        detail = observer.snapshot()
+        if case == 'other-first':
+            assert detail == {'schema': 1, 'context': 'CHILD_PARENT', 'site': 'B_BUILD_G03', 'failure': 'REFUSED'}
+        elif case in ('inactive', 'muted', 'sealed', 'zero-status', 'bool-status',
+                      'unknown-status', 'unknown-lifetime'):
+            assert detail is None
+        else:
+            assert detail == {'schema': 1, 'context': 'CHILD_PARENT',
+                              'site': 'B_BUILD_STATUS_REFUSAL', 'failure': 'REFUSED'}
+finally:
+    sys.setprofile(None)
+    sys.stdout, sys.stderr, sys.__stdout__, sys.__stderr__, sys.stdin, sys.__stdin__ = saved_streams
+    sys.implementation.name = implementation_name
+"""
+        for case in cases:
+            with self.subTest(case=case):
+                script = setup + f"case = {case!r}\n" + exercise
+                result = subprocess.run(
+                    ["/proc/self/exe", "-I", "-B", "-S", "-"],
+                    input=script.encode("ascii"),
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr.decode())
+                self.assertEqual(result.stdout, b"")
 
 
 if __name__ == "__main__":

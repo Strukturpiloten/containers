@@ -831,6 +831,26 @@
       "groupName": "Docker Arch distro base"
     },
     {
+      "description": "Update Podman CentOS Stream 10 distro base digest for both root modes together",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "quay.io/centos/centos"
+      ],
+      "matchCurrentValue": "/^stream10$/",
+      "matchFileNames": [
+        "/^images\\/podman\\/podman-centos-stream-10-(?:rootful|rootless)\\/container\\.yaml$/"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "groupName": "Podman CentOS Stream 10 distro base"
+    },
+    {
       "description": "Update Docker and Podman Debian 11 distro base digest for both root modes together",
       "matchManagers": [
         "custom.regex"

@@ -12,6 +12,7 @@ import selectors
 import signal
 import stat
 import subprocess
+import sys
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from enum import StrEnum
@@ -25,6 +26,14 @@ if TYPE_CHECKING:
 MAX_SOURCE = 65536
 MAX_INTERPRETER = 16 * 1024 * 1024
 MAX_POLICY = 1024
+_RUNTIME_IMPLEMENTATION_TYPE = type(sys.implementation)
+_RUNTIME_VERSION_TYPE = type(sys.version_info)
+_STATUS_FAULT = ("CHILD_PARENT", "B_BUILD_STATUS_REFUSAL", "REFUSED")
+_TERMINATION_FORMS = ("EXIT_NONZERO", "SIGNAL_ALRM", "SIGNAL_XCPU", "SIGNAL_XFSZ", "SIGNAL_KILL", "OTHER_SIGNAL")
+_RECEIPT_CHECKS = ("MATCH", "EMPTY", "MISMATCH")
+BUILD_STATUS_LIMIT = 128
+BUILD_STATUS_FIELDS = ("terminationForm", "receiptCheck")
+_QUALIFIED_VERSION = (3, 14, 4, "final", 0)
 _SEAL_VALUES = tuple(
     getattr(fcntl, name, None) for name in ("F_SEAL_WRITE", "F_SEAL_GROW", "F_SEAL_SHRINK", "F_SEAL_SEAL")
 )
@@ -399,10 +408,41 @@ def work_failure(value: object) -> dict[str, object] | None:
     return result
 
 
+def build_status_observation(value: object, fault: object) -> dict[str, object] | None:
+    """Accept only the closed pair alongside the original normalized status refusal."""
+    detail = work_failure(fault)
+    if detail is None or tuple(detail[key] for key in WORK_FAILURE_FIELDS) != _STATUS_FAULT:
+        return None
+    if type(value) is not dict or set(value) != {"schema", "terminationForm", "receiptCheck"}:
+        return None
+    if type(value["schema"]) is not int or value["schema"] != 1:
+        return None
+    termination, receipt = value["terminationForm"], value["receiptCheck"]
+    if type(termination) is not str or type(receipt) is not str:
+        return None
+    if termination not in _TERMINATION_FORMS or receipt not in _RECEIPT_CHECKS:
+        return None
+    result = {"schema": 1, "terminationForm": termination, "receiptCheck": receipt}
+    return result if len(json.dumps(result, ensure_ascii=True).encode("ascii")) <= BUILD_STATUS_LIMIT else None
+
+
 class WorkObserver:
     """Keep only immutable closed first-work evidence for one explicit preparation scope."""
 
-    __slots__ = ("_active", "_fault", "_invalid", "_mute_depth", "_sealed", "_work_depth", "_work_site")
+    __slots__ = (
+        "_active",
+        "_fault",
+        "_invalid",
+        "_mute_depth",
+        "_sealed",
+        "_status_claim",
+        "_status_finished",
+        "_status_invalid",
+        "_status_pair",
+        "_status_used",
+        "_work_depth",
+        "_work_site",
+    )
 
     def __init__(self) -> None:
         """Start inactive, without references to privileged inputs."""
@@ -410,6 +450,89 @@ class WorkObserver:
         self._fault: tuple[str, str, str] | None = None
         self._work_depth = self._mute_depth = 0
         self._work_site: tuple[str, str] | None = None
+        self._status_used = self._status_invalid = False
+        self._status_finished = False
+        self._status_claim: object | None = None
+        self._status_pair: tuple[str, str] | None = None
+
+    def _claim_status(self, *, fresh: bool) -> object | None:
+        # Consume before inspecting the record or allocating a witness. No later call
+        # can redeem a pre-existing identical fault or a failed enrichment attempt.
+        used = self._status_used
+        self._status_used, self._status_claim = True, None
+        if not used and fresh and not self._invalid and self._fault == _STATUS_FAULT:
+            self._status_claim = object()
+            return self._status_claim
+        return None
+
+    def _take_status_claim(self, claim: object) -> bool:
+        expected = self._status_claim
+        self._status_claim = None
+        valid = (
+            type(claim) is object
+            and claim is expected
+            and self._status_used
+            and not self._status_invalid
+            and self._active
+            and not self._sealed
+            and not self._mute_depth
+            and not self._invalid
+            and self._fault == _STATUS_FAULT
+        )
+        if not valid:
+            self._status_invalid, self._status_pair = True, None
+        return valid
+
+    def _record_status(self, pair: object) -> None:
+        """Keep two closed strings only; conflicting copies disable this detail alone."""
+        if self._status_invalid or self._sealed or not self._active or self._mute_depth:
+            return
+        if (
+            type(pair) is not tuple
+            or len(pair) != len(BUILD_STATUS_FIELDS)
+            or any(type(item) is not str for item in pair)
+            or pair[0] not in _TERMINATION_FORMS
+            or pair[1] not in _RECEIPT_CHECKS
+            or (self._status_pair is not None and self._status_pair != pair)
+        ):
+            self._status_invalid, self._status_pair = True, None
+        else:
+            self._status_pair = pair
+
+    def observe_status(self, claim: object, status: int, lease: Build, proof: bytes) -> None:
+        """Redeem only this refusal's local witness before any diagnostic work."""
+        if self._take_status_claim(claim):
+            pair = _build_status_pair(status, lease, proof)
+            if pair is not None:
+                self._record_status(pair)
+
+    def finish_status(self, *, completed: bool) -> None:
+        """Discard the invocation witness even if qualification or recording failed."""
+        self._status_claim = None
+        if not completed:
+            self._status_invalid, self._status_pair = True, None
+        self._status_finished = completed
+
+    def status_snapshot(self) -> tuple[str, str] | None:
+        """Return a separate sealed pair only while the original fault still qualifies."""
+        if (
+            self._status_invalid
+            or not self._status_finished
+            or self._status_pair is None
+            or not self._sealed
+            or self._active
+        ):
+            return None
+        with suppress(Exception):
+            if type(self._status_pair) is tuple and len(self._status_pair) == len(BUILD_STATUS_FIELDS):
+                value = build_status_observation(
+                    {"schema": 1, "terminationForm": self._status_pair[0], "receiptCheck": self._status_pair[1]},
+                    self.snapshot(),
+                )
+                if value is not None:
+                    return value["terminationForm"], value["receiptCheck"]
+        self._status_invalid, self._status_pair = True, None
+        return None
 
     def record(self, context: str, site: str, failure: str) -> None:
         """Accept an active closed candidate; conflicting candidates invalidate detail."""
@@ -453,6 +576,7 @@ class WorkObserver:
 
     def seal(self) -> None:
         """Seal only closed evidence; the caller suppresses diagnostic sealing failure."""
+        self._status_claim = None
         self._active, self._sealed = False, True
 
     @contextmanager
@@ -502,21 +626,29 @@ class WorkObserver:
             self._work_depth -= 1
             self._work_site = previous
 
-    def refused(self, context: str, site: str | None) -> None:
+    def refused(self, context: str, site: str | None) -> object | None:
         """Record an actual false guard without reading or re-evaluating its operands."""
         if site is None or not self._active or self._sealed or self._mute_depth or self._invalid:
-            return
+            return None
         if type(context) is not str or type(site) is not str or (context, site) not in WORK_FAILURES:
             self._invalid, self._fault = True, None
-            return
+            return None
         previous = self._work_site
         self._work_site = (context, site)
         self._work_depth += 1
+        fresh = self._fault is None
+        status_refusal = context == "CHILD_PARENT" and site == "B_BUILD_STATUS_REFUSAL"
         try:
             self._attempt(context, site, "REFUSED")
         finally:
             self._work_depth -= 1
             self._work_site = previous
+        if status_refusal:
+            # Enrichment failures never invalidate the independently recorded fault.
+            with suppress(Exception):
+                return self._claim_status(fresh=fresh)
+            self._status_used, self._status_claim, self._status_invalid = True, None, True
+        return None
 
 
 def new_observer() -> WorkObserver | None:
@@ -579,10 +711,11 @@ def work(
         yield
 
 
-def refused(observer: WorkObserver | None, context: str, site: str | None) -> None:
+def refused(observer: WorkObserver | None, context: str, site: str | None) -> object | None:
     """Offer only an actual false predicate or the approved known-dead status refusal."""
     if type(observer) is WorkObserver:
-        observer.refused(context, site)
+        return observer.refused(context, site)
+    return None
 
 
 def _work(observer: WorkObserver | None, site: str | None) -> AbstractContextManager[None]:
@@ -951,7 +1084,16 @@ def build(
             )
         except ChildError:
             if lifetime is Lifetime.DEAD and type(status) is int and status != 0:
-                refused(observer, "CHILD_PARENT", "B_BUILD_STATUS_REFUSAL")
+                claim = refused(observer, "CHILD_PARENT", "B_BUILD_STATUS_REFUSAL")
+                if claim is not None and type(observer) is WorkObserver:
+                    observed = False
+                    try:
+                        with suppress(Exception):
+                            observer.observe_status(claim, status, lease, proof)
+                            observed = True
+                    finally:
+                        with suppress(Exception):
+                            observer.finish_status(completed=observed)
             raise
         _privilege_receipt(proof, lease, **observer_args(observer))
         with _work(observer, "B_BUILD_G02"):
@@ -962,6 +1104,60 @@ def build(
 
     except Exception as error:
         raise ChildError(lifetime=lifetime) from error
+
+
+def _runtime_qualified() -> bool:
+    """Manually reviewed parent semantics, never an operational version selector."""
+    implementation, version = sys.implementation, sys.version_info
+    if type(implementation) is not _RUNTIME_IMPLEMENTATION_TYPE or type(implementation.name) is not str:
+        return False
+    if implementation.name != "cpython":
+        return False
+    for candidate in (version, implementation.version):
+        if type(candidate) is not _RUNTIME_VERSION_TYPE or len(candidate) != len(_QUALIFIED_VERSION):
+            return False
+        if any(type(candidate[index]) is not int for index in (0, 1, 2, 4)) or type(candidate[3]) is not str:
+            return False
+        if tuple(candidate) != _QUALIFIED_VERSION:
+            return False
+    return True
+
+
+def _build_status_pair(status: int, lease: Build, proof: bytes) -> tuple[str, str] | None:
+    """Use only held bounded data, once, without changing the refused build."""
+    if not _runtime_qualified():
+        return None
+    if type(status) is not int or status == 0 or type(lease) is not Build:
+        return None
+    if type(lease.uid) is not int or type(lease.gid) is not int:
+        return None
+    if type(proof) is not bytes or len(proof) > MAX_POLICY:
+        return None
+    receipt = "EMPTY"
+    if proof:
+        if not proof.isascii() or b"\0" in proof:
+            return None
+        try:
+            _privilege_receipt(proof, lease, observer=None)
+        except ChildError, json.JSONDecodeError:
+            receipt = "MISMATCH"
+        else:
+            receipt = "MATCH"
+    return _termination_form(status), receipt
+
+
+def _termination_form(status: int) -> str:
+    if status > 0:
+        return "EXIT_NONZERO"
+    for number, name in (
+        (signal.SIGALRM, "SIGNAL_ALRM"),
+        (signal.SIGXCPU, "SIGNAL_XCPU"),
+        (signal.SIGXFSZ, "SIGNAL_XFSZ"),
+        (signal.SIGKILL, "SIGNAL_KILL"),
+    ):
+        if status == -number:
+            return name
+    return "OTHER_SIGNAL"
 
 
 def _privilege_receipt(proof: bytes, lease: Build, *, observer: WorkObserver | None = None) -> None:

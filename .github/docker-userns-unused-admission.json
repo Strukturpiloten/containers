@@ -5,8 +5,8 @@
   "sourceManifestSha256": "7f6693f40311617e4854f8c6a35cbe13b3afdd3d7a8bef58978397ba1178dbd8",
   "contracts": {
     "scripts/docker_userns_custody.py": "8d38ba82d0c1798b56cf796e7965ced4fc82f64dd7b3b17857e40f1a62b40fbe",
-    "scripts/docker_userns_custody_child.py": "cb3312a209b48f62f7591cfb01da13d6a43af55b1f222345d19f4cc3c69285c7",
-    "scripts/docker_userns_hosted.py": "a39499011403150c0befb15533199b2bf166cd8e21dcacab085d245a67b93f15",
+    "scripts/docker_userns_custody_child.py": "41aeacaf59021ea794406130c1f75901eddbd1676b1fb71f316ca95c98fc1640",
+    "scripts/docker_userns_hosted.py": "01455962d6f539cd7959a0161bbe5b0661e3020f7d4eddebcb67c019f7fcce80",
     "scripts/docker_userns_policy_source.py": "cafc4121a424b3053528a5c8284314decdcf370878666c39edc83c15b2234927",
     ".github/docker-userns-helper-closure.json": "48d06e8cb16f495b32a0037d868c7d057a9040e2756c420438a2a302a7ca359f"
   },

@@ -310,6 +310,32 @@ staging and the synthetic write-denial probe do not establish a successful
 normal custody cycle or native runtime qualification. A work label cannot
 authorize readiness, cleanup or disposal of retained data.
 
+Only a freshly recorded `CHILD_PARENT / B_BUILD_STATUS_REFUSAL / REFUSED` can also add
+`buildStatusObservation` during preparation. Its three fields are integer `schema: 1`,
+`terminationForm` (`EXIT_NONZERO`, `SIGNAL_ALRM`, `SIGNAL_XCPU`, `SIGNAL_XFSZ`,
+`SIGNAL_KILL`, or `OTHER_SIGNAL`) and `receiptCheck` (`MATCH`, `EMPTY`, or `MISMATCH`).
+Absence means unobserved. The observer consumes its single attempt before any new
+qualification or parsing; identical later refusals cannot retry. Diagnostic errors
+or an invalid extra field leave the original work failure independent.
+
+This optional check is manually qualified only for the resident parent CPython
+3.14.4 final runtime. It uses the already held Popen return code and, for an exact
+Build with exact integer IDs, at most 1024 exact receipt bytes. Empty bytes need no
+parser. Nonempty bytes must be ASCII without an actual NUL; other encodings, types
+or bounds produce no extra observation. Eligible bytes go unchanged to the existing
+receipt validator once, without an observer. Schema/duplicate or JSON syntax refusal
+means `MISMATCH`; unexpected decoder, numeric-limit, recursion or allocation errors
+omit the extra observation. No codec prewarming or additional I/O is used.
+
+`MATCH` only means the held receipt passes that validator. It does not prove receipt
+close, imports, rendering, readiness or completion. `EMPTY` does not prove setup never
+ran, and signal names do not identify a cause: `SIGNAL_KILL` cannot distinguish OOM,
+a hard limit or an external sender. The sealed pair retains only two closed strings,
+adds no authority and shares the existing single bounded diagnostic write. Runtime
+qualification is a semantic review constant, not a Python installer/version selector;
+operational admission and existing Renovate managers therefore require no change.
+Qualifying another runtime requires a fresh semantic review.
+
 `.github/docker-userns-unused-admission.json` is a manually reviewed semantic
 admission based on the audited Stage-1 Ubuntu 26 observation, bound to the
 active source manifest and helper contracts. It never compares historical
