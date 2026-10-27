@@ -12,10 +12,15 @@ import selectors
 import signal
 import stat
 import subprocess
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Protocol
+from functools import partial
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
+    from contextlib import AbstractContextManager
 
 MAX_SOURCE = 65536
 MAX_INTERPRETER = 16 * 1024 * 1024
@@ -141,6 +146,460 @@ class ChildError(Exception):
         self.pending = self.lifetime is Lifetime.UNKNOWN
 
 
+WORK_FAILURE_LIMIT = 512
+WORK_FAILURE_FIELDS = ("context", "site", "failure")
+_WORK_CATEGORIES = frozenset(
+    ("REFUSED", "OS_ERROR", "TIMEOUT", "DECODE", "VALUE_ERROR", "LOOKUP_ERROR", "TYPE_ERROR", "OTHER")
+)
+_WORK_REFUSAL = frozenset(("REFUSED",))
+WORK_FAILURES = {
+    ("CHILD_PARENT", "B_BUILD_G02"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_BUILD_G03"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_BUILD_STATUS_REFUSAL"): _WORK_REFUSAL,
+    ("CHILD_PARENT", "B_BYTES_AT_EXTEND"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_BYTES_AT_W01"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_CAPTURE_EXTEND"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_CAPTURE_G01"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_CAPTURE_G02"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_CAPTURE_G03"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_CAPTURE_W01"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_CAPTURE_W02"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_CAPTURE_W03"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_CAPTURE_W04"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_CAPTURE_W05"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_CAPTURE_W06"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_CAPTURE_W07"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_CAPTURE_W08"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_CAPTURE_W09"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_EXECUTE_G01"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_EXECUTE_W01"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_EXECUTE_W02"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_EXECUTE_W03"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_INTERPRETER_G01"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_INTERPRETER_G02"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_INTERPRETER_G03"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_INTERPRETER_G04"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_INTERPRETER_W01"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_INTERPRETER_W02"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_PREFLIGHT_G01"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_PREFLIGHT_G02"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_PREFLIGHT_G03"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_PREFLIGHT_G04"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_PREFLIGHT_W01"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_PREFLIGHT_W02"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_PRIVILEGE_RECEIPT_G01"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_PRIVILEGE_RECEIPT_G02"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_PRIVILEGE_RECEIPT_W01"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_PROBE_G01"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_PROBE_G02"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_PROBE_G03"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_PROBE_G04"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_PROBE_G06"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_PROBE_G07"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_PROBE_STATUS_REFUSAL"): _WORK_REFUSAL,
+    ("CHILD_PARENT", "B_PROBE_W01"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_PROBE_W02"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_PROBE_W03"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_SEAL_DUP"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_SEAL_G01"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_SEAL_G02"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_SEAL_W01"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_SEAL_W02"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_SEAL_W03"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_SEAL_W04"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_SEAL_W05"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_SEAL_W06"): _WORK_CATEGORIES,
+    ("CHILD_PARENT", "B_UNIQUE_G01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_BUDGET_G01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_BUDGET_G02"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_CALLER_G01"): _WORK_REFUSAL,
+    ("CUSTODY", "C_CLOCK_G01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_CLOCK_W01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_COHORT_G01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_COHORT_G02"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_COHORT_G03"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_CREATE_G01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_CREATE_W01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_CREATE_W02"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_CREATE_W03"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_CREATE_W04"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_CREATE_W05"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_CREATE_W06"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_CREATE_W07"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_CREATE_W08"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_CREATE_W09"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_CREATE_W10"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_DIRECTORY_G01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_EXACT_G01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_FILE_G01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_FILE_G02"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_GROUP_G01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_INITIAL_G01"): _WORK_REFUSAL,
+    ("CUSTODY", "C_INTEGER_G01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_JOURNAL_G01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_JOURNAL_G02"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_JOURNAL_G03"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_MANIFEST_G01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_MANIFEST_G02"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_MANIFEST_G03"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_MANIFEST_G04"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_MANIFEST_G05"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_MANIFEST_G06"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_MANIFEST_G07"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_MANIFEST_G08"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_MANIFEST_G09"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_MANIFEST_W01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_NEXT_G01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_OBSERVATION_G01"): _WORK_REFUSAL,
+    ("CUSTODY", "C_OBSERVATION_G02"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_OBSERVATION_G03"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_OBSERVATION_G04"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_OBSERVATION_G05"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_OBSERVATION_G06"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_OBSERVATION_G07"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_OBSERVATION_G08"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_PHASE_G01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_PHASE_G02"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_PHASE_G03"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_PHASE_G04"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_PHASE_G05"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_PHASE_G06"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_POPULATE_G01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_POPULATE_G02"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_POPULATE_G03"): _WORK_REFUSAL,
+    ("CUSTODY", "C_POPULATE_G05"): _WORK_REFUSAL,
+    ("CUSTODY", "C_POPULATE_W01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_POPULATE_W02"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_PREPARE_UNUSED_G01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_PREPARE_UNUSED_G02"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_PREPARE_UNUSED_G03"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_PREPARE_UNUSED_G04"): _WORK_REFUSAL,
+    ("CUSTODY", "C_PREPARE_UNUSED_G05"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_PROCESS_G01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_ROOT_G01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_RUN_G01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_RUN_G02"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_RUN_G03"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_SELF_START_G01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_SELF_START_G02"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_SELF_START_OPEN"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_SELF_START_W01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_START_G01"): _WORK_REFUSAL,
+    ("CUSTODY", "C_STORE_G01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_G02"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_G03"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_G04"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_G05"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_LOAD_G01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_LOAD_G02"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_LOAD_G03"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_LOAD_G04"): _WORK_REFUSAL,
+    ("CUSTODY", "C_STORE_LOAD_W01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_LOAD_W02"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_READ_G01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_READ_G02"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_READ_G03"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_READ_W01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_READ_W02"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_READ_W03"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_SAVE_G01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_SAVE_G02"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_SAVE_G03"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_SAVE_G04"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_SAVE_G05"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_SAVE_STATE_REPLACE"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_SAVE_W01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_SAVE_W02"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_SAVE_W03"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_SAVE_W04"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_SAVE_W05"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_SAVE_W06"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_W01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_W02"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_W03"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_W04"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_W05"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_W06"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_W07"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_W08"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_WRITE_DUP"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_WRITE_G01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_WRITE_G02"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_WRITE_G03"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_WRITE_W01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_WRITE_W02"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_WRITE_W03"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_WRITE_W04"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_STORE_WRITE_W05"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_TOKEN_G01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_UNIQUE_G01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_VALIDATE_G01"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_VALIDATE_G02"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_VALIDATE_G03"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_VALIDATE_G04"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_VALIDATE_G05"): _WORK_CATEGORIES,
+    ("CUSTODY", "C_VALIDATE_G06"): _WORK_CATEGORIES,
+    ("HOSTED", "H_CLOCK_BOOT_ID_G01"): _WORK_REFUSAL,
+    ("HOSTED", "H_CLOCK_NOW_NS_W01"): _WORK_CATEGORIES,
+    ("HOSTED", "H_GROUP_G01"): _WORK_CATEGORIES,
+    ("HOSTED", "H_GROUP_G02"): _WORK_CATEGORIES,
+    ("HOSTED", "H_GROUP_LSTAT"): _WORK_CATEGORIES,
+    ("HOSTED", "H_HOSTPORT_OBSERVE_G01"): _WORK_CATEGORIES,
+    ("HOSTED", "H_HOSTPORT_OBSERVE_G02"): _WORK_CATEGORIES,
+    ("HOSTED", "H_HOSTPORT_OBSERVE_G03"): _WORK_CATEGORIES,
+    ("HOSTED", "H_HOSTPORT_OBSERVE_G04"): _WORK_CATEGORIES,
+    ("HOSTED", "H_HOSTPORT_OBSERVE_G05"): _WORK_CATEGORIES,
+    ("HOSTED", "H_HOSTPORT_OBSERVE_G06"): _WORK_CATEGORIES,
+    ("HOSTED", "H_HOSTPORT_OBSERVE_G08"): _WORK_REFUSAL,
+    ("HOSTED", "H_HOSTPORT_OBSERVE_W01"): _WORK_CATEGORIES,
+    ("HOSTED", "H_HOSTPORT_REOBSERVE_G01"): _WORK_CATEGORIES,
+    ("HOSTED", "H_HOSTPORT_REOBSERVE_G02"): _WORK_CATEGORIES,
+    ("HOSTED", "H_PROCESS_G01"): _WORK_CATEGORIES,
+    ("HOSTED", "H_PROCESS_G02"): _WORK_CATEGORIES,
+    ("HOSTED", "H_PROCESS_G03"): _WORK_CATEGORIES,
+    ("HOSTED", "H_PROCESS_G04"): _WORK_CATEGORIES,
+    ("HOSTED", "H_PROCESS_G05"): _WORK_CATEGORIES,
+    ("HOSTED", "H_PROCESS_G06"): _WORK_REFUSAL,
+    ("HOSTED", "H_READ_ROOT_G01"): _WORK_CATEGORIES,
+    ("HOSTED", "H_READ_ROOT_G02"): _WORK_CATEGORIES,
+    ("HOSTED", "H_READ_ROOT_G03"): _WORK_CATEGORIES,
+    ("HOSTED", "H_READ_ROOT_G04"): _WORK_CATEGORIES,
+    ("HOSTED", "H_READ_ROOT_G05"): _WORK_CATEGORIES,
+    ("HOSTED", "H_READ_ROOT_G06"): _WORK_CATEGORIES,
+    ("HOSTED", "H_READ_ROOT_G07"): _WORK_CATEGORIES,
+    ("HOSTED", "H_READ_ROOT_W01"): _WORK_CATEGORIES,
+    ("HOSTED", "H_READ_ROOT_W02"): _WORK_CATEGORIES,
+    ("HOSTED", "H_READ_ROOT_W03"): _WORK_CATEGORIES,
+    ("HOSTED", "H_SAFE_PATH_COMPONENT_LSTAT"): _WORK_CATEGORIES,
+    ("HOSTED", "H_SAFE_PATH_G01"): _WORK_CATEGORIES,
+    ("HOSTED", "H_SAFE_PATH_G02"): _WORK_CATEGORIES,
+    ("HOSTED", "H_SAFE_PATH_G03"): _WORK_CATEGORIES,
+    ("HOSTED", "H_SAFE_PATH_G04"): _WORK_CATEGORIES,
+    ("HOSTED", "H_SAFE_PATH_G05"): _WORK_CATEGORIES,
+    ("HOSTED", "H_SAFE_PATH_G06"): _WORK_CATEGORIES,
+    ("HOSTED", "H_SAFE_PATH_G07"): _WORK_CATEGORIES,
+    ("HOSTED", "H_SAFE_PATH_READLINK"): _WORK_CATEGORIES,
+    ("HOSTED", "H_SAFE_PATH_ROOT_LSTAT"): _WORK_CATEGORIES,
+}
+
+
+def work_failure(value: object) -> dict[str, object] | None:
+    """Normalize one closed optional detail without accepting authored or unknown data."""
+    if type(value) is not dict or set(value) != {"schema", "context", "site", "failure"}:
+        return None
+    if type(value["schema"]) is not int or value["schema"] != 1:
+        return None
+    if any(type(value[key]) is not str for key in ("context", "site", "failure")):
+        return None
+    if value["failure"] not in WORK_FAILURES.get((value["context"], value["site"]), ()):
+        return None
+    result = {"schema": 1, "context": value["context"], "site": value["site"], "failure": value["failure"]}
+    if len(json.dumps(result, ensure_ascii=True).encode("ascii")) > WORK_FAILURE_LIMIT:
+        return None
+    return result
+
+
+class WorkObserver:
+    """Keep only immutable closed first-work evidence for one explicit preparation scope."""
+
+    __slots__ = ("_active", "_fault", "_invalid", "_mute_depth", "_sealed", "_work_depth", "_work_site")
+
+    def __init__(self) -> None:
+        """Start inactive, without references to privileged inputs."""
+        self._active = self._sealed = self._invalid = False
+        self._fault: tuple[str, str, str] | None = None
+        self._work_depth = self._mute_depth = 0
+        self._work_site: tuple[str, str] | None = None
+
+    def record(self, context: str, site: str, failure: str) -> None:
+        """Accept an active closed candidate; conflicting candidates invalidate detail."""
+        if not self._active or self._sealed or self._mute_depth or not self._work_depth or self._invalid:
+            return
+        candidate = (context, site, failure)
+        if (context, site) != self._work_site:
+            self._invalid, self._fault = True, None
+            return
+        if work_failure({"schema": 1, "context": context, "site": site, "failure": failure}) is None or (
+            self._fault is not None and self._fault != candidate
+        ):
+            self._invalid, self._fault = True, None
+        else:
+            self._fault = candidate
+
+    def snapshot(self) -> dict[str, object] | None:
+        """Expose sealed safe values without exceptions, captures or cleanup authority."""
+        if not self._sealed or self._active or self._invalid or self._fault is None:
+            return None
+        context, site, failure = self._fault
+        return work_failure({"schema": 1, "context": context, "site": site, "failure": failure})
+
+    @contextmanager
+    def observing(self) -> Iterator[None]:
+        """Activate once, then seal before later phases or invocation cleanup."""
+        if self._active or self._sealed:
+            self._invalid, self._fault = True, None
+            yield
+            return
+        self._active = True
+        try:
+            yield
+        finally:
+            sealed = False
+            with suppress(Exception):
+                self.seal()
+                sealed = True
+            if not sealed:
+                self._invalid, self._fault, self._active = True, None, False
+
+    def seal(self) -> None:
+        """Seal only closed evidence; the caller suppresses diagnostic sealing failure."""
+        self._active, self._sealed = False, True
+
+    @contextmanager
+    def muted(self) -> Iterator[None]:
+        """Exclude retention and its shared helper calls from work attribution."""
+        self._mute_depth += 1
+        try:
+            yield
+        finally:
+            self._mute_depth -= 1
+
+    def _attempt(self, context: str, site: str, failure: str) -> None:
+        if self._fault is not None or self._invalid:
+            return
+        recorded = False
+        with suppress(Exception):
+            self.record(context, site, failure)
+            recorded = True
+        if not recorded:
+            self._invalid, self._fault = True, None
+
+    @contextmanager
+    def work(self, context: str, site: str | None, refusals: tuple[type[Exception], ...]) -> Iterator[None]:
+        """Latch only this original work operation before its enclosing release runs."""
+        if site is None or not self._active or self._sealed or self._mute_depth or self._invalid:
+            yield
+            return
+        if type(context) is not str or type(site) is not str or (context, site) not in WORK_FAILURES:
+            self._invalid, self._fault = True, None
+            yield
+            return
+        previous = self._work_site
+        self._work_site = (context, site)
+        self._work_depth += 1
+        try:
+            yield
+        except Exception as error:
+            if self._fault is None and not self._invalid:
+                recorded = False
+                with suppress(Exception):
+                    self._attempt(context, site, _failure(error, refusals))
+                    recorded = True
+                if not recorded:
+                    self._invalid, self._fault = True, None
+            raise
+        finally:
+            self._work_depth -= 1
+            self._work_site = previous
+
+    def refused(self, context: str, site: str | None) -> None:
+        """Record an actual false guard without reading or re-evaluating its operands."""
+        if site is None or not self._active or self._sealed or self._mute_depth or self._invalid:
+            return
+        if type(context) is not str or type(site) is not str or (context, site) not in WORK_FAILURES:
+            self._invalid, self._fault = True, None
+            return
+        previous = self._work_site
+        self._work_site = (context, site)
+        self._work_depth += 1
+        try:
+            self._attempt(context, site, "REFUSED")
+        finally:
+            self._work_depth -= 1
+            self._work_site = previous
+
+
+def new_observer() -> WorkObserver | None:
+    """Disable observation silently if its local collector cannot be constructed."""
+    result = None
+    with suppress(Exception):
+        result = WorkObserver()
+    return result
+
+
+def observer_args(observer: WorkObserver | None) -> dict[str, WorkObserver]:
+    """Keep omitted observers' shared call signatures unchanged."""
+    return {"observer": observer} if type(observer) is WorkObserver else {}
+
+
+@contextmanager
+def observing(observer: WorkObserver | None) -> Iterator[None]:
+    """Scope only explicitly supplied observers, preserving default callers."""
+    if type(observer) is WorkObserver:
+        with observer.observing():
+            yield
+    else:
+        yield
+
+
+@contextmanager
+def muted(observer: WorkObserver | None) -> Iterator[None]:
+    """Mute only the supplied invocation's cleanup, without ambient state."""
+    if type(observer) is WorkObserver:
+        with observer.muted():
+            yield
+    else:
+        yield
+
+
+def _failure(error: Exception, refusals: tuple[type[Exception], ...]) -> str:
+    for category, kinds in (
+        ("REFUSED", refusals),
+        ("TIMEOUT", (subprocess.TimeoutExpired,)),
+        ("OS_ERROR", (OSError,)),
+        ("DECODE", (UnicodeError,)),
+        ("VALUE_ERROR", (ValueError,)),
+        ("LOOKUP_ERROR", (LookupError,)),
+        ("TYPE_ERROR", (TypeError,)),
+    ):
+        if isinstance(error, kinds):
+            return category
+    return "OTHER"
+
+
+@contextmanager
+def work(
+    observer: WorkObserver | None, context: str, site: str | None, refusals: tuple[type[Exception], ...]
+) -> Iterator[None]:
+    """Observe only a named original work site, leaving default consumers unchanged."""
+    if type(observer) is WorkObserver:
+        with observer.work(context, site, refusals):
+            yield
+    else:
+        yield
+
+
+def refused(observer: WorkObserver | None, context: str, site: str | None) -> None:
+    """Offer only an actual false predicate or the approved known-dead status refusal."""
+    if type(observer) is WorkObserver:
+        observer.refused(context, site)
+
+
+def _work(observer: WorkObserver | None, site: str | None) -> AbstractContextManager[None]:
+    return work(observer, "CHILD_PARENT", site, (ChildError,))
+
+
+def _observe[T](
+    observer: WorkObserver | None, site: str, operation: Callable[..., T], /, *args: object, **kwargs: object
+) -> T:
+    with _work(observer, site):
+        return operation(*args, **kwargs)
+
+
+def _pairs(observer: WorkObserver | None) -> Callable[..., dict[str, object]]:
+    return _unique if observer is None else partial(_unique, observer=observer)
+
+
 @dataclass(frozen=True)
 class Interpreter:
     """Require explicit reviewed system-interpreter authority; never use sys.executable."""
@@ -178,44 +637,53 @@ class Outcome:
     dead: bool
 
 
-def _need(value: object, *, dead: bool | None = None) -> None:
+def _need(
+    value: object, *, dead: bool | None = None, observer: WorkObserver | None = None, work_site: str | None = None
+) -> None:
     if not value:
+        refused(observer, "CHILD_PARENT", work_site)
         raise ChildError(dead=dead)
 
 
-def bytes_at(descriptor: int, limit: int) -> bytes:
+def bytes_at(descriptor: int, limit: int, *, observer: WorkObserver | None = None) -> bytes:
     """Read finite descriptor bytes without changing its shared offset."""
     content = bytearray()
     while len(content) <= limit:
-        raw = os.pread(descriptor, min(65536, limit + 1 - len(content)), len(content))
+        raw = _observe(
+            observer, "B_BYTES_AT_W01", os.pread, descriptor, min(65536, limit + 1 - len(content)), len(content)
+        )
         if not raw:
             return bytes(content)
-        content.extend(raw)
+        _observe(observer, "B_BYTES_AT_EXTEND", content.extend, raw)
     raise ChildError(dead=False)
 
 
-def seal(module: str, data: bytes) -> Source:
+def seal(module: str, data: bytes, *, observer: WorkObserver | None = None) -> Source:
     """Create immutable read-only source FDs without exposing root directories."""
-    _need(
-        os.geteuid() == 0
-        and module in MODULES
-        and 0 < len(data) <= MAX_SOURCE
-        and SEALS is not None
-        and hasattr(fcntl, "F_ADD_SEALS")
-        and hasattr(fcntl, "F_GET_SEALS")
-        and hasattr(os, "memfd_create")
-        and hasattr(os, "MFD_ALLOW_SEALING")
+    with _work(observer, "B_SEAL_G01"):
+        _need(
+            os.geteuid() == 0
+            and module in MODULES
+            and 0 < len(data) <= MAX_SOURCE
+            and SEALS is not None
+            and hasattr(fcntl, "F_ADD_SEALS")
+            and hasattr(fcntl, "F_GET_SEALS")
+            and hasattr(os, "memfd_create")
+            and hasattr(os, "MFD_ALLOW_SEALING")
+        )
+    descriptor = _observe(
+        observer, "B_SEAL_W01", os.memfd_create, "containers-userns-source", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING
     )
-    descriptor = os.memfd_create("containers-userns-source", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
     read_only = None
     try:
-        with os.fdopen(os.dup(descriptor), "wb") as stream:
-            stream.write(data)
-            stream.flush()
-        os.fchmod(descriptor, 0o400)
-        fcntl.fcntl(descriptor, fcntl.F_ADD_SEALS, SEALS)
-        read_only = os.open(f"/proc/self/fd/{descriptor}", os.O_RDONLY | os.O_CLOEXEC)
-        _need(fcntl.fcntl(read_only, fcntl.F_GET_SEALS) & SEALS == SEALS)
+        with os.fdopen(_observe(observer, "B_SEAL_DUP", os.dup, descriptor), "wb") as stream:
+            _observe(observer, "B_SEAL_W02", stream.write, data)
+            _observe(observer, "B_SEAL_W03", stream.flush)
+        _observe(observer, "B_SEAL_W04", os.fchmod, descriptor, 0o400)
+        _observe(observer, "B_SEAL_W05", fcntl.fcntl, descriptor, fcntl.F_ADD_SEALS, SEALS)
+        read_only = _observe(observer, "B_SEAL_W06", os.open, f"/proc/self/fd/{descriptor}", os.O_RDONLY | os.O_CLOEXEC)
+        with _work(observer, "B_SEAL_G02"):
+            _need(fcntl.fcntl(read_only, fcntl.F_GET_SEALS) & SEALS == SEALS)
         return Source(module, read_only, len(data), hashlib.sha256(data).hexdigest())
     except BaseException:
         if read_only is not None:
@@ -240,50 +708,66 @@ def file_mark(info: os.stat_result) -> tuple[int, ...]:
     )
 
 
-def _interpreter(value: Interpreter) -> tuple[tuple[int, ...], bytes]:
-    info = os.fstat(value.descriptor)
-    _need(
-        stat.S_ISREG(info.st_mode)
-        and info.st_uid == 0
-        and info.st_nlink == 1
-        and info.st_mode & 0o111
-        and not info.st_mode & 0o7022
-        and fcntl.fcntl(value.descriptor, fcntl.F_GETFL) & os.O_ACCMODE == os.O_RDONLY
-    )
+def _interpreter(value: Interpreter, *, observer: WorkObserver | None = None) -> tuple[tuple[int, ...], bytes]:
+    info = _observe(observer, "B_INTERPRETER_W01", os.fstat, value.descriptor)
+    with _work(observer, "B_INTERPRETER_G01"):
+        _need(
+            stat.S_ISREG(info.st_mode)
+            and info.st_uid == 0
+            and info.st_nlink == 1
+            and info.st_mode & 0o111
+            and not info.st_mode & 0o7022
+            and fcntl.fcntl(value.descriptor, fcntl.F_GETFL) & os.O_ACCMODE == os.O_RDONLY
+        )
     try:
         capabilities = os.getxattr(value.descriptor, "security.capability")
     except OSError as error:
-        _need(error.errno == errno.ENODATA)
+        with _work(observer, "B_INTERPRETER_G02"):
+            _need(error.errno == errno.ENODATA)
     else:
-        _need(not capabilities)
-    raw = bytes_at(value.descriptor, MAX_INTERPRETER)
-    _need(
-        raw.startswith(b"\x7fELF")
-        and hashlib.sha256(raw).hexdigest() == value.sha256
-        and file_mark(os.fstat(value.descriptor)) == file_mark(info)
+        with _work(observer, "B_INTERPRETER_G03"):
+            _need(not capabilities)
+    raw = _observe(
+        observer, "B_INTERPRETER_W02", bytes_at, value.descriptor, MAX_INTERPRETER, **observer_args(observer)
     )
+    with _work(observer, "B_INTERPRETER_G04"):
+        _need(
+            raw.startswith(b"\x7fELF")
+            and hashlib.sha256(raw).hexdigest() == value.sha256
+            and file_mark(os.fstat(value.descriptor)) == file_mark(info)
+        )
     return file_mark(info), raw
 
 
-def _capture(process: subprocess.Popen[bytes], receipt: int, lease: Build, clock: Clock) -> tuple[bytes, bytes]:
+def _capture(
+    process: subprocess.Popen[bytes], receipt: int, lease: Build, clock: Clock, *, observer: WorkObserver | None = None
+) -> tuple[bytes, bytes]:
     output, proof = bytearray(), bytearray()
-    with selectors.DefaultSelector() as selector:
-        selector.register(process.stdout, selectors.EVENT_READ, (output, MAX_POLICY))
-        selector.register(receipt, selectors.EVENT_READ, (proof, MAX_POLICY))
+    with _observe(observer, "B_CAPTURE_W01", selectors.DefaultSelector) as selector:
+        _observe(
+            observer, "B_CAPTURE_W02", selector.register, process.stdout, selectors.EVENT_READ, (output, MAX_POLICY)
+        )
+        _observe(observer, "B_CAPTURE_W03", selector.register, receipt, selectors.EVENT_READ, (proof, MAX_POLICY))
         while selector.get_map():
-            _need(clock.now_ns() < lease.deadline_ns)
-            for key, _ in selector.select(0.01):
+            with _work(observer, "B_CAPTURE_G01"):
+                _need(clock.now_ns() < lease.deadline_ns)
+            for key, _ in _observe(observer, "B_CAPTURE_W04", selector.select, 0.01):
                 content, limit = key.data
-                raw = os.read(key.fd, min(1024, limit + 1 - len(content)))
-                content.extend(raw)
-                _need(len(content) <= limit)
+                raw = _observe(observer, "B_CAPTURE_W05", os.read, key.fd, min(1024, limit + 1 - len(content)))
+                _observe(observer, "B_CAPTURE_EXTEND", content.extend, raw)
+                with _work(observer, "B_CAPTURE_G02"):
+                    _need(len(content) <= limit)
                 if not raw:
-                    selector.unregister(key.fileobj)
-    while os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None:
-        _need(clock.now_ns() < lease.deadline_ns)
+                    _observe(observer, "B_CAPTURE_W06", selector.unregister, key.fileobj)
+    while (
+        _observe(observer, "B_CAPTURE_W07", os.waitid, os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        is None
+    ):
+        with _work(observer, "B_CAPTURE_G03"):
+            _need(clock.now_ns() < lease.deadline_ns)
         # The child also owns an independent, nonrenewed wall alarm.
-        with selectors.DefaultSelector() as selector:
-            selector.select(0.001)
+        with _observe(observer, "B_CAPTURE_W08", selectors.DefaultSelector) as selector:
+            _observe(observer, "B_CAPTURE_W09", selector.select, 0.001)
     return bytes(output), bytes(proof)
 
 
@@ -303,48 +787,83 @@ def _stop(process: subprocess.Popen[bytes], lease: Build, clock: Clock) -> tuple
 
 
 def _preflight(
-    interpreter: Interpreter, sources: tuple[Source, ...], lease: Build, clock: Clock
+    interpreter: Interpreter,
+    sources: tuple[Source, ...],
+    lease: Build,
+    clock: Clock,
+    *,
+    observer: WorkObserver | None = None,
 ) -> tuple[tuple[tuple[int, ...], bytes], int]:
-    _need(
-        os.geteuid() == 0
-        and SEALS is not None
-        and hasattr(fcntl, "F_GET_SEALS")
-        and type(lease.uid) is int
-        and 0 < lease.uid < 2**31
-        and type(lease.gid) is int
-        and 0 < lease.gid < 2**31
-        and tuple(item.module for item in sources) == MODULES
-        and re.fullmatch(r"dockerlens-127-upstream-rootless-[1-9][0-9]{0,19}-[1-9][0-9]{0,19}-[0-9a-f]{32}", lease.name)
-    )
-    seconds = min(5, (lease.deadline_ns - clock.now_ns()) // 1_000_000_000)
-    _need(seconds >= 1 and lease.deadline_ns < lease.cleanup_deadline_ns)
-    before = _interpreter(interpreter)
-    for item in sources:
+    with _work(observer, "B_PREFLIGHT_G01"):
         _need(
-            fcntl.fcntl(item.descriptor, fcntl.F_GETFL) & os.O_ACCMODE == os.O_RDONLY
-            and fcntl.fcntl(item.descriptor, fcntl.F_GET_SEALS) & SEALS == SEALS
-            and os.fstat(item.descriptor).st_uid == 0
-            and hashlib.sha256(bytes_at(item.descriptor, item.size)).hexdigest() == item.sha256
+            os.geteuid() == 0
+            and SEALS is not None
+            and hasattr(fcntl, "F_GET_SEALS")
+            and type(lease.uid) is int
+            and 0 < lease.uid < 2**31
+            and type(lease.gid) is int
+            and 0 < lease.gid < 2**31
+            and tuple(item.module for item in sources) == MODULES
+            and re.fullmatch(
+                r"dockerlens-127-upstream-rootless-[1-9][0-9]{0,19}-[1-9][0-9]{0,19}-[0-9a-f]{32}", lease.name
+            )
         )
+    seconds = min(5, (lease.deadline_ns - _observe(observer, "B_PREFLIGHT_W01", clock.now_ns)) // 1_000_000_000)
+    with _work(observer, "B_PREFLIGHT_G02"):
+        _need(seconds >= 1 and lease.deadline_ns < lease.cleanup_deadline_ns)
+    before = _interpreter(interpreter, **observer_args(observer))
+    for item in sources:
+        with _work(observer, "B_PREFLIGHT_G03"):
+            _need(
+                fcntl.fcntl(item.descriptor, fcntl.F_GETFL) & os.O_ACCMODE == os.O_RDONLY
+                and fcntl.fcntl(item.descriptor, fcntl.F_GET_SEALS) & SEALS == SEALS
+                and os.fstat(item.descriptor).st_uid == 0
+                and hashlib.sha256(bytes_at(item.descriptor, item.size, **observer_args(observer))).hexdigest()
+                == item.sha256
+            )
     # Hashing must not consume time and then start a child on the earlier allowance.
-    seconds = min(5, (lease.deadline_ns - clock.now_ns()) // 1_000_000_000)
-    _need(seconds >= 1)
+    seconds = min(5, (lease.deadline_ns - _observe(observer, "B_PREFLIGHT_W02", clock.now_ns)) // 1_000_000_000)
+    with _work(observer, "B_PREFLIGHT_G04"):
+        _need(seconds >= 1)
     return before, seconds
+
+
+@dataclass(frozen=True)
+class _ExecuteArgs:
+    interpreter: Interpreter
+    sources: tuple[Source, ...]
+    lease: Build
+    clock: Clock
+    seconds: int
 
 
 def _execute(
     interpreter: Interpreter, sources: tuple[Source, ...], lease: Build, clock: Clock, seconds: int
 ) -> tuple[bytes, bytes, int | None, Lifetime]:
+    return _execute_observed(_ExecuteArgs(interpreter, sources, lease, clock, seconds))
+
+
+def _execute_observed(
+    arguments: _ExecuteArgs, observer: WorkObserver | None = None
+) -> tuple[bytes, bytes, int | None, Lifetime]:
+    interpreter, sources, lease, clock, seconds = (
+        arguments.interpreter,
+        arguments.sources,
+        arguments.lease,
+        arguments.clock,
+        arguments.seconds,
+    )
     try:
-        read, write = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
+        read, write = _observe(observer, "B_EXECUTE_W01", os.pipe2, os.O_CLOEXEC | os.O_NONBLOCK)
     except Exception as error:
         raise ChildError(lifetime=Lifetime.NEVER_STARTED) from error
     process, dead, status = None, False, None
     primary = None
     attempted = False
     try:
-        seconds = min(seconds, (lease.deadline_ns - clock.now_ns()) // 1_000_000_000)
-        _need(seconds >= 1)
+        seconds = min(seconds, (lease.deadline_ns - _observe(observer, "B_EXECUTE_W02", clock.now_ns)) // 1_000_000_000)
+        with _work(observer, "B_EXECUTE_G01"):
+            _need(seconds >= 1)
         arguments = [
             str(interpreter.descriptor),
             str(write),
@@ -355,7 +874,10 @@ def _execute(
             str(seconds),
         ]
         attempted = True
-        process = subprocess.Popen(  # noqa: S603 - verified held interpreter, fixed code and descriptor-only inputs.
+        process = _observe(
+            observer,
+            "B_EXECUTE_W03",
+            subprocess.Popen,
             [f"/proc/self/fd/{interpreter.descriptor}", "-I", "-B", "-S", "-c", CODE, *arguments],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -371,7 +893,7 @@ def _execute(
         )
         os.close(write)
         write = -1
-        output, proof = _capture(process, read, lease, clock)
+        output, proof = _capture(process, read, lease, clock, **observer_args(observer))
     except (ChildError, OSError, ValueError, TypeError, RuntimeError, subprocess.SubprocessError) as error:
         primary = error
     finally:
@@ -403,38 +925,61 @@ def _close_pipes(descriptors: tuple[int, int], primary: Exception | None) -> Exc
     return primary
 
 
-def build(interpreter: Interpreter, sources: tuple[Source, ...], lease: Build, clock: Clock) -> Outcome:
+def build(
+    interpreter: Interpreter,
+    sources: tuple[Source, ...],
+    lease: Build,
+    clock: Clock,
+    *,
+    observer: WorkObserver | None = None,
+) -> Outcome:
     """Preserve failure while reporting never-started, proven-dead or unknown lifetime."""
     try:
-        before, seconds = _preflight(interpreter, sources, lease, clock)
+        before, seconds = _preflight(interpreter, sources, lease, clock, **observer_args(observer))
     except Exception as error:
         raise ChildError(lifetime=Lifetime.NEVER_STARTED) from error
-    output, proof, status, lifetime = _execute(interpreter, sources, lease, clock, seconds)
+    output, proof, status, lifetime = (
+        _execute(interpreter, sources, lease, clock, seconds)
+        if observer is None
+        else _execute_observed(_ExecuteArgs(interpreter, sources, lease, clock, seconds), observer)
+    )
     try:
-        _need(
-            lifetime is Lifetime.DEAD and status == 0 and clock.now_ns() < lease.deadline_ns,
-            dead=lifetime is Lifetime.DEAD,
-        )
-        _privilege_receipt(proof, lease)
-        _need(_interpreter(interpreter) == before, dead=lifetime is Lifetime.DEAD)
-        _need(clock.now_ns() < lease.deadline_ns, dead=lifetime is Lifetime.DEAD)
+        try:
+            _need(
+                lifetime is Lifetime.DEAD and status == 0 and clock.now_ns() < lease.deadline_ns,
+                dead=lifetime is Lifetime.DEAD,
+            )
+        except ChildError:
+            if lifetime is Lifetime.DEAD and type(status) is int and status != 0:
+                refused(observer, "CHILD_PARENT", "B_BUILD_STATUS_REFUSAL")
+            raise
+        _privilege_receipt(proof, lease, **observer_args(observer))
+        with _work(observer, "B_BUILD_G02"):
+            _need(_interpreter(interpreter, **observer_args(observer)) == before, dead=lifetime is Lifetime.DEAD)
+        with _work(observer, "B_BUILD_G03"):
+            _need(clock.now_ns() < lease.deadline_ns, dead=lifetime is Lifetime.DEAD)
         return Outcome(output, dead=True)
 
     except Exception as error:
         raise ChildError(lifetime=lifetime) from error
 
 
-def _privilege_receipt(proof: bytes, lease: Build) -> None:
+def _privilege_receipt(proof: bytes, lease: Build, *, observer: WorkObserver | None = None) -> None:
     """Require a duplicate-free closed receipt with integer IDs/schema/NNP, never bool or float."""
-    actual = json.loads(proof, object_pairs_hook=_unique)
-    _need(type(actual) is dict and all(type(actual.get(key)) is int for key in ("schema", "uid", "gid", "nnp")))
-    _need(actual == {"schema": 1, "uid": lease.uid, "gid": lease.gid, "groups": [], "nnp": 1, "capabilities": "zero"})
+    actual = _observe(observer, "B_PRIVILEGE_RECEIPT_W01", json.loads, proof, object_pairs_hook=_pairs(observer))
+    with _work(observer, "B_PRIVILEGE_RECEIPT_G01"):
+        _need(type(actual) is dict and all(type(actual.get(key)) is int for key in ("schema", "uid", "gid", "nnp")))
+    with _work(observer, "B_PRIVILEGE_RECEIPT_G02"):
+        _need(
+            actual == {"schema": 1, "uid": lease.uid, "gid": lease.gid, "groups": [], "nnp": 1, "capabilities": "zero"}
+        )
 
 
-def _unique(pairs: list[tuple[str, object]]) -> dict[str, object]:
+def _unique(pairs: list[tuple[str, object]], *, observer: WorkObserver | None = None) -> dict[str, object]:
     result = {}
     for key, value in pairs:
-        _need(key not in result)
+        with _work(observer, "B_UNIQUE_G01"):
+            _need(key not in result)
         result[key] = value
     return result
 
@@ -473,29 +1018,66 @@ else:
 )
 
 
+@dataclass(frozen=True)
+class _ProbeArgs:
+    interpreter: Interpreter
+    target: int
+    kind: str
+    lease: Build
+    clock: Clock
+
+    def observe(self, observer: WorkObserver | None = None) -> Outcome:
+        """Use the shared private probe body with an explicit local observer."""
+        return _probe_observed(self, observer)
+
+
+def probe_input(interpreter: Interpreter, target: int, kind: str, lease: Build, clock: Clock) -> _ProbeArgs:
+    """Group the hosted adapter's existing probe inputs without changing its capabilities."""
+    return _ProbeArgs(interpreter, target, kind, lease, clock)
+
+
 def probe(interpreter: Interpreter, target: int, kind: str, lease: Build, clock: Clock) -> Outcome:
-    """Run a fixed version-only or synthetic permission probe after complete ID drop."""
-    _need(
-        kind in {"parser-version", "write-denial"}
-        and type(lease.uid) is int
-        and type(lease.gid) is int
-        and lease.uid > 0
-        and lease.gid > 0
-        and os.geteuid() == 0
-        and clock.now_ns() < lease.deadline_ns < lease.cleanup_deadline_ns
+    """Keep legacy version-only and synthetic permission probes unobserved by default."""
+    return _probe_observed(_ProbeArgs(interpreter, target, kind, lease, clock))
+
+
+def _probe_observed(arguments: _ProbeArgs, observer: WorkObserver | None = None) -> Outcome:
+    interpreter, target, kind, lease, clock = (
+        arguments.interpreter,
+        arguments.target,
+        arguments.kind,
+        arguments.lease,
+        arguments.clock,
     )
-    before = _interpreter(interpreter)
-    target_mark = file_mark(os.fstat(target))
-    _need(os.fstat(target).st_uid == 0 and not os.fstat(target).st_mode & 0o7022)
+    """Run a fixed version-only or synthetic permission probe after complete ID drop."""
+    with _work(observer, "B_PROBE_G01"):
+        _need(
+            kind in {"parser-version", "write-denial"}
+            and type(lease.uid) is int
+            and type(lease.gid) is int
+            and lease.uid > 0
+            and lease.gid > 0
+            and os.geteuid() == 0
+            and clock.now_ns() < lease.deadline_ns < lease.cleanup_deadline_ns
+        )
+    before = _interpreter(interpreter, **observer_args(observer))
+    target_mark = file_mark(_observe(observer, "B_PROBE_W01", os.fstat, target))
+    with _work(observer, "B_PROBE_G02"):
+        _need(os.fstat(target).st_uid == 0 and not os.fstat(target).st_mode & 0o7022)
     if kind == "parser-version":
-        _need(bytes_at(target, MAX_INTERPRETER).startswith(b"\x7fELF"))
-    read, write = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
+        with _work(observer, "B_PROBE_G03"):
+            _need(bytes_at(target, MAX_INTERPRETER, **observer_args(observer)).startswith(b"\x7fELF"))
+    read, write = _observe(observer, "B_PROBE_W02", os.pipe2, os.O_CLOEXEC | os.O_NONBLOCK)
     process, attempted, dead = None, False, False
     try:
         seconds = min(5, (lease.deadline_ns - clock.now_ns()) // 1_000_000_000)
-        _need(os.geteuid() == 0 and seconds >= 1 and lease.deadline_ns < lease.cleanup_deadline_ns)
+        with _work(observer, "B_PROBE_G04"):
+            _need(os.geteuid() == 0 and seconds >= 1 and lease.deadline_ns < lease.cleanup_deadline_ns)
         attempted = True
-        process = subprocess.Popen(  # noqa: S603 - held OS interpreter and closed fixed probe code.
+        process = _observe(
+            observer,
+            "B_PROBE_W03",
+            subprocess.Popen,
             [
                 f"/proc/self/fd/{interpreter.descriptor}",
                 "-I",
@@ -525,12 +1107,23 @@ def probe(interpreter: Interpreter, target: int, kind: str, lease: Build, clock:
         )
         os.close(write)
         write = -1
-        output, proof = _capture(process, read, lease, clock)
+        output, proof = _capture(process, read, lease, clock, **observer_args(observer))
         status, dead = _stop(process, lease, clock)
-        _need(status == 0 and dead and clock.now_ns() < lease.deadline_ns, dead=dead)
-        _privilege_receipt(proof, lease)
-        _need(_interpreter(interpreter) == before and file_mark(os.fstat(target)) == target_mark, dead=dead)
-        _need(clock.now_ns() < lease.deadline_ns, dead=dead)
+        try:
+            _need(status == 0 and dead and clock.now_ns() < lease.deadline_ns, dead=dead)
+        except ChildError:
+            if dead is True and type(status) is int and status != 0:
+                refused(observer, "CHILD_PARENT", "B_PROBE_STATUS_REFUSAL")
+            raise
+        _privilege_receipt(proof, lease, **observer_args(observer))
+        with _work(observer, "B_PROBE_G06"):
+            _need(
+                _interpreter(interpreter, **observer_args(observer)) == before
+                and file_mark(os.fstat(target)) == target_mark,
+                dead=dead,
+            )
+        with _work(observer, "B_PROBE_G07"):
+            _need(clock.now_ns() < lease.deadline_ns, dead=dead)
         return Outcome(output, dead=True)
     except Exception as error:
         if process is not None and not dead:

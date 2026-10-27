@@ -12,11 +12,13 @@ import stat
 from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass, replace
 from enum import StrEnum
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
+    from contextlib import AbstractContextManager
 
 from scripts import docker_userns_custody_child as child
 
@@ -93,17 +95,35 @@ class CustodyError(Exception):
         self.child_pending = child_pending
 
 
-def _need(value: object) -> None:
+def _work(observer: child.WorkObserver | None, site: str | None) -> AbstractContextManager[None]:
+    return child.work(observer, "CUSTODY", site, (CustodyError, child.ChildError))
+
+
+def _observe[T](
+    observer: child.WorkObserver | None, site: str, operation: Callable[..., T], /, *args: object, **kwargs: object
+) -> T:
+    with _work(observer, site):
+        return operation(*args, **kwargs)
+
+
+def _pairs(observer: child.WorkObserver | None) -> Callable[..., dict[str, Any]]:
+    return _unique if observer is None else partial(_unique, observer=observer)
+
+
+def _need(value: object, *, observer: child.WorkObserver | None = None, work_site: str | None = None) -> None:
     if not value:
+        child.refused(observer, "CUSTODY", work_site)
         raise CustodyError
 
 
-def _integer(value: object, *, minimum: int = 0) -> None:
-    _need(type(value) is int and value >= minimum)
+def _integer(value: object, *, minimum: int = 0, observer: child.WorkObserver | None = None) -> None:
+    with _work(observer, "C_INTEGER_G01"):
+        _need(type(value) is int and value >= minimum)
 
 
-def _token(value: object, pattern: re.Pattern[str]) -> None:
-    _need(type(value) is str and pattern.fullmatch(value))
+def _token(value: object, pattern: re.Pattern[str], *, observer: child.WorkObserver | None = None) -> None:
+    with _work(observer, "C_TOKEN_G01"):
+        _need(type(value) is str and pattern.fullmatch(value))
 
 
 def _digest(value: bytes) -> str:
@@ -114,10 +134,11 @@ def _json(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
 
 
-def _unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+def _unique(pairs: list[tuple[str, Any]], *, observer: child.WorkObserver | None = None) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
-        _need(key not in result)
+        with _work(observer, "C_UNIQUE_G01"):
+            _need(key not in result)
         result[key] = value
     return result
 
@@ -397,189 +418,231 @@ class Receipt:
     outcome: str = "closed-unused"
 
 
-def _group(value: Group) -> None:
-    _need(
-        type(value) is Group
-        and type(value.path) is str
-        and re.fullmatch(r"/[A-Za-z0-9_.:/-]{0,255}", value.path)
-        and ".." not in value.path.split("/")
-        and "//" not in value.path
-    )
-    _integer(value.device)
-    _integer(value.inode, minimum=1)
+def _group(value: Group, *, observer: child.WorkObserver | None = None) -> None:
+    with _work(observer, "C_GROUP_G01"):
+        _need(
+            type(value) is Group
+            and type(value.path) is str
+            and re.fullmatch(r"/[A-Za-z0-9_.:/-]{0,255}", value.path)
+            and ".." not in value.path.split("/")
+            and "//" not in value.path
+        )
+    _integer(value.device, **child.observer_args(observer))
+    _integer(value.inode, minimum=1, **child.observer_args(observer))
 
 
-def _process(value: Process) -> None:
-    _need(type(value) is Process and type(value.uid) is int and value.uid == 0)
+def _process(value: Process, *, observer: child.WorkObserver | None = None) -> None:
+    with _work(observer, "C_PROCESS_G01"):
+        _need(type(value) is Process and type(value.uid) is int and value.uid == 0)
     for number in (value.pid, value.start_ticks, value.pgid):
-        _integer(number, minimum=1)
-    _group(value.cgroup)
+        _integer(number, minimum=1, **child.observer_args(observer))
+    _group(value.cgroup, **child.observer_args(observer))
 
 
-def _run(value: Run) -> None:
-    _need(
-        type(value) is Run
-        and value.repository == "Strukturpiloten/containers"
-        and type(value.pull_request) is int
-        and value.pull_request == PULL_REQUEST
-        and value.head_ref == "TheRealBecks/issue442-main-reconciled"
-        and value.provider == "github-hosted"
-        and value.event == "pull_request"
-        and value.checkout_identity == "github-pr-merge"
-    )
+def _run(value: Run, *, observer: child.WorkObserver | None = None) -> None:
+    with _work(observer, "C_RUN_G01"):
+        _need(
+            type(value) is Run
+            and value.repository == "Strukturpiloten/containers"
+            and type(value.pull_request) is int
+            and value.pull_request == PULL_REQUEST
+            and value.head_ref == "TheRealBecks/issue442-main-reconciled"
+            and value.provider == "github-hosted"
+            and value.event == "pull_request"
+            and value.checkout_identity == "github-pr-merge"
+        )
     for number in (value.candidate, value.head, value.base):
-        _token(number, COMMIT)
+        _token(number, COMMIT, **child.observer_args(observer))
     for number in (value.workflow_run, value.attempt):
-        _need(type(number) is str and re.fullmatch(r"[1-9][0-9]{0,19}", number))
-    _need(type(value.job) is str and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value.job))
+        with _work(observer, "C_RUN_G02"):
+            _need(type(number) is str and re.fullmatch(r"[1-9][0-9]{0,19}", number))
+    with _work(observer, "C_RUN_G03"):
+        _need(type(value.job) is str and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value.job))
 
 
-def _file(value: FileIdentity) -> None:
-    _need(
-        type(value) is FileIdentity
-        and value.owner == 0
-        and value.links == 1
-        and stat.S_ISREG(value.mode)
-        and not value.mode & 0o7022
-    )
+def _file(value: FileIdentity, *, observer: child.WorkObserver | None = None) -> None:
+    with _work(observer, "C_FILE_G01"):
+        _need(
+            type(value) is FileIdentity
+            and value.owner == 0
+            and value.links == 1
+            and stat.S_ISREG(value.mode)
+            and not value.mode & 0o7022
+        )
     for number in asdict(value).values():
-        _integer(number)
-    _need(value.inode > 0)
+        _integer(number, **child.observer_args(observer))
+    with _work(observer, "C_FILE_G02"):
+        _need(value.inode > 0)
 
 
-def _cohort(value: Cohort) -> None:
-    _need(
-        type(value) is Cohort
-        and value.os_id == "ubuntu"
-        and value.os_version == "26.04"
-        and value.architecture == "x86_64"
-        and value.image_os == "ubuntu26"
-        and value.parser_version == "5.0.2"
-    )
-    _need(re.fullmatch(r"[A-Za-z0-9_.+-]{1,96}", value.kernel) and re.fullmatch(r"[0-9.]{1,64}", value.image_version))
-    _token(value.parser_sha256, SHA)
-    _token(value.abi_sha256, SHA)
-    _need(
-        type(value.namespace_mask) is tuple
-        and value.namespace_mask == tuple(sorted(set(value.namespace_mask)))
-        and "userns_create" in value.namespace_mask
-        and all(type(item) is str and re.fullmatch(r"[a-z_]{1,40}", item) for item in value.namespace_mask)
-    )
+def _cohort(value: Cohort, *, observer: child.WorkObserver | None = None) -> None:
+    with _work(observer, "C_COHORT_G01"):
+        _need(
+            type(value) is Cohort
+            and value.os_id == "ubuntu"
+            and value.os_version == "26.04"
+            and value.architecture == "x86_64"
+            and value.image_os == "ubuntu26"
+            and value.parser_version == "5.0.2"
+        )
+    with _work(observer, "C_COHORT_G02"):
+        _need(
+            re.fullmatch(r"[A-Za-z0-9_.+-]{1,96}", value.kernel) and re.fullmatch(r"[0-9.]{1,64}", value.image_version)
+        )
+    _token(value.parser_sha256, SHA, **child.observer_args(observer))
+    _token(value.abi_sha256, SHA, **child.observer_args(observer))
+    with _work(observer, "C_COHORT_G03"):
+        _need(
+            type(value.namespace_mask) is tuple
+            and value.namespace_mask == tuple(sorted(set(value.namespace_mask)))
+            and "userns_create" in value.namespace_mask
+            and all(type(item) is str and re.fullmatch(r"[a-z_]{1,40}", item) for item in value.namespace_mask)
+        )
 
 
-def _manifest(admission: Admission) -> tuple[str, tuple[SourceSpec, ...]]:
-    _need(
-        type(admission) is Admission
-        and type(admission.manifest) is bytes
-        and len(admission.manifest) <= child.MAX_SOURCE
-    )
-    _token(admission.manifest_sha256, SHA)
-    _need(_digest(admission.manifest) == admission.manifest_sha256)
-    value = json.loads(admission.manifest, object_pairs_hook=_unique)
-    _need(
-        type(value) is dict
-        and set(value) == {"schemaVersion", "consumer", "qualification", "source", "parser"}
-        and type(value["schemaVersion"]) is int
-        and value["schemaVersion"] == 1
-        and value["consumer"] == "containers-ubuntu26-userns-dryparse"
-        and value["qualification"] == "none"
-    )
+def _manifest(
+    admission: Admission, *, observer: child.WorkObserver | None = None
+) -> tuple[str, tuple[SourceSpec, ...]]:
+    with _work(observer, "C_MANIFEST_G01"):
+        _need(
+            type(admission) is Admission
+            and type(admission.manifest) is bytes
+            and len(admission.manifest) <= child.MAX_SOURCE
+        )
+    _token(admission.manifest_sha256, SHA, **child.observer_args(observer))
+    with _work(observer, "C_MANIFEST_G02"):
+        _need(_digest(admission.manifest) == admission.manifest_sha256)
+    value = _observe(observer, "C_MANIFEST_W01", json.loads, admission.manifest, object_pairs_hook=_pairs(observer))
+    with _work(observer, "C_MANIFEST_G03"):
+        _need(
+            type(value) is dict
+            and set(value) == {"schemaVersion", "consumer", "qualification", "source", "parser"}
+            and type(value["schemaVersion"]) is int
+            and value["schemaVersion"] == 1
+            and value["consumer"] == "containers-ubuntu26-userns-dryparse"
+            and value["qualification"] == "none"
+        )
     source = value["source"]
-    _need(
-        type(source) is dict
-        and set(source) == {"managed", "repository", "ref", "commit", "license", "retrieval", "files"}
-        and source["managed"] is True
-        and source["repository"] == "Strukturpiloten/docker-lens"
-        and source["license"] == "MPL-2.0"
-        and source["retrieval"] == "public-https-immutable-commit"
-        and type(source["ref"]) is str
-        and re.fullmatch(r"[A-Za-z0-9_./-]{1,128}", source["ref"])
-    )
-    _token(source["commit"], COMMIT)
-    _need(type(source["files"]) is list and len(source["files"]) == len(SOURCE_PATHS))
+    with _work(observer, "C_MANIFEST_G04"):
+        _need(
+            type(source) is dict
+            and set(source) == {"managed", "repository", "ref", "commit", "license", "retrieval", "files"}
+            and source["managed"] is True
+            and source["repository"] == "Strukturpiloten/docker-lens"
+            and source["license"] == "MPL-2.0"
+            and source["retrieval"] == "public-https-immutable-commit"
+            and type(source["ref"]) is str
+            and re.fullmatch(r"[A-Za-z0-9_./-]{1,128}", source["ref"])
+        )
+    _token(source["commit"], COMMIT, **child.observer_args(observer))
+    with _work(observer, "C_MANIFEST_G05"):
+        _need(type(source["files"]) is list and len(source["files"]) == len(SOURCE_PATHS))
     records = {}
     for item in source["files"]:
-        _need(
-            type(item) is dict
-            and set(item) == {"path", "size", "sha256"}
-            and type(item["path"]) is str
-            and item["path"] in SOURCE_PATHS
-            and item["path"] not in records
-        )
-        _integer(item["size"], minimum=1)
-        _need(item["size"] <= child.MAX_SOURCE)
-        _token(item["sha256"], SHA)
+        with _work(observer, "C_MANIFEST_G06"):
+            _need(
+                type(item) is dict
+                and set(item) == {"path", "size", "sha256"}
+                and type(item["path"]) is str
+                and item["path"] in SOURCE_PATHS
+                and item["path"] not in records
+            )
+        _integer(item["size"], minimum=1, **child.observer_args(observer))
+        with _work(observer, "C_MANIFEST_G07"):
+            _need(item["size"] <= child.MAX_SOURCE)
+        _token(item["sha256"], SHA, **child.observer_args(observer))
         records[item["path"]] = SourceSpec(**item)
-    _need(type(value["parser"]) is dict and value["parser"].get("expectedVersion") == admission.cohort.parser_version)
+    with _work(observer, "C_MANIFEST_G08"):
+        _need(
+            type(value["parser"]) is dict and value["parser"].get("expectedVersion") == admission.cohort.parser_version
+        )
     parser = value["parser"]
-    _need(
-        set(parser) == {"managed", "repository", "expectedVersion", "contractTag", "contractCommit", "integrity"}
-        and parser["managed"] is True
-        and parser["repository"] == "apparmor/apparmor"
-        and parser["contractTag"] == "v" + admission.cohort.parser_version
-        and parser["integrity"] == "observed-preinstalled-system-tool-not-vendor-checksum"
-    )
-    _token(parser["contractCommit"], COMMIT)
+    with _work(observer, "C_MANIFEST_G09"):
+        _need(
+            set(parser) == {"managed", "repository", "expectedVersion", "contractTag", "contractCommit", "integrity"}
+            and parser["managed"] is True
+            and parser["repository"] == "apparmor/apparmor"
+            and parser["contractTag"] == "v" + admission.cohort.parser_version
+            and parser["integrity"] == "observed-preinstalled-system-tool-not-vendor-checksum"
+        )
+    _token(parser["contractCommit"], COMMIT, **child.observer_args(observer))
     return source["commit"], tuple(records[name] for name in SOURCE_PATHS)
 
 
-def _self_start() -> int:
-    with Path("/proc/self/stat").open("rb") as stream:
-        raw = stream.read(SELF_STAT_LIMIT + 1)
-    _need(len(raw) <= SELF_STAT_LIMIT and b")" in raw)
+def _self_start(*, observer: child.WorkObserver | None = None) -> int:
+    with _observe(observer, "C_SELF_START_OPEN", Path("/proc/self/stat").open, "rb") as stream:
+        raw = _observe(observer, "C_SELF_START_W01", stream.read, SELF_STAT_LIMIT + 1)
+    with _work(observer, "C_SELF_START_G01"):
+        _need(len(raw) <= SELF_STAT_LIMIT and b")" in raw)
     fields = raw.rsplit(b")", 1)[1].split()
-    _need(len(fields) > START_FIELD and fields[START_FIELD].isdigit())
+    with _work(observer, "C_SELF_START_G02"):
+        _need(len(fields) > START_FIELD and fields[START_FIELD].isdigit())
     return int(fields[START_FIELD])
 
 
-def _caller(process: Process) -> None:
+def _caller(process: Process, *, observer: child.WorkObserver | None = None) -> None:
     _need(
         process.pid == os.getpid()
         and process.pgid == os.getpgid(0)
-        and process.start_ticks == _self_start()
-        and os.geteuid() == 0
+        and process.start_ticks == _self_start(**child.observer_args(observer))
+        and os.geteuid() == 0,
+        observer=observer,
+        work_site="C_CALLER_G01",
     )
 
 
-def _root() -> None:
-    _need(os.geteuid() == 0)
+def _root(*, observer: child.WorkObserver | None = None) -> None:
+    with _work(observer, "C_ROOT_G01"):
+        _need(os.geteuid() == 0)
 
 
-def _clock(clock: Clock, lease: Lease | None = None) -> int:
-    now, boot = clock.now_ns(), clock.boot_id()
-    _integer(now)
-    _token(boot, BOOT)
+def _clock(clock: Clock, lease: Lease | None = None, *, observer: child.WorkObserver | None = None) -> int:
+    now, boot = _observe(observer, "C_CLOCK_W01", clock.now_ns), clock.boot_id()
+    _integer(now, **child.observer_args(observer))
+    _token(boot, BOOT, **child.observer_args(observer))
     if lease is not None:
-        _need(boot == lease.boot and now >= lease.start_ns)
+        with _work(observer, "C_CLOCK_G01"):
+            _need(boot == lease.boot and now >= lease.start_ns)
     return now
 
 
-def _start(clock: Clock) -> tuple[int, str]:
+def _start(clock: Clock, *, observer: child.WorkObserver | None = None) -> tuple[int, str]:
     boot = clock.boot_id()
-    _token(boot, BOOT)
-    now = _clock(clock)
-    _need(clock.boot_id() == boot)
+    _token(boot, BOOT, **child.observer_args(observer))
+    now = _clock(clock, **child.observer_args(observer))
+    _need(clock.boot_id() == boot, observer=observer, work_site="C_START_G01")
     return now, boot
 
 
-def _budget(clock: Clock, lease: Lease, until: int | None = None) -> int:
+def _budget(clock: Clock, lease: Lease, until: int | None = None, *, observer: child.WorkObserver | None = None) -> int:
     """Reject new work and accepted completion at the same original current-boot cutoff."""
     limit = lease.deadline_ns if until is None else until
-    _integer(limit)
-    _need(limit <= lease.deadline_ns)
-    now = _clock(clock, lease)
-    _need(now < limit)
+    _integer(limit, **child.observer_args(observer))
+    with _work(observer, "C_BUDGET_G01"):
+        _need(limit <= lease.deadline_ns)
+    now = _clock(clock, lease, **child.observer_args(observer))
+    with _work(observer, "C_BUDGET_G02"):
+        _need(now < limit)
     return now
 
 
-def _persist(store: _Store, record: Record, clock: Clock, until: int | None = None) -> None:
-    _budget(clock, record.lease, until)
+def _persist(
+    store: _Store, record: Record, clock: Clock, until: int | None = None, *, observer: child.WorkObserver | None = None
+) -> None:
+    _budget(clock, record.lease, until, **child.observer_args(observer))
     store.save(record)
-    _budget(clock, record.lease, until)
+    _budget(clock, record.lease, until, **child.observer_args(observer))
 
 
-def _observation(admission: Admission, request: Request, observation: Observation, clock: Clock) -> None:
-    _cohort(admission.cohort)
+def _observation(
+    admission: Admission,
+    request: Request,
+    observation: Observation,
+    clock: Clock,
+    *,
+    observer: child.WorkObserver | None = None,
+) -> None:
+    _cohort(admission.cohort, **child.observer_args(observer))
     _need(
         type(observation) is Observation
         and observation.cohort == admission.cohort
@@ -594,180 +657,274 @@ def _observation(admission: Admission, request: Request, observation: Observatio
         and observation.abi_path == "/etc/apparmor.d/abi/4.0"
         and observation.parser_capabilities == b""
         and _digest(observation.parser) == admission.cohort.parser_sha256
-        and _digest(observation.abi) == admission.cohort.abi_sha256
+        and _digest(observation.abi) == admission.cohort.abi_sha256,
+        observer=observer,
+        work_site="C_OBSERVATION_G01",
     )
-    _process(observation.coordinator)
-    _caller(observation.coordinator)
-    _need(request.runtime_slice == observation.coordinator.cgroup and request.runtime_slice.path != "/")
-    _need(
-        len(observation.features) == len(FEATURES)
-        and all(type(item) is bytes and len(item) <= MAX_FEATURE for item in observation.features)
-    )
+    _process(observation.coordinator, **child.observer_args(observer))
+    _caller(observation.coordinator, **child.observer_args(observer))
+    with _work(observer, "C_OBSERVATION_G02"):
+        _need(request.runtime_slice == observation.coordinator.cgroup and request.runtime_slice.path != "/")
+    with _work(observer, "C_OBSERVATION_G03"):
+        _need(
+            len(observation.features) == len(FEATURES)
+            and all(type(item) is bytes and len(item) <= MAX_FEATURE for item in observation.features)
+        )
     enabled, restricted, mask, version = observation.features
-    _need(
-        enabled == b"Y\n"
-        and restricted == b"1\n"
-        and version == b"yes\n"
-        and re.fullmatch(rb"[a-z_ \n]{1,4096}", mask)
-        and tuple(sorted(set(mask.decode("ascii").split()))) == admission.cohort.namespace_mask
-    )
-    _need(len(observation.identities) == len(FILE_ROLES))
-    _need(observation.identities[0].mode & 0o111)
+    with _work(observer, "C_OBSERVATION_G04"):
+        _need(
+            enabled == b"Y\n"
+            and restricted == b"1\n"
+            and version == b"yes\n"
+            and re.fullmatch(rb"[a-z_ \n]{1,4096}", mask)
+            and tuple(sorted(set(mask.decode("ascii").split()))) == admission.cohort.namespace_mask
+        )
+    with _work(observer, "C_OBSERVATION_G05"):
+        _need(len(observation.identities) == len(FILE_ROLES))
+    with _work(observer, "C_OBSERVATION_G06"):
+        _need(observation.identities[0].mode & 0o111)
     for identity in (*observation.identities, *observation.helper_identities):
-        _file(identity)
+        _file(identity, **child.observer_args(observer))
     authority = admission.bootstrap
-    _need(
-        type(authority) is BootstrapAuthority
-        and observation.interpreter is not None
-        and observation.interpreter.sha256 == authority.interpreter_sha256
-        and type(authority.helper_sha256) is tuple
-        and len(authority.helper_sha256) == len(HELPERS)
-        and len(observation.helpers) == len(HELPERS)
-        and len(observation.helper_identities) == len(HELPERS)
-    )
+    with _work(observer, "C_OBSERVATION_G07"):
+        _need(
+            type(authority) is BootstrapAuthority
+            and observation.interpreter is not None
+            and observation.interpreter.sha256 == authority.interpreter_sha256
+            and type(authority.helper_sha256) is tuple
+            and len(authority.helper_sha256) == len(HELPERS)
+            and len(observation.helpers) == len(HELPERS)
+            and len(observation.helper_identities) == len(HELPERS)
+        )
     for digest in (authority.interpreter_sha256, *authority.helper_sha256):
-        _token(digest, SHA)
-    _need(
-        all(type(data) is bytes and len(data) <= child.MAX_SOURCE for data in observation.helpers)
-        and tuple(_digest(data) for data in observation.helpers) == authority.helper_sha256
-    )
+        _token(digest, SHA, **child.observer_args(observer))
+    with _work(observer, "C_OBSERVATION_G08"):
+        _need(
+            all(type(data) is bytes and len(data) <= child.MAX_SOURCE for data in observation.helpers)
+            and tuple(_digest(data) for data in observation.helpers) == authority.helper_sha256
+        )
 
 
 def _identity(info: os.stat_result) -> DirectoryIdentity:
     return DirectoryIdentity(info.st_dev, info.st_ino)
 
 
-def _directory(info: os.stat_result) -> None:
-    _need(stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and stat.S_IMODE(info.st_mode) == ROOT_MODE)
+def _directory(info: os.stat_result, *, observer: child.WorkObserver | None = None) -> None:
+    with _work(observer, "C_DIRECTORY_G01"):
+        _need(stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and stat.S_IMODE(info.st_mode) == ROOT_MODE)
 
 
 @dataclass(frozen=True)
 class _Store:
     directory: int
     locator: Locator
+    observer: child.WorkObserver | None = None
 
     def read(self, name: str) -> bytes:
-        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=self.directory)
+        descriptor = _observe(
+            self.observer,
+            "C_STORE_READ_W01",
+            os.open,
+            name,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+            dir_fd=self.directory,
+        )
         try:
-            before = os.fstat(descriptor)
-            _need(
-                stat.S_ISREG(before.st_mode)
-                and before.st_uid == 0
-                and before.st_nlink == 1
-                and stat.S_IMODE(before.st_mode) == MODES[name]
+            before = _observe(self.observer, "C_STORE_READ_W02", os.fstat, descriptor)
+            with _work(self.observer, "C_STORE_READ_G01"):
+                _need(
+                    stat.S_ISREG(before.st_mode)
+                    and before.st_uid == 0
+                    and before.st_nlink == 1
+                    and stat.S_IMODE(before.st_mode) == MODES[name]
+                )
+            data = _observe(
+                self.observer,
+                "C_STORE_READ_W03",
+                child.bytes_at,
+                descriptor,
+                MAX_STATE if name == "state.json" else child.MAX_SOURCE,
+                **child.observer_args(self.observer),
             )
-            data = child.bytes_at(descriptor, MAX_STATE if name == "state.json" else child.MAX_SOURCE)
-            _need(
-                child.file_mark(os.fstat(descriptor)) == child.file_mark(before)
-                and _identity(os.stat(name, dir_fd=self.directory, follow_symlinks=False)) == _identity(before)
-            )
-            _need(name != "lock" or not data)
+            with _work(self.observer, "C_STORE_READ_G02"):
+                _need(
+                    child.file_mark(os.fstat(descriptor)) == child.file_mark(before)
+                    and _identity(os.stat(name, dir_fd=self.directory, follow_symlinks=False)) == _identity(before)
+                )
+            with _work(self.observer, "C_STORE_READ_G03"):
+                _need(name != "lock" or not data)
             return data
         finally:
             os.close(descriptor)
 
     def write(self, name: str, data: bytes, mode: int) -> None:
-        _need(name in {*MODES, "state.next"} and len(data) <= (MAX_STATE if name == "state.next" else child.MAX_SOURCE))
-        descriptor = os.open(
-            name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, mode, dir_fd=self.directory
+        with _work(self.observer, "C_STORE_WRITE_G01"):
+            _need(
+                name in {*MODES, "state.next"}
+                and len(data) <= (MAX_STATE if name == "state.next" else child.MAX_SOURCE)
+            )
+        descriptor = _observe(
+            self.observer,
+            "C_STORE_WRITE_W01",
+            os.open,
+            name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+            mode,
+            dir_fd=self.directory,
         )
         try:
-            with os.fdopen(os.dup(descriptor), "wb") as stream:
-                stream.write(data)
-                stream.flush()
-                os.fsync(stream.fileno())
-            info = os.fstat(descriptor)
-            _need(info.st_uid == 0 and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) == mode)
-            _need(_identity(os.stat(name, dir_fd=self.directory, follow_symlinks=False)) == _identity(info))
+            with os.fdopen(_observe(self.observer, "C_STORE_WRITE_DUP", os.dup, descriptor), "wb") as stream:
+                _observe(self.observer, "C_STORE_WRITE_W02", stream.write, data)
+                _observe(self.observer, "C_STORE_WRITE_W03", stream.flush)
+                _observe(self.observer, "C_STORE_WRITE_W04", os.fsync, stream.fileno())
+            info = _observe(self.observer, "C_STORE_WRITE_W05", os.fstat, descriptor)
+            with _work(self.observer, "C_STORE_WRITE_G02"):
+                _need(info.st_uid == 0 and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) == mode)
+            with _work(self.observer, "C_STORE_WRITE_G03"):
+                _need(_identity(os.stat(name, dir_fd=self.directory, follow_symlinks=False)) == _identity(info))
         finally:
             os.close(descriptor)
 
     def save(self, record: Record) -> None:
-        _validate(record, self.locator)
-        data = _json(asdict(record))
+        _validate(record, self.locator, **child.observer_args(self.observer))
+        data = _observe(self.observer, "C_STORE_SAVE_W01", _json, asdict(record))
         journal = self.read("journal").splitlines()
-        _need(len(journal) < MAX_JOURNAL)
+        with _work(self.observer, "C_STORE_SAVE_G01"):
+            _need(len(journal) < MAX_JOURNAL)
         if journal:
-            previous = _decode(json.loads(self.read("state.json"), object_pairs_hook=_unique))
-            _need(
-                record.generation == previous.generation + 1
-                and record.state in _transitions().get(previous.state, set())
+            previous = _decode(
+                json.loads(self.read("state.json"), object_pairs_hook=_pairs(self.observer)),
+                **child.observer_args(self.observer),
             )
-            _need(
-                record.lease == previous.lease
-                or (
-                    previous.state is State.PREPARING
-                    and record.state is State.PREPARED
-                    and record.lease == replace(previous.lease, policy_sha256=record.lease.policy_sha256)
+            with _work(self.observer, "C_STORE_SAVE_G02"):
+                _need(
+                    record.generation == previous.generation + 1
+                    and record.state in _transitions().get(previous.state, set())
                 )
-            )
-            _journal(journal, previous)
+            with _work(self.observer, "C_STORE_SAVE_G03"):
+                _need(
+                    record.lease == previous.lease
+                    or (
+                        previous.state is State.PREPARING
+                        and record.state is State.PREPARED
+                        and record.lease == replace(previous.lease, policy_sha256=record.lease.policy_sha256)
+                    )
+                )
+            _journal(journal, previous, **child.observer_args(self.observer))
         else:
-            _need(record.generation == 1 and record.state is State.PREPARING)
+            with _work(self.observer, "C_STORE_SAVE_G04"):
+                _need(record.generation == 1 and record.state is State.PREPARING)
         self.write("state.next", data, 0o600)
-        os.replace("state.next", "state.json", src_dir_fd=self.directory, dst_dir_fd=self.directory)
-        os.fsync(self.directory)
-        descriptor = os.open("journal", os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=self.directory)
+        _observe(
+            self.observer,
+            "C_STORE_SAVE_STATE_REPLACE",
+            os.replace,
+            "state.next",
+            "state.json",
+            src_dir_fd=self.directory,
+            dst_dir_fd=self.directory,
+        )
+        _observe(self.observer, "C_STORE_SAVE_W02", os.fsync, self.directory)
+        descriptor = _observe(
+            self.observer,
+            "C_STORE_SAVE_W03",
+            os.open,
+            "journal",
+            os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=self.directory,
+        )
         try:
-            entry = _json({"generation": record.generation, "sha256": _digest(data)}) + b"\n"
-            _need(os.write(descriptor, entry) == len(entry))
-            os.fsync(descriptor)
+            entry = (
+                _observe(
+                    self.observer, "C_STORE_SAVE_W04", _json, {"generation": record.generation, "sha256": _digest(data)}
+                )
+                + b"\n"
+            )
+            with _work(self.observer, "C_STORE_SAVE_G05"):
+                _need(os.write(descriptor, entry) == len(entry))
+            _observe(self.observer, "C_STORE_SAVE_W05", os.fsync, descriptor)
         finally:
             os.close(descriptor)
-        os.fsync(self.directory)
+        _observe(self.observer, "C_STORE_SAVE_W06", os.fsync, self.directory)
 
     def load(self) -> Record:
-        os.lseek(self.directory, 0, os.SEEK_SET)
-        names = set(os.listdir(self.directory))  # noqa: PTH208 - enumerate the held directory FD, never reopen its path.
-        _need(names <= set(MODES) and {"lock", "journal", "state.json"} <= names)
+        _observe(self.observer, "C_STORE_LOAD_W01", os.lseek, self.directory, 0, os.SEEK_SET)
+        names = set(_observe(self.observer, "C_STORE_LOAD_W02", os.listdir, self.directory))
+        with _work(self.observer, "C_STORE_LOAD_G01"):
+            _need(names <= set(MODES) and {"lock", "journal", "state.json"} <= names)
         for name in names:
             self.read(name)
-        record = _decode(json.loads(self.read("state.json"), object_pairs_hook=_unique))
-        _validate(record, self.locator)
-        _journal(self.read("journal").splitlines(), record)
+        record = _decode(
+            json.loads(self.read("state.json"), object_pairs_hook=_pairs(self.observer)),
+            **child.observer_args(self.observer),
+        )
+        _validate(record, self.locator, **child.observer_args(self.observer))
+        _journal(self.read("journal").splitlines(), record, **child.observer_args(self.observer))
         if record.state not in {State.PREPARING, State.RETAINED}:
-            _need(names == set(MODES))
+            with _work(self.observer, "C_STORE_LOAD_G02"):
+                _need(names == set(MODES))
         for leaf, spec in zip(LEAVES, record.lease.sources, strict=True):
             if leaf in names:
                 data = self.read(leaf)
-                _need(len(data) == spec.size and _digest(data) == spec.sha256)
+                with _work(self.observer, "C_STORE_LOAD_G03"):
+                    _need(len(data) == spec.size and _digest(data) == spec.sha256)
         if "policy" in names and record.lease.policy_sha256 is not None:
-            _need(_digest(self.read("policy")) == record.lease.policy_sha256)
+            _need(
+                _digest(self.read("policy")) == record.lease.policy_sha256,
+                observer=self.observer,
+                work_site="C_STORE_LOAD_G04",
+            )
         return record
 
 
 @contextmanager
-def _store(locator: Locator) -> Iterator[_Store]:
-    _root()
-    _need(type(locator) is Locator and type(locator.directory) is DirectoryIdentity)
-    _integer(locator.directory.device)
-    _integer(locator.directory.inode, minimum=1)
-    _token(locator.nonce, NONCE)
+def _store(locator: Locator, *, observer: child.WorkObserver | None = None) -> Iterator[_Store]:
+    _root(**child.observer_args(observer))
+    with _work(observer, "C_STORE_G01"):
+        _need(type(locator) is Locator and type(locator.directory) is DirectoryIdentity)
+    _integer(locator.directory.device, **child.observer_args(observer))
+    _integer(locator.directory.inode, minimum=1, **child.observer_args(observer))
+    _token(locator.nonce, NONCE, **child.observer_args(observer))
     root, directory, lock = None, None, None
     try:
-        root = os.open(ROOT, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
-        info = os.fstat(root)
-        _need(stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022)
+        root = _observe(
+            observer, "C_STORE_W01", os.open, ROOT, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        )
+        info = _observe(observer, "C_STORE_W02", os.fstat, root)
+        with _work(observer, "C_STORE_G02"):
+            _need(stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022)
         name = PREFIX + locator.nonce
-        directory = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root)
-        _directory(os.fstat(directory))
-        _need(
-            _identity(os.fstat(directory))
-            == locator.directory
-            == _identity(os.stat(name, dir_fd=root, follow_symlinks=False))
+        directory = _observe(
+            observer,
+            "C_STORE_W03",
+            os.open,
+            name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=root,
         )
-        lock = os.open("lock", os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory)
-        lock_info = os.fstat(lock)
-        _need(
-            stat.S_ISREG(lock_info.st_mode)
-            and lock_info.st_uid == 0
-            and lock_info.st_nlink == 1
-            and stat.S_IMODE(lock_info.st_mode) == PRIVATE_MODE
+        _directory(_observe(observer, "C_STORE_W04", os.fstat, directory), **child.observer_args(observer))
+        with _work(observer, "C_STORE_G03"):
+            _need(
+                _identity(os.fstat(directory))
+                == locator.directory
+                == _identity(os.stat(name, dir_fd=root, follow_symlinks=False))
+            )
+        lock = _observe(
+            observer, "C_STORE_W05", os.open, "lock", os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory
         )
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        yield _Store(directory, locator)
-        _directory(os.fstat(directory))
-        _need(_identity(os.fstat(directory)) == _identity(os.stat(name, dir_fd=root, follow_symlinks=False)))
+        lock_info = _observe(observer, "C_STORE_W06", os.fstat, lock)
+        with _work(observer, "C_STORE_G04"):
+            _need(
+                stat.S_ISREG(lock_info.st_mode)
+                and lock_info.st_uid == 0
+                and lock_info.st_nlink == 1
+                and stat.S_IMODE(lock_info.st_mode) == PRIVATE_MODE
+            )
+        _observe(observer, "C_STORE_W07", fcntl.flock, lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield _Store(directory, locator, **child.observer_args(observer))
+        _directory(_observe(observer, "C_STORE_W08", os.fstat, directory), **child.observer_args(observer))
+        with _work(observer, "C_STORE_G05"):
+            _need(_identity(os.fstat(directory)) == _identity(os.stat(name, dir_fd=root, follow_symlinks=False)))
     except (OSError, ValueError, TypeError, KeyError, AttributeError) as error:
         raise CustodyError(locator) from error
     finally:
@@ -779,21 +936,22 @@ def _store(locator: Locator) -> Iterator[_Store]:
             os.close(root)
 
 
-def _exact(value: object, keys: set[str]) -> dict[str, Any]:
-    _need(type(value) is dict and set(value) == keys)
+def _exact(value: object, keys: set[str], *, observer: child.WorkObserver | None = None) -> dict[str, Any]:
+    with _work(observer, "C_EXACT_G01"):
+        _need(type(value) is dict and set(value) == keys)
     return value
 
 
-def _group_from(value: object) -> Group:
-    return Group(**_exact(value, {"path", "device", "inode"}))
+def _group_from(value: object, *, observer: child.WorkObserver | None = None) -> Group:
+    return Group(**_exact(value, {"path", "device", "inode"}, **child.observer_args(observer)))
 
 
-def _process_from(value: object) -> Process:
-    data = _exact(value, {"pid", "start_ticks", "pgid", "uid", "cgroup"})
-    return Process(**{**data, "cgroup": _group_from(data["cgroup"])})
+def _process_from(value: object, *, observer: child.WorkObserver | None = None) -> Process:
+    data = _exact(value, {"pid", "start_ticks", "pgid", "uid", "cgroup"}, **child.observer_args(observer))
+    return Process(**{**data, "cgroup": _group_from(data["cgroup"], **child.observer_args(observer))})
 
 
-def _decode(value: object) -> Record:
+def _decode(value: object, *, observer: child.WorkObserver | None = None) -> Record:
     data = _exact(
         value,
         {
@@ -807,31 +965,38 @@ def _decode(value: object) -> Record:
             "policy_load",
             "container_create",
         },
+        **child.observer_args(observer),
     )
-    lease = _exact(data["lease"], set(Lease.__dataclass_fields__))
+    lease = _exact(data["lease"], set(Lease.__dataclass_fields__), **child.observer_args(observer))
     lease = Lease(
         **{
             **lease,
-            "directory": DirectoryIdentity(**_exact(lease["directory"], {"device", "inode"})),
-            "run": Run(**_exact(lease["run"], set(Run.__dataclass_fields__))),
-            "coordinator": _process_from(lease["coordinator"]),
-            "runtime_slice": _group_from(lease["runtime_slice"]),
-            "sources": tuple(SourceSpec(**_exact(item, {"path", "size", "sha256"})) for item in lease["sources"]),
+            "directory": DirectoryIdentity(
+                **_exact(lease["directory"], {"device", "inode"}, **child.observer_args(observer))
+            ),
+            "run": Run(**_exact(lease["run"], set(Run.__dataclass_fields__), **child.observer_args(observer))),
+            "coordinator": _process_from(lease["coordinator"], **child.observer_args(observer)),
+            "runtime_slice": _group_from(lease["runtime_slice"], **child.observer_args(observer)),
+            "sources": tuple(
+                SourceSpec(**_exact(item, {"path", "size", "sha256"}, **child.observer_args(observer)))
+                for item in lease["sources"]
+            ),
             "cohort": Cohort(
                 **{
-                    **_exact(lease["cohort"], set(Cohort.__dataclass_fields__)),
+                    **_exact(lease["cohort"], set(Cohort.__dataclass_fields__), **child.observer_args(observer)),
                     "namespace_mask": tuple(lease["cohort"]["namespace_mask"]),
                 }
             ),
             "identities": tuple(
-                FileIdentity(**_exact(item, set(FileIdentity.__dataclass_fields__))) for item in lease["identities"]
+                FileIdentity(**_exact(item, set(FileIdentity.__dataclass_fields__), **child.observer_args(observer)))
+                for item in lease["identities"]
             ),
         }
     )
     owner = None
     if data["owner"] is not None:
-        fields = _exact(data["owner"], {"service", "process"})
-        owner = Owner(fields["service"], _process_from(fields["process"]))
+        fields = _exact(data["owner"], {"service", "process"}, **child.observer_args(observer))
+        owner = Owner(fields["service"], _process_from(fields["process"], **child.observer_args(observer)))
     return Record(
         lease,
         data["generation"],
@@ -845,85 +1010,104 @@ def _decode(value: object) -> Record:
     )
 
 
-def _validate(record: Record, locator: Locator) -> None:
+def _validate(record: Record, locator: Locator, *, observer: child.WorkObserver | None = None) -> None:
     lease = record.lease
-    _need(
-        type(record) is Record
-        and type(lease) is Lease
-        and lease.schema == 1
-        and type(lease.schema) is int
-        and lease.consumer == CONSUMER
-        and lease.nonce == locator.nonce
-        and lease.directory == locator.directory
-        and record.policy_load == "never"
-        and record.container_create == "never"
-        and type(record.state) is State
-        and type(record.child_pending) is bool
-        and type(record.owner_attempted) is bool
-    )
-    _token(lease.nonce, NONCE)
-    _token(lease.boot, BOOT)
-    _token(lease.manifest_sha256, SHA)
-    _token(lease.source_commit, COMMIT)
-    _run(lease.run)
-    _process(lease.coordinator)
-    _group(lease.runtime_slice)
-    _need(lease.runtime_slice == lease.coordinator.cgroup and lease.runtime_slice.path != "/")
-    _cohort(lease.cohort)
-    _integer(record.generation, minimum=1)
+    with _work(observer, "C_VALIDATE_G01"):
+        _need(
+            type(record) is Record
+            and type(lease) is Lease
+            and lease.schema == 1
+            and type(lease.schema) is int
+            and lease.consumer == CONSUMER
+            and lease.nonce == locator.nonce
+            and lease.directory == locator.directory
+            and record.policy_load == "never"
+            and record.container_create == "never"
+            and type(record.state) is State
+            and type(record.child_pending) is bool
+            and type(record.owner_attempted) is bool
+        )
+    _token(lease.nonce, NONCE, **child.observer_args(observer))
+    _token(lease.boot, BOOT, **child.observer_args(observer))
+    _token(lease.manifest_sha256, SHA, **child.observer_args(observer))
+    _token(lease.source_commit, COMMIT, **child.observer_args(observer))
+    _run(lease.run, **child.observer_args(observer))
+    _process(lease.coordinator, **child.observer_args(observer))
+    _group(lease.runtime_slice, **child.observer_args(observer))
+    with _work(observer, "C_VALIDATE_G02"):
+        _need(lease.runtime_slice == lease.coordinator.cgroup and lease.runtime_slice.path != "/")
+    _cohort(lease.cohort, **child.observer_args(observer))
+    _integer(record.generation, minimum=1, **child.observer_args(observer))
     for value in (lease.start_ns, lease.deadline_ns, lease.work_until_ns):
-        _integer(value)
-    _need(
-        lease.deadline_ns - lease.start_ns <= MAX_TOTAL_NS
-        and lease.start_ns < lease.work_until_ns == lease.deadline_ns - CLEANUP_NS
-    )
-    _need(
-        tuple(item.path for item in lease.sources) == SOURCE_PATHS
-        and len(lease.identities) == len(FILE_ROLES)
-        and lease.policy_name
-        == f"dockerlens-127-upstream-rootless-{lease.run.workflow_run}-{lease.run.attempt}-{lease.nonce}"
-    )
+        _integer(value, **child.observer_args(observer))
+    with _work(observer, "C_VALIDATE_G03"):
+        _need(
+            lease.deadline_ns - lease.start_ns <= MAX_TOTAL_NS
+            and lease.start_ns < lease.work_until_ns == lease.deadline_ns - CLEANUP_NS
+        )
+    with _work(observer, "C_VALIDATE_G04"):
+        _need(
+            tuple(item.path for item in lease.sources) == SOURCE_PATHS
+            and len(lease.identities) == len(FILE_ROLES)
+            and lease.policy_name
+            == f"dockerlens-127-upstream-rootless-{lease.run.workflow_run}-{lease.run.attempt}-{lease.nonce}"
+        )
     for item in lease.sources:
-        _integer(item.size, minimum=1)
-        _need(item.size <= child.MAX_SOURCE)
-        _token(item.sha256, SHA)
+        _integer(item.size, minimum=1, **child.observer_args(observer))
+        with _work(observer, "C_VALIDATE_G05"):
+            _need(item.size <= child.MAX_SOURCE)
+        _token(item.sha256, SHA, **child.observer_args(observer))
     for item in lease.identities:
-        _file(item)
-    _integer(lease.uid, minimum=1)
-    _integer(lease.gid, minimum=1)
+        _file(item, **child.observer_args(observer))
+    _integer(lease.uid, minimum=1, **child.observer_args(observer))
+    _integer(lease.gid, minimum=1, **child.observer_args(observer))
     if record.state not in {State.PREPARING, State.RETAINED}:
-        _need(not record.child_pending)
-        _token(lease.policy_sha256, SHA)
-    _phase(record)
+        with _work(observer, "C_VALIDATE_G06"):
+            _need(not record.child_pending)
+        _token(lease.policy_sha256, SHA, **child.observer_args(observer))
+    _phase(record, **child.observer_args(observer))
 
 
-def _phase(record: Record) -> None:
+def _phase(record: Record, *, observer: child.WorkObserver | None = None) -> None:
     lease = record.lease
     if record.owner is not None:
-        _process(record.owner.process)
-        _need(record.owner.service == "containers-userns-unused-" + lease.nonce)
+        _process(record.owner.process, **child.observer_args(observer))
+        with _work(observer, "C_PHASE_G01"):
+            _need(record.owner.service == "containers-userns-unused-" + lease.nonce)
     if record.state in {State.ARM_INTENT, State.ARMED}:
-        _need(record.owner_attempted)
+        with _work(observer, "C_PHASE_G02"):
+            _need(record.owner_attempted)
     if record.state is State.PREPARED:
-        _need(not record.owner_attempted and record.owner is None)
+        with _work(observer, "C_PHASE_G03"):
+            _need(not record.owner_attempted and record.owner is None)
     if record.state is State.PREPARING:
-        _need(not record.owner_attempted and record.owner is None)
+        with _work(observer, "C_PHASE_G04"):
+            _need(not record.owner_attempted and record.owner is None)
     if record.state is State.ARMED or (record.state in {State.CLOSING, State.CLOSED} and record.owner_attempted):
-        _need(record.owner is not None)
+        with _work(observer, "C_PHASE_G05"):
+            _need(record.owner is not None)
     if record.state is State.CLOSED:
-        _need(type(record.cause) is Cause)
+        with _work(observer, "C_PHASE_G06"):
+            _need(type(record.cause) is Cause)
 
 
-def _journal(lines: list[bytes], record: Record) -> None:
-    _need(0 < len(lines) <= MAX_JOURNAL)
+def _journal(lines: list[bytes], record: Record, *, observer: child.WorkObserver | None = None) -> None:
+    with _work(observer, "C_JOURNAL_G01"):
+        _need(0 < len(lines) <= MAX_JOURNAL)
     previous = 0
     for line in lines:
-        entry = _exact(json.loads(line, object_pairs_hook=_unique), {"generation", "sha256"})
-        _integer(entry["generation"], minimum=1)
-        _token(entry["sha256"], SHA)
-        _need(entry["generation"] == previous + 1)
+        entry = _exact(
+            json.loads(line, object_pairs_hook=_pairs(observer)),
+            {"generation", "sha256"},
+            **child.observer_args(observer),
+        )
+        _integer(entry["generation"], minimum=1, **child.observer_args(observer))
+        _token(entry["sha256"], SHA, **child.observer_args(observer))
+        with _work(observer, "C_JOURNAL_G02"):
+            _need(entry["generation"] == previous + 1)
         previous = entry["generation"]
-    _need(previous == record.generation and entry["sha256"] == _digest(_json(asdict(record))))
+    with _work(observer, "C_JOURNAL_G03"):
+        _need(previous == record.generation and entry["sha256"] == _digest(_json(asdict(record))))
 
 
 def _transitions() -> dict[State, set[State]]:
@@ -936,17 +1120,19 @@ def _transitions() -> dict[State, set[State]]:
     }
 
 
-def _next(record: Record, state: State, **fields: object) -> Record:
-    _need(state in _transitions().get(record.state, set()))
+def _next(record: Record, state: State, *, observer: child.WorkObserver | None = None, **fields: object) -> Record:
+    with _work(observer, "C_NEXT_G01"):
+        _need(state in _transitions().get(record.state, set()))
     return replace(record, state=state, generation=record.generation + 1, **fields)
 
 
 def _retain(store: _Store, record: Record, clock: Clock, *, pending: bool | None = None) -> None:
-    _budget(clock, record.lease)
-    record = store.load()
-    if record.state not in {State.RETAINED, State.CLOSED}:
-        retained = _next(record, State.RETAINED, child_pending=record.child_pending if pending is None else pending)
-        _persist(store, retained, clock)
+    with child.muted(store.observer):
+        _budget(clock, record.lease)
+        record = store.load()
+        if record.state not in {State.RETAINED, State.CLOSED}:
+            retained = _next(record, State.RETAINED, child_pending=record.child_pending if pending is None else pending)
+            _persist(store, retained, clock)
 
 
 def _settled(store: _Store, clock: Clock, *, work: bool = False) -> Record:
@@ -958,37 +1144,57 @@ def _settled(store: _Store, clock: Clock, *, work: bool = False) -> Record:
     return record
 
 
-def _initial(clock: Clock, boot: str, until: int) -> None:
-    _need(_clock(clock) < until and clock.boot_id() == boot)
+def _initial(clock: Clock, boot: str, until: int, *, observer: child.WorkObserver | None = None) -> None:
+    _need(
+        _clock(clock, **child.observer_args(observer)) < until and clock.boot_id() == boot,
+        observer=observer,
+        work_site="C_INITIAL_G01",
+    )
 
 
-def _create(clock: Clock, boot: str, until: int) -> Locator:
-    _initial(clock, boot, until)
-    nonce = secrets.token_hex(16)
+def _create(clock: Clock, boot: str, until: int, *, observer: child.WorkObserver | None = None) -> Locator:
+    _initial(clock, boot, until, **child.observer_args(observer))
+    nonce = _observe(observer, "C_CREATE_W01", secrets.token_hex, 16)
     name = PREFIX + nonce
-    root = os.open(ROOT, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    root = _observe(
+        observer, "C_CREATE_W02", os.open, ROOT, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    )
     try:
-        parent = os.fstat(root)
-        _need(stat.S_ISDIR(parent.st_mode) and parent.st_uid == 0 and not parent.st_mode & 0o022)
-        _initial(clock, boot, until)
-        os.mkdir(name, ROOT_MODE, dir_fd=root)
-        _initial(clock, boot, until)
-        directory = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root)
+        parent = _observe(observer, "C_CREATE_W03", os.fstat, root)
+        with _work(observer, "C_CREATE_G01"):
+            _need(stat.S_ISDIR(parent.st_mode) and parent.st_uid == 0 and not parent.st_mode & 0o022)
+        _initial(clock, boot, until, **child.observer_args(observer))
+        _observe(observer, "C_CREATE_W04", os.mkdir, name, ROOT_MODE, dir_fd=root)
+        _initial(clock, boot, until, **child.observer_args(observer))
+        directory = _observe(
+            observer,
+            "C_CREATE_W05",
+            os.open,
+            name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=root,
+        )
         try:
-            _directory(os.fstat(directory))
-            locator = Locator(nonce, _identity(os.fstat(directory)))
+            _directory(_observe(observer, "C_CREATE_W06", os.fstat, directory), **child.observer_args(observer))
+            locator = Locator(nonce, _identity(_observe(observer, "C_CREATE_W07", os.fstat, directory)))
             for leaf in ("lock", "journal"):
-                _initial(clock, boot, until)
-                descriptor = os.open(
-                    leaf, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=directory
+                _initial(clock, boot, until, **child.observer_args(observer))
+                descriptor = _observe(
+                    observer,
+                    "C_CREATE_W08",
+                    os.open,
+                    leaf,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    0o600,
+                    dir_fd=directory,
                 )
                 os.close(descriptor)
-                _initial(clock, boot, until)
-            os.fsync(directory)
+                _initial(clock, boot, until, **child.observer_args(observer))
+            _observe(observer, "C_CREATE_W09", os.fsync, directory)
         finally:
             os.close(directory)
-        os.fsync(root)
-        _initial(clock, boot, until)
+        _observe(observer, "C_CREATE_W10", os.fsync, root)
+        _initial(clock, boot, until, **child.observer_args(observer))
     finally:
         os.close(root)
     return locator
@@ -999,30 +1205,71 @@ class _Preparation:
     host: HostPort
     observation: Observation
     clock: Clock
+    observer: child.WorkObserver | None = None
+
+
+@dataclass(frozen=True)
+class _PrepareArgs:
+    admission: Admission
+    request: Request
+    source_fds: tuple[SourceFD, ...]
+    host: HostPort | None
+    clock: Clock
+
+    def observe(self, observer: child.WorkObserver | None = None) -> Locator:
+        """Enter the one private implementation without retaining inputs in the observer."""
+        return _prepare_observed(self, observer)
+
+
+def preparation_input(
+    admission: Admission, request: Request, source_fds: tuple[SourceFD, ...], host: HostPort | None, clock: Clock
+) -> _PrepareArgs:
+    """Group only the hosted adapter's original five inputs; this grants no authority."""
+    return _PrepareArgs(admission, request, source_fds, host, clock)
 
 
 def prepare_unused(
     admission: Admission, request: Request, source_fds: tuple[SourceFD, ...], host: HostPort | None, clock: Clock
 ) -> Locator:
+    """Keep the legacy operational signature and default unobserved behavior."""
+    return _prepare_observed(_PrepareArgs(admission, request, source_fds, host, clock))
+
+
+def _prepare_observed(arguments: _PrepareArgs, observer: child.WorkObserver | None = None) -> Locator:
+    admission, request, source_fds, host, clock = (
+        arguments.admission,
+        arguments.request,
+        arguments.source_fds,
+        arguments.host,
+        arguments.clock,
+    )
     """Prepare finite root custody; no default host/bootstrap authority or parser execution exists."""
-    _root()
-    _need(host is not None and type(request) is Request)
-    _run(request.run)
-    _group(request.runtime_slice)
-    _integer(request.uid, minimum=1)
-    _integer(request.gid, minimum=1)
-    _integer(request.original_deadline_ns)
-    start, boot = _start(clock)
+    _root(**child.observer_args(observer))
+    with _work(observer, "C_PREPARE_UNUSED_G01"):
+        _need(host is not None and type(request) is Request)
+    _run(request.run, **child.observer_args(observer))
+    _group(request.runtime_slice, **child.observer_args(observer))
+    _integer(request.uid, minimum=1, **child.observer_args(observer))
+    _integer(request.gid, minimum=1, **child.observer_args(observer))
+    _integer(request.original_deadline_ns, **child.observer_args(observer))
+    start, boot = _start(clock, **child.observer_args(observer))
     deadline = min(request.original_deadline_ns, start + MAX_TOTAL_NS)
-    _need(deadline - start > CLEANUP_NS + 1_000_000_000)
-    commit, specs = _manifest(admission)
-    _initial(clock, boot, deadline - CLEANUP_NS)
+    with _work(observer, "C_PREPARE_UNUSED_G02"):
+        _need(deadline - start > CLEANUP_NS + 1_000_000_000)
+    commit, specs = _manifest(admission, **child.observer_args(observer))
+    _initial(clock, boot, deadline - CLEANUP_NS, **child.observer_args(observer))
     observation = host.observe(request)
-    _observation(admission, request, observation, clock)
-    _need(observation.boot == boot)
-    _need(_clock(clock) < deadline - CLEANUP_NS and clock.boot_id() == boot)
-    _need(tuple(item.path for item in source_fds) == SOURCE_PATHS)
-    locator = _create(clock, boot, deadline - CLEANUP_NS)
+    _observation(admission, request, observation, clock, **child.observer_args(observer))
+    with _work(observer, "C_PREPARE_UNUSED_G03"):
+        _need(observation.boot == boot)
+    _need(
+        _clock(clock, **child.observer_args(observer)) < deadline - CLEANUP_NS and clock.boot_id() == boot,
+        observer=observer,
+        work_site="C_PREPARE_UNUSED_G04",
+    )
+    with _work(observer, "C_PREPARE_UNUSED_G05"):
+        _need(tuple(item.path for item in source_fds) == SOURCE_PATHS)
+    locator = _create(clock, boot, deadline - CLEANUP_NS, **child.observer_args(observer))
     nonce = locator.nonce
     lease = Lease(
         1,
@@ -1046,12 +1293,12 @@ def prepare_unused(
         request.uid,
         request.gid,
     )
-    with _store(locator) as store:
+    with _store(locator, **child.observer_args(observer)) as store:
         record = Record(lease=lease, generation=1, state=State.PREPARING, child_pending=False, owner=None, cause=None)
-        _persist(store, record, clock, lease.work_until_ns)
-        _populate(store, record, source_fds, _Preparation(host, observation, clock))
-        _budget(clock, lease, lease.work_until_ns)
-    _budget(clock, lease, lease.work_until_ns)
+        _persist(store, record, clock, lease.work_until_ns, **child.observer_args(observer))
+        _populate(store, record, source_fds, _Preparation(host, observation, clock, **child.observer_args(observer)))
+        _budget(clock, lease, lease.work_until_ns, **child.observer_args(observer))
+    _budget(clock, lease, lease.work_until_ns, **child.observer_args(observer))
     return locator
 
 
@@ -1063,30 +1310,41 @@ def _populate(store: _Store, record: Record, source_fds: tuple[SourceFD, ...], c
     invoked = False
     try:
         for index, (item, spec, leaf) in enumerate(zip(source_fds, lease.sources, LEAVES, strict=True)):
-            _budget(clock, lease, lease.work_until_ns)
-            before = os.fstat(item.descriptor)
-            _need(
-                stat.S_ISREG(before.st_mode)
-                and before.st_nlink == 1
-                and fcntl.fcntl(item.descriptor, fcntl.F_GETFL) & os.O_ACCMODE == os.O_RDONLY
+            _budget(clock, lease, lease.work_until_ns, **child.observer_args(context.observer))
+            before = _observe(context.observer, "C_POPULATE_W01", os.fstat, item.descriptor)
+            with _work(context.observer, "C_POPULATE_G01"):
+                _need(
+                    stat.S_ISREG(before.st_mode)
+                    and before.st_nlink == 1
+                    and fcntl.fcntl(item.descriptor, fcntl.F_GETFL) & os.O_ACCMODE == os.O_RDONLY
+                )
+            data = _observe(
+                context.observer,
+                "C_POPULATE_W02",
+                child.bytes_at,
+                item.descriptor,
+                spec.size,
+                **child.observer_args(context.observer),
             )
-            data = child.bytes_at(item.descriptor, spec.size)
-            _need(
-                len(data) == spec.size
-                and _digest(data) == spec.sha256
-                and child.file_mark(os.fstat(item.descriptor)) == child.file_mark(before)
-            )
-            _budget(clock, lease, lease.work_until_ns)
+            with _work(context.observer, "C_POPULATE_G02"):
+                _need(
+                    len(data) == spec.size
+                    and _digest(data) == spec.sha256
+                    and child.file_mark(os.fstat(item.descriptor)) == child.file_mark(before)
+                )
+            _budget(clock, lease, lease.work_until_ns, **child.observer_args(context.observer))
             store.write(leaf, data, 0o400)
-            _budget(clock, lease, lease.work_until_ns)
+            _budget(clock, lease, lease.work_until_ns, **child.observer_args(context.observer))
             if index < len(child.MODULES):
-                sealed.append(child.seal(child.MODULES[index], store.read(leaf)))
-                _budget(clock, lease, lease.work_until_ns)
-        _budget(clock, lease, lease.work_until_ns)
-        _need(host.reobserve(observation) == observation)
-        _budget(clock, lease, lease.work_until_ns)
-        record = _next(record, State.PREPARING, child_pending=True)
-        _persist(store, record, clock, lease.work_until_ns)
+                sealed.append(
+                    child.seal(child.MODULES[index], store.read(leaf), **child.observer_args(context.observer))
+                )
+                _budget(clock, lease, lease.work_until_ns, **child.observer_args(context.observer))
+        _budget(clock, lease, lease.work_until_ns, **child.observer_args(context.observer))
+        _need(host.reobserve(observation) == observation, observer=context.observer, work_site="C_POPULATE_G03")
+        _budget(clock, lease, lease.work_until_ns, **child.observer_args(context.observer))
+        record = _next(record, State.PREPARING, child_pending=True, **child.observer_args(context.observer))
+        _persist(store, record, clock, lease.work_until_ns, **child.observer_args(context.observer))
         pending = True
         invoked = True
         outcome = child.build(
@@ -1096,28 +1354,37 @@ def _populate(store: _Store, record: Record, source_fds: tuple[SourceFD, ...], c
                 lease.policy_name,
                 lease.uid,
                 lease.gid,
-                min(lease.work_until_ns, _clock(clock, lease) + CHILD_NS),
+                min(lease.work_until_ns, _clock(clock, lease, **child.observer_args(context.observer)) + CHILD_NS),
                 lease.deadline_ns,
             ),
             clock,
+            **child.observer_args(context.observer),
         )
         _need(type(outcome) is child.Outcome and outcome.dead is True)
         pending = False
-        _budget(clock, lease, lease.work_until_ns)
+        _budget(clock, lease, lease.work_until_ns, **child.observer_args(context.observer))
         _need(
             host.reobserve(observation) == observation
-            and _clock(clock, lease) < lease.work_until_ns
+            and _clock(clock, lease, **child.observer_args(context.observer)) < lease.work_until_ns
             and type(outcome.policy) is bytes
             and len(outcome.policy) <= child.MAX_POLICY
             and outcome.policy.startswith(b"abi <abi/4.0>,\n")
-            and outcome.policy.count(lease.policy_name.encode("ascii")) == 1
+            and outcome.policy.count(lease.policy_name.encode("ascii")) == 1,
+            observer=context.observer,
+            work_site="C_POPULATE_G05",
         )
-        _budget(clock, lease, lease.work_until_ns)
+        _budget(clock, lease, lease.work_until_ns, **child.observer_args(context.observer))
         store.write("policy", outcome.policy, 0o400)
-        _budget(clock, lease, lease.work_until_ns)
+        _budget(clock, lease, lease.work_until_ns, **child.observer_args(context.observer))
         lease = replace(lease, policy_sha256=_digest(outcome.policy))
         _persist(
-            store, replace(_next(record, State.PREPARED, child_pending=False), lease=lease), clock, lease.work_until_ns
+            store,
+            replace(
+                _next(record, State.PREPARED, child_pending=False, **child.observer_args(context.observer)), lease=lease
+            ),
+            clock,
+            lease.work_until_ns,
+            **child.observer_args(context.observer),
         )
     except Exception as error:
         if invoked and isinstance(error, child.ChildError):

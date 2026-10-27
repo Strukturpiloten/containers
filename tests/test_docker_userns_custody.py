@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import errno
 import hashlib
 import importlib.abc
 import io
@@ -1266,6 +1267,532 @@ class ChildTests(unittest.TestCase):
         self.assertNotIn("sys.path.insert", child.CODE)
         self.assertNotIn("RunnerProfile", child.CODE)
         self.assertNotIn("consumer_mode", child.CODE)
+
+
+class WorkObserverTests(unittest.TestCase):
+    def test_closed_pairs_categories_and_first_fault_privacy(self) -> None:
+        for (context, site), categories in child.WORK_FAILURES.items():
+            with self.subTest(context=context, site=site):
+                observer = child.WorkObserver()
+                with child.observing(observer):
+                    if categories == frozenset({"REFUSED"}):
+                        child.refused(observer, context, site)
+                    else:
+                        original = OSError("private path uid source output")
+                        with (
+                            self.assertRaises(OSError) as raised,
+                            child.work(observer, context, site, (child.ChildError,)),
+                        ):
+                            raise original
+                        self.assertIs(raised.exception, original)
+                detail = observer.snapshot()
+                self.assertEqual(
+                    detail,
+                    {
+                        "schema": 1,
+                        "context": context,
+                        "site": site,
+                        "failure": "REFUSED" if categories == frozenset({"REFUSED"}) else "OS_ERROR",
+                    },
+                )
+                self.assertNotIn("private", json.dumps(detail))
+                self.assertEqual(child.work_failure(detail), detail)
+                wrong = {**detail, "context": "HOSTED" if context != "HOSTED" else "CUSTODY"}
+                self.assertIsNone(child.work_failure(wrong))
+                self.assertIsInstance(observer._fault, tuple)
+                self.assertTrue(all(type(value) is str for value in observer._fault))
+
+    def test_cleanup_muting_late_conflict_and_recording_failure(self) -> None:
+        site = "B_BYTES_AT_W01"
+        observer = child.WorkObserver()
+        child.refused(observer, "CHILD_PARENT", site)
+        with child.observing(observer):
+            with child.muted(observer), child.work(observer, "CHILD_PARENT", site, (child.ChildError,)):
+                pass
+            with child.work(observer, "CHILD_PARENT", site, (child.ChildError,)):
+                observer.record("CHILD_PARENT", site, "OS_ERROR")
+                observer.record("CHILD_PARENT", site, "OS_ERROR")
+                observer.record("CHILD_PARENT", site, "OTHER")
+        self.assertIsNone(observer.snapshot())
+        child.refused(observer, "CHILD_PARENT", site)
+        self.assertIsNone(observer.snapshot())
+        observer = child.WorkObserver()
+        original = OSError("private original", 17)
+        with (
+            patch.object(child.WorkObserver, "record", side_effect=RuntimeError("private recorder")) as record,
+            self.assertRaises(OSError) as raised,
+            child.observing(observer),
+            child.work(observer, "CUSTODY", "C_POPULATE_W02", (child.ChildError,)),
+            child.work(observer, "CHILD_PARENT", site, (child.ChildError,)),
+        ):
+            raise original
+        self.assertIs(raised.exception, original)
+        self.assertEqual(raised.exception.args, ("private original", 17))
+        self.assertEqual(record.call_count, 1)
+        self.assertIsNone(observer.snapshot())
+
+    def test_classifier_and_seal_failure_preserve_original_error(self) -> None:
+        for target in ("_failure", "seal"):
+            observer = child.WorkObserver()
+            original = OSError("private operation")
+            owner = child if target == "_failure" else child.WorkObserver
+            with (
+                patch.object(owner, target, side_effect=RuntimeError("private diagnostic")),
+                self.assertRaises(OSError) as raised,
+                child.observing(observer),
+                child.work(observer, "CHILD_PARENT", "B_BYTES_AT_W01", (child.ChildError,)),
+            ):
+                raise original
+            self.assertIs(raised.exception, original)
+            self.assertIsNone(observer.snapshot())
+
+    def test_active_binding_rejects_another_legal_site_and_unknown_work_is_non_authoring(self) -> None:
+        for context, site in (("CHILD_PARENT", "B_BYTES_AT_W01"), ("private unknown", "private unknown")):
+            with self.subTest(context=context):
+                observer = child.WorkObserver()
+                calls = []
+                with child.observing(observer), child.work(observer, context, site, (child.ChildError,)):
+                    calls.append("original work")
+                    observer.record("CUSTODY", "C_CREATE_W02", "OS_ERROR")
+                self.assertEqual(calls, ["original work"])
+                self.assertIsNone(observer.snapshot())
+                self.assertIsNone(observer._work_site)
+                self.assertNotIn("private", repr([getattr(observer, name) for name in observer.__slots__]))
+
+    def test_actual_opaque_or_missing_inner_capture_has_no_outer_fallback(self) -> None:
+        observer = child.WorkObserver()
+        original = OSError("private opaque cleanup")
+        with child.observing(observer), self.assertRaises(OSError) as raised:
+            custody._need((_ for _ in ()).throw(original), observer=observer, work_site="C_CALLER_G01")
+        self.assertIs(raised.exception, original)
+        self.assertIsNone(observer.snapshot())
+
+
+class PreparationObservationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.fixture = CustodyTests(methodName="runTest")
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.observer = child.WorkObserver()
+        # The existing fake OS/build providers do not implement native operations.
+        for mock in (child.seal, child.build):
+            delegate = mock.side_effect
+
+            def observed_fake(
+                *args: object, observer: child.WorkObserver | None = None, delegate: object = delegate
+            ) -> object:
+                del observer
+                return delegate(*args)
+
+            mock.side_effect = observed_fake
+
+    def arguments(self) -> custody._PrepareArgs:
+        f = self.fixture
+        return custody._PrepareArgs(f.admission, f.request, tuple(f.fds), f.host, f.clock)
+
+    def prepare(self) -> custody.Locator:
+        with child.observing(self.observer):
+            locator = custody._prepare_observed(self.arguments(), self.observer)
+            with custody._store(locator, observer=self.observer) as store:
+                store.load()
+        return locator
+
+    def test_success_and_immediate_readback_are_unobserved(self) -> None:
+        locator = self.prepare()
+        record = self.fixture.record(locator)
+        self.assertIs(record.state, custody.State.PREPARED)
+        self.assertEqual(record.lease.policy_sha256, digest(policy(record.lease.policy_name)))
+        self.assertFalse(record.child_pending)
+        self.assertIsNone(self.observer.snapshot())
+        self.assertEqual(child.build.call_count, 1)
+
+    def test_real_source_guard_read_and_bound_failures_stop_before_builder(self) -> None:
+        original_fstat, original_pread = custody.os.fstat, child.os.pread
+        descriptor = self.fixture.fds[0].descriptor
+        for fault in ("links", "read", "bound", "hash"):
+            with self.subTest(fault=fault):
+                self.observer = child.WorkObserver()
+
+                def fstat(fd: int, *, fault: str = fault) -> object:
+                    info = original_fstat(fd)
+                    return (
+                        SimpleNamespace(**{**vars(info), "st_nlink": 2})
+                        if fault == "links" and fd == descriptor
+                        else info
+                    )
+
+                def pread(fd: int, size: int, offset: int, *, fault: str = fault) -> bytes:
+                    if fd != descriptor or fault == "links":
+                        return original_pread(fd, size, offset)
+                    if fault == "read":
+                        message = "private source read"
+                        raise OSError(message)
+                    if fault == "bound":
+                        return b"x" * size
+                    raw = original_pread(fd, size, offset)
+                    return b"x" * len(raw)
+
+                with (
+                    patch.object(custody.os, "fstat", side_effect=fstat),
+                    patch.object(child.os, "pread", side_effect=pread),
+                    self.assertRaises(custody.CustodyError),
+                ):
+                    self.prepare()
+                expected = {
+                    "links": ("CUSTODY", "C_POPULATE_G01", "REFUSED"),
+                    "read": ("CHILD_PARENT", "B_BYTES_AT_W01", "OS_ERROR"),
+                    "bound": ("CUSTODY", "C_POPULATE_W02", "REFUSED"),
+                    "hash": ("CUSTODY", "C_POPULATE_G02", "REFUSED"),
+                }[fault]
+                self.assertEqual(
+                    self.observer.snapshot(), dict(zip(("context", "site", "failure"), expected, strict=True), schema=1)
+                )
+                self.assertEqual(child.build.call_count, 0)
+
+    def test_work_fault_survives_store_release_mask_and_cleanup_only_is_unobserved(self) -> None:
+        locator = self.fixture.prepare()
+
+        def exercise(*, fail_work: bool) -> None:
+            with custody._store(locator) as shared:
+                observer = child.WorkObserver()
+                store = custody._Store(shared.directory, locator, observer)
+                real_open, real_stat, real_close = os.open, os.fstat, os.close
+                opened = []
+                work_error, release_error = OSError("private fstat"), OSError("private release")
+
+                def opened_file(*args: object, **kwargs: object) -> int:
+                    fd = real_open(*args, **kwargs)
+                    opened.append(fd)
+                    return fd
+
+                def metadata(fd: int) -> object:
+                    if fail_work and fd in opened:
+                        raise work_error
+                    return real_stat(fd)
+
+                def release(fd: int) -> None:
+                    real_close(fd)
+                    if fd in opened:
+                        raise release_error
+
+                with (
+                    patch.object(os, "open", side_effect=opened_file),
+                    patch.object(os, "fstat", side_effect=metadata),
+                    patch.object(os, "close", side_effect=release),
+                    self.assertRaises(OSError) as raised,
+                    child.observing(observer),
+                ):
+                    store.read("state.json")
+                self.assertIs(raised.exception, release_error)
+                if fail_work:
+                    self.assertEqual(
+                        observer.snapshot(),
+                        {"schema": 1, "context": "CUSTODY", "site": "C_STORE_READ_W02", "failure": "OS_ERROR"},
+                    )
+                else:
+                    self.assertIsNone(observer.snapshot())
+
+        for fail_work in (False, True):
+            with self.subTest(work=fail_work):
+                exercise(fail_work=fail_work)
+
+    def test_retention_shared_calls_are_muted_and_cannot_replace_first_work(self) -> None:
+        real_fstat = custody.os.fstat
+        descriptor = self.fixture.fds[0].descriptor
+
+        def metadata(fd: int) -> object:
+            info = real_fstat(fd)
+            return SimpleNamespace(**{**vars(info), "st_nlink": 2}) if fd == descriptor else info
+
+        with (
+            patch.object(custody.os, "fstat", side_effect=metadata),
+            patch.object(custody.os, "lseek", side_effect=OSError("private retention")),
+            self.assertRaises(custody.CustodyError),
+        ):
+            self.prepare()
+        self.assertEqual(
+            self.observer.snapshot(),
+            {"schema": 1, "context": "CUSTODY", "site": "C_POPULATE_G01", "failure": "REFUSED"},
+        )
+
+    def test_build_argument_failure_and_excluded_outcome_preserve_pending_order(self) -> None:
+        for fault in ("argument", "outcome"):
+            with self.subTest(fault=fault):
+                self.observer = child.WorkObserver()
+                child.build.reset_mock()
+                if fault == "argument":
+                    context = patch.object(child, "Build", side_effect=ValueError("private argument"))
+                else:
+                    child.build.side_effect = None
+                    child.build.return_value = child.Outcome(b"unused", dead=False)
+                    context = ExitStack()
+                with context, self.assertRaises(custody.CustodyError) as raised:
+                    self.prepare()
+                self.assertTrue(raised.exception.child_pending)
+                self.assertEqual(child.build.call_count, int(fault == "outcome"))
+                self.assertIsNone(self.observer.snapshot())
+
+    def test_store_post_yield_revalidation_is_owned_work(self) -> None:
+        locator = self.fixture.prepare()
+        real_stat = custody.os.stat
+        changed = False
+
+        def metadata(*args: object, **kwargs: object) -> object:
+            info = real_stat(*args, **kwargs)
+            if changed and args[0] == custody.PREFIX + locator.nonce:
+                return SimpleNamespace(**{**vars(info), "st_ino": info.st_ino + 1})
+            return info
+
+        with (
+            patch.object(custody.os, "stat", side_effect=metadata),
+            self.assertRaises(custody.CustodyError),
+            child.observing(self.observer),
+            custody._store(locator, observer=self.observer),
+        ):
+            changed = True
+        self.assertEqual(
+            self.observer.snapshot(), {"schema": 1, "context": "CUSTODY", "site": "C_STORE_G05", "failure": "REFUSED"}
+        )
+
+
+class ChildObservationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.fixture = ChildTests(methodName="runTest")
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.before = ((1,), b"trusted")
+        self.real_interpreter = child._interpreter
+        self.process = MagicMock()
+        self.interpreter = self.stack.enter_context(patch.object(child, "_interpreter", return_value=self.before))
+        self.start = self.stack.enter_context(patch.object(child.subprocess, "Popen", return_value=self.process))
+        self.capture = self.stack.enter_context(
+            patch.object(child, "_capture", return_value=(b"policy", self.fixture.proof()))
+        )
+        self.stop = self.stack.enter_context(patch.object(child, "_stop", return_value=(0, True)))
+
+    def build(self, observer: child.WorkObserver | None = None) -> child.Outcome:
+        f = self.fixture
+        return child.build(f.interpreter, f.sources, f.lease, f.clock, **child.observer_args(observer))
+
+    def test_observation_preserves_exact_launch_and_existing_capture_calls(self) -> None:
+        baseline = self.build()
+        arguments, options = self.start.call_args.args, self.start.call_args.kwargs
+        baseline_capture = self.capture.call_args.args
+        self.start.reset_mock()
+        self.capture.reset_mock()
+        self.stop.reset_mock()
+        self.process.stdout.close.reset_mock()
+        observer = child.WorkObserver()
+        with child.observing(observer):
+            actual = self.build(observer)
+        self.assertEqual(actual, baseline)
+        self.assertEqual(self.start.call_args.args, arguments)
+        self.assertEqual(self.start.call_args.kwargs, options)
+        self.assertEqual(self.capture.call_args.args, baseline_capture)
+        self.assertEqual(self.start.call_count, 1)
+        self.assertEqual(self.capture.call_count, 1)
+        self.assertEqual(self.stop.call_count, 1)
+        self.process.stdout.close.assert_called_once_with()
+        self.assertIsNone(observer.snapshot())
+
+    def test_launch_fault_is_observed_but_missing_inner_capture_and_release_are_not(self) -> None:
+        for fault in ("launch", "capture", "release"):
+            with self.subTest(fault=fault):
+                observer = child.WorkObserver()
+                original = OSError("private child boundary")
+                self.start.side_effect = original if fault == "launch" else None
+                self.capture.side_effect = original if fault == "capture" else None
+                self.process.stdout.close.side_effect = original if fault == "release" else None
+                self.stop.reset_mock()
+                with self.assertRaises(child.ChildError), child.observing(observer):
+                    self.build(observer)
+                if fault == "launch":
+                    self.assertEqual(
+                        observer.snapshot(),
+                        {"schema": 1, "context": "CHILD_PARENT", "site": "B_EXECUTE_W03", "failure": "OS_ERROR"},
+                    )
+                    self.stop.assert_not_called()
+                else:
+                    self.assertIsNone(observer.snapshot())
+                    self.assertEqual(self.stop.call_count, 1)
+
+    def test_mixed_completion_has_only_known_dead_nonzero_parent_status_detail(self) -> None:
+        for status, lifetime, expired in (
+            (1, child.Lifetime.DEAD, False),
+            (None, child.Lifetime.DEAD, False),
+            (True, child.Lifetime.DEAD, False),
+            (1, child.Lifetime.UNKNOWN, False),
+            (0, child.Lifetime.UNKNOWN, False),
+            (0, child.Lifetime.DEAD, True),
+        ):
+            with self.subTest(status=status, lifetime=lifetime, expired=expired):
+                observer = child.WorkObserver()
+                clock = MagicMock()
+                clock.now_ns.return_value = self.fixture.lease.deadline_ns if expired else self.fixture.clock.time
+                with (
+                    patch.object(child, "_preflight", return_value=(self.before, 5)),
+                    patch.object(
+                        child, "_execute_observed", return_value=(b"policy", self.fixture.proof(), status, lifetime)
+                    ),
+                    self.assertRaises(child.ChildError),
+                    child.observing(observer),
+                ):
+                    child.build(
+                        self.fixture.interpreter, self.fixture.sources, self.fixture.lease, clock, observer=observer
+                    )
+                if type(status) is int and status != 0 and lifetime is child.Lifetime.DEAD:
+                    self.assertEqual(
+                        observer.snapshot(),
+                        {
+                            "schema": 1,
+                            "context": "CHILD_PARENT",
+                            "site": "B_BUILD_STATUS_REFUSAL",
+                            "failure": "REFUSED",
+                        },
+                    )
+                else:
+                    self.assertIsNone(observer.snapshot())
+                self.assertEqual(clock.now_ns.call_count, int(lifetime is child.Lifetime.DEAD and status == 0))
+
+    def test_owned_receipt_and_later_postflight_guard_are_observed_without_child_cause(self) -> None:
+        validation_calls = 2
+        for fault, expected in (
+            ("json", ("B_PRIVILEGE_RECEIPT_W01", "VALUE_ERROR")),
+            ("receipt", ("B_PRIVILEGE_RECEIPT_G01", "REFUSED")),
+            ("interpreter", ("B_BUILD_G02", "REFUSED")),
+            ("final-deadline", ("B_BUILD_G03", "REFUSED")),
+        ):
+            with self.subTest(fault=fault):
+                self.fixture.clock.time = 1_000_000_000
+                observer = child.WorkObserver()
+                self.capture.return_value = (
+                    b"policy",
+                    b"private invalid" if fault == "json" else b"{}" if fault == "receipt" else self.fixture.proof(),
+                )
+                calls = 0
+
+                def interpreter(_value: object, *, fault: str = fault, **_kwargs: object) -> object:
+                    nonlocal calls
+                    calls += 1
+                    if calls == validation_calls:
+                        if fault == "final-deadline":
+                            self.fixture.clock.time = self.fixture.lease.deadline_ns
+                        if fault == "interpreter":
+                            return ((2,), b"changed")
+                    return self.before
+
+                self.interpreter.side_effect = interpreter
+                with self.assertRaises(child.ChildError), child.observing(observer):
+                    self.build(observer)
+                self.assertEqual(
+                    observer.snapshot(),
+                    {"schema": 1, "context": "CHILD_PARENT", "site": expected[0], "failure": expected[1]},
+                )
+                self.assertNotIn("private", json.dumps(observer.snapshot()))
+
+    def test_expected_capability_errno_is_not_a_fault_and_interpreter_links_stay_strict(self) -> None:
+        raw = b"\x7fELF"
+        target = child.Interpreter(self.fixture.sources[0].descriptor, digest(raw))
+        original_fstat = child.os.fstat
+        for condition, expected in (
+            ("accepted", None),
+            ("errno", "B_INTERPRETER_G02"),
+            ("capability", "B_INTERPRETER_G03"),
+            ("links", "B_INTERPRETER_G01"),
+        ):
+            with self.subTest(condition=condition):
+                observer = child.WorkObserver()
+
+                def metadata(fd: int, *, condition: str = condition) -> SimpleNamespace:
+                    return SimpleNamespace(
+                        **(
+                            vars(original_fstat(fd))
+                            | {
+                                "st_mode": stat.S_IFREG | 0o755,
+                                "st_nlink": 2 if condition == "links" else 1,
+                                "st_size": len(raw),
+                            }
+                        )
+                    )
+
+                capability = (
+                    patch.object(child.os, "getxattr", return_value=b"x")
+                    if condition == "capability"
+                    else patch.object(
+                        child.os,
+                        "getxattr",
+                        side_effect=OSError(
+                            errno.EPERM if condition == "errno" else errno.ENODATA, "private capability"
+                        ),
+                    )
+                )
+                with (
+                    patch.object(child.os, "fstat", side_effect=metadata),
+                    patch.object(child, "bytes_at", return_value=raw) as read,
+                    capability,
+                    child.observing(observer),
+                ):
+                    if expected is None:
+                        self.real_interpreter(target, observer=observer)
+                    else:
+                        with self.assertRaises(child.ChildError):
+                            self.real_interpreter(target, observer=observer)
+                if expected is None:
+                    self.assertIsNone(observer.snapshot())
+                    self.assertEqual(read.call_count, 1)
+                else:
+                    self.assertEqual(
+                        observer.snapshot(),
+                        {"schema": 1, "context": "CHILD_PARENT", "site": expected, "failure": "REFUSED"},
+                    )
+                    read.assert_not_called()
+
+    def test_existing_probe_status_and_cleanup_deadline_exclusions(self) -> None:
+        f = self.fixture
+        target = f.sources[0].descriptor
+        for status, dead, expired in (
+            (1, True, False),
+            (None, True, False),
+            (1, False, False),
+            (0, False, False),
+            (0, True, True),
+        ):
+            with self.subTest(status=status, dead=dead, expired=expired):
+                f.clock.time = 1_000_000_000
+                observer = child.WorkObserver()
+
+                def stopped(
+                    *_args: object, status: int | None = status, dead: bool = dead, expired: bool = expired
+                ) -> tuple[object, bool]:
+                    if expired:
+                        f.clock.time = f.lease.deadline_ns
+                    return status, dead
+
+                self.stop.side_effect = stopped
+                self.stop.reset_mock()
+                with (
+                    patch.object(child, "bytes_at", return_value=b"\x7fELF"),
+                    self.assertRaises(child.ChildError),
+                    child.observing(observer),
+                ):
+                    child._probe_observed(
+                        child._ProbeArgs(f.interpreter, target, "parser-version", f.lease, f.clock), observer
+                    )
+                if type(status) is int and status != 0 and dead:
+                    self.assertEqual(
+                        observer.snapshot(),
+                        {
+                            "schema": 1,
+                            "context": "CHILD_PARENT",
+                            "site": "B_PROBE_STATUS_REFUSAL",
+                            "failure": "REFUSED",
+                        },
+                    )
+                else:
+                    self.assertIsNone(observer.snapshot())
+                self.assertEqual(self.stop.call_count, 1 if dead else 2)
 
 
 if __name__ == "__main__":

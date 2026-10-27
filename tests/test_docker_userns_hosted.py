@@ -1808,5 +1808,366 @@ class ToolDiagnosticTests(unittest.TestCase):
         probe.assert_not_called()
 
 
+class PreparationWireTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.base = {
+            "schema": 1,
+            "diagnosticOnly": True,
+            "phase": "prepare",
+            "ns": 17,
+            "custodyLocator": None,
+            "childPending": False,
+        }
+        self.detail = {"schema": 1, "context": "CUSTODY", "site": "C_CREATE_W02", "failure": "OS_ERROR"}
+
+    def test_optional_detail_is_closed_and_invalid_detail_keeps_only_valid_base(self) -> None:
+        self.assertEqual(hosted._failure_diagnostic(self.base), self.base)
+        self.assertEqual(
+            hosted._failure_diagnostic({**self.base, "workFailure": self.detail}),
+            {**self.base, "workFailure": self.detail},
+        )
+        invalid = [
+            None,
+            [],
+            {},
+            {**self.detail, "schema": True},
+            {**self.detail, "schema": 1.0},
+            {**self.detail, "context": "HOSTED"},
+            {**self.detail, "site": "unknown"},
+            {**self.detail, "failure": "private error"},
+            {**self.detail, "raw": "private output"},
+            {**self.detail, "site": "x" * (child.WORK_FAILURE_LIMIT + 1)},
+            {"schema": 1, "context": "CHILD_PARENT", "site": "B_BUILD_STATUS_REFUSAL", "failure": "OS_ERROR"},
+        ]
+        for detail in invalid:
+            with self.subTest(detail=detail):
+                self.assertEqual(hosted._failure_diagnostic({**self.base, "workFailure": detail}), self.base)
+        base = {**self.base, "phase": "binding"}
+        self.assertEqual(hosted._failure_diagnostic({**base, "workFailure": self.detail}), base)
+
+    def test_invalid_base_unknown_root_or_duplicate_keys_keep_existing_refusal(self) -> None:
+        for value in (
+            None,
+            [],
+            {**self.base, "unknown": 1},
+            {**self.base, "schema": 0},
+            {key: value for key, value in self.base.items() if key != "childPending"},
+        ):
+            with self.subTest(value=value), self.assertRaises(custody.CustodyError):
+                hosted._failure_diagnostic(value)
+        control = hosted.Control.__new__(hosted.Control)
+        control.path, control.check = Path("/synthetic"), MagicMock()
+        raw = (
+            json.dumps({**self.base, "workFailure": self.detail})
+            .replace('"site": "C_CREATE_W02"', '"site": "C_CREATE_W02", "site": "C_CREATE_W02"')
+            .encode()
+        )
+        with patch.object(hosted, "read_root", return_value=(raw, None)), self.assertRaises(custody.CustodyError):
+            control.read("failure.json")
+
+    def test_single_failure_write_keeps_legacy_default_and_immutable_optional_input(self) -> None:
+        control = hosted.Control.__new__(hosted.Control)
+        control.phase, control.write = "prepare", MagicMock()
+        fault = OSError("private exception path uid")
+        with patch.object(hosted.time, "monotonic_ns", return_value=17):
+            control.failure(fault, 100)
+            self.assertEqual(set(control.write.call_args.args[1]), set(self.base))
+            control.write.reset_mock()
+            control.failure(fault, 100, work_failure=("CUSTODY", "C_CREATE_W02", "OS_ERROR"))
+        self.assertEqual(control.write.call_count, 1)
+        value = control.write.call_args.args[1]
+        self.assertEqual(value["workFailure"], self.detail)
+        self.assertTrue(value["diagnosticOnly"])
+        self.assertNotIn("private", json.dumps(value))
+        self.assertLessEqual(len(json.dumps(value["workFailure"]).encode()), child.WORK_FAILURE_LIMIT)
+        for phase in ("binding", "owner"):
+            control.phase = phase
+            control.failure(fault, 100, work_failure=("CUSTODY", "C_CREATE_W02", "OS_ERROR"))
+            self.assertNotIn("workFailure", control.write.call_args.args[1])
+        control.phase = "prepare"
+        control.write.reset_mock()
+        control.write.side_effect = OSError("private failure capture")
+        with self.assertRaises(OSError):
+            control.failure(fault, 100, work_failure=("CUSTODY", "C_CREATE_W02", "OS_ERROR"))
+        self.assertEqual(control.write.call_count, 1)
+
+    def test_opaque_boot_and_distro_calls_are_unobserved(self) -> None:
+        for kind in ("boot", "distro"):
+            with self.subTest(kind=kind):
+                observer = child.WorkObserver()
+                fault = OSError("private opaque cleanup")
+                with (
+                    patch.object(Path, "read_text", side_effect=fault),
+                    child.observing(observer),
+                    self.assertRaises(OSError) as raised,
+                ):
+                    if kind == "boot":
+                        clock = hosted.Clock.__new__(hosted.Clock)
+                        clock.boot, clock.observer = "old", observer
+                        clock.boot_id()
+                    else:
+                        host = hosted.HostPort.__new__(hosted.HostPort)
+                        host.observer = observer
+                        with patch.object(hosted, "safe_path", side_effect=lambda path, **_kwargs: path):
+                            host.observe(MagicMock())
+                self.assertIs(raised.exception, fault)
+                self.assertIsNone(observer.snapshot())
+
+    def test_shared_read_record_call_stays_default_none(self) -> None:
+        store = MagicMock()
+        marker = object()
+        store.load.return_value = marker
+        context = MagicMock()
+        context.__enter__.return_value = store
+        with patch.object(custody, "_store", return_value=context) as open_store:
+            self.assertIs(hosted.read_record(marker), marker)
+        open_store.assert_called_once_with(marker)
+
+
+class CoordinatorObservationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.hosted = HostedTests(methodName="runTest")
+        self.hosted.setUp()
+        self.addCleanup(self.hosted.doCleanups)
+        self.fixture = self.hosted.fixture
+        self.control = hosted.Control.__new__(hosted.Control)
+        self.control.phase = "control"
+        self.control.mark = SimpleNamespace(st_dev=1, st_ino=2)
+        self.stale = ("CUSTODY", "C_CREATE_W02", "OS_ERROR")
+        self.control.preparation_failure = self.stale
+        self.binding_error = RuntimeError("private later binding")
+        self.control.write = MagicMock(side_effect=self.binding_error)
+        self.bootstrap = {
+            "context": {"candidate": "a" * 40, "head": "b" * 40, "base": "c" * 40, "run": "17", "attempt": "2"},
+            "uid": 1001,
+            "gid": 1002,
+        }
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.close = self.stack.enter_context(patch.object(hosted.os, "close"))
+        self.stack.enter_context(patch.object(hosted.os, "open", side_effect=(71, 72, 73, 74, 75, 76)))
+        self.stack.enter_context(patch.object(hosted, "Clock", return_value=self.fixture.clock))
+        self.stack.enter_context(
+            patch.object(hosted, "HostPort", return_value=SimpleNamespace(admission=self.fixture.admission))
+        )
+        self.stack.enter_context(patch.object(hosted, "process", return_value=self.hosted.record.lease.coordinator))
+        self.read = self.stack.enter_context(patch.object(hosted, "read_record", return_value=self.hosted.record))
+        self.prepare = self.stack.enter_context(
+            patch.object(custody, "_prepare_observed", return_value=self.hosted.locator)
+        )
+
+    def run_coordinator(self) -> int:
+        return hosted.coordinator_main(
+            Path("/synthetic"),
+            self.control,
+            self.bootstrap,
+            self.hosted.record.lease.coordinator,
+            self.fixture.clock.time + hosted.CYCLE_NS,
+        )
+
+    def work_fault(self, _arguments: object, observer: child.WorkObserver | None) -> None:
+        self.assertIsNone(self.control.preparation_failure)
+        with child.work(observer, "CUSTODY", "C_CREATE_W02", (custody.CustodyError, child.ChildError)):
+            raise self.original
+
+    def test_first_work_tuple_survives_original_exitstack_masking(self) -> None:
+        self.original, release = OSError("private prepare"), OSError("private release")
+        self.prepare.side_effect = self.work_fault
+        self.close.side_effect = release
+        with self.assertRaises(OSError) as raised:
+            self.run_coordinator()
+        self.assertIs(raised.exception, release)
+        self.assertEqual(self.control.preparation_failure, self.stale)
+        self.assertEqual(self.control.phase, "prepare")
+        self.assertFalse(any(type(value) is child.WorkObserver for value in vars(self.control).values()))
+        self.assertEqual(self.close.call_count, len(custody.LEAVES))
+        self.control.write.reset_mock()
+        self.control.write.side_effect = None
+        self.control.failure(raised.exception, 100, work_failure=self.control.preparation_failure)
+        self.assertEqual(self.control.write.call_count, 1)
+        self.assertEqual(self.control.write.call_args.args[1]["workFailure"]["site"], "C_CREATE_W02")
+
+    def test_reuse_clears_stale_tuple_and_later_binding_failure_has_no_work_detail(self) -> None:
+        self.original = OSError("private prepare")
+        self.prepare.side_effect = self.work_fault
+        with self.assertRaises(OSError):
+            self.run_coordinator()
+        self.assertEqual(self.control.preparation_failure, self.stale)
+        self.prepare.side_effect = None
+        with self.assertRaises(RuntimeError) as raised:
+            self.run_coordinator()
+        self.assertIs(raised.exception, self.binding_error)
+        self.assertIsNone(self.control.preparation_failure)
+        self.assertEqual(self.control.phase, "binding")
+        self.control.write.side_effect = None
+        self.control.write.reset_mock()
+        self.control.failure(raised.exception, 100, work_failure=self.stale)
+        self.assertNotIn("workFailure", self.control.write.call_args.args[1])
+        self.assertEqual(self.control.write.call_count, 1)
+
+    def test_snapshot_seal_and_constructor_failures_preserve_original_and_single_capture(self) -> None:
+        for target in ("snapshot", "seal", "new_observer"):
+            with self.subTest(target=target):
+                self.control.preparation_failure = self.stale
+                self.original = OSError("private prepare")
+                self.prepare.side_effect = self.work_fault
+                self.close.reset_mock()
+                self.control.write.reset_mock()
+                owner = child if target == "new_observer" else child.WorkObserver
+                effect = None if target == "new_observer" else RuntimeError("private diagnostic")
+                kwargs = {"return_value": None} if target == "new_observer" else {"side_effect": effect}
+                # Each case gets fresh fake descriptors; no native close/open is performed.
+                with (
+                    patch.object(hosted.os, "open", side_effect=(71, 72, 73)),
+                    patch.object(owner, target, **kwargs),
+                    self.assertRaises(OSError) as raised,
+                ):
+                    self.run_coordinator()
+                self.assertIs(raised.exception, self.original)
+                self.assertIsNone(self.control.preparation_failure)
+                self.control.write.side_effect = None
+                self.control.failure(raised.exception, 100, work_failure=self.control.preparation_failure)
+                self.assertEqual(self.control.write.call_count, 1)
+                self.assertNotIn("workFailure", self.control.write.call_args.args[1])
+
+    def test_immediate_readback_can_author_before_binding(self) -> None:
+        def read(_locator: object, observer: child.WorkObserver | None = None) -> None:
+            with child.work(observer, "CUSTODY", "C_STORE_LOAD_G01", (custody.CustodyError, child.ChildError)):
+                custody._need(value=False)
+
+        self.read.side_effect = read
+        with self.assertRaises(custody.CustodyError):
+            self.run_coordinator()
+        self.assertEqual(self.control.preparation_failure, ("CUSTODY", "C_STORE_LOAD_G01", "REFUSED"))
+        self.assertEqual(self.control.phase, "prepare")
+        self.control.write.assert_not_called()
+
+
+class ComposedClockObservationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.fixture = fixtures.CustodyTests(methodName="runTest")
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+
+    def clock(self, observer: child.WorkObserver) -> hosted.Clock:
+        with patch.object(Path, "read_text", return_value=fixtures.BOOT):
+            return hosted.Clock(observer=observer)
+
+    def invoke(self, kind: str, clock: hosted.Clock, observer: child.WorkObserver) -> None:
+        f = self.fixture
+        if kind == "initial":
+            custody._initial(
+                clock, fixtures.BOOT, f.request.original_deadline_ns - custody.CLEANUP_NS, observer=observer
+            )
+        else:
+            custody._prepare_observed(
+                custody._PrepareArgs(f.admission, f.request, tuple(f.fds), f.host, clock), observer
+            )
+
+    def test_composed_boot_read_and_internal_release_exceptions_remain_unobserved(self) -> None:
+        for kind, target in (("initial", 1), ("initial", 2), ("prepare", 7), ("prepare", 8)):
+            for failure_kind in ("read", "release"):
+                with self.subTest(kind=kind, target=target, failure=failure_kind):
+                    observer = child.WorkObserver()
+                    clock = self.clock(observer)
+                    original = OSError("private opaque boot " + failure_kind)
+                    calls = 0
+
+                    def read(
+                        *_args: object, target: int = target, original: OSError = original, **_kwargs: object
+                    ) -> str:
+                        nonlocal calls
+                        calls += 1
+                        if calls == target:
+                            raise original
+                        return fixtures.BOOT
+
+                    def opened(
+                        *_args: object, target: int = target, original: OSError = original, **_kwargs: object
+                    ) -> MagicMock:
+                        nonlocal calls
+                        calls += 1
+                        stream = MagicMock()
+                        stream.__enter__.return_value = stream
+                        stream.read.return_value = fixtures.BOOT
+                        stream.__exit__.return_value = False
+                        if calls == target:
+                            stream.__exit__.side_effect = original
+                        return stream
+
+                    owner = "read_text" if failure_kind == "read" else "open"
+                    effect = read if failure_kind == "read" else opened
+                    with (
+                        patch.object(hosted.time, "monotonic_ns", return_value=self.fixture.clock.time),
+                        patch.object(Path, owner, side_effect=effect),
+                        child.observing(observer),
+                        self.assertRaises(OSError) as raised,
+                    ):
+                        self.invoke(kind, clock, observer)
+                    self.assertIs(raised.exception, original)
+                    self.assertIsNone(observer.snapshot())
+                    self.assertEqual(calls, target)
+
+    def test_actual_false_composed_predicates_keep_original_lazy_read_counts(self) -> None:
+        for kind, time_call, expected_site, reads in (
+            ("initial", 1, "C_INITIAL_G01", 1),
+            ("prepare", 3, "C_PREPARE_UNUSED_G04", 7),
+        ):
+            with self.subTest(kind=kind):
+                observer = child.WorkObserver()
+                clock = self.clock(observer)
+                calls = 0
+                cutoff = self.fixture.request.original_deadline_ns - custody.CLEANUP_NS
+
+                def now(*, cutoff: int = cutoff, time_call: int = time_call) -> int:
+                    nonlocal calls
+                    calls += 1
+                    return cutoff if calls == time_call else self.fixture.clock.time
+
+                with (
+                    patch.object(hosted.time, "monotonic_ns", side_effect=now),
+                    patch.object(Path, "read_text", return_value=fixtures.BOOT) as read,
+                    child.observing(observer),
+                    self.assertRaises(custody.CustodyError),
+                ):
+                    self.invoke(kind, clock, observer)
+                self.assertEqual(
+                    observer.snapshot(),
+                    {"schema": 1, "context": "CUSTODY", "site": expected_site, "failure": "REFUSED"},
+                )
+                self.assertEqual(calls, time_call)
+                self.assertEqual(read.call_count, reads)
+
+    def test_owned_inner_clock_fault_survives_without_composed_fallback(self) -> None:
+        for kind, target, reads in (("initial", 1, 0), ("prepare", 3, 6)):
+            with self.subTest(kind=kind):
+                observer = child.WorkObserver()
+                clock = self.clock(observer)
+                original = OSError("private owned monotonic operation")
+                calls = 0
+
+                def now(*, target: int = target, original: OSError = original) -> int:
+                    nonlocal calls
+                    calls += 1
+                    if calls == target:
+                        raise original
+                    return self.fixture.clock.time
+
+                with (
+                    patch.object(hosted.time, "monotonic_ns", side_effect=now),
+                    patch.object(Path, "read_text", return_value=fixtures.BOOT) as read,
+                    child.observing(observer),
+                    self.assertRaises(OSError) as raised,
+                ):
+                    self.invoke(kind, clock, observer)
+                self.assertIs(raised.exception, original)
+                self.assertEqual(
+                    observer.snapshot(),
+                    {"schema": 1, "context": "HOSTED", "site": "H_CLOCK_NOW_NS_W01", "failure": "OS_ERROR"},
+                )
+                self.assertEqual(calls, target)
+                self.assertEqual(read.call_count, reads)
+
+
 if __name__ == "__main__":
     unittest.main()

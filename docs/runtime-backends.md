@@ -283,6 +283,33 @@ rechecks (including link count and timestamps), command arguments and budgets
 remain in place. This bounded OS-tool contract does not establish native runtime
 qualification or claim that the earlier runner had multiple links.
 
+Preparation can add one optional `workFailure` to the existing failure diagnostic.
+It identifies a closed parent-side work site in the `CUSTODY`, `CHILD_PARENT` or
+`HOSTED` source area. The finite site/category pairs live in the helper's
+`WORK_FAILURES` table. Observation is local to preparation and its immediate
+record readback; shared callers remain unobserved by default. The collector
+keeps only closed immutable values, and the invocation's control object receives
+only a sealed tuple. No exception, raw capture, path, credential ID or authored
+source/policy content is included in the new detail.
+
+Eligible work failures are captured before cleanup can mask them. Resource
+release, retention cleanup, opaque file-read internals, unknown child lifetime
+and child-internal causes remain unobserved. A proven-dead nonzero child status
+can identify only the parent's status-validation refusal. The first completion
+deadline after child cleanup is ambiguous and receives no work label. Composed
+boot checks observe only an actual false predicate; opaque boot-read/close
+exceptions cannot acquire an outer label. A valid legacy failure diagnostic
+with invalid optional detail retains only its legacy fields; malformed base
+records, unknown root fields and duplicate keys keep their existing refusal
+behavior. Recording or capture failure adds no retry or fallback output.
+
+These diagnostics add no reads, child channel, process, probe, wait, deadline or
+runtime authority. Child programs and privilege receipts, strict custody reads,
+and borrowed OS-tool rules remain unchanged. Successful initial tool scans,
+staging and the synthetic write-denial probe do not establish a successful
+normal custody cycle or native runtime qualification. A work label cannot
+authorize readiness, cleanup or disposal of retained data.
+
 `.github/docker-userns-unused-admission.json` is a manually reviewed semantic
 admission based on the audited Stage-1 Ubuntu 26 observation, bound to the
 active source manifest and helper contracts. It never compares historical

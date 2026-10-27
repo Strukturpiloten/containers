@@ -24,7 +24,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
+    from contextlib import AbstractContextManager
 
 from scripts import docker_userns_custody as custody
 from scripts import docker_userns_custody_child as child
@@ -93,9 +94,21 @@ PROPERTIES = (
 )
 
 
-def need(value: object) -> None:
+def _work(observer: child.WorkObserver | None, site: str | None) -> AbstractContextManager[None]:
+    return child.work(observer, "HOSTED", site, (custody.CustodyError, child.ChildError))
+
+
+def _observe[T](
+    observer: child.WorkObserver | None, site: str, operation: Callable[..., T], /, *args: object, **kwargs: object
+) -> T:
+    with _work(observer, site):
+        return operation(*args, **kwargs)
+
+
+def need(value: object, *, observer: child.WorkObserver | None = None, work_site: str | None = None) -> None:
     """Refuse without including raw privileged inputs in diagnostics."""
     if not value:
+        child.refused(observer, "HOSTED", work_site)
         raise custody.CustodyError
 
 
@@ -129,17 +142,22 @@ def exact(value: object, keys: set[str]) -> dict[str, Any]:
 class Clock:
     """Use current-boot monotonic time throughout the immutable allowance."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, observer: child.WorkObserver | None = None) -> None:
         """Capture the current boot without relying on workflow metadata."""
+        self.observer = observer
         self.boot = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
 
     def now_ns(self) -> int:
         """Return the kernel monotonic clock."""
-        return time.monotonic_ns()
+        return _observe(self.observer, "H_CLOCK_NOW_NS_W01", time.monotonic_ns)
 
     def boot_id(self) -> str:
         """Reobserve boot identity without renewing any budget."""
-        need(Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip() == self.boot)
+        need(
+            Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip() == self.boot,
+            observer=self.observer,
+            work_site="H_CLOCK_BOOT_ID_G01",
+        )
         return self.boot
 
 
@@ -214,16 +232,18 @@ def tool_site(diagnostic: ToolDiagnostic | None, site: str) -> Iterator[None]:
         raise
 
 
-def safe_path(path: Path, diagnostic: ToolDiagnostic | None = None) -> Path:
+def safe_path(
+    path: Path, diagnostic: ToolDiagnostic | None = None, *, observer: child.WorkObserver | None = None
+) -> Path:
     """Check every root-owned component traversed by the installed OS symlink chain."""
-    with tool_site(diagnostic, "PATH_ABSOLUTE"):
+    with tool_site(diagnostic, "PATH_ABSOLUTE"), _work(observer, "H_SAFE_PATH_G01"):
         need(path.is_absolute())
     pending, resolved, links = list(path.parts[1:]), Path("/"), 0
     with tool_site(diagnostic, "PATH_ROOT_LSTAT"):
-        root = resolved.lstat()
-    with tool_site(diagnostic, "PATH_ROOT_OWNER"):
+        root = _observe(observer, "H_SAFE_PATH_ROOT_LSTAT", resolved.lstat)
+    with tool_site(diagnostic, "PATH_ROOT_OWNER"), _work(observer, "H_SAFE_PATH_G02"):
         need(root.st_uid == 0)
-    with tool_site(diagnostic, "PATH_ROOT_MODE"):
+    with tool_site(diagnostic, "PATH_ROOT_MODE"), _work(observer, "H_SAFE_PATH_G03"):
         need(not root.st_mode & 0o022)
     while pending:
         part = pending.pop(0)
@@ -234,24 +254,24 @@ def safe_path(path: Path, diagnostic: ToolDiagnostic | None = None) -> Path:
             continue
         current = resolved / part
         with tool_site(diagnostic, "PATH_COMPONENT_LSTAT"):
-            info = current.lstat()
-        with tool_site(diagnostic, "PATH_COMPONENT_OWNER"):
+            info = _observe(observer, "H_SAFE_PATH_COMPONENT_LSTAT", current.lstat)
+        with tool_site(diagnostic, "PATH_COMPONENT_OWNER"), _work(observer, "H_SAFE_PATH_G04"):
             need(info.st_uid == 0)
         if stat.S_ISLNK(info.st_mode):
             links += 1
-            with tool_site(diagnostic, "PATH_SYMLINK_LIMIT"):
+            with tool_site(diagnostic, "PATH_SYMLINK_LIMIT"), _work(observer, "H_SAFE_PATH_G05"):
                 need(links <= MAX_LINKS)
             with tool_site(diagnostic, "PATH_READLINK"):
-                target = current.readlink()
+                target = _observe(observer, "H_SAFE_PATH_READLINK", current.readlink)
             if target.is_absolute():
                 resolved = Path("/")
                 pending = list(target.parts[1:]) + pending
             else:
                 pending = list(target.parts) + pending
         else:
-            with tool_site(diagnostic, "PATH_COMPONENT_MODE"):
+            with tool_site(diagnostic, "PATH_COMPONENT_MODE"), _work(observer, "H_SAFE_PATH_G06"):
                 need(not info.st_mode & 0o022)
-            with tool_site(diagnostic, "PATH_COMPONENT_TYPE"):
+            with tool_site(diagnostic, "PATH_COMPONENT_TYPE"), _work(observer, "H_SAFE_PATH_G07"):
                 need(not pending or stat.S_ISDIR(info.st_mode))
             resolved = current
     return resolved
@@ -277,36 +297,45 @@ class _RootReadPolicy(Enum):
 
 
 def read_root(
-    path: Path, limit: int = LIMIT, diagnostic: ToolDiagnostic | None = None
+    path: Path,
+    limit: int = LIMIT,
+    diagnostic: ToolDiagnostic | None = None,
+    *,
+    observer: child.WorkObserver | None = None,
 ) -> tuple[bytes, custody.FileIdentity]:
     """Read one exact single-link root file, including directly named OS executables."""
-    return _read_root(path, limit, diagnostic, _RootReadPolicy.STRICT)
+    return _read_root(path, limit, diagnostic, _RootReadPolicy.STRICT, **child.observer_args(observer))
 
 
 def _read_root(
-    path: Path, limit: int, diagnostic: ToolDiagnostic | None, policy: _RootReadPolicy
+    path: Path,
+    limit: int,
+    diagnostic: ToolDiagnostic | None,
+    policy: _RootReadPolicy,
+    *,
+    observer: child.WorkObserver | None = None,
 ) -> tuple[bytes, custody.FileIdentity]:
     """Share the original descriptor checks under one private, closed link policy."""
-    with tool_site(diagnostic, "READ_CANONICAL_PATH"):
-        need(safe_path(path, diagnostic) == path)
+    with tool_site(diagnostic, "READ_CANONICAL_PATH"), _work(observer, "H_READ_ROOT_G01"):
+        need(safe_path(path, diagnostic, **child.observer_args(observer)) == path)
     with tool_site(diagnostic, "READ_OPEN"):
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        descriptor = _observe(observer, "H_READ_ROOT_W01", os.open, path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
         with tool_site(diagnostic, "READ_INITIAL_FSTAT"):
-            before = identity(os.fstat(descriptor))
-        with tool_site(diagnostic, "READ_REGULAR_FILE"):
+            before = identity(_observe(observer, "H_READ_ROOT_W02", os.fstat, descriptor))
+        with tool_site(diagnostic, "READ_REGULAR_FILE"), _work(observer, "H_READ_ROOT_G02"):
             need(stat.S_ISREG(before.mode))
-        with tool_site(diagnostic, "READ_OWNER"):
+        with tool_site(diagnostic, "READ_OWNER"), _work(observer, "H_READ_ROOT_G03"):
             need(before.owner == 0)
-        with tool_site(diagnostic, "READ_LINKS"):
+        with tool_site(diagnostic, "READ_LINKS"), _work(observer, "H_READ_ROOT_G04"):
             need(before.links >= 1 if policy is _RootReadPolicy.BORROWED_OS_TOOL else before.links == 1)
-        with tool_site(diagnostic, "READ_MODE"):
+        with tool_site(diagnostic, "READ_MODE"), _work(observer, "H_READ_ROOT_G05"):
             need(not before.mode & 0o7022)
         with tool_site(diagnostic, "READ_BYTES"):
-            raw = child.bytes_at(descriptor, limit)
-        with tool_site(diagnostic, "READ_FINAL_FSTAT"):
+            raw = _observe(observer, "H_READ_ROOT_W03", child.bytes_at, descriptor, limit)
+        with tool_site(diagnostic, "READ_FINAL_FSTAT"), _work(observer, "H_READ_ROOT_G06"):
             need(identity(os.fstat(descriptor)) == before)
-        with tool_site(diagnostic, "READ_FINAL_LSTAT"):
+        with tool_site(diagnostic, "READ_FINAL_LSTAT"), _work(observer, "H_READ_ROOT_G07"):
             need(identity(path.lstat()) == before)
         return raw, before
     finally:
@@ -314,30 +343,41 @@ def _read_root(
             os.close(descriptor)
 
 
-def group(path: str) -> custody.Group:
+def group(path: str, *, observer: child.WorkObserver | None = None) -> custody.Group:
     """Bind the actual unified cgroup to its current filesystem identity."""
-    need(re.fullmatch(r"/[A-Za-z0-9_.:/-]{0,255}", path) and ".." not in path.split("/") and "//" not in path)
+    with _work(observer, "H_GROUP_G01"):
+        need(re.fullmatch(r"/[A-Za-z0-9_.:/-]{0,255}", path) and ".." not in path.split("/") and "//" not in path)
     location = Path("/sys/fs/cgroup" + path)
-    info = location.lstat()
-    need(stat.S_ISDIR(info.st_mode) and info.st_uid == 0)
+    info = _observe(observer, "H_GROUP_LSTAT", location.lstat)
+    with _work(observer, "H_GROUP_G02"):
+        need(stat.S_ISDIR(info.st_mode) and info.st_uid == 0)
     return custody.Group(path, info.st_dev, info.st_ino)
 
 
-def process(pid: int) -> custody.Process:
+def process(pid: int, *, observer: child.WorkObserver | None = None) -> custody.Process:
     """Reobserve PID, start time, all root IDs, process group and exact cgroup."""
-    need(type(pid) is int and pid > 1)
+    with _work(observer, "H_PROCESS_G01"):
+        need(type(pid) is int and pid > 1)
     root = Path("/proc") / str(pid)
     first = (root / "stat").read_bytes()
-    need(len(first) <= PROC_LIMIT and b")" in first)
+    with _work(observer, "H_PROCESS_G02"):
+        need(len(first) <= PROC_LIMIT and b")" in first)
     fields = first.rsplit(b")", 1)[1].split()
-    need(len(fields) > START_FIELD)
+    with _work(observer, "H_PROCESS_G03"):
+        need(len(fields) > START_FIELD)
     status = (root / "status").read_bytes()
     rows = [row.split()[1:] for row in status.splitlines() if row.startswith(b"Uid:")]
-    need(rows == [[b"0", b"0", b"0", b"0"]])
+    with _work(observer, "H_PROCESS_G04"):
+        need(rows == [[b"0", b"0", b"0", b"0"]])
     cgroups = (root / "cgroup").read_bytes()
-    need(len(cgroups) <= CGROUP_LIMIT and re.fullmatch(rb"0::/[A-Za-z0-9_.:/-]*\n", cgroups))
-    observed = group(cgroups[3:-1].decode("ascii"))
-    need((root / "stat").read_bytes().rsplit(b")", 1)[1].split()[START_FIELD] == fields[START_FIELD])
+    with _work(observer, "H_PROCESS_G05"):
+        need(len(cgroups) <= CGROUP_LIMIT and re.fullmatch(rb"0::/[A-Za-z0-9_.:/-]*\n", cgroups))
+    observed = group(cgroups[3:-1].decode("ascii"), **child.observer_args(observer))
+    need(
+        (root / "stat").read_bytes().rsplit(b")", 1)[1].split()[START_FIELD] == fields[START_FIELD],
+        observer=observer,
+        work_site="H_PROCESS_G06",
+    )
     return custody.Process(pid, int(fields[START_FIELD]), int(fields[2]), 0, observed)
 
 
@@ -525,6 +565,7 @@ class Control:
 
     def __init__(self, path: Path, *, create: bool = False) -> None:
         """Create or authenticate one private finite control directory."""
+        self.preparation_failure: tuple[str, str, str] | None = None
         need(path.parent == Path("/run") and re.fullmatch(re.escape(CONTROL_PREFIX) + r"[0-9a-f]{32}", path.name))
         if create:
             path.mkdir(mode=0o700)
@@ -579,23 +620,29 @@ class Control:
         need(type(value) is dict)
         return value
 
-    def failure(self, error: Exception, deadline: int) -> None:
-        """Keep the first closed diagnostic only; it can never authorize readiness/cleanup."""
+    def failure(self, error: Exception, deadline: int, *, work_failure: tuple[str, str, str] | None = None) -> None:
+        """Keep the existing diagnostic and optionally one sealed closed preparation fault."""
         need(self.phase in {"control", "admission", "prepare", "binding", "arm", "commit", "close", "finish", "owner"})
         locator = error.locator if isinstance(error, custody.CustodyError) else None
         pending = error.child_pending if isinstance(error, custody.CustodyError) else None
-        self.write(
-            "failure.json",
-            {
-                "schema": 1,
-                "diagnosticOnly": True,
-                "phase": self.phase,
-                "ns": time.monotonic_ns(),
-                "custodyLocator": asdict(locator) if locator else None,
-                "childPending": pending,
-            },
-            deadline,
-        )
+        value = {
+            "schema": 1,
+            "diagnosticOnly": True,
+            "phase": self.phase,
+            "ns": time.monotonic_ns(),
+            "custodyLocator": asdict(locator) if locator else None,
+            "childPending": pending,
+        }
+        if (
+            self.phase == "prepare"
+            and type(work_failure) is tuple
+            and len(work_failure) == len(child.WORK_FAILURE_FIELDS)
+        ):
+            context, site, failure = work_failure
+            detail = child.work_failure({"schema": 1, "context": context, "site": site, "failure": failure})
+            if detail is not None:
+                value["workFailure"] = detail
+        self.write("failure.json", value, deadline)
 
     def listen(self, name: str) -> socket.socket:
         """Create only a fixed finite private Unix listener."""
@@ -632,9 +679,9 @@ class Control:
         remaining(deadline)
 
 
-def read_record(locator: custody.Locator) -> custody.Record:
+def read_record(locator: custody.Locator, *, observer: child.WorkObserver | None = None) -> custody.Record:
     """Strict nonmutating durable read; unresolved intent is deliberately not settled."""
-    with custody._store(locator) as store:  # noqa: SLF001 - adapter reads the foundation's strict locked schema.
+    with custody._store(locator, **child.observer_args(observer)) as store:  # noqa: SLF001 - adapter reads the foundation's strict locked schema.
         return store.load()
 
 
@@ -748,8 +795,17 @@ class StartBinding:
 class HostPort:
     """Observe the current manually admitted OS cohort using root-held fresh files."""
 
-    def __init__(self, stage: Path, receipt: dict[str, Any], clock: Clock, stack: ExitStack) -> None:
+    def __init__(
+        self,
+        stage: Path,
+        receipt: dict[str, Any],
+        clock: Clock,
+        stack: ExitStack,
+        *,
+        observer: child.WorkObserver | None = None,
+    ) -> None:
         """Check the selected manual admission against the verified active closure."""
+        self.observer = observer
         self.stage, self.receipt, self.clock, self.stack = stage, receipt, clock, stack
         self.request: custody.Request | None = None
         self.probes: list[dict[str, Any]] = []
@@ -790,47 +846,73 @@ class HostPort:
         self.request = request
         distro = dict(
             line.split("=", 1)
-            for line in safe_path(Path("/etc/os-release")).read_text().splitlines()
+            for line in safe_path(Path("/etc/os-release"), **child.observer_args(self.observer))
+            .read_text()
+            .splitlines()
             if "=" in line and not line.startswith("#")
         )
         actual = self.admission.cohort
-        need(
-            distro.get("ID", "").strip('"') == actual.os_id
-            and distro.get("VERSION_ID", "").strip('"') == actual.os_version
-        )
-        need(os.uname().machine == actual.architecture and os.uname().release == actual.kernel)
-        need(
-            self.receipt["context"]["imageOS"] == actual.image_os
-            and self.receipt["context"]["imageVersion"] == actual.image_version
-        )
+        with _work(self.observer, "H_HOSTPORT_OBSERVE_G01"):
+            need(
+                distro.get("ID", "").strip('"') == actual.os_id
+                and distro.get("VERSION_ID", "").strip('"') == actual.os_version
+            )
+        with _work(self.observer, "H_HOSTPORT_OBSERVE_G02"):
+            need(os.uname().machine == actual.architecture and os.uname().release == actual.kernel)
+        with _work(self.observer, "H_HOSTPORT_OBSERVE_G03"):
+            need(
+                self.receipt["context"]["imageOS"] == actual.image_os
+                and self.receipt["context"]["imageVersion"] == actual.image_version
+            )
         paths = (Path("/usr/sbin/apparmor_parser"), Path("/etc/apparmor.d/abi/4.0"), *FEATURE_PATHS)
         files = tuple(
-            read_root(path, child.MAX_INTERPRETER if index == 0 else child.MAX_SOURCE)
+            read_root(
+                path, child.MAX_INTERPRETER if index == 0 else child.MAX_SOURCE, **child.observer_args(self.observer)
+            )
             for index, path in enumerate(paths)
         )
-        parser = os.open(paths[0], os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        parser = _observe(
+            self.observer, "H_HOSTPORT_OBSERVE_W01", os.open, paths[0], os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+        )
         try:
-            need(identity(os.fstat(parser)) == files[0][1])
+            with _work(self.observer, "H_HOSTPORT_OBSERVE_G04"):
+                need(identity(os.fstat(parser)) == files[0][1])
             try:
                 capabilities = os.getxattr(parser, "security.capability")
             except OSError as error:
-                need(error.errno == errno.ENODATA)
+                with _work(self.observer, "H_HOSTPORT_OBSERVE_G05"):
+                    need(error.errno == errno.ENODATA)
                 capabilities = b""
-            need(
-                capabilities == b""
-                and digest(files[0][0]) == actual.parser_sha256
-                and digest(files[1][0]) == actual.abi_sha256
-            )
+            with _work(self.observer, "H_HOSTPORT_OBSERVE_G06"):
+                need(
+                    capabilities == b""
+                    and digest(files[0][0]) == actual.parser_sha256
+                    and digest(files[1][0]) == actual.abi_sha256
+                )
             cutoff = min(request.original_deadline_ns - custody.CLEANUP_NS, self.clock.now_ns() + 5 * NS)
-            result = child.probe(
-                child.Interpreter(self.interpreter, self.admission.bootstrap.interpreter_sha256),
-                parser,
-                "parser-version",
-                child.Build("version", request.uid, request.gid, cutoff, cutoff + NS),
-                self.clock,
+            result = (
+                child.probe(
+                    child.Interpreter(self.interpreter, self.admission.bootstrap.interpreter_sha256),
+                    parser,
+                    "parser-version",
+                    child.Build("version", request.uid, request.gid, cutoff, cutoff + NS),
+                    self.clock,
+                )
+                if self.observer is None
+                else child.probe_input(
+                    child.Interpreter(self.interpreter, self.admission.bootstrap.interpreter_sha256),
+                    parser,
+                    "parser-version",
+                    child.Build("version", request.uid, request.gid, cutoff, cutoff + NS),
+                    self.clock,
+                ).observe(self.observer)
             )
             need(result.dead and re.fullmatch(rb"AppArmor parser version 5\.0\.2\n[^\x00]{0,900}", result.policy))
-            need(read_root(paths[0], child.MAX_INTERPRETER) == files[0])
+            need(
+                read_root(paths[0], child.MAX_INTERPRETER, **child.observer_args(self.observer)) == files[0],
+                observer=self.observer,
+                work_site="H_HOSTPORT_OBSERVE_G08",
+            )
             self.probes.append(
                 {
                     "kind": "parser-version",
@@ -847,12 +929,15 @@ class HostPort:
             )
         finally:
             os.close(parser)
-        helpers = tuple(read_root(self.stage / "scripts" / name, child.MAX_SOURCE * 4) for name in custody.HELPERS)
+        helpers = tuple(
+            read_root(self.stage / "scripts" / name, child.MAX_SOURCE * 4, **child.observer_args(self.observer))
+            for name in custody.HELPERS
+        )
         return custody.Observation(
             request.run,
             actual,
             self.clock.boot_id(),
-            process(os.getpid()),
+            process(os.getpid(), **child.observer_args(self.observer)),
             files[0][0],
             files[1][0],
             tuple(item[0] for item in files[2:]),
@@ -867,9 +952,11 @@ class HostPort:
 
     def reobserve(self, observation: custody.Observation) -> custody.Observation:
         """Repeat the same current-run facts; caller rejects any changed identity/content."""
-        need(self.request is not None)
+        with _work(self.observer, "H_HOSTPORT_REOBSERVE_G01"):
+            need(self.request is not None)
         repeated = self.observe(self.request)
-        need(repeated == observation)
+        with _work(self.observer, "H_HOSTPORT_REOBSERVE_G02"):
+            need(repeated == observation)
         return repeated
 
 
@@ -1364,14 +1451,25 @@ def commit_notice(supervisor: SupervisorPort, intent: custody.ArmIntent) -> None
         need(receive(connection, deadline) == {"committed": True})
 
 
+def _sealed_preparation(observer: child.WorkObserver | None) -> tuple[str, str, str] | None:
+    if type(observer) is child.WorkObserver:
+        with suppress(Exception):
+            detail = child.work_failure(observer.snapshot())
+            if detail is not None:
+                return detail["context"], detail["site"], detail["failure"]
+    return None
+
+
 def coordinator_main(
     stage: Path, control: Control, bootstrap: dict[str, Any], observer: custody.Process, deadline: int
 ) -> int:
     """Prepare/arm as the actual root caller, then await its independent observer."""
-    clock = Clock()
+    control.preparation_failure = None
+    work_observer = child.new_observer()
+    clock = Clock(**child.observer_args(work_observer))
     with ExitStack() as stack:
         control.phase = "admission"
-        host = HostPort(stage, bootstrap, clock, stack)
+        host = HostPort(stage, bootstrap, clock, stack, **child.observer_args(work_observer))
         context = bootstrap["context"]
         run = custody.Run(
             context["candidate"],
@@ -1396,8 +1494,14 @@ def coordinator_main(
             stack.callback(os.close, descriptor)
             source_fds.append(custody.SourceFD(name, descriptor))
         control.phase = "prepare"
-        locator = custody.prepare_unused(host.admission, request, tuple(source_fds), host, clock)
-        record = read_record(locator)
+        try:
+            with child.observing(work_observer):
+                locator = custody.preparation_input(host.admission, request, tuple(source_fds), host, clock).observe(
+                    work_observer
+                )
+                record = read_record(locator, **child.observer_args(work_observer))
+        finally:
+            control.preparation_failure = _sealed_preparation(work_observer)
         control.phase = "binding"
         control.write(
             "binding.json",
@@ -1554,6 +1658,7 @@ class CycleObserver:
                 listener.close()
                 os.close(read)
                 os.close(gate_write)
+                self.control.preparation_failure = None
                 try:
                     os.setsid()
                     raw = encoded(asdict(process(os.getpid()))) + b"\n"
@@ -1564,11 +1669,15 @@ class CycleObserver:
                     remaining(end)
                     os.close(gate_read)
                     status = coordinator_main(
-                        self.plan.stage, self.control, self.plan.bootstrap, self.observer, self.plan.deadline
+                        self.plan.stage,
+                        self.control,
+                        self.plan.bootstrap,
+                        self.observer,
+                        self.plan.deadline,
                     )
                 except Exception as error:  # noqa: BLE001 - closed diagnostic, never raw privileged output.
                     with suppress(custody.CustodyError, OSError, ValueError):
-                        self.control.failure(error, self.plan.deadline)
+                        self.control.failure(error, self.plan.deadline, work_failure=self.control.preparation_failure)
                     status = 1
                 os._exit(status)
             self.coordinator = ChildCustody(pid)
@@ -1757,6 +1866,18 @@ class CycleObserver:
                     self.coordinator.close()
 
 
+def _failure_diagnostic(value: object) -> dict[str, Any]:
+    need(type(value) is dict)
+    base = {key: item for key, item in value.items() if key != "workFailure"} if "workFailure" in value else value
+    result = exact(base, {"schema", "diagnosticOnly", "phase", "ns", "custodyLocator", "childPending"})
+    need(result["schema"] == 1 and result["diagnosticOnly"] is True)
+    if result["phase"] == "prepare" and "workFailure" in value:
+        detail = child.work_failure(value["workFailure"])
+        if detail is not None:
+            result["workFailure"] = detail
+    return result
+
+
 def cycle(plan: CyclePlan, result: dict[str, Any]) -> None:
     """Refuse a late cycle rather than manufacturing a new cleanup reserve."""
     remaining(plan.deadline - custody.CLEANUP_NS)
@@ -1765,12 +1886,7 @@ def cycle(plan: CyclePlan, result: dict[str, Any]) -> None:
         observer.run()
     except Exception:
         with suppress(custody.CustodyError, OSError, ValueError):
-            failure = exact(
-                observer.control.read("failure.json"),
-                {"schema", "diagnosticOnly", "phase", "ns", "custodyLocator", "childPending"},
-            )
-            need(failure["schema"] == 1 and failure["diagnosticOnly"] is True)
-            result["diagnostic"] = failure
+            result["diagnostic"] = _failure_diagnostic(observer.control.read("failure.json"))
         raise
 
 
