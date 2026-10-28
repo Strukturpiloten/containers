@@ -317,10 +317,12 @@ After a valid service projection, one separate optional private capture can clas
 the last eight messages from the exact guest's current-boot journal, matching both
 `_UID=1000` and `_SYSTEMD_USER_UNIT=docker.service`. It repeats the private-daemon,
 full-CID ownership and guest placement checks inside the same original deadline.
-Only the root worker sees raw JSON messages in memory under the existing 64 KiB
-query cap. Classification accepts at most 2 KiB; the parent receives only closed
-message labels and bounded
-record/unknown counts. Generic permission errors, unreviewed formats and warnings
+Only the root worker sees raw JSON messages and their journal metadata in memory.
+Private classifier input shares the existing 64 KiB query
+cap and eight-record window; the parent receives only closed message labels and
+bounded record/unknown counts under the unchanged 2 KiB closed-wire input limit.
+Legacy service input also retains its separate 2 KiB limit. Generic permission
+errors, unreviewed formats and warnings
 remain unknown. Labels describe observed messages, not a proven cause or actor.
 Malformed, oversized, unavailable, cancelled or late classification cannot erase
 the existing service or host projection. Unverified query teardown still retains
@@ -333,6 +335,15 @@ alone does not bind a live process birth/identity through a proc read, and a uni
 property would describe configuration rather than the observed process state.
 No NNP override, security-policy change, service restart or startup wait is added.
 
+Official JSON output in
+[systemd v257](https://github.com/systemd/systemd/blob/v257/src/shared/logs-show.c#L1133-L1138)
+and [v259](https://github.com/systemd/systemd/blob/v259/src/shared/logs-show.c#L1168-L1173)
+adds string `__SEQNUM` and `__SEQNUM_ID` alongside cursor, timestamps and boot ID
+before `output_fields` filters the remaining journal data. The classifier accepts
+these two unused string keys and discards all metadata before returning the root
+protocol. Authored fixtures cover four- and six-metadata-field variants; they do
+not establish the actual guest's raw journal fields or installed systemd version.
+
 Message literals were reviewed read-only on 2026-10-28 using Context7
 `resolve-library-id`/`query-docs` and official-source `open`/`find`, without running
 an external oracle or copying its implementation. References are
@@ -341,7 +352,7 @@ an external oracle or copying its implementation. References are
 [Unix listener errors](https://github.com/moby/moby/blob/v28.5.2/daemon/listeners/listeners_linux.go),
 [network initialization errors](https://github.com/moby/moby/blob/v28.5.2/daemon/daemon.go),
 and [systemd v257 journalctl](https://github.com/systemd/systemd/blob/v257/man/journalctl.xml).
-RootlessKit/Moby sources are Apache-2.0; that systemd manual is LGPL-2.1-or-later.
+RootlessKit/Moby sources are Apache-2.0; the systemd references are LGPL-2.1-or-later.
 These references do not attest the guest's installed versions; unmatched formats
 remain unknown. No upstream implementation or oracle executable is redistributed.
 The existing diagnostics input ownership and already-installed guest journalctl

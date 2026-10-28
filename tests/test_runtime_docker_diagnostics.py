@@ -902,7 +902,7 @@ class GuestStartupProjection(unittest.TestCase):
             (json.dumps({"MESSAGE": "ordinary", "Environment": PRIVATE_MARKER}).encode(), "invalid-fields"),
             (json.dumps({"MESSAGE": "ordinary", "__CURSOR": [PRIVATE_MARKER]}).encode(), "invalid-fields"),
             (self.log_records(*(["ordinary"] * 9)), "record-limit"),
-            (b"x" * (diagnostics.GUEST_BYTE_LIMIT + 1), "byte-limit"),
+            (b"x" * (diagnostics.GUEST_LOG_INPUT_LIMIT + 1), "byte-limit"),
         ):
             with (
                 self.subTest(expected=expected),
@@ -931,6 +931,93 @@ class GuestStartupProjection(unittest.TestCase):
         self.assertNotIn("MESSAGE", result)
         self.assertNotIn("__CURSOR", result)
 
+    def test_eight_record_journal_window_with_mandatory_metadata_retains_only_closed_observations(self) -> None:
+        cursor_canary = "cafebabe" * 4
+        sequence_canary = "9876543210123456"
+        sequence_id_canary = "aabbccdd" * 4
+        records = [
+            {
+                "MESSAGE": (
+                    "[rootlesskit:parent] error: failed to start the child: " + PRIVATE_MARKER
+                    if index == 0
+                    else "ordinary startup message"
+                ),
+                "__CURSOR": (
+                    f"s={cursor_canary};i={index + 1:016x};b={'0123456789abcdef' * 2};"
+                    "m=123456789;t=65c87aa123456;x=0123456789abcdef"
+                ),
+                "__REALTIME_TIMESTAMP": str(1790000000000000 + index),
+                "__MONOTONIC_TIMESTAMP": str(123456789012 + index),
+                "_BOOT_ID": "0123456789abcdef" * 2,
+            }
+            for index in range(8)
+        ]
+        sequence_records = [
+            record | {"__SEQNUM": sequence_canary + str(index), "__SEQNUM_ID": sequence_id_canary}
+            for index, record in enumerate(records)
+        ]
+        for variant in (records, sequence_records):
+            with self.subTest(metadata_fields=len(variant[0]) - 1):
+                raw = b"\n".join(json.dumps(record).encode() for record in variant)
+                self.assertGreater(len(raw), 2048)
+                metadata = [{key: value for key, value in record.items() if key != "MESSAGE"} for record in variant]
+                self.assertGreater(len(b"\n".join(json.dumps(record).encode() for record in metadata)), 2048)
+                with patch.object(diagnostics, "_query_capture", return_value=self.protocol(raw)):
+                    protocol = diagnostics._guest_log_capture(["fixed-query"], 1005, "/fixed/timeout")
+                self.assertEqual(protocol["status"], "available")
+                self.assertTrue(protocol["teardownVerified"])
+                projected = diagnostics.base64.b64decode(protocol["data"])
+                result = diagnostics._startup_log_projection(projected)
+                self.assertEqual((result["records"], result["unknownRecords"]), (8, 7))
+                self.assertEqual(result["classes"], ["child-start-message"])
+                for canary in (PRIVATE_MARKER, cursor_canary, sequence_canary, sequence_id_canary):
+                    self.assertNotIn(canary, json.dumps(protocol))
+                    self.assertNotIn(canary.encode(), projected)
+                    self.assertNotIn(canary, json.dumps(result))
+                self.assertLessEqual(len(projected), 2048)
+
+    def test_sequence_metadata_rejects_nonstring_duplicate_unknown_and_missing_message_fields(self) -> None:
+        invalid = [
+            json.dumps({"MESSAGE": "ordinary", field: value}).encode()
+            for field in ("__SEQNUM", "__SEQNUM_ID")
+            for value in (None, 1, False, [], {}, [PRIVATE_MARKER])
+        ]
+        invalid.extend(
+            f'{{"MESSAGE":"ordinary","{field}":"first","{field}":"{PRIVATE_MARKER}"}}'.encode()
+            for field in ("__SEQNUM", "__SEQNUM_ID")
+        )
+        invalid.extend(
+            (
+                json.dumps({"MESSAGE": "ordinary", "__UNKNOWN_SEQUENCE": PRIVATE_MARKER}).encode(),
+                json.dumps({"__SEQNUM": "123", "__SEQNUM_ID": PRIVATE_MARKER}).encode(),
+            )
+        )
+        for raw in invalid:
+            with (
+                self.subTest(raw=raw),
+                patch.object(diagnostics, "_query_capture", return_value=self.protocol(raw)),
+            ):
+                protocol = diagnostics._guest_log_capture(["fixed-query"], 1005, "/fixed/timeout")
+                self.assertEqual(protocol, {"status": "invalid-fields", "teardownVerified": True})
+                self.assertNotIn(PRIVATE_MARKER, json.dumps(protocol))
+
+    def test_private_journal_input_limit_preserves_service_and_parent_wire_limits(self) -> None:
+        self.assertEqual(diagnostics.GUEST_LOG_INPUT_LIMIT, 64 * 1024)
+        prefix = "[rootlesskit:parent] error: failed to setup UID/GID map: newuidmap "
+        raw = self.log_records(prefix + "x" * (64 * 1024 - len(self.log_records(prefix))))
+        self.assertEqual(len(raw), 64 * 1024)
+        self.assertEqual(diagnostics._classify_startup_log(raw)["classes"], ["uidgid-map-message"])
+        for parser, limit in (
+            (diagnostics._classify_startup_log, 64 * 1024),
+            (diagnostics._guest_projection, 2048),
+            (diagnostics._startup_log_projection, 2048),
+        ):
+            with (
+                self.subTest(parser=parser.__name__),
+                self.assertRaisesRegex(diagnostics._UnavailableError, "byte-limit"),
+            ):
+                parser(b"x" * (limit + 1))
+
     def test_root_query_failure_or_unknown_teardown_never_repackages_raw_data(self) -> None:
         for status, verified in (("timeout", True), ("interrupted", True), ("cleanup-unverified", False)):
             original = {"status": status, "teardownVerified": verified, "data": PRIVATE_MARKER}
@@ -944,6 +1031,8 @@ class GuestStartupProjection(unittest.TestCase):
         valid = diagnostics._classify_startup_log(self.log_records("ordinary"))
         for value in (
             valid | {"MESSAGE": PRIVATE_MARKER},
+            valid | {"__SEQNUM": "123"},
+            valid | {"__SEQNUM_ID": PRIVATE_MARKER},
             valid | {"records": True},
             valid | {"unknownRecords": 2},
             valid | {"records": 9},

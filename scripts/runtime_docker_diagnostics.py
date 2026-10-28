@@ -39,6 +39,8 @@ PROTOCOL_LIMIT = 96 * 1024
 GUEST_BYTE_LIMIT = 2048
 GUEST_RECORD_LIMIT = 1024
 GUEST_LOG_RECORD_LIMIT = 8
+# Private journal metadata shares the existing capture cap; service and closed-wire input remain 2 KiB.
+GUEST_LOG_INPUT_LIMIT = BYTE_LIMIT
 DIAGNOSTIC_RECORD_LIMIT = 4096
 GUARD_SOURCE_LIMIT = 4096
 SERVICE_FIELDS = frozenset(
@@ -495,14 +497,22 @@ def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 def _classify_startup_log(raw: bytes) -> dict[str, Any]:
     """Inspect bounded private messages, returning only reviewed message labels."""
-    if len(raw) > GUEST_BYTE_LIMIT:
+    if len(raw) > GUEST_LOG_INPUT_LIMIT:
         raise _UnavailableError("byte-limit")
     lines = raw.splitlines()
     if len(lines) > GUEST_LOG_RECORD_LIMIT:
         raise _UnavailableError("record-limit")
     classes: set[str] = set()
     unknown = 0
-    allowed = {"MESSAGE", "__CURSOR", "__REALTIME_TIMESTAMP", "__MONOTONIC_TIMESTAMP", "_BOOT_ID"}
+    allowed = {
+        "MESSAGE",
+        "__CURSOR",
+        "__REALTIME_TIMESTAMP",
+        "__MONOTONIC_TIMESTAMP",
+        "_BOOT_ID",
+        "__SEQNUM",
+        "__SEQNUM_ID",
+    }
     for line in lines:
         entry = json.loads(line, object_pairs_hook=_unique_object)
         if (
