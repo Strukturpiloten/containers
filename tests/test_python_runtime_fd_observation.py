@@ -70,60 +70,148 @@ def child_record() -> dict:
     }
 
 
-class PythonFdObservationTests(unittest.TestCase):
-    def test_outer_wrapper_covers_startup_and_kills_only_its_fixture_group(self) -> None:
-        # The separate helper is a process-local subreaper, so even group-SIGKILL
-        # cannot leave the authored observer or its child for the host to reap.
-        # This local GNU fixture does not prove hosted /usr/bin/gnutimeout exists.
-        fixture = (
-            "import os,signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); "
-            "print(os.getpid(),flush=True); child=os.fork(); "
-            "print(os.getpid(),flush=True) if child==0 else None; time.sleep(10)"
-        )
-        helper = textwrap.dedent("""\
-            import ctypes,json,os,signal,subprocess,sys,time
-            assert ctypes.CDLL(None).prctl(36,1,0,0,0)==0
-            started=time.monotonic()
-            process=subprocess.Popen(['/usr/bin/timeout','--signal=TERM','--kill-after=0.1s','0.2s',
-                                      sys.executable,'-I','-B','-S','-c',sys.argv[1]],
-                                     stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
-                                     close_fds=True)
+OUTER_GROUP_HELPER = textwrap.dedent("""\
+    import ctypes,json,os,signal,subprocess,sys,time
+    from contextlib import suppress
+    assert ctypes.CDLL(None).prctl(36,1,0,0,0)==0
+    started=time.monotonic()
+    process=subprocess.Popen(['/usr/bin/gnutimeout','--signal=TERM','--kill-after=0.5s','2s',
+                              sys.executable,'-I','-B','-S','-c',sys.argv[1]],
+                             stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+                             close_fds=True)
+    reaped=[]
+    try:
+        output,errors=process.communicate(timeout=5)
+    finally:
+        try:
             try:
-                output,errors=process.communicate(timeout=2)
-            finally:
                 if process.returncode is None:
-                    os.killpg(process.pid,signal.SIGKILL)
-                    process.wait(timeout=1)
-                process.stdout.close()
-                process.stderr.close()
-            reaped=[]
-            end=time.monotonic()+1
+                    try:
+                        os.killpg(process.pid,signal.SIGKILL)
+                    except ProcessLookupError:
+                        try:
+                            with suppress(ProcessLookupError):
+                                os.kill(process.pid,signal.SIGKILL)
+                        finally:
+                            with suppress(ProcessLookupError):
+                                os.killpg(process.pid,signal.SIGKILL)
+            finally:
+                process.wait(timeout=2)
+        finally:
+            process.stdout.close()
+            process.stderr.close()
+            end=time.monotonic()+2
             while True:
                 try:
                     pid,status=os.waitpid(-1,os.WNOHANG)
                 except ChildProcessError:
                     break
                 if pid:
-                    assert os.WIFSIGNALED(status) and os.WTERMSIG(status)==signal.SIGKILL
-                    reaped.append(pid)
+                    reaped.append((pid,status))
                 else:
                     assert time.monotonic()<end
                     time.sleep(0.005)
-            assert not errors and len(output)<100
-            assert len(reaped)==2 and set(reaped)==set(map(int,output.split()))
-            print(json.dumps({'status':process.returncode,'reaped':len(reaped),'elapsed':time.monotonic()-started}))
-            """)
+    assert not errors and len(output)<100
+    rows=[list(map(int,line.split())) for line in output.splitlines()]
+    assert len(rows)==2 and all(len(row)==2 and row[1]==process.pid for row in rows)
+    assert os.getpgrp()!=process.pid
+    assert len(reaped)==2 and {pid for pid,status in reaped}=={row[0] for row in rows}
+    assert all(os.WIFSIGNALED(status) and os.WTERMSIG(status)==signal.SIGKILL for pid,status in reaped)
+    print(json.dumps({'status':process.returncode,'reaped':len(reaped),'elapsed':time.monotonic()-started}))
+    """)
+
+
+class PythonFdObservationTests(unittest.TestCase):
+    def test_pre_group_startup_timeout_kills_held_pid_retries_group_and_reaps(self) -> None:
+        events = []
+        for direct_missing, retry_missing in ((False, False), (False, True), (True, False), (True, True)):
+            events.clear()
+            process, libc = MagicMock(), MagicMock()
+            process.pid, process.returncode = 31415, None
+            failure = subprocess.TimeoutExpired("authored-fixed-provider", 5)
+            process.communicate.side_effect = failure
+            process.wait.side_effect = lambda **kw: events.append(("wait", kw["timeout"]))
+            libc.prctl.return_value = 0
+
+            def group(pid: int, number: int, *, retry_missing: bool = retry_missing) -> None:
+                events.append(("group", pid, number))
+                if len(events) == 1 or retry_missing:
+                    raise ProcessLookupError
+
+            def direct(pid: int, number: int, *, direct_missing: bool = direct_missing) -> None:
+                events.append(("direct", pid, number))
+                if direct_missing:
+                    raise ProcessLookupError
+
+            def reap(pid: int, flags: int) -> tuple[int, int]:
+                events.append(("reap", pid, flags))
+                if events.count(("reap", pid, flags)) == 1:
+                    return 31416, signal.SIGKILL
+                raise ChildProcessError
+
+            with (
+                self.subTest(direct_missing=direct_missing, retry_missing=retry_missing),
+                patch("ctypes.CDLL", return_value=libc),
+                patch.object(sys, "argv", ["helper", "fixture"]),
+                patch.object(subprocess, "Popen", return_value=process) as launch,
+                patch.object(os, "killpg", side_effect=group),
+                patch.object(os, "kill", side_effect=direct),
+                patch.object(os, "waitpid", side_effect=reap),
+                self.assertRaises(subprocess.TimeoutExpired) as caught,
+            ):
+                exec(compile(OUTER_GROUP_HELPER, "authored-group-helper", "exec"), {})  # noqa: S102 - own fixture, all process/signal operations mocked.
+            self.assertIs(caught.exception, failure)
+            self.assertEqual(launch.call_args.args[0][0], "/usr/bin/gnutimeout")
+            self.assertEqual(
+                events,
+                [
+                    ("group", process.pid, signal.SIGKILL),
+                    ("direct", process.pid, signal.SIGKILL),
+                    ("group", process.pid, signal.SIGKILL),
+                    ("wait", 2),
+                    ("reap", -1, os.WNOHANG),
+                    ("reap", -1, os.WNOHANG),
+                ],
+            )
+            process.wait.assert_called_once_with(timeout=2)
+            process.poll.assert_not_called()
+            process.kill.assert_not_called()
+            process.stdout.close.assert_called_once_with()
+            process.stderr.close.assert_called_once_with()
+
+    def test_outer_wrapper_covers_startup_and_kills_only_its_fixture_group(self) -> None:
+        self.assertEqual(observation.GNU_TIMEOUT, "/usr/bin/gnutimeout")
+        try:
+            Path(observation.GNU_TIMEOUT).stat()
+        except FileNotFoundError:
+            self.skipTest("fixed /usr/bin/gnutimeout absent; OS watchdog behavior remains unobserved")
+        provider = observation.gnu_provider(
+            observation.capture(
+                [observation.GNU_TIMEOUT, "--version"],
+                time.monotonic() + 3,
+            )
+        )
+        self.assertEqual(provider["provider"], "gnu-coreutils")
+        # The separate helper is a process-local subreaper, so even group-SIGKILL
+        # cannot leave the authored observer or its child for the host to reap.
+        # The larger startup interval permits hosted scheduling before TERM;
+        # the helper witnesses the held group and reaps before checking results.
+        fixture = (
+            "import os,signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); "
+            "print(os.getpid(),os.getpgrp(),flush=True); child=os.fork(); "
+            "print(os.getpid(),os.getpgrp(),flush=True) if child==0 else None; time.sleep(10)"
+        )
         result = subprocess.run(  # noqa: S603 - authored, isolated process-group cleanup fixture.
-            [sys.executable, "-I", "-B", "-S", "-c", helper, fixture],
+            [sys.executable, "-I", "-B", "-S", "-c", OUTER_GROUP_HELPER, fixture],
             stdin=subprocess.DEVNULL,
             capture_output=True,
-            timeout=4,
+            timeout=10,
             check=True,
         )
         record = json.loads(result.stdout)
         self.assertEqual(record["status"], -signal.SIGKILL)
         self.assertEqual(record["reaped"], 2)
-        self.assertLess(record["elapsed"], 2)
+        self.assertLess(record["elapsed"], 5)
 
     def test_metadata_classification_never_reads_descriptor_targets_or_contents(self) -> None:
         records = [
