@@ -21,6 +21,46 @@ if TYPE_CHECKING:
 MAX_BYTES = 65536
 MAX_GROUPS = 32
 MAX_CUSTODY_EVENTS = 32  # Schema v1 helper runtime_oom_watch.MAX_EVENTS.
+# Intentional closed wire duplication: importing the standalone ctypes helper
+# would add a native-library dependency to the client. Protocol tests tie both.
+CUSTODY_FAILURE_GUARDS = frozenset(
+    {
+        "custody-deadline",
+        "custody-read-budget",
+        "directory-event-budget",
+        "marker-event-budget",
+        "protocol-input",
+        "protocol-phase",
+        "protocol-output",
+        "directory-path",
+        "original-pid-identity",
+        "original-pid-descriptor",
+        "custody-deadline-config",
+        "original-watch",
+        "inotify-unavailable",
+        "cgroup-path",
+        "cgroup-directory-identity",
+        "conmon-event-identity",
+        "store-identity",
+        "marker-count",
+        "marker-path",
+        "marker-parent-identity",
+        "marker-watch",
+        "marker-file",
+        "counter-content",
+        "inotify-framing",
+        "inotify-watch-loss",
+        "marker-rename",
+        "completed-marker-path",
+        "completed-marker-descriptor",
+        "completed-marker-identity",
+        "completed-marker-content",
+        "completed-marker-bracket",
+        "marker-identity",
+        "marker-completion",
+        "marker-version",
+    }
+)
 SNAPSHOT_SECONDS = 10
 MAX_FILE_BYTES = 4096
 STARTTIME_INDEX = 19
@@ -806,7 +846,7 @@ def _custody_reply(process: subprocess.Popen[bytes], deadline: float) -> dict[st
 
 def _terminal_custody_record(value: dict[str, Any]) -> None:
     required = {"schemaVersion", "attribution", "availability", "reason"}
-    optional = {"events", "originalConmonWatch", "exitObservedMonotonicNs", "uncertainty"}
+    optional = {"events", "originalConmonWatch", "exitObservedMonotonicNs", "uncertainty", "failureGuard"}
     _require(
         required <= value.keys() <= required | optional
         and type(value["schemaVersion"]) is int
@@ -816,6 +856,11 @@ def _terminal_custody_record(value: dict[str, Any]) -> None:
         and isinstance(value["reason"], str)
         and re.fullmatch(r"[A-Za-z]{1,64}", value["reason"]) is not None,
         "diagnostic custody terminal schema was invalid",
+    )
+    _require(
+        "failureGuard" not in value
+        or (type(value["failureGuard"]) is str and value["failureGuard"] in CUSTODY_FAILURE_GUARDS),
+        "diagnostic custody terminal failure guard was invalid",
     )
     _require(
         isinstance(value.get("events", []), list)

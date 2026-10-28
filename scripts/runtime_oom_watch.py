@@ -40,6 +40,70 @@ IN_DELETE_SELF = 0x400
 IN_IGNORED = 0x8000
 IN_Q_OVERFLOW = 0x4000
 EVENT_HEADER = struct.Struct("iIII")
+# Closed wire values are also declared by the lightweight client; do not import
+# this standalone ctypes helper there. Unknown exception messages stay private.
+FAILURE_GUARDS = {
+    "custody deadline expired": "custody-deadline",
+    "custody read budget exhausted": "custody-read-budget",
+    "directory event count exceeded bound": "directory-event-budget",
+    "marker event count exceeded bound": "marker-event-budget",
+    "custody input deadline expired": "protocol-input",
+    "partial custody input": "protocol-input",
+    "custody input exceeded bound": "protocol-input",
+    "ambiguous custody input": "protocol-input",
+    "invalid custody request": "protocol-input",
+    "invalid custody phase request": "protocol-input",
+    "unknown phase": "protocol-phase",
+    "custody response exceeded bound": "protocol-output",
+    "custody output deadline expired": "protocol-output",
+    "directory outside bound": "directory-path",
+    "unsafe directory component": "directory-path",
+    "process stat exceeded bound": "original-pid-identity",
+    "invalid process birth": "original-pid-identity",
+    "invalid original PID": "original-pid-identity",
+    "original PID changed before custody": "original-pid-identity",
+    "original PID start identity changed": "original-pid-identity",
+    "original PID descriptor unavailable": "original-pid-descriptor",
+    "invalid custody deadline": "custody-deadline-config",
+    "original conmon watch unresolved": "original-watch",
+    "inotify unavailable": "inotify-unavailable",
+    "unsafe owned cgroup": "cgroup-path",
+    "original watched cgroup directory changed": "cgroup-directory-identity",
+    "original conmon event inode changed": "conmon-event-identity",
+    "original store changed": "store-identity",
+    "ambiguous marker count": "marker-count",
+    "marker escaped original store": "marker-path",
+    "unsafe marker path": "marker-path",
+    "original marker parent changed": "marker-parent-identity",
+    "original marker parent path replaced": "marker-parent-identity",
+    "ambiguous duplicate marker": "marker-watch",
+    "marker directory watch unavailable": "marker-watch",
+    "ambiguous marker watch event": "marker-watch",
+    "unsafe marker file": "marker-file",
+    "counter read exceeded bound": "counter-content",
+    "invalid counter read": "counter-content",
+    "incomplete counters": "counter-content",
+    "partial inotify header": "inotify-framing",
+    "partial inotify name": "inotify-framing",
+    "inotify overflow or watch lost": "inotify-watch-loss",
+    "marker rename event unresolved": "marker-rename",
+    "close event no longer binds original marker path": "completed-marker-path",
+    "close event lacks original marker descriptor": "completed-marker-descriptor",
+    "completed marker identity changed": "completed-marker-identity",
+    "partial or changing completed marker read": "completed-marker-content",
+    "close event not independently bracketed": "completed-marker-bracket",
+    "proposed completion changed during post-read event bracket": "completed-marker-bracket",
+    "held marker identity changed": "marker-identity",
+    "marker replaced": "marker-identity",
+    "marker write completion unobserved": "marker-completion",
+    "held marker differs from completed version": "marker-version",
+}
+
+
+def _failure_guard(error: BaseException) -> str | None:
+    if type(error) is ValueError and len(error.args) == 1 and type(error.args[0]) is str:
+        return FAILURE_GUARDS.get(error.args[0])
+    return None
 
 
 def _require(condition: object, message: str) -> None:
@@ -512,8 +576,24 @@ class MarkerCustody:
             os.close(self.fds.pop())
 
 
+def _reply_bytes(value: dict[str, Any]) -> bytes:
+    return (json.dumps(value) + "\n").encode("utf-8")
+
+
+def _classified_terminal(record: dict[str, Any], error: BaseException) -> dict[str, Any]:
+    try:
+        guard = _failure_guard(error)
+        if guard is not None:
+            classified = {**record, "failureGuard": guard}
+            if len(_reply_bytes(classified)) <= MAX_BYTES:
+                return classified
+    except Exception:  # noqa: BLE001 — optional classification must not erase the original terminal error.
+        return record
+    return record
+
+
 def _reply(value: dict[str, Any]) -> None:
-    raw = (json.dumps(value) + "\n").encode("utf-8")
+    raw = _reply_bytes(value)
     _require(len(raw) <= MAX_BYTES, "custody response exceeded bound")
     deadline = time.monotonic() + 0.5
     descriptor = sys.stdout.fileno()
@@ -594,7 +674,7 @@ def main() -> None:
             record["originalConmonWatch"] = observer.watch
             record["exitObservedMonotonicNs"] = observer.exited_at
             record["uncertainty"] = observer.reasons
-        _reply(record)
+        _reply(_classified_terminal(record, error))
     finally:
         if observer is not None:
             observer.close()

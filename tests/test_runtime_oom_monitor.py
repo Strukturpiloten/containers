@@ -874,6 +874,246 @@ class CustodyProtocolTests(unittest.TestCase):
         os.write(response_writer, payload)
         return observer, request_reader, response_writer
 
+    def test_failure_guard_wire_definitions_match_and_all_values_are_accepted(self) -> None:
+        self.assertEqual(set(custody.FAILURE_GUARDS.values()), diagnostics.CUSTODY_FAILURE_GUARDS)
+        with (
+            patch.object(custody.time, "monotonic") as monotonic,
+            patch.object(custody.time, "monotonic_ns") as monotonic_ns,
+            patch.object(custody.os, "read") as read,
+            patch.object(custody.os, "write") as write,
+            patch.object(custody.select, "select") as ready,
+        ):
+            for message, expected in custody.FAILURE_GUARDS.items():
+                self.assertEqual(custody._failure_guard(ValueError(message)), expected)
+                diagnostics._terminal_custody_record({**self.terminal_fixture(), "failureGuard": expected})
+        for operation in (monotonic, monotonic_ns, read, write, ready):
+            operation.assert_not_called()
+
+    def test_unknown_and_hooked_error_arguments_are_never_formatted_or_classified(self) -> None:
+        class ProtectedArgument:
+            def __str__(self) -> str:
+                raise AssertionError
+
+            def __hash__(self) -> int:
+                raise AssertionError
+
+        class ProtectedString(str):
+            __slots__ = ()
+
+            def __hash__(self) -> int:
+                raise AssertionError
+
+        class ProtectedError(ValueError):
+            @property
+            def args(self) -> tuple:
+                raise AssertionError
+
+        known = "custody deadline expired"
+        errors = (
+            ValueError(),
+            ValueError(known, "protected fixture text"),
+            ValueError("protected fixture text /private/path"),
+            ValueError(ProtectedArgument()),
+            ValueError(ProtectedString(known)),
+            ProtectedError(known),
+            OSError(known),
+        )
+        for error in errors:
+            with self.subTest(error_type=type(error).__name__):
+                self.assertIsNone(custody._failure_guard(error))
+                with (
+                    patch.object(custody, "_line", side_effect=error),
+                    patch.object(custody, "_reply") as reply,
+                ):
+                    custody.main()
+                record = reply.call_args.args[0]
+                self.assertEqual(record["reason"], type(error).__name__)
+                self.assertEqual(record["availability"], "error")
+                self.assertEqual(record["attribution"], "unresolved")
+                self.assertNotIn("failureGuard", record)
+                self.assertNotIn("protected fixture text", json.dumps(record))
+                self.assertNotIn("/private/path", json.dumps(record))
+
+    def test_real_helper_budget_and_watch_guards_keep_terminal_failure_and_cleanup(self) -> None:
+        cases = (
+            ("deadline", "custody-deadline"),
+            ("reads", "custody-read-budget"),
+            ("directory-events", "directory-event-budget"),
+            ("marker-events", "marker-event-budget"),
+            ("watch", "inotify-watch-loss"),
+        )
+        for failure, expected in cases:
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                request, marker, group = MarkerCustodyTests.fixture(self, Path(temporary))
+                held = MarkerCustodyTests.observer(self, request, group)
+                if failure == "deadline":
+                    held.deadline = time.monotonic() - 1
+                elif failure == "reads":
+                    held.reads = custody.MAX_READS
+                elif failure == "directory-events":
+                    held.event_count = custody.MAX_EVENTS
+                    marker.with_name("authored-unrelated-event").touch()
+                elif failure == "marker-events":
+                    held.events = [self.terminal_fixture()["events"][0] for _ in range(custody.MAX_EVENTS)]
+                    marker.touch()
+                with (
+                    patch.object(custody, "MarkerCustody", return_value=held),
+                    patch.object(custody, "_line", return_value=b"{}\n"),
+                    patch.object(custody, "_reply") as reply,
+                ):
+                    if failure == "watch":
+                        with patch.object(held, "_pending_events", return_value=[(-1, custody.IN_IGNORED, 0, b"")]):
+                            custody.main()
+                    else:
+                        custody.main()
+                terminal = reply.call_args.args[0]
+                self.assertEqual(terminal["failureGuard"], expected)
+                self.assertEqual(terminal["reason"], "ValueError")
+                self.assertEqual(terminal["availability"], "error")
+                self.assertEqual(terminal["attribution"], "unresolved")
+                self.assertEqual(held.fds, [])
+                diagnostics._terminal_custody_record(terminal)
+
+    def test_real_helper_partial_protocol_input_is_classified(self) -> None:
+        reader, writer = os.pipe()
+        self.addCleanup(os.close, reader)
+        os.write(writer, b"authored partial request")
+        os.close(writer)
+        stream = MagicMock()
+        stream.fileno.return_value = reader
+        with patch.object(custody.sys, "stdin", stream), patch.object(custody, "_reply") as reply:
+            custody.main()
+        self.assertEqual(reply.call_args.args[0]["failureGuard"], "protocol-input")
+        self.assertEqual(reply.call_args.args[0]["reason"], "ValueError")
+
+    def test_real_helper_response_bound_is_classified_without_output_io(self) -> None:
+        request = MagicMock()
+        request.sample.return_value = {"authored": "x" * custody.MAX_BYTES}
+        request.events, request.watch, request.exited_at, request.reasons = [], {}, None, []
+        real_reply = custody._reply
+
+        def bounded_reply(record: dict) -> None:
+            if record.get("availability") != "error":
+                real_reply(record)
+
+        with (
+            patch.object(custody, "MarkerCustody", return_value=request),
+            patch.object(custody, "_line", return_value=b"{}\n"),
+            patch.object(custody, "_reply", side_effect=bounded_reply) as reply,
+            patch.object(custody.os, "write") as write,
+        ):
+            custody.main()
+        self.assertEqual(reply.call_args.args[0]["failureGuard"], "protocol-output")
+        self.assertEqual(reply.call_args.args[0]["reason"], "ValueError")
+        request.close.assert_called_once_with()
+        write.assert_not_called()
+
+    def test_optional_failure_guard_preserves_exact_terminal_envelope_boundaries(self) -> None:
+        original_encoder = custody._reply_bytes
+        for case in ("legacy-full", "classified-full", "legacy-overflow", "preview-error"):
+            with self.subTest(case=case):
+                terminal = self.terminal_with_content()
+                legacy = {
+                    "schemaVersion": 1,
+                    "attribution": "unresolved",
+                    "availability": "error",
+                    "reason": "ValueError",
+                    "events": terminal["events"],
+                    "originalConmonWatch": terminal["originalConmonWatch"],
+                    "exitObservedMonotonicNs": terminal["exitObservedMonotonicNs"],
+                    "uncertainty": terminal["uncertainty"],
+                }
+                legacy["originalConmonWatch"]["path"] = '/authored/é/"'
+                expected = dict(legacy)
+                if case == "classified-full":
+                    expected["failureGuard"] = "custody-read-budget"
+                size = 4096 if case == "preview-error" else custody.MAX_BYTES + (case == "legacy-overflow")
+                padding = size - len((json.dumps(expected) + "\n").encode("utf-8"))
+                legacy["originalConmonWatch"]["path"] += "x" * padding
+                expected_raw = (json.dumps(expected) + "\n").encode("utf-8")
+                self.assertEqual(len(expected_raw), size)
+                diagnostics._terminal_custody_record(expected)
+                observer = MagicMock()
+                observer.sample.side_effect = ValueError("custody read budget exhausted")
+                observer.events = legacy["events"]
+                observer.watch = legacy["originalConmonWatch"]
+                observer.exited_at = legacy["exitObservedMonotonicNs"]
+                observer.reasons = legacy["uncertainty"]
+                output = MagicMock()
+                output.fileno.return_value = 123
+
+                def encode(record: dict, *, preview_error: bool = case == "preview-error") -> bytes:
+                    if preview_error and "failureGuard" in record:
+                        message = "protected preview data"
+                        raise RuntimeError(message)
+                    return original_encoder(record)
+
+                with (
+                    patch.object(custody, "MarkerCustody", return_value=observer),
+                    patch.object(custody, "_line", return_value=b"{}\n"),
+                    patch.object(custody, "_reply", wraps=custody._reply) as reply,
+                    patch.object(custody, "_reply_bytes", side_effect=encode) as encoder,
+                    patch.object(custody.sys, "stdout", output),
+                    patch.object(custody.time, "monotonic", return_value=100) as monotonic,
+                    patch.object(custody.os, "set_blocking") as set_blocking,
+                    patch.object(custody.os, "read") as read,
+                    patch.object(custody.os, "write", side_effect=lambda _fd, raw: len(raw)) as write,
+                    patch.object(custody.select, "select", return_value=([], [123], [])) as ready,
+                ):
+                    if case == "legacy-overflow":
+                        with self.assertRaisesRegex(ValueError, "custody response exceeded bound"):
+                            custody.main()
+                    else:
+                        custody.main()
+                reply.assert_called_once_with(expected)
+                self.assertEqual(encoder.call_count, 2)
+                observer.close.assert_called_once_with()
+                read.assert_not_called()
+                if case == "legacy-overflow":
+                    write.assert_not_called()
+                    ready.assert_not_called()
+                    set_blocking.assert_not_called()
+                    self.assertEqual(monotonic.call_count, 1)
+                else:
+                    write.assert_called_once_with(123, expected_raw)
+                    ready.assert_called_once_with([], [123], [], 0.5)
+                    self.assertEqual(set_blocking.call_args.args, (123, False))
+                    set_blocking.assert_called_once()
+                    self.assertEqual(monotonic.call_count, 3)
+
+    def test_optional_failure_guard_survives_buffered_terminal_and_cache(self) -> None:
+        terminal = {**self.terminal_with_content(), "failureGuard": "custody-read-budget"}
+        for exited in (False, True):
+            with self.subTest(exited=exited):
+                observer = self.closed_observer((json.dumps(terminal) + "\n").encode(), exited=exited)
+                result = observer._custody_exchange({"phase": "before-shutdown"})
+                self.assertEqual(result["failureGuard"], "custody-read-budget")
+                result.clear()
+                process = observer.custody
+                process.poll.reset_mock()
+                with (
+                    patch.object(diagnostics.time, "monotonic") as monotonic,
+                    patch.object(diagnostics.os, "read") as read,
+                    patch.object(diagnostics.os, "write") as write,
+                    patch.object(diagnostics.select, "select") as ready,
+                    patch.object(diagnostics.subprocess, "Popen") as spawn,
+                ):
+                    observer._custody_sample("after-exit")
+                self.assertEqual(observer.ctx.observations[-1]["snapshot"]["failureGuard"], "custody-read-budget")
+                self.assertEqual(observer.custody_terminal, terminal)
+                for operation in (monotonic, read, write, ready, spawn, process.poll):
+                    operation.assert_not_called()
+
+    def test_invalid_optional_failure_guards_retire_the_stream(self) -> None:
+        for invalid in (None, True, 1, [], {}, ["custody-deadline"], "unknown", "protected fixture text /private/path"):
+            with self.subTest(invalid=invalid):
+                terminal = {**self.terminal_fixture(), "failureGuard": invalid}
+                observer = self.closed_observer((json.dumps(terminal) + "\n").encode(), exited=True)
+                result = observer._custody_exchange({"phase": "before-shutdown"})
+                self.assertEqual(result["availability"], "unavailable")
+                self.assertNotIn("failureGuard", result)
+                self.assert_failed_terminal_remains_unavailable_without_io(observer)
+
     def terminal_with_content(self) -> dict:
         record = self.terminal_fixture()
         record["originalConmonWatch"] = {

@@ -58,6 +58,23 @@ retained errors also remain available to later phases without restarting or
 retrying the helper.
 Final owned cleanup still closes the pipes and waits for the helper.
 
+Terminal errors may additionally include `failureGuard`, a closed classification
+of a known fixed deadline, budget, protocol, watch, identity or content guard.
+The helper matches only an exact built-in `ValueError` with one plain string
+argument against a static table; unknown errors omit the field. It never formats
+or emits the exception message. The optional field is also omitted when the
+complete record would exceed the existing message bound or its classification
+preview fails; the original record is sent once without trimming or retrying.
+The original exception-class `reason`, error
+status and unresolved attribution remain unchanged. This classification adds no
+reads, timers, retries or allowance and does not identify an OOM cause. Some
+content and identity guards already remain local unresolved observations; their
+handling is unchanged and they do not become terminal failures.
+The helper mapping and lightweight client deliberately duplicate the finite wire
+values to preserve isolated helper startup and avoid loading its native-library
+dependencies in the client. Protocol tests tie both definitions; absent fields
+remain valid, while unknown or malformed classifications retire the stream.
+
 The existing snapshot evidence schema and historical native evidence are retained.
 No image recipe, software version, dependency, pin or operational workflow changes
 are required; consequently existing Renovate ownership and extractors are
