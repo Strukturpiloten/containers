@@ -577,40 +577,67 @@ class PythonFdObservationTests(unittest.TestCase):
         self.assertEqual(handlers, {number: signal.getsignal(number) for number in handlers})
 
     def test_parent_uses_system_interpreter_and_one_absolute_budget(self) -> None:
-        output = SimpleNamespace(buffer=io.BytesIO())
         fixture = child_record()
-        started = time.monotonic()
-        with (
-            patch.object(observation.os, "getuid", return_value=1000),
-            patch.object(observation.os, "geteuid", return_value=1000),
-            patch.object(observation, "public_file", return_value=file_record()) as read,
-            patch.object(observation, "capture", side_effect=[GNU_BANNER, json.dumps(fixture).encode()]) as capture,
-            patch.object(observation.sys, "argv", ["fixture"]),
-            patch.object(observation.sys, "stdout", output),
-        ):
-            self.assertEqual(observation.main(), 0)
-        command, end = capture.call_args.args
-        self.assertEqual(capture.call_args_list[0].args, (["/usr/bin/gnutimeout", "--version"], end))
-        self.assertEqual(len(capture.call_args_list), 2)
-        self.assertEqual(command[:4], ["/usr/bin/python3", "-I", "-B", "-S"])
-        child_end = int(command[-1]) / 1000000000
-        self.assertEqual(child_end, end - observation.CLEANUP_RESERVE)
-        self.assertLessEqual(end - started, 8.1)
-        self.assertTrue(all(call.args[2] == child_end for call in read.call_args_list))
-        result = json.loads(output.buffer.getvalue())
-        self.assertEqual(result["state"], "observed")
-        self.assertEqual(result["provenance"], "observed")
-        self.assertEqual(result["packageProvenance"], "unavailable")
-        self.assertEqual(
-            result["timeoutProvider"],
-            {
-                "state": "observed",
-                "provider": "gnu-coreutils",
-                "version": "9.12",
-                "pathKind": "prefixed",
-            },
+        clock, captures = SimpleNamespace(now_ns=0), []
+
+        def capture_child(_command: list[str], end: float) -> bytes:
+            observation.check(end - observation.CLEANUP_RESERVE)
+            clock.now_ns += 1000000000
+            return captures.pop(0)
+
+        def read_public(_path: str, _kind: str, end: float) -> dict:
+            observation.check(end)
+            clock.now_ns += 250000000
+            return file_record()
+
+        # The second authored clock reproduces the hosted conservative 1 ns
+        # float-to-integer serialization, without relying on a float roundtrip.
+        cases = (
+            (128000000000, 136.0, 135.5, 135500000000, 0),
+            (128618220789, 136.618220789, 136.118220789, 136118220788, 1),
         )
-        self.assertNotIn("private-discarded", output.buffer.getvalue().decode())
+        for started_ns, expected_end, expected_work, expected_wire_ns, conservative_ns in cases:
+            clock.now_ns = started_ns
+            captures[:] = [GNU_BANNER, json.dumps(fixture).encode()]
+            output = SimpleNamespace(buffer=io.BytesIO())
+            with (
+                self.subTest(started_ns=started_ns),
+                patch.object(observation.time, "monotonic_ns", side_effect=lambda: clock.now_ns) as nano_clock,
+                patch.object(observation.time, "monotonic", side_effect=lambda: clock.now_ns / 1000000000),
+                patch.object(observation.os, "getuid", return_value=1000),
+                patch.object(observation.os, "geteuid", return_value=1000),
+                patch.object(observation, "public_file", side_effect=read_public) as read,
+                patch.object(observation, "capture", side_effect=capture_child) as capture,
+                patch.object(observation.sys, "argv", ["fixture"]),
+                patch.object(observation.sys, "stdout", output),
+            ):
+                self.assertEqual(observation.main(), 0)
+            nano_clock.assert_called_once_with()
+            command, end = capture.call_args.args
+            self.assertEqual(end, expected_end)
+            self.assertEqual(capture.call_args_list[0].args, (["/usr/bin/gnutimeout", "--version"], expected_end))
+            self.assertEqual(len(capture.call_args_list), 2)
+            self.assertEqual(command[:4], ["/usr/bin/python3", "-I", "-B", "-S"])
+            self.assertEqual(command[-1], str(expected_wire_ns))
+            self.assertEqual(started_ns + 7500000000 - int(command[-1]), conservative_ns)
+            self.assertEqual(expected_end - expected_work, observation.CLEANUP_RESERVE)
+            self.assertEqual([call.args[2] for call in read.call_args_list], [expected_work, expected_work])
+            self.assertEqual(clock.now_ns, started_ns + 2500000000)
+            self.assertFalse(captures)
+            result = json.loads(output.buffer.getvalue())
+            self.assertEqual(result["state"], "observed")
+            self.assertEqual(result["provenance"], "observed")
+            self.assertEqual(result["packageProvenance"], "unavailable")
+            self.assertEqual(
+                result["timeoutProvider"],
+                {
+                    "state": "observed",
+                    "provider": "gnu-coreutils",
+                    "version": "9.12",
+                    "pathKind": "prefixed",
+                },
+            )
+            self.assertNotIn("private-discarded", output.buffer.getvalue().decode())
 
     def test_gnu_banner_acceptance_agrees_with_native_qualifier_without_importing_owner(self) -> None:
         cases = (
