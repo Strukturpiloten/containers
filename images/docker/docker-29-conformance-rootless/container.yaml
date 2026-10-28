@@ -49,6 +49,7 @@ inputs:
   - images/docker/upstream/payload.Containerfile
   - images/docker/upstream/fetch-payload.sh
   - scripts/runtime_docker_systemd.py
+  - scripts/runtime_docker_systemd_guard.py
   - scripts/runtime_oom_diagnostics.py
   - scripts/runtime_oom_watch.py
   - shared/oci-labels.env

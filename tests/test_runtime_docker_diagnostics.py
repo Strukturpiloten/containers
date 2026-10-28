@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -19,6 +20,7 @@ from unittest.mock import MagicMock, patch
 from scripts import runtime_docker_diagnostics as diagnostics
 from scripts.runtime_docker import _run_nested_docker
 from scripts.runtime_docker_backend import DockerBackend
+from scripts.runtime_docker_systemd_guard import PLACEMENT_GUARD, USER_MANAGER, guarded_command
 from scripts.runtime_tests import DEFAULT_TIMEOUT, ProbeError, RuntimeContext
 
 if TYPE_CHECKING:
@@ -351,6 +353,462 @@ class GnuTimeoutAdmissionControls(unittest.TestCase):
             check=True,
         )
         self.assertIn("--timeout-executable", result.stdout)
+
+
+class GuestStartupProjection(unittest.TestCase):
+    def setUp(self) -> None:
+        self.backend = DockerBackend(Path("/owned-runtime"), ("sudo", "-n"))
+        self.backend.ready = True
+        self.backend.deadline = 2000
+        self.ctx = SimpleNamespace(
+            backend=self.backend,
+            name="docker-29-conformance-rootless",
+            declared_launcher="systemd",
+            container_launchers={CONTAINER: "systemd"},
+            exec_guard=guarded_command(),
+            containers=[CONTAINER],
+            checks=[],
+        )
+        self.observed = {
+            "id": CONTAINER,
+            "owner": self.backend.owner,
+            "cgroup": self.backend.slice,
+            "privileged": True,
+            "apparmor": "unconfined",
+            "securityOptions": ["label=disable"],
+            "state": "running",
+            "exitCode": 0,
+            "oomKilled": False,
+            "pid": 123,
+        }
+
+    @staticmethod
+    def report(*, manager: str = "running", service: str = "running") -> bytes:
+        def fields(state: str) -> str:
+            return (
+                "LoadState=loaded\n"
+                f"ActiveState={'failed' if state == 'failed' else 'active'}\nSubState={state}\n"
+                f"Result={'exit-code' if state == 'failed' else 'success'}\n"
+                f"ExecMainCode={1 if state == 'failed' else 0}\n"
+                f"ExecMainStatus={1 if state == 'failed' else 0}\n"
+                f"MainPID={0 if state == 'failed' else 123}\n"
+            )
+
+        return ("user-manager\n" + fields(manager) + "docker-service\n" + fields(service)).encode()
+
+    def test_manager_failure_service_failure_and_running_api_pending_are_distinct(self) -> None:
+        for manager, service in (("failed", "running"), ("running", "failed"), ("running", "running")):
+            with self.subTest(manager=manager, service=service):
+                result = diagnostics._guest_projection(self.report(manager=manager, service=service))
+                self.assertEqual(result["userManager"]["SubState"], manager)
+                self.assertEqual(result["dockerService"]["SubState"], service)
+                self.assertEqual(result["userManager"]["Result"], "exit-code" if manager == "failed" else "success")
+                self.assertEqual(result["dockerService"]["ExecMainStatus"], 1 if service == "failed" else 0)
+                self.assertNotIn("apiReady", result)
+
+    def test_absent_user_bus_preserves_only_validated_root_manager(self) -> None:
+        manager = self.report(manager="failed").split(b"docker-service\n")[0]
+        result = diagnostics._guest_projection(manager + b"docker-service\nUnavailable=user-bus-absent\n")
+        self.assertEqual(result["userManager"]["ActiveState"], "failed")
+        self.assertEqual(result["dockerService"], {"availability": "user-bus-absent"})
+
+    def test_failed_service_retains_the_closed_exit_status(self) -> None:
+        result = diagnostics._guest_projection(self.report(service="failed"))
+        self.assertEqual(
+            result["dockerService"],
+            {
+                "availability": "available",
+                "LoadState": "loaded",
+                "ActiveState": "failed",
+                "SubState": "failed",
+                "Result": "exit-code",
+                "ExecMainCode": 1,
+                "ExecMainStatus": 1,
+                "MainPID": 0,
+            },
+        )
+
+    def test_unknown_missing_duplicate_protected_and_malformed_fields_fail_closed(self) -> None:
+        valid = self.report()
+        for raw in (
+            valid.replace(b"ActiveState=active", b"ActiveState=unknown", 1),
+            valid.replace(b"SubState=running", b"SubState=" + PRIVATE_MARKER.encode(), 1),
+            valid.replace(b"Result=success\n", b"", 1),
+            valid.replace(b"Result=success\n", b"Result=success\nResult=success\n", 1),
+            valid + b"Environment=" + PRIVATE_MARKER.encode(),
+            valid + b"ExecStart=" + PRIVATE_MARKER.encode(),
+            valid.replace(b"MainPID=123", b"MainPID=-1", 1),
+            valid.replace(b"MainPID=123", b"MainPID=2147483648", 1),
+            valid.replace(b"ExecMainCode=0", b"ExecMainCode=4", 1),
+            valid.replace(b"ExecMainStatus=0", b"ExecMainStatus=256", 1),
+            valid.replace(b"ExecMainStatus=0", b"ExecMainStatus=00", 1),
+            valid.replace(b"user-manager", b"other-user", 1),
+            valid + b"docker-service\n",
+            valid + b"\xff",
+            b"",
+        ):
+            with self.subTest(raw=raw[:30]), self.assertRaises(diagnostics._UnavailableError) as caught:
+                diagnostics._guest_projection(raw)
+            self.assertEqual(str(caught.exception), "invalid-fields")
+            self.assertNotIn(PRIVATE_MARKER, str(caught.exception))
+
+    def test_raw_and_projected_byte_limits_are_fixed(self) -> None:
+        with self.assertRaisesRegex(diagnostics._UnavailableError, "byte-limit"):
+            diagnostics._guest_projection(b"x" * (diagnostics.GUEST_BYTE_LIMIT + 1))
+        with (
+            patch.object(diagnostics, "GUEST_RECORD_LIMIT", 1),
+            self.assertRaisesRegex(diagnostics._UnavailableError, "byte-limit"),
+        ):
+            diagnostics._guest_projection(self.report())
+
+    def test_optional_query_shares_host_deadline_and_cannot_erase_host_evidence(self) -> None:
+        for reply, expected in (
+            (self.report(service="failed"), "collected"),
+            (OSError(PRIVATE_MARKER), "query-unavailable"),
+            (diagnostics._UnavailableError("timeout"), "timeout"),
+            (diagnostics._UnavailableError("cleanup-unverified"), "cleanup-unverified"),
+            (b"Environment=" + PRIVATE_MARKER.encode(), "invalid-fields"),
+        ):
+            with (
+                self.subTest(expected=expected),
+                patch.object(diagnostics.time, "monotonic", return_value=1000),
+                patch.object(diagnostics.time, "time", return_value=110),
+                patch.object(diagnostics.shutil, "which", return_value="/usr/bin/journalctl"),
+                patch.object(
+                    diagnostics, "_capture", side_effect=[json.dumps(self.observed).encode(), b"", reply]
+                ) as capture,
+            ):
+                diagnostics.diagnose_rootless_failure(self.ctx, CONTAINER, 100)
+            record = self.ctx.checks[-1]
+            self.assertEqual(record["container"]["state"], "running")
+            self.assertEqual(record["kernelJournal"]["rootlesskitUsernsDenialRecords"], 0)
+            self.assertEqual(record["guestSystemd"]["availability"], expected)
+            self.assertEqual(record["status"], "failed")
+            self.assertFalse(record["acceptanceEvidence"])
+            self.assertEqual([call.args[2] for call in capture.call_args_list], [1005, 1005, 1005])
+            self.assertEqual(capture.call_args_list[-1].args[1], ["guest-systemd", CONTAINER, self.backend.owner])
+            self.assertEqual(self.backend.deadline, 2000)
+            self.assertNotIn(PRIVATE_MARKER, json.dumps(record))
+
+    def test_wrong_profile_launcher_or_missing_guard_never_queries_guest(self) -> None:
+        for changes, availability in (
+            ({"name": "docker-29-rootless"}, "profile-not-applicable"),
+            ({"declared_launcher": "direct"}, "profile-not-applicable"),
+            ({"container_launchers": {}}, "profile-not-applicable"),
+            ({"exec_guard": ()}, "placement-unverified"),
+        ):
+            with self.subTest(changes=changes), patch.object(diagnostics, "_capture") as capture:
+                ctx = SimpleNamespace(**(vars(self.ctx) | changes))
+                self.assertEqual(diagnostics._guest(ctx, self.backend, CONTAINER, 1005), {"availability": availability})
+                capture.assert_not_called()
+
+    def test_exhausted_shared_budget_does_not_create_query_or_wait(self) -> None:
+        with (
+            patch.object(diagnostics.time, "monotonic", return_value=1005),
+            patch.object(diagnostics.time, "sleep") as sleep,
+            patch.object(diagnostics, "_capture") as capture,
+        ):
+            self.assertEqual(
+                diagnostics._guest(self.ctx, self.backend, CONTAINER, 1005),
+                {"availability": "budget-exhausted"},
+            )
+        capture.assert_not_called()
+        sleep.assert_not_called()
+
+    def test_optional_envelope_boundary_uses_canonical_serialization_and_preserves_old_record(self) -> None:
+        old = {"status": "failed", "legacy": PRIVATE_MARKER}
+        guest = {"availability": "query-unavailable"}
+        expected = old | {"guestSystemd": guest}
+        size = len((json.dumps(expected, indent=2) + "\n").encode("utf-8"))
+        for maximum, included in ((size, True), (size - 1, False), (1, False)):
+            with self.subTest(maximum=maximum), patch.object(diagnostics, "DIAGNOSTIC_RECORD_LIMIT", maximum):
+                observed = diagnostics._with_guest(old, guest)
+                self.assertEqual(observed, expected if included else old)
+                if not included:
+                    self.assertIs(observed, old)
+        with patch.object(diagnostics, "_record_size", side_effect=ValueError(PRIVATE_MARKER)):
+            self.assertIs(diagnostics._with_guest(old, guest), old)
+        self.assertEqual(old, {"status": "failed", "legacy": PRIVATE_MARKER})
+
+    def test_root_receiver_refuses_foreign_dead_malformed_or_unprivileged_container_before_guest_exec(self) -> None:
+        variants = [
+            self.observed | {key: value}
+            for key, value in (
+                ("id", "b" * 64),
+                ("owner", "b" * 32),
+                ("cgroup", "other.slice"),
+                ("state", "exited"),
+                ("pid", 0),
+                ("privileged", False),
+            )
+        ]
+        for raw in [*(json.dumps(value).encode() for value in variants), b"malformed"]:
+            with (
+                self.subTest(raw=raw[:50]),
+                patch.object(diagnostics.time, "monotonic", return_value=1000),
+                patch.object(diagnostics.shutil, "which", return_value="/usr/bin/docker"),
+                patch.object(diagnostics, "_guest_worker_arguments") as guest,
+                patch.object(
+                    diagnostics, "_query_capture", side_effect=[self.daemon_protocol(), self.protocol(raw)]
+                ) as query,
+            ):
+                result = diagnostics._guest_query_capture(
+                    self.backend.directory, ["guest-systemd", CONTAINER, self.backend.owner], 1005, "/fixed/timeout"
+                )
+            self.assertEqual(result, {"status": "query-unavailable", "teardownVerified": True})
+            guest.assert_not_called()
+            self.assertEqual(query.call_count, 2)
+
+    @staticmethod
+    def protocol(raw: bytes) -> dict[str, Any]:
+        return {"status": "available", "teardownVerified": True, "data": diagnostics.base64.b64encode(raw).decode()}
+
+    def daemon_protocol(self) -> dict[str, Any]:
+        return self.protocol(json.dumps({"root": str(self.backend.directory / "root"), "securityOptions": []}).encode())
+
+    def test_root_receiver_checks_ownership_before_loading_guard_and_only_queries_fixed_services(self) -> None:
+        events = []
+
+        def query(arguments: list[str], deadline: float, provider: str) -> dict[str, Any]:
+            self.assertEqual((deadline, provider), (1005, "/fixed/timeout"))
+            operation = "info" if "info" in arguments else "inspect" if "inspect" in arguments else "exec"
+            events.append(operation)
+            return (
+                self.daemon_protocol()
+                if operation == "info"
+                else self.protocol(json.dumps(self.observed).encode() if operation == "inspect" else self.report())
+            )
+
+        original = diagnostics._guest_guard_contract
+
+        def contract() -> dict[str, Any]:
+            events.append("guard-load")
+            return original()
+
+        with (
+            patch.object(diagnostics.time, "monotonic", return_value=1000),
+            patch.object(diagnostics.shutil, "which", return_value="/usr/bin/docker"),
+            patch.object(diagnostics, "_query_capture", side_effect=query),
+            patch.object(diagnostics, "_guest_guard_contract", side_effect=contract),
+        ):
+            result = diagnostics._guest_query_capture(
+                self.backend.directory, ["guest-systemd", CONTAINER, self.backend.owner], 1005, "/fixed/timeout"
+            )
+            arguments = diagnostics._guest_worker_arguments(self.backend.directory, CONTAINER)
+        self.assertEqual(events[:4], ["info", "inspect", "guard-load", "exec"])
+        self.assertEqual(result["status"], "available")
+        index = arguments.index("exec")
+        self.assertEqual(arguments[index + 1 : index + 7], [CONTAINER, *guarded_command(), "sh"])
+        self.assertIn("unix:///owned-runtime/docker.sock", arguments[:index])
+        script = arguments[-1]
+        self.assertIn("user@1000.service", script)
+        self.assertIn(shlex.join(USER_MANAGER), script)
+        self.assertIn("docker.service", script)
+        self.assertNotIn("journal", script)
+        self.assertNotIn("Environment", script)
+        self.assertNotIn("ExecStart", script)
+
+    def test_extracted_contract_preserves_public_reexports_and_original_guard_bytes(self) -> None:
+        from scripts import runtime_docker_systemd  # noqa: PLC0415
+
+        self.assertIs(runtime_docker_systemd.guarded_command, guarded_command)
+        self.assertEqual(runtime_docker_systemd.USER_MANAGER, USER_MANAGER)
+        self.assertEqual(runtime_docker_systemd.PLACEMENT_GUARD, PLACEMENT_GUARD)
+        contract = diagnostics._guest_guard_contract()
+        self.assertEqual(contract["PLACEMENT_GUARD"], PLACEMENT_GUARD)
+        self.assertEqual(contract["USER_MANAGER"], USER_MANAGER)
+        self.assertEqual(
+            contract["guarded_command"]("printf", "literal $value"), guarded_command("printf", "literal $value")
+        )
+
+    def test_isolated_root_worker_loads_only_fixed_stdlib_helper_without_package_imports(self) -> None:
+        code = (
+            "import runpy,sys; "
+            "namespace=runpy.run_path(sys.argv[1]); "
+            "contract=namespace['_guest_guard_contract'](); "
+            "assert contract['USER_MANAGER'][2]=='dockertest'; "
+            "assert contract['guarded_command']()[0]=='sh'; "
+            "assert not any(name.startswith('scripts.') for name in sys.modules); "
+            "print('fixed-guard-available')"
+        )
+        result = subprocess.run(  # noqa: S603 - fixed isolated helper read; no daemon or guest operation.
+            [sys.executable, "-I", "-c", code, str(Path(diagnostics.__file__).resolve())],
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=True,
+        )
+        self.assertEqual(result.stdout, "fixed-guard-available\n")
+
+    def test_placement_refusal_precedes_systemctl_for_host_outside_leaf_root_and_malformed_contexts(self) -> None:
+        # Exercise the unchanged real guard with synthetic proc/cgroup readers, never host state changes.
+        prelude = (
+            'cut() { case "$*" in */proc/1/cgroup) printf %s "$INIT";; *) printf %s "$CURRENT";; esac; }; '
+            'cat() { case "$1" in /sys/fs/cgroup/cgroup.procs) printf %s "$ROOT_PROCS";; '
+            '*) printf %s "$SUBTREE";; esac; }; '
+            "systemctl() { printf SYSTEMCTL_CALLED; }; "
+        )
+        guard = guarded_command("systemctl", "show", "user@1000.service", "--property=ActiveState")
+        for context, init, current, root_processes, success in (
+            ("admitted-guest-leaf", "/init.scope", "/init.scope", "", True),
+            ("host-populated-distributor", "/host.scope", "/host.scope", "1 2 3", False),
+            ("outside-pid1-leaf", "/init.scope", "/outside.scope", "", False),
+            ("namespace-root", "/", "/", "", False),
+            ("malformed-parent", "/../init.scope", "/../init.scope", "", False),
+            ("malformed-empty", "", "", "", False),
+        ):
+            with self.subTest(context=context):
+                result = subprocess.run(  # noqa: S603 - fixed offline shell guard with literal synthetic readers.
+                    ["/bin/sh", "-euc", prelude + guard[2], *guard[3:]],
+                    env={"INIT": init, "CURRENT": current, "ROOT_PROCS": root_processes, "SUBTREE": ""},
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    timeout=2,
+                )
+                self.assertEqual(result.returncode == 0, success)
+                self.assertEqual(result.stdout, "SYSTEMCTL_CALLED" if success else "")
+
+    def test_root_receiver_budget_or_inspect_teardown_failure_never_execs(self) -> None:
+        for observed, now in (
+            (self.protocol(json.dumps(self.observed).encode()), 1005),
+            ({"status": "timeout", "teardownVerified": True}, 1000),
+            ({"status": "cleanup-unverified", "teardownVerified": False}, 1000),
+        ):
+            with (
+                self.subTest(observed=observed.get("status"), now=now),
+                patch.object(diagnostics.time, "monotonic", return_value=now),
+                patch.object(diagnostics.shutil, "which", return_value="/usr/bin/docker"),
+                patch.object(diagnostics, "_query_capture", return_value=observed) as query,
+                patch.object(diagnostics, "_guest_worker_arguments") as guest,
+            ):
+                result = diagnostics._guest_query_capture(
+                    self.backend.directory, ["guest-systemd", CONTAINER, self.backend.owner], 1005, "/fixed/timeout"
+                )
+            if now == 1005:  # noqa: PLR2004 - exact shared-deadline boundary.
+                self.assertEqual(result["status"], "budget-exhausted")
+                query.assert_not_called()
+            else:
+                self.assertEqual(result["status"], observed["status"])
+                query.assert_called_once()
+            guest.assert_not_called()
+
+    def test_root_receiver_rejects_arbitrary_selectors_without_query_or_source_loading(self) -> None:
+        for request in (
+            ["guest-systemd", "short", self.backend.owner],
+            ["guest-systemd", CONTAINER, "foreign"],
+            ["guest-systemd", CONTAINER, self.backend.owner, "other.service"],
+            ["other-operation", CONTAINER, self.backend.owner],
+        ):
+            with (
+                self.subTest(request=request),
+                patch.object(diagnostics, "_query_capture") as query,
+                patch.object(diagnostics, "_guest_guard_contract") as contract,
+            ):
+                self.assertEqual(
+                    diagnostics._guest_query_capture(self.backend.directory, request, 1005, "/fixed/timeout"),
+                    {"status": "invalid-fields", "teardownVerified": True},
+                )
+            query.assert_not_called()
+            contract.assert_not_called()
+
+    def test_fixed_source_loader_refuses_symlink_nonregular_oversize_and_changed_helper(self) -> None:
+        source = Path(diagnostics.__file__).with_name("runtime_docker_systemd_guard.py").read_bytes()
+        with tempfile.TemporaryDirectory() as directory:
+            fake_script = Path(directory) / "runtime_docker_diagnostics.py"
+            helper = fake_script.with_name("runtime_docker_systemd_guard.py")
+            target = Path(directory) / "target"
+            target.write_bytes(source)
+            original_read = os.read
+            for kind in ("symlink", "directory", "oversize", "changed"):
+                with self.subTest(kind=kind), patch.object(diagnostics, "__file__", str(fake_script)):
+                    if kind == "symlink":
+                        helper.symlink_to(target)
+                    elif kind == "directory":
+                        helper.mkdir()
+                    else:
+                        helper.write_bytes(
+                            b"x" * (diagnostics.GUARD_SOURCE_LIMIT + 1) if kind == "oversize" else source
+                        )
+
+                    def changed_read(descriptor: int, size: int) -> bytes:
+                        result = original_read(descriptor, size)
+                        if result:
+                            helper.write_bytes(source + b"\n")
+                        return result
+
+                    with (
+                        patch.object(
+                            diagnostics.os, "read", side_effect=changed_read if kind == "changed" else original_read
+                        ),
+                        self.assertRaises((OSError, diagnostics._UnavailableError)),
+                    ):
+                        diagnostics._guest_guard_contract()
+                    if kind == "directory":
+                        helper.rmdir()
+                    else:
+                        helper.unlink()
+
+    def test_guest_capture_timeout_preserves_original_start_failure_and_orderly_cleanup(self) -> None:
+        ctx = MagicMock()
+        for name, value in vars(self.ctx).items():
+            setattr(ctx, name, value)
+        ctx.directory = self.backend.directory
+        ctx.timeout = 45
+        ctx.start.return_value = CONTAINER
+        profile = {"mode": "rootless", "outerPrivilege": "privileged", "launcher": "systemd"}
+        with (
+            patch("scripts.runtime_docker.runtime_docker_systemd.verify_runtime"),
+            patch("scripts.runtime_docker.runtime_docker_systemd.systemd_options", return_value=()),
+            patch(
+                "scripts.runtime_docker._prepare_started_daemon", side_effect=ProbeError("original startup deadline")
+            ),
+            patch("scripts.runtime_docker._shutdown_docker_phase") as shutdown,
+            patch.object(diagnostics.time, "monotonic", return_value=1000),
+            patch.object(diagnostics.time, "time", return_value=110),
+            patch.object(diagnostics.shutil, "which", return_value="/usr/bin/journalctl"),
+            patch.object(
+                diagnostics,
+                "_capture",
+                side_effect=[json.dumps(self.observed).encode(), b"", diagnostics._UnavailableError("timeout")],
+            ),
+            self.assertRaisesRegex(ProbeError, "original startup deadline"),
+        ):
+            _run_nested_docker(ctx, profile, "0", MagicMock())
+        self.assertEqual(ctx.checks[-1]["guestSystemd"]["availability"], "timeout")
+        shutdown.assert_called_once_with(ctx, CONTAINER, systemd=True, diagnostics=None)
+
+    def test_wrong_backend_never_enters_private_docker_lane(self) -> None:
+        self.ctx.backend = SimpleNamespace()
+        with patch.object(diagnostics, "_capture") as capture:
+            diagnostics.diagnose_rootless_failure(self.ctx, CONTAINER, 100)
+        capture.assert_not_called()
+        self.assertEqual(self.ctx.checks, [])
+
+    def test_root_receiver_refuses_wrong_private_daemon_or_rootless_endpoint_before_cid_read(self) -> None:
+        for value in (
+            {"root": "/var/lib/docker", "securityOptions": []},
+            {"root": str(self.backend.directory / "root"), "securityOptions": ["name=rootless"]},
+            {"root": str(self.backend.directory / "root"), "securityOptions": None},
+            {"root": str(self.backend.directory / "root"), "securityOptions": [PRIVATE_MARKER, None]},
+        ):
+            with (
+                self.subTest(value=value),
+                patch.object(diagnostics.time, "monotonic", return_value=1000),
+                patch.object(diagnostics.shutil, "which", return_value="/usr/bin/docker"),
+                patch.object(
+                    diagnostics, "_query_capture", return_value=self.protocol(json.dumps(value).encode())
+                ) as query,
+                patch.object(diagnostics, "_guest_worker_arguments") as guest,
+            ):
+                result = diagnostics._guest_query_capture(
+                    self.backend.directory, ["guest-systemd", CONTAINER, self.backend.owner], 1005, "/fixed/timeout"
+                )
+            self.assertEqual(result, {"status": "query-unavailable", "teardownVerified": True})
+            query.assert_called_once()
+            self.assertIn("info", query.call_args.args[0])
+            guest.assert_not_called()
+            self.assertNotIn(PRIVATE_MARKER, json.dumps(result))
 
 
 class RootlessFailureDiagnostics(unittest.TestCase):

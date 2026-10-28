@@ -230,6 +230,97 @@ evade this boundary.
 
 ## Hosted unused userns custody seam
 
+Before the unchanged root bootstrap, the same PR-492-only job also runs
+`scripts/python_runtime_fd_observation.py` directly with `/usr/bin/python3 -I -B -S`
+as the ordinary job user. This separate, optional fixture observes nonstdio
+descriptor metadata before and after importing `_ctypes` in its own isolated
+child. It does not reproduce the privileged build child's complete import order,
+environment, inherited descriptors or execution context. Device/inode matches to
+the known Python executable, `_ctypes` extension or mapped libffi files identify
+objects only; they establish no OFD identity, descriptor origin or root-failure
+cause. An absence in this fixture cannot clear the original guard refusal.
+
+The fixture enumerates at most 32 nonstdio descriptors, including high-numbered
+ones, and closes its enumeration iterator before `fstat`. It never reads arbitrary
+descriptor contents or retains their symlink targets. Every snapshot explicitly
+reports `state=non-atomic` and a bounded `closedDuringSnapshot` count for entries
+that returned `EBADF`. The fixture's own closed enumeration descriptor may
+account for one entry; no disappeared descriptor's identity or origin is proven.
+An empty descriptor list, including one with a zero closed count, is not an
+atomic absence proof and cannot clear the original guard refusal. Bounded
+process mappings are used internally only to identify strict public system libffi paths and check
+their mapped device/inode; mappings and addresses are discarded. Root-owned,
+nonwritable path components, bounded symlink resolution, regular-file/mode/size
+checks and stable identities surround hashing of the known public files. Each
+file is at most 32 MiB; at most four libffi files are hashed. Missing, unsupported,
+unsafe or changed provenance is explicitly unavailable. The hashes are observed
+system-file hashes under the existing OS-tool integrity exception, not vendor
+checksums. No source-package version is inferred from a libffi filename or hash;
+package/version provenance remains unavailable in this observation.
+
+The ordinary-user parent launches only its fixed isolated system Python child,
+with clean environment, closed inherited descriptors and `/dev/null` stdin. It
+bounds combined stdout/stderr while the child lives, attempts exact-child
+termination/reaping on failure, and closes both pipes. Parent and child share
+one eight-second monotonic allowance after module startup, including a half-second
+cleanup reserve; neither hashing nor capture renews it. Before the import child,
+the parent uses the same bounded capture helper to query only fixed
+`/usr/bin/gnutimeout --version`. A strict numeric GNU banner is required; only
+closed `provider=gnu-coreutils`, numeric version and `pathKind=prefixed` survive.
+The two owned children run sequentially under that original allowance. Missing,
+bad or unqualified providers leave the observation unavailable. No mutable PATH
+selection, fallback, installation or default-utility change is introduced.
+
+An unverifiable child wait or pipe close records `cleanup=uncertain`. The
+canonical CI step additionally wraps the complete interpreter startup and
+collector in fixed `/usr/bin/gnutimeout --signal=TERM --kill-after=1s 9s`, without
+foreground mode. GNU process-group behavior permits normal TERM cleanup and
+group KILL one second later if necessary. The initial wrapper necessarily trusts
+the declared OS binary before its in-budget version check; no positive
+observation is accepted without that check. Actual hosted presence and watchdog
+semantics still require fresh CI evidence. The existing observed OS-tool
+integrity exception covers this bootstrap trust; no package, download, version
+pin or vendor checksum is added, and existing Renovate ownership is unchanged.
+The step seeds a closed unavailable JSON placeholder using Bash `printf`, writes
+collector output to a fresh private temporary file, and replaces the final
+artifact only after successful command completion. A missing provider or failed
+wrapper preserves valid unavailable JSON and fails only this optional step.
+Filesystem calls and Python process creation are not interruptible hard bounds;
+kernel-uninterruptible tasks can outlast a signal. Elapsed time is also checked
+after process creation and around bounded file reads, and overdue operations
+refuse the observation. The existing one-minute step timeout is only an outer CI
+backstop. Its complete JSON artifact is capped at 16 KiB. Validated public
+GitHub run/attempt and source identifiers support later independent comparison
+with the root artifact's observed binary hash; they are not attestations. The
+separate `python-runtime-fd-observation` artifact always reports qualification
+`none`, `policy_load_run=false` and `container_run=false`. Collection and upload
+are optional and cannot replace the original root-bootstrap outcome or renew
+the existing experiment deadline. No root call, policy operation, container
+workload or dependency/pin is added. The existing pinned upload Action and its
+template/generated Renovate ownership are reused without changes.
+
+On an early systemd-rootless guest startup failure, optional diagnostics can
+project only the fixed `user@1000.service` and dockertest `docker.service`
+states, results, status codes and PIDs. Host inspect and journal evidence retain
+priority inside the original five-second diagnostic allowance; the guest query
+does not extend startup or diagnostic deadlines. Before guest execution, the
+parent requires the held fixture/placement guard, and the root worker checks the
+private rootful daemon, exact container identity, owner, derived slice, live
+state and privilege. The unchanged placement guard refuses execution outside
+the delegated guest leaf. Raw guest output, journals, errors, command arguments,
+environment and private paths are not retained; bounded closed fields are
+optional and cannot erase legacy host evidence if unavailable or oversized.
+Host query teardown does not prove guest process death: exact-container cleanup
+remains responsible and native behavior still needs fresh hosted evidence.
+
+The stdlib-only `scripts/runtime_docker_systemd_guard.py` holds the existing
+guard and fixed user-manager argv without expanding root import paths. The
+root worker reads only a bounded stable no-follow snapshot of that literal
+sibling. Its path is declared among the conformance image inputs, so a helper
+change selects both image architectures. This extraction adds no dependency or
+operational pin; existing image-input selection owns it and no Renovate manager
+change is required.
+
 The PR-492-only `userns-custody-unused` AMD64 Ubuntu 26 job exercises two real
 unused ownership cycles: normal close and deliberate loss of the exact root
 coordinator after durable arm. An independent root observer authenticates the

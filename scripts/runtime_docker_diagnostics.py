@@ -1,7 +1,7 @@
 """Non-acceptance, private-read diagnostics for an early rootless Docker failure.
 
-Raw inspect/journal data never enters RuntimeContext.command or its public log
-recorder. Only closed fields and task-window record counts leave this module.
+Raw inspect/journal/guest data never enters RuntimeContext.command or its public
+log recorder. Only closed fields and task-window record counts leave this module.
 """
 
 # Closed read-only argv and access to the invocation's held ownership are intentional.
@@ -19,11 +19,13 @@ import selectors
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import time
 from contextlib import suppress
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -34,6 +36,61 @@ DIAGNOSTIC_SECONDS = 5
 BYTE_LIMIT = 64 * 1024
 JOURNAL_RECORD_LIMIT = 64
 PROTOCOL_LIMIT = 96 * 1024
+GUEST_BYTE_LIMIT = 2048
+GUEST_RECORD_LIMIT = 1024
+DIAGNOSTIC_RECORD_LIMIT = 4096
+GUARD_SOURCE_LIMIT = 4096
+SERVICE_FIELDS = frozenset(
+    {"LoadState", "ActiveState", "SubState", "Result", "ExecMainCode", "ExecMainStatus", "MainPID"}
+)
+SERVICE_STATES = {
+    "LoadState": frozenset({"loaded", "not-found", "error", "bad-setting", "masked", "merged", "stub"}),
+    "ActiveState": frozenset(
+        {"active", "reloading", "inactive", "failed", "activating", "deactivating", "maintenance", "refreshing"}
+    ),
+    "SubState": frozenset(
+        {
+            "dead",
+            "running",
+            "exited",
+            "failed",
+            "auto-restart",
+            "auto-restart-queued",
+            "start-pre",
+            "start",
+            "start-post",
+            "stop",
+            "stop-sigterm",
+            "stop-sigkill",
+            "stop-post",
+            "final-sigterm",
+            "final-sigkill",
+            "reload",
+            "reload-signal",
+            "reload-notify",
+            "condition",
+            "cleaning",
+        }
+    ),
+    "Result": frozenset(
+        {
+            "success",
+            "resources",
+            "protocol",
+            "timeout",
+            "exit-code",
+            "signal",
+            "core-dump",
+            "watchdog",
+            "start-limit-hit",
+            "oom-kill",
+            "exec-condition",
+            "assert",
+            "dependency",
+            "skip",
+        }
+    ),
+}
 SECURITY_OPTIONS = {
     "apparmor=unconfined": "apparmor-unconfined",
     "seccomp=unconfined": "seccomp-unconfined",
@@ -48,6 +105,7 @@ INSPECT_FORMAT = (
     '"state":{{json .State.Status}},"exitCode":{{json .State.ExitCode}},'
     '"oomKilled":{{json .State.OOMKilled}},"pid":{{json .State.Pid}}}'
 )
+PRIVATE_DAEMON_FORMAT = '{"root":{{json .DockerRootDir}},"securityOptions":{{json .SecurityOptions}}}'
 
 
 class _UnavailableError(Exception):
@@ -320,6 +378,124 @@ def _worker_arguments(directory: Path, request: list[str]) -> list[str]:
     raise _UnavailableError("invalid-fields")
 
 
+def _guest_guard_contract() -> dict[str, Any]:
+    """Load one literal adjacent helper snapshot, never expand root import paths."""
+    path = Path(__file__).resolve().with_name("runtime_docker_systemd_guard.py")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= GUARD_SOURCE_LIMIT:
+            raise _UnavailableError("query-unavailable")
+        source = bytearray()
+        while len(source) <= GUARD_SOURCE_LIMIT:
+            chunk = os.read(descriptor, GUARD_SOURCE_LIMIT + 1 - len(source))
+            if not chunk:
+                break
+            source.extend(chunk)
+        after = os.fstat(descriptor)
+        named = path.lstat()
+        fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if (
+            len(source) != before.st_size
+            or len(source) > GUARD_SOURCE_LIMIT
+            or any(getattr(before, field) != getattr(current, field) for current in (after, named) for field in fields)
+        ):
+            raise _UnavailableError("query-unavailable")
+    finally:
+        os.close(descriptor)
+    namespace: dict[str, Any] = {}
+    # Only the checked snapshot of this literal sibling shares the existing source trust boundary.
+    exec(compile(source, "[fixed-systemd-guard]", "exec"), namespace)  # noqa: S102
+    return namespace
+
+
+def _guest_worker_arguments(directory: Path, container: str) -> list[str]:
+    contract = _guest_guard_contract()
+    properties = " ".join("--property=" + field for field in sorted(SERVICE_FIELDS))
+    script = (
+        'test "$(id -u)" = 0; test "$(cat /proc/1/comm)" = systemd; '
+        "LC_ALL=C; export LC_ALL; printf 'user-manager\\n'; "
+        f"systemctl show --no-pager user@1000.service {properties}; "
+        "printf 'docker-service\\n'; "
+        "if test -S /run/user/1000/bus; then "
+        + shlex.join(contract["USER_MANAGER"])
+        + f" show --no-pager docker.service {properties}; "
+        "else printf 'Unavailable=user-bus-absent\\n'; fi"
+    )
+    # Reuse the fixed private endpoint/environment prefix; replace only the fixed inspect query.
+    inspect = _worker_arguments(directory, ["inspect", container])
+    return [*inspect[:-4], "exec", container, *contract["guarded_command"]("sh", "-euc", script)]
+
+
+def _verify_guest_container(raw: bytes, owner: str, container: str) -> None:
+    projection = _inspect_projection(
+        raw, SimpleNamespace(owner=owner, slice="strukturpiloten" + owner + ".slice"), container
+    )
+    if projection["state"] != "running" or not projection["hostPidAvailable"] or projection["privileged"] is not True:
+        raise _UnavailableError("ownership-unverified")
+
+
+def _verify_private_daemon(raw: bytes, directory: Path) -> None:
+    observed = json.loads(raw)
+    if not isinstance(observed, dict) or observed.get("root") != str(directory / "root"):
+        raise _UnavailableError("ownership-unverified")
+    security = observed.get("securityOptions")
+    if (
+        not isinstance(security, list)
+        or len(security) > 32
+        or any(not isinstance(option, str) or "rootless" in option for option in security)
+    ):
+        raise _UnavailableError("ownership-unverified")
+
+
+def _guest_owned_capture(
+    directory: Path, container: str, owner: str, deadline: float, timeout_executable: str
+) -> dict[str, Any]:
+    inspect = _worker_arguments(directory, ["inspect", container])
+    for arguments, verifier in (
+        (
+            [*inspect[:-4], "info", "--format", PRIVATE_DAEMON_FORMAT],
+            lambda raw: _verify_private_daemon(raw, directory),
+        ),
+        (inspect, lambda raw: _verify_guest_container(raw, owner, container)),
+    ):
+        observed = _query_capture(arguments, deadline, timeout_executable)
+        if observed.get("status") != "available" or observed.get("teardownVerified") is not True:
+            return observed
+        try:
+            verifier(base64.b64decode(observed["data"], validate=True))
+        except Exception:  # noqa: BLE001 - root-observed private daemon and exact ownership must both be affirmative.
+            return {"status": "query-unavailable", "teardownVerified": True}
+    return {"status": "available", "teardownVerified": True}
+
+
+def _guest_query_capture(
+    directory: Path, request: list[str], deadline: float, timeout_executable: str
+) -> dict[str, Any]:
+    """Root-side ownership readback precedes every fixed, guarded guest read."""
+    if (
+        len(request) != 3
+        or request[0] != "guest-systemd"
+        or re.fullmatch(r"[0-9a-f]{64}", request[1]) is None
+        or re.fullmatch(r"[0-9a-f]{32}", request[2]) is None
+    ):
+        return {"status": "invalid-fields", "teardownVerified": True}
+    if deadline - time.monotonic() <= 0.05:
+        return {"status": "budget-exhausted", "teardownVerified": True}
+    container, owner = request[1:]
+    observed = _guest_owned_capture(directory, container, owner, deadline, timeout_executable)
+    if observed.get("status") != "available" or observed.get("teardownVerified") is not True:
+        return observed
+    try:
+        if deadline - time.monotonic() <= 0.05:
+            return {"status": "budget-exhausted", "teardownVerified": True}
+        arguments = _guest_worker_arguments(directory, container)
+    except Exception:  # noqa: BLE001 - refuse exec on any ownership/source-contract uncertainty.
+        return {"status": "query-unavailable", "teardownVerified": True}
+    # This ACK covers the host query group only. Guest processes remain owned by exact-container cleanup.
+    return _query_capture(arguments, deadline, timeout_executable)
+
+
 def _verified_protocol(output: bytes, returncode: int) -> dict[str, Any]:
     protocol = json.loads(output)
     if returncode != 0 or not isinstance(protocol, dict) or protocol.get("teardownVerified") is not True:
@@ -472,6 +648,91 @@ def _journal(backend: DockerBackend, deadline: float, started: float, finished: 
     return {"availability": reason, "attribution": "host-task-window-only"}
 
 
+def _service_projection(lines: list[str]) -> dict[str, Any]:
+    values: dict[str, Any] = {}
+    for line in lines:
+        key, separator, value = line.partition("=")
+        if not separator or key not in SERVICE_FIELDS or key in values:
+            raise _UnavailableError("invalid-fields")
+        if key in SERVICE_STATES:
+            if value not in SERVICE_STATES[key]:
+                raise _UnavailableError("invalid-fields")
+            values[key] = value
+        else:
+            maximum = {"ExecMainCode": 3, "ExecMainStatus": 255, "MainPID": 2**31 - 1}[key]
+            if re.fullmatch(r"0|[1-9][0-9]{0,9}", value) is None or int(value) > maximum:
+                raise _UnavailableError("invalid-fields")
+            values[key] = int(value)
+    if values.keys() != SERVICE_FIELDS:
+        raise _UnavailableError("invalid-fields")
+    return {"availability": "available", **values}
+
+
+def _guest_projection(raw: bytes) -> dict[str, Any]:
+    if len(raw) > GUEST_BYTE_LIMIT:
+        raise _UnavailableError("byte-limit")
+    try:
+        lines = raw.decode("ascii").splitlines()
+    except UnicodeDecodeError as error:
+        raise _UnavailableError("invalid-fields") from error
+    if not lines or lines[0] != "user-manager" or lines.count("docker-service") != 1:
+        raise _UnavailableError("invalid-fields")
+    boundary = lines.index("docker-service")
+    manager = _service_projection(lines[1:boundary])
+    service_lines = lines[boundary + 1 :]
+    service = (
+        {"availability": "user-bus-absent"}
+        if service_lines == ["Unavailable=user-bus-absent"]
+        else _service_projection(service_lines)
+    )
+    result = {"availability": "collected", "userManager": manager, "dockerService": service}
+    if _record_size(result) > GUEST_RECORD_LIMIT:
+        raise _UnavailableError("byte-limit")
+    return result
+
+
+def _record_size(record: dict[str, Any]) -> int:
+    return len((json.dumps(record, indent=2) + "\n").encode("utf-8"))
+
+
+def _with_guest(record: dict[str, Any], guest: dict[str, Any]) -> dict[str, Any]:
+    """Keep legacy evidence unchanged when the optional projection cannot fit."""
+    try:
+        preview = {**record, "guestSystemd": guest}
+        if _record_size(preview) <= DIAGNOSTIC_RECORD_LIMIT:
+            return preview
+    except Exception:  # noqa: BLE001 - even a serialization failure preserves legacy evidence.
+        return record
+    return record
+
+
+def _guest(ctx: RuntimeContext, backend: DockerBackend, container: str, deadline: float) -> dict[str, Any]:
+    try:
+        if not backend._systemd_guest(ctx, container):  # noqa: SLF001 - reuse exact existing fixture binding.
+            return {"availability": "profile-not-applicable"}
+        from scripts.runtime_docker_systemd_guard import guarded_command  # noqa: PLC0415 - parent-side only.
+
+        if vars(ctx).get("exec_guard") != guarded_command():
+            return {"availability": "placement-unverified"}
+        if deadline - time.monotonic() <= 0.05:
+            return {"availability": "budget-exhausted"}
+        raw = _capture(backend, ["guest-systemd", container, backend.owner], deadline)
+        result = _guest_projection(raw)
+        # Query-group teardown does not establish guest process exit; exact-container cleanup owns it.
+        result["guestProcessCleanup"] = "owned-container-cleanup-required"
+        if _record_size(result) > GUEST_RECORD_LIMIT:
+            return {"availability": "byte-limit", "guestProcessCleanup": "owned-container-cleanup-required"}
+    except _UnavailableError as error:
+        reason = str(error)
+    except KeyboardInterrupt:
+        reason = "interrupted"
+    except Exception:  # noqa: BLE001 - optional guest diagnostics cannot replace host evidence or the launch error.
+        reason = "query-unavailable"
+    else:
+        return result
+    return {"availability": reason, "guestProcessCleanup": "owned-container-cleanup-required"}
+
+
 def _collect(ctx: RuntimeContext, backend: DockerBackend, container: str, started: float) -> dict[str, Any]:
     finished = time.time()
     if (
@@ -493,7 +754,9 @@ def _collect(ctx: RuntimeContext, backend: DockerBackend, container: str, starte
     if time.monotonic() >= deadline:
         raise _UnavailableError("timeout")
     backend.check_deadline()
-    return {"availability": "collected", "container": projection, "kernelJournal": journal}
+    record = {"availability": "collected", "container": projection, "kernelJournal": journal}
+    record["guestSystemd"] = _guest(ctx, backend, container, deadline)
+    return record
 
 
 def diagnose_rootless_failure(ctx: RuntimeContext, container: str, started: float) -> None:
@@ -510,7 +773,10 @@ def diagnose_rootless_failure(ctx: RuntimeContext, container: str, started: floa
         "acceptanceEvidence": False,
     }
     try:
-        record.update(_collect(ctx, backend, container, started))
+        collected = _collect(ctx, backend, container, started)
+        guest = collected.pop("guestSystemd")
+        record.update(collected)
+        record = _with_guest(record, guest)
     except _UnavailableError as error:
         record["availability"] = str(error)
     except KeyboardInterrupt:
@@ -521,7 +787,7 @@ def diagnose_rootless_failure(ctx: RuntimeContext, container: str, started: floa
 
 
 def main() -> None:
-    """Run only the two fixed root-side read queries, with a drain acknowledgement."""
+    """Run only fixed root-side read queries, with host query drain acknowledgement."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--capture", required=True, action="store_true")
     parser.add_argument("--directory", required=True, type=Path)
@@ -547,6 +813,8 @@ def main() -> None:
             or not 0 < deadline - time.monotonic() <= 5
         ):
             result = {"status": "query-unavailable", "teardownVerified": False}
+        elif args.request[0] == "guest-systemd":
+            result = _guest_query_capture(args.directory, args.request, deadline, str(args.timeout_executable))
         else:
             result = _query_capture(
                 _worker_arguments(args.directory, args.request), deadline, str(args.timeout_executable)

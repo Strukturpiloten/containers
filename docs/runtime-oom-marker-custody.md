@@ -55,11 +55,31 @@ buffered terminal error record within the same exchange deadline and byte cap.
 Only the closed versioned error schema is retained; missing, late, partial,
 oversized or unknown records stay explicitly unavailable. Later phases may show
 that previously retained error, without restarting or retrying the helper.
+A failed request/response exchange or terminal drain permanently retires the
+stream. Later phases reuse an unavailable result without a new deadline or
+pipe/process operations; the original exchange failure remains explicit in its
+phase. Final owned cleanup still closes the pipes and waits for the helper.
 Terminal validation closes every nested watch, file identity, counter and
 completed-content record, including numeric ranges, hashes and read intervals.
 The watch must match the original owned source. Exception classes and uncertainty
 labels use the producer's fixed vocabulary; unknown text or fields are rejected
 before caching or forwarding. Producer schema changes require receiver review.
+
+Terminal errors may additionally include `failureGuard`, a closed classification
+of a known fixed deadline, budget, protocol, watch, identity or content guard.
+The helper matches only an exact built-in `ValueError` with one plain string
+argument against a static table; unknown errors omit the field. It never formats
+or emits the exception message. The optional field is also omitted when the
+complete record would exceed the existing message bound or its classification
+preview fails; the original record is sent once without trimming or retrying.
+The original exception-class `reason`, error status and unresolved attribution
+remain unchanged. This classification adds no reads, timers, retries or allowance
+and does not identify an OOM cause. Guards that already remain local unresolved
+observations keep their existing handling.
+The helper mapping and lightweight client deliberately duplicate the finite wire
+values to preserve isolated helper startup and avoid loading its native-library
+dependencies in the client. Protocol tests tie both definitions; absent fields
+remain valid, while unknown or malformed classifications retire the stream.
 
 The existing snapshot evidence schema and historical native evidence are retained.
 No image recipe, software version, dependency, pin or operational workflow changes

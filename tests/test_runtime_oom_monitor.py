@@ -1094,6 +1094,491 @@ class CustodyProtocolTests(unittest.TestCase):
                     self.assertEqual(record["availability"], "error")
                     self.assertEqual(record["events"], observer.events)
 
+    def exchanging_observer(self, payload: bytes) -> tuple[diagnostics.OomDiagnostics, int, int]:
+        observer = self.closed_observer(b"")
+        process = observer.custody
+        process.stdin.close()
+        process.stdout.close()
+        request_reader, request_writer = os.pipe()
+        response_reader, response_writer = os.pipe()
+        process.stdin = os.fdopen(request_writer, "wb", buffering=0)
+        process.stdout = os.fdopen(response_reader, "rb", buffering=0)
+        for descriptor in (request_reader, response_writer):
+            self.addCleanup(os.close, descriptor)
+        self.addCleanup(process.stdin.close)
+        self.addCleanup(process.stdout.close)
+        os.write(response_writer, payload)
+        return observer, request_reader, response_writer
+
+    def test_failure_guard_wire_definitions_match_and_all_values_are_accepted(self) -> None:
+        self.assertEqual(set(custody.FAILURE_GUARDS.values()), diagnostics.CUSTODY_FAILURE_GUARDS)
+        with (
+            patch.object(custody.time, "monotonic") as monotonic,
+            patch.object(custody.time, "monotonic_ns") as monotonic_ns,
+            patch.object(custody.os, "read") as read,
+            patch.object(custody.os, "write") as write,
+            patch.object(custody.select, "select") as ready,
+        ):
+            for message, expected in custody.FAILURE_GUARDS.items():
+                self.assertEqual(custody._failure_guard(ValueError(message)), expected)
+                diagnostics._terminal_custody_record(
+                    {**self.terminal_fixture(), "failureGuard": expected}, expected_watch=self.watch_fixture()
+                )
+        for operation in (monotonic, monotonic_ns, read, write, ready):
+            operation.assert_not_called()
+
+    def test_unknown_and_hooked_error_arguments_are_never_formatted_or_classified(self) -> None:
+        class ProtectedArgument:
+            def __str__(self) -> str:
+                raise AssertionError
+
+            def __hash__(self) -> int:
+                raise AssertionError
+
+        class ProtectedString(str):
+            __slots__ = ()
+
+            def __hash__(self) -> int:
+                raise AssertionError
+
+        class ProtectedError(ValueError):
+            @property
+            def args(self) -> tuple:
+                raise AssertionError
+
+        known = "custody deadline expired"
+        errors = (
+            ValueError(),
+            ValueError(known, "protected fixture text"),
+            ValueError("protected fixture text /private/path"),
+            ValueError(ProtectedArgument()),
+            ValueError(ProtectedString(known)),
+            ProtectedError(known),
+            OSError(known),
+        )
+        for error in errors:
+            with self.subTest(error_type=type(error).__name__):
+                self.assertIsNone(custody._failure_guard(error))
+                with (
+                    patch.object(custody, "_line", side_effect=error),
+                    patch.object(custody, "_reply") as reply,
+                ):
+                    custody.main()
+                record = reply.call_args.args[0]
+                self.assertEqual(record["reason"], type(error).__name__)
+                self.assertEqual(record["availability"], "error")
+                self.assertEqual(record["attribution"], "unresolved")
+                self.assertNotIn("failureGuard", record)
+                self.assertNotIn("protected fixture text", json.dumps(record))
+                self.assertNotIn("/private/path", json.dumps(record))
+
+    def test_real_helper_budget_and_watch_guards_keep_terminal_failure_and_cleanup(self) -> None:
+        cases = (
+            ("deadline", "custody-deadline"),
+            ("reads", "custody-read-budget"),
+            ("directory-events", "directory-event-budget"),
+            ("marker-events", "marker-event-budget"),
+            ("watch", "inotify-watch-loss"),
+        )
+        for failure, expected in cases:
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                request, marker, group = MarkerCustodyTests.fixture(self, Path(temporary))
+                request["watch"].update(
+                    file="memory.events",
+                    rawKernelDevice=f"{(request['watch']['major'] << 20) | request['watch']['minor']:x}",
+                    deviceEncoding="Linux raw kernel dev_t; 20 minor bits",
+                )
+                held = MarkerCustodyTests.observer(self, request, group)
+                if failure == "deadline":
+                    held.deadline = time.monotonic() - 1
+                elif failure == "reads":
+                    held.reads = custody.MAX_READS
+                elif failure == "directory-events":
+                    held.event_count = custody.MAX_EVENTS
+                    marker.with_name("authored-unrelated-event").touch()
+                elif failure == "marker-events":
+                    held.events = [self.terminal_fixture()["events"][0] for _ in range(custody.MAX_EVENTS)]
+                    marker.touch()
+                with (
+                    patch.object(custody, "MarkerCustody", return_value=held),
+                    patch.object(custody, "_line", return_value=b"{}\n"),
+                    patch.object(custody, "_reply") as reply,
+                ):
+                    if failure == "watch":
+                        with patch.object(held, "_pending_events", return_value=[(-1, custody.IN_IGNORED, 0, b"")]):
+                            custody.main()
+                    else:
+                        custody.main()
+                terminal = reply.call_args.args[0]
+                self.assertEqual(terminal["failureGuard"], expected)
+                self.assertEqual(terminal["reason"], "ValueError")
+                self.assertEqual(terminal["availability"], "error")
+                self.assertEqual(terminal["attribution"], "unresolved")
+                self.assertEqual(held.fds, [])
+                diagnostics._terminal_custody_record(terminal, expected_watch=held.watch)
+
+    def test_real_helper_partial_protocol_input_is_classified(self) -> None:
+        reader, writer = os.pipe()
+        self.addCleanup(os.close, reader)
+        os.write(writer, b"authored partial request")
+        os.close(writer)
+        stream = MagicMock()
+        stream.fileno.return_value = reader
+        with patch.object(custody.sys, "stdin", stream), patch.object(custody, "_reply") as reply:
+            custody.main()
+        self.assertEqual(reply.call_args.args[0]["failureGuard"], "protocol-input")
+        self.assertEqual(reply.call_args.args[0]["reason"], "ValueError")
+
+    def test_real_helper_response_bound_is_classified_without_output_io(self) -> None:
+        request = MagicMock()
+        request.sample.return_value = {"authored": "x" * custody.MAX_BYTES}
+        request.events, request.watch, request.exited_at, request.reasons = [], self.watch_fixture(), None, []
+        real_reply = custody._reply
+
+        def bounded_reply(record: dict) -> None:
+            if record.get("availability") != "error":
+                real_reply(record)
+
+        with (
+            patch.object(custody, "MarkerCustody", return_value=request),
+            patch.object(custody, "_line", return_value=b"{}\n"),
+            patch.object(custody, "_reply", side_effect=bounded_reply) as reply,
+            patch.object(custody.os, "write") as write,
+        ):
+            custody.main()
+        self.assertEqual(reply.call_args.args[0]["failureGuard"], "protocol-output")
+        self.assertEqual(reply.call_args.args[0]["reason"], "ValueError")
+        request.close.assert_called_once_with()
+        write.assert_not_called()
+
+    def test_optional_failure_guard_preserves_exact_terminal_envelope_boundaries(self) -> None:
+        original_encoder = custody._reply_bytes
+        for case in ("legacy-full", "classified-full", "legacy-overflow", "preview-error"):
+            with self.subTest(case=case):
+                terminal = self.complex_terminal_fixture()
+                legacy = {
+                    "schemaVersion": 1,
+                    "attribution": "unresolved",
+                    "availability": "error",
+                    "reason": "ValueError",
+                    "events": terminal["events"],
+                    "originalConmonWatch": terminal["originalConmonWatch"],
+                    "exitObservedMonotonicNs": terminal["exitObservedMonotonicNs"],
+                    "uncertainty": terminal["uncertainty"],
+                }
+                legacy["originalConmonWatch"]["path"] = '/authored/é/"'
+                expected = dict(legacy)
+                if case == "classified-full":
+                    expected["failureGuard"] = "custody-read-budget"
+                size = 4096 if case == "preview-error" else custody.MAX_BYTES + (case == "legacy-overflow")
+                padding = size - len((json.dumps(expected) + "\n").encode("utf-8"))
+                legacy["originalConmonWatch"]["path"] += "x" * padding
+                expected_raw = (json.dumps(expected) + "\n").encode("utf-8")
+                self.assertEqual(len(expected_raw), size)
+                # Preserve the helper wire envelope independently of receiver admission.
+                # This padded path is intentionally outside the stricter receiver contract.
+                observer = MagicMock()
+                observer.sample.side_effect = ValueError("custody read budget exhausted")
+                observer.events = legacy["events"]
+                observer.watch = legacy["originalConmonWatch"]
+                observer.exited_at = legacy["exitObservedMonotonicNs"]
+                observer.reasons = legacy["uncertainty"]
+                output = MagicMock()
+                output.fileno.return_value = 123
+
+                def encode(record: dict, *, preview_error: bool = case == "preview-error") -> bytes:
+                    if preview_error and "failureGuard" in record:
+                        message = "protected preview data"
+                        raise RuntimeError(message)
+                    return original_encoder(record)
+
+                with (
+                    patch.object(custody, "MarkerCustody", return_value=observer),
+                    patch.object(custody, "_line", return_value=b"{}\n"),
+                    patch.object(custody, "_reply", wraps=custody._reply) as reply,
+                    patch.object(custody, "_reply_bytes", side_effect=encode) as encoder,
+                    patch.object(custody.sys, "stdout", output),
+                    patch.object(custody.time, "monotonic", return_value=100) as monotonic,
+                    patch.object(custody.os, "set_blocking") as set_blocking,
+                    patch.object(custody.os, "read") as read,
+                    patch.object(custody.os, "write", side_effect=lambda _fd, raw: len(raw)) as write,
+                    patch.object(custody.select, "select", return_value=([], [123], [])) as ready,
+                ):
+                    if case == "legacy-overflow":
+                        with self.assertRaisesRegex(ValueError, "custody response exceeded bound"):
+                            custody.main()
+                    else:
+                        custody.main()
+                reply.assert_called_once_with(expected)
+                self.assertEqual(encoder.call_count, 2)
+                observer.close.assert_called_once_with()
+                read.assert_not_called()
+                if case == "legacy-overflow":
+                    write.assert_not_called()
+                    ready.assert_not_called()
+                    set_blocking.assert_not_called()
+                    self.assertEqual(monotonic.call_count, 1)
+                else:
+                    write.assert_called_once_with(123, expected_raw)
+                    ready.assert_called_once_with([], [123], [], 0.5)
+                    self.assertEqual(set_blocking.call_args.args, (123, False))
+                    set_blocking.assert_called_once()
+                    self.assertEqual(monotonic.call_count, 3)
+
+    def test_optional_failure_guard_survives_buffered_terminal_and_cache(self) -> None:
+        terminal = {**self.complex_terminal_fixture(), "failureGuard": "custody-read-budget"}
+        for exited in (False, True):
+            with self.subTest(exited=exited):
+                observer = self.closed_observer(
+                    (json.dumps(terminal) + "\n").encode(), exited=exited, watch=terminal["originalConmonWatch"]
+                )
+                result = observer._custody_exchange({"phase": "before-shutdown"})
+                self.assertEqual(result["failureGuard"], "custody-read-budget")
+                result.clear()
+                process = observer.custody
+                process.poll.reset_mock()
+                with (
+                    patch.object(diagnostics.time, "monotonic") as monotonic,
+                    patch.object(diagnostics.os, "read") as read,
+                    patch.object(diagnostics.os, "write") as write,
+                    patch.object(diagnostics.select, "select") as ready,
+                    patch.object(diagnostics.subprocess, "Popen") as spawn,
+                ):
+                    observer._custody_sample("after-exit")
+                self.assertEqual(observer.ctx.observations[-1]["snapshot"]["failureGuard"], "custody-read-budget")
+                self.assertEqual(observer.custody_terminal, terminal)
+                for operation in (monotonic, read, write, ready, spawn, process.poll):
+                    operation.assert_not_called()
+
+    def test_invalid_optional_failure_guards_retire_the_stream(self) -> None:
+        for invalid in (None, True, 1, [], {}, ["custody-deadline"], "unknown", "protected fixture text /private/path"):
+            with self.subTest(invalid=invalid):
+                terminal = {**self.terminal_fixture(), "failureGuard": invalid}
+                observer = self.closed_observer((json.dumps(terminal) + "\n").encode(), exited=True)
+                result = observer._custody_exchange({"phase": "before-shutdown"})
+                self.assertEqual(result["availability"], "unavailable")
+                self.assertNotIn("failureGuard", result)
+                self.assert_failed_terminal_remains_unavailable_without_io(observer)
+
+    def test_failure_guard_preserves_strict_terminal_cohorts_and_owned_source(self) -> None:
+        terminal = {**self.complex_terminal_fixture(), "failureGuard": "custody-read-budget"}
+        expected_watch = terminal["originalConmonWatch"]
+        minimal = {
+            key: terminal[key] for key in ("schemaVersion", "availability", "attribution", "reason", "failureGuard")
+        }
+        diagnostics._terminal_custody_record(minimal)
+        close = next(index for index, event in enumerate(terminal["events"]) if "completedContent" in event)
+        changes = (
+            (("reason",), "ProtectedFixtureText"),
+            (("uncertainty",), ["protected fixture text"]),
+            (("originalConmonWatch", "path"), "/different-owned-source"),
+            (("events", close, "mask"), -1),
+            (("events", close, "completedContent", "bytesRead"), diagnostics.MAX_FILE_BYTES + 1),
+            (("events", close, "completedContent", "readIntervalMonotonicNs", "end"), -1),
+        )
+        partial = copy.deepcopy(terminal)
+        del partial["originalConmonWatch"]
+        invalid_records = [partial]
+        for path, value in changes:
+            changed = copy.deepcopy(terminal)
+            target = changed
+            for component in path[:-1]:
+                target = target[component]
+            target[path[-1]] = value
+            invalid_records.append(changed)
+        for index, invalid in enumerate(invalid_records):
+            with self.subTest(index=index):
+                observer = self.closed_observer(
+                    (json.dumps(invalid) + "\n").encode(), exited=True, watch=expected_watch
+                )
+                observer._custody_sample("after-exit")
+                self.assertEqual(observer.ctx.observations[-1]["snapshot"]["availability"], "unavailable")
+                self.assertNotIn("ProtectedFixtureText", json.dumps(observer.ctx.observations))
+                self.assertNotIn("protected fixture text", json.dumps(observer.ctx.observations))
+                self.assert_failed_terminal_remains_unavailable_without_io(observer)
+
+    def test_ordinary_terminal_error_is_retained_without_later_pipe_or_process_operations(self) -> None:
+        terminal = self.terminal_fixture()
+        observer = self.closed_observer((json.dumps(terminal) + "\n").encode())
+        with patch.object(diagnostics.os, "write", side_effect=lambda _fd, payload: len(payload)):
+            observer._custody_sample("before-stop-request")
+        first = observer.ctx.observations[-1]["snapshot"]
+        self.assertEqual(first, terminal)
+        first["events"].clear()
+        with (
+            patch.object(diagnostics.os, "read") as read,
+            patch.object(diagnostics.os, "write") as write,
+            patch.object(diagnostics.select, "select") as select_ready,
+            patch.object(diagnostics.subprocess, "Popen") as spawn,
+        ):
+            observer.custody.poll.reset_mock()
+            observer._custody_sample("after-exit")
+            observer.custody.poll.assert_not_called()
+        read.assert_not_called()
+        write.assert_not_called()
+        select_ready.assert_not_called()
+        spawn.assert_not_called()
+        cached = observer.ctx.observations[-1]["snapshot"]
+        self.assertEqual(cached["events"], terminal["events"])
+        self.assertEqual(cached["terminalReceipt"], "previously-retained-terminal")
+        cached["events"].clear()
+        self.assertEqual(observer.custody_terminal, terminal)
+        observer.ctx.command.assert_not_called()
+
+    def assert_failed_terminal_remains_unavailable_without_io(self, observer: diagnostics.OomDiagnostics) -> None:
+        process = observer.custody
+        process.poll.reset_mock()
+        with (
+            patch.object(diagnostics.time, "monotonic") as monotonic,
+            patch.object(diagnostics.os, "read") as read,
+            patch.object(diagnostics.os, "write") as write,
+            patch.object(diagnostics.select, "select") as select_ready,
+            patch.object(diagnostics.subprocess, "Popen") as spawn,
+            patch.object(diagnostics, "_custody_reply") as drain,
+        ):
+            for phase in ("before-shutdown", "before-stop-request", "after-exit"):
+                observer._custody_sample(phase)
+                result = observer.ctx.observations[-1]["snapshot"]
+                self.assertEqual(result["availability"], "unavailable")
+                self.assertEqual(result["reason"], "terminal-record-unavailable-or-invalid")
+                self.assertEqual(result["terminalReceipt"], "previously-retired-terminal")
+                result.clear()  # Later results and the failure cache must be independent copies.
+        for operation in (monotonic, read, write, select_ready, spawn, drain, process.poll):
+            operation.assert_not_called()
+        observer.ctx.command.assert_not_called()
+        self.assertIsNone(observer.custody_terminal)
+
+    def test_failed_terminal_records_retire_stream_without_cross_phase_io(self) -> None:
+        terminal = self.terminal_fixture()
+        payloads = (
+            b"",
+            b"partial",
+            b"{malformed}\n",
+            b"{}\n",
+            (json.dumps({**terminal, "schemaVersion": 2}) + "\n").encode(),
+            (json.dumps({**terminal, "unknown": "protected fixture text"}) + "\n").encode(),
+            (json.dumps(terminal) + "\n" + json.dumps(terminal) + "\n").encode(),
+        )
+        for exited in (False, True):
+            for payload in payloads:
+                with self.subTest(exited=exited, payload=payload):
+                    observer = self.closed_observer(payload, exited=exited)
+                    observer._custody_sample("after-inner-memory")
+                    result = observer.ctx.observations[-1]["snapshot"]
+                    self.assertEqual(result["availability"], "unavailable")
+                    result.clear()
+                    self.assert_failed_terminal_remains_unavailable_without_io(observer)
+        observer = self.closed_observer(b"x", exited=True)
+        with patch.object(diagnostics.os, "read", return_value=b"x" * (diagnostics.MAX_BYTES + 1)):
+            observer._custody_sample("after-inner-memory")
+        self.assertEqual(observer.ctx.observations[-1]["snapshot"]["availability"], "unavailable")
+        self.assert_failed_terminal_remains_unavailable_without_io(observer)
+
+    def test_failed_terminal_deadline_cannot_be_laundered_by_a_later_phase(self) -> None:
+        terminal = self.terminal_fixture()
+        observer = self.closed_observer((json.dumps(terminal) + "\n").encode(), exited=True)
+        with patch.object(
+            diagnostics, "_custody_reply", side_effect=[ValueError("deadline expired"), terminal]
+        ) as drain:
+            observer._custody_sample("before-stop-request")
+            self.assertEqual(observer.ctx.observations[-1]["snapshot"]["availability"], "unavailable")
+            observer._custody_sample("after-exit")
+            self.assertEqual(observer.ctx.observations[-1]["snapshot"]["availability"], "unavailable")
+        self.assertEqual(drain.call_count, 1)
+        self.assert_failed_terminal_remains_unavailable_without_io(observer)
+
+    def test_failed_normal_responses_retire_before_late_terminal_and_helper_exit(self) -> None:
+        terminal = self.terminal_fixture()
+        cases = (
+            (b"", ValueError, "response deadline expired"),
+            (b"partial", ValueError, "response deadline expired"),
+            (b"{malformed}\n", json.JSONDecodeError, "Expecting property name"),
+            ((json.dumps({**terminal, "schemaVersion": 2}) + "\n").encode(), ValueError, "terminal schema"),
+            (
+                (json.dumps({**terminal, "unknown": "protected fixture text"}) + "\n").encode(),
+                ValueError,
+                "terminal schema",
+            ),
+        )
+        for payload, error, message in cases:
+            with self.subTest(payload=payload):
+                observer, request_reader, response_writer = self.exchanging_observer(payload)
+                process = observer.custody
+                ready = [([], [process.stdin.fileno()], [])]
+                if payload:
+                    ready.append(([process.stdout], [], []))
+                ready.append(([], [], []))
+                with (
+                    patch.object(diagnostics.select, "select", side_effect=ready),
+                    self.assertRaisesRegex(error, message),
+                ):
+                    observer._custody_exchange({"phase": "before-stop-request"})
+                self.assertEqual(os.read(request_reader, diagnostics.MAX_BYTES), b'{"phase": "before-stop-request"}\n')
+                self.assertEqual(observer.custody_terminal_unavailable["terminalReceipt"], "exchange-failed")
+                os.write(response_writer, (json.dumps(terminal) + "\n").encode())
+                process.poll.return_value = 0
+                self.assert_failed_terminal_remains_unavailable_without_io(observer)
+
+    def test_partial_request_failure_retires_and_preserves_first_phase_error(self) -> None:
+        observer, _, response_writer = self.exchanging_observer(b"")
+        process = observer.custody
+        with (
+            patch.object(diagnostics.os, "write", return_value=1) as write,
+            patch.object(diagnostics.select, "select", side_effect=[([], [process.stdin.fileno()], []), ([], [], [])]),
+        ):
+            observer._custody_sample("before-stop-request")
+        write.assert_called_once()
+        self.assertEqual(observer.ctx.observations[-1]["availability"], "error")
+        self.assertEqual(observer.ctx.observations[-1]["reason"], "ValueError")
+        os.write(response_writer, (json.dumps(self.terminal_fixture()) + "\n").encode())
+        process.poll.return_value = 0
+        self.assert_failed_terminal_remains_unavailable_without_io(observer)
+
+    def test_failed_normal_response_still_closes_pipes_and_waits_for_owned_helper(self) -> None:
+        observer, _, _ = self.exchanging_observer(b"{malformed}\n")
+        observer._custody_sample("before-stop-request")
+        self.assertEqual(observer.ctx.observations[-1]["availability"], "error")
+        self.assertEqual(observer.ctx.observations[-1]["reason"], "JSONDecodeError")
+        process = observer.custody
+        process.poll.return_value = process.returncode = 0
+        observer.close()
+        self.assertIsNone(observer.custody)
+        self.assertTrue(process.stdin.closed)
+        self.assertTrue(process.stdout.closed)
+        process.wait.assert_called_once_with(timeout=diagnostics.MONITOR_CLEANUP_SECONDS)
+        process.kill.assert_not_called()
+        self.assertEqual(observer.ctx.observations[-1]["phase"], "cleanup")
+        self.assertEqual(observer.ctx.observations[-1]["availability"], "observed")
+
+    def test_retired_terminal_stream_still_closes_pipes_and_waits_for_owned_helper(self) -> None:
+        for timeout in (False, True):
+            with self.subTest(timeout=timeout):
+                observer = self.closed_observer(b"partial", exited=True)
+                observer._custody_sample("after-exit")
+                process = observer.custody
+                process.returncode = 0
+                if timeout:
+                    process.wait.side_effect = subprocess.TimeoutExpired("authored helper", 0.5)
+                observer.close()
+                self.assertIsNone(observer.custody)
+                self.assertTrue(process.stdin.closed)
+                self.assertTrue(process.stdout.closed)
+                process.wait.assert_called_once_with(timeout=diagnostics.MONITOR_CLEANUP_SECONDS)
+                process.kill.assert_not_called()
+                result = observer.ctx.observations[-1]
+                self.assertEqual(result["phase"], "cleanup")
+                self.assertEqual(result["availability"], "unresolved" if timeout else "observed")
+
+    def test_complete_terminal_record_arriving_after_deadline_is_unavailable(self) -> None:
+        terminal = self.terminal_fixture()
+        observer = self.closed_observer((json.dumps(terminal) + "\n").encode(), exited=True)
+        with patch.object(diagnostics.time, "monotonic", side_effect=[100, 100.1, 100.2, 101.1]):
+            result = observer._custody_exchange({"phase": "after-exit"})
+        self.assertEqual(result["availability"], "unavailable")
+        self.assertEqual(result["reason"], "terminal-record-unavailable-or-invalid")
+        self.assertIsNone(observer.custody_terminal)
+        self.assert_failed_terminal_remains_unavailable_without_io(observer)
+
 
 if __name__ == "__main__":
     unittest.main()

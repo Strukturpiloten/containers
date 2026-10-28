@@ -803,6 +803,46 @@ def _custody_reply(process: subprocess.Popen[bytes], deadline: float) -> dict[st
     return value
 
 
+# Intentional closed wire duplication avoids importing the standalone ctypes helper.
+CUSTODY_FAILURE_GUARDS = frozenset(
+    {
+        "custody-deadline",
+        "custody-read-budget",
+        "directory-event-budget",
+        "marker-event-budget",
+        "protocol-input",
+        "protocol-phase",
+        "protocol-output",
+        "directory-path",
+        "original-pid-identity",
+        "original-pid-descriptor",
+        "custody-deadline-config",
+        "original-watch",
+        "inotify-unavailable",
+        "cgroup-path",
+        "cgroup-directory-identity",
+        "conmon-event-identity",
+        "store-identity",
+        "marker-count",
+        "marker-path",
+        "marker-parent-identity",
+        "marker-watch",
+        "marker-file",
+        "counter-content",
+        "inotify-framing",
+        "inotify-watch-loss",
+        "marker-rename",
+        "completed-marker-path",
+        "completed-marker-descriptor",
+        "completed-marker-identity",
+        "completed-marker-content",
+        "completed-marker-bracket",
+        "marker-identity",
+        "marker-completion",
+        "marker-version",
+    }
+)
+
 TERMINAL_ERROR_CLASSES = frozenset(
     {
         "OSError",
@@ -1015,7 +1055,7 @@ def _terminal_custody_record(value: dict[str, Any], *, expected_watch: dict[str,
     required = {"schemaVersion", "attribution", "availability", "reason"}
     optional = {"events", "originalConmonWatch", "exitObservedMonotonicNs", "uncertainty"}
     _require(
-        value.keys() in (required, required | optional)
+        value.keys() - {"failureGuard"} in (required, required | optional)
         and type(value["schemaVersion"]) is int
         and value["schemaVersion"] == 1
         and value["attribution"] == "unresolved"
@@ -1024,7 +1064,12 @@ def _terminal_custody_record(value: dict[str, Any], *, expected_watch: dict[str,
         and value["reason"] in TERMINAL_ERROR_CLASSES,
         "diagnostic custody terminal schema invalid",
     )
-    if value.keys() == required:
+    _require(
+        "failureGuard" not in value
+        or (type(value["failureGuard"]) is str and value["failureGuard"] in CUSTODY_FAILURE_GUARDS),
+        "diagnostic custody terminal failure guard invalid",
+    )
+    if value.keys() - {"failureGuard"} == required:
         return
     _terminal_watch(value["originalConmonWatch"], expected_watch)
     _require(
@@ -1058,28 +1103,38 @@ class OomDiagnostics:
         self.last_watch: dict[str, Any] | None = None
         self.custody_terminal: dict[str, Any] | None = None
         self.custody_watch: dict[str, Any] | None = None
+        self.custody_terminal_unavailable: dict[str, Any] | None = None
+
+    def _retire_custody_reply(self, receipt: str) -> dict[str, Any]:
+        self.custody_terminal_unavailable = {
+            "schemaVersion": 1,
+            "availability": "unavailable",
+            "attribution": "unresolved",
+            "reason": "terminal-record-unavailable-or-invalid",
+            "terminalReceipt": receipt,
+        }
+        return copy.deepcopy(self.custody_terminal_unavailable)
 
     def _closed_custody_reply(self, process: subprocess.Popen[bytes], deadline: float) -> dict[str, Any]:
         try:
             terminal = _custody_reply(process, deadline)
             _terminal_custody_record(terminal, expected_watch=self.custody_watch)
         except Exception:  # noqa: BLE001 — absent/late/invalid terminal evidence stays explicitly unavailable.
-            return {
-                "schemaVersion": 1,
-                "availability": "unavailable",
-                "attribution": "unresolved",
-                "reason": "terminal-record-unavailable-or-invalid",
-                "terminalReceipt": "input-closed",
-            }
+            return self._retire_custody_reply("input-closed")
         self.custody_terminal = copy.deepcopy(terminal)
         return {**terminal, "terminalReceipt": "buffered-after-input-closed"}
 
     def _custody_exchange(self, request: dict[str, Any]) -> dict[str, Any]:
         _require(self.custody is not None, "diagnostic custody was not armed")
-        process = self.custody
-        _require(process.stdin is not None and process.stdout is not None, "diagnostic custody pipes unavailable")
         if self.custody_terminal is not None:
             return {**copy.deepcopy(self.custody_terminal), "terminalReceipt": "previously-retained-terminal"}
+        if self.custody_terminal_unavailable is not None:
+            return {
+                **copy.deepcopy(self.custody_terminal_unavailable),
+                "terminalReceipt": "previously-retired-terminal",
+            }
+        process = self.custody
+        _require(process.stdin is not None and process.stdout is not None, "diagnostic custody pipes unavailable")
         deadline = time.monotonic() + min(2, self.ctx.timeout)
         if process.poll() is not None:
             return self._closed_custody_reply(process, deadline)
@@ -1087,16 +1142,21 @@ class OomDiagnostics:
         _require(len(payload) <= MAX_BYTES, "diagnostic custody request exceeded bound")
         descriptor = process.stdin.fileno()
         try:
-            while payload:
-                _, ready, _ = select.select([], [descriptor], [], max(0, deadline - time.monotonic()))
-                _require(bool(ready), "diagnostic custody request deadline expired")
-                payload = payload[os.write(descriptor, payload) :]
-        except BrokenPipeError:
-            return self._closed_custody_reply(process, deadline)
-        value = _custody_reply(process, deadline)
-        if value.get("availability") == "error":
-            _terminal_custody_record(value, expected_watch=self.custody_watch)
-            self.custody_terminal = copy.deepcopy(value)
+            try:
+                while payload:
+                    _, ready, _ = select.select([], [descriptor], [], max(0, deadline - time.monotonic()))
+                    _require(bool(ready), "diagnostic custody request deadline expired")
+                    payload = payload[os.write(descriptor, payload) :]
+            except BrokenPipeError:
+                return self._closed_custody_reply(process, deadline)
+            value = _custody_reply(process, deadline)
+            if value.get("availability") == "error":
+                _terminal_custody_record(value, expected_watch=self.custody_watch)
+                self.custody_terminal = copy.deepcopy(value)
+        except Exception:
+            # Failed exchanges cannot admit a late response under a new budget.
+            self._retire_custody_reply("exchange-failed")
+            raise
         return value
 
     def _custody_sample(self, phase: str, *, request: dict[str, Any] | None = None) -> None:

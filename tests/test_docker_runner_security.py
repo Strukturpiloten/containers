@@ -229,7 +229,7 @@ class RunnerSecurityWorkflowTests(unittest.TestCase):
             for match in re.finditer(pattern, template)
             if match.group("depName") == "actions/upload-artifact"
         ]
-        self.assertEqual(len(observed), 4)
+        self.assertEqual(len(observed), 5)
         self.assertTrue(all(pin == observed[0] for pin in observed))
         self.assertRegex(observed[0]["currentDigest"], r"^[a-f0-9]{40}$")
         self.assertRegex(observed[0]["currentValue"], r"^v\d+\.\d+\.\d+$")

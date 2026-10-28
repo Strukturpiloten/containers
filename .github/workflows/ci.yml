@@ -144,6 +144,22 @@ jobs:
         uses: ./.github/actions/setup-uv
         with:
           version: ${{ env.UV_VERSION }}
+      - name: Observe ordinary-user system Python import descriptors
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          artifact="${RUNNER_TEMP}/python-runtime-fd-observation.json"
+          printf '%s\n' '{"schema":1,"qualification":"none","policy_load_run":false,"container_run":false,"state":"unavailable","provenance":"unavailable","packageProvenance":"unavailable","timeoutProvider":{"state":"unavailable"}}' > "${artifact}"
+          temporary="$(/usr/bin/mktemp "${RUNNER_TEMP}/python-runtime-fd-observation.XXXXXXXX")"
+          trap '/usr/bin/rm -f -- "${temporary}"' EXIT
+          if /usr/bin/gnutimeout --signal=TERM --kill-after=1s 9s /usr/bin/python3 -I -B -S scripts/python_runtime_fd_observation.py > "${temporary}"; then
+            /usr/bin/mv -- "${temporary}" "${artifact}"
+          else
+            exit "$?"
+          fi
       - name: Observe two real hosted unused ownership cycles
         shell: bash
         env:
@@ -499,6 +515,15 @@ jobs:
         with:
           name: docker-userns-custody-unused
           path: ${{ runner.temp }}/docker-userns-custody-unused.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Retain separate nonqualifying Python import observation
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: python-runtime-fd-observation
+          path: ${{ runner.temp }}/python-runtime-fd-observation.json
           if-no-files-found: error
           retention-days: 7
 

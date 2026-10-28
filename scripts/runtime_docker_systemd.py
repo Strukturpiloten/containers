@@ -15,6 +15,7 @@ import time
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any
 
+from scripts.runtime_docker_systemd_guard import PLACEMENT_GUARD, USER_MANAGER, guarded_command  # noqa: F401 - preserve public re-exports.
 from scripts.runtime_errors import ProbeError
 from scripts.runtime_resource_budgets import verify_outer_container_limits
 
@@ -46,20 +47,6 @@ DOCKER_SYSTEMD_OPTIONS = (
     "--tmpfs",
     "/run/lock:rw,nosuid,nodev,size=16m,mode=755",
 )
-USER_MANAGER = (
-    "runuser",
-    "-u",
-    "dockertest",
-    "--",
-    "env",
-    "HOME=/home/docker",
-    "XDG_RUNTIME_DIR=/run/user/1000",
-    "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus",
-    "systemctl",
-    "--user",
-)
-
-
 MAX_CGROUP_DEPTH = 32
 MAX_CGROUP_PATH = 4096
 MAX_HIERARCHY_READBACK = 256 * 1024
@@ -213,15 +200,6 @@ done
 """
 
 
-PLACEMENT_GUARD = (
-    "init=$(cut -d: -f3 /proc/1/cgroup); current=$(cut -d: -f3 /proc/self/cgroup); "
-    'printf "%s\\n" "$init" | LC_ALL=C grep -Eq "^(/[A-Za-z0-9_.@:-]+)+$"; '
-    'case "$init/" in */./*|*/../*) exit 90 ;; esac; '
-    'test "$init" = "$current"; '
-    'root_procs=$(cat /sys/fs/cgroup/cgroup.procs); test -z "$root_procs"; '
-    'leaf_controllers=$(cat "/sys/fs/cgroup$current/cgroup.subtree_control"); test -z "$leaf_controllers"; '
-)
-
 # Passive observation only: no daemon requests or cgroup/service changes before admission.
 PLACEMENT_READBACK_COMMAND = r"""
 LC_ALL=C; export LC_ALL
@@ -344,12 +322,6 @@ JOURNAL_BOUNDARY_COMMAND = (
     'grep -qFx "systemd=$version" /usr/share/strukturpiloten/docker/conformance-packages; '
     'printf "systemd-version=%s\\n" "$version"'
 )
-
-
-def guarded_command(*args: str) -> tuple[str, ...]:
-    """Refuse guest helpers in a distributor or outside the delegated parent."""
-    script = PLACEMENT_GUARD + 'set +e; "$@"; result=$?; set -e; ' + PLACEMENT_GUARD + 'exit "$result"'
-    return ("sh", "-euc", script, "--", *args)
 
 
 def startup_deadline(ctx: RuntimeContext) -> float:
