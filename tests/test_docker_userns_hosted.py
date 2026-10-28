@@ -7,6 +7,7 @@ import json
 import os
 import signal
 import struct
+import subprocess
 import sys
 import unittest
 from contextlib import ExitStack, contextmanager
@@ -690,7 +691,12 @@ class HostedTests(unittest.TestCase):
             patch.object(child, "bytes_at", return_value=b"OS ELF"),
         ):
             hosted.HostPort(root, receipt, self.fixture.clock, MagicMock())
-            for name in (".github/docker-userns-policy-source.json", "scripts/docker_userns_custody.py"):
+            for name in (
+                ".github/docker-userns-policy-source.json",
+                "scripts/docker_userns_custody.py",
+                "scripts/docker_userns_custody_child.py",
+                "scripts/docker_userns_hosted.py",
+            ):
                 original = files[str(root / name)]
                 files[str(root / name)] = original + b"\n"
                 with self.subTest(name=name), self.assertRaises(custody.CustodyError):
@@ -895,6 +901,7 @@ class HostedTests(unittest.TestCase):
     def test_child_gate_eof_or_cancellation_prevents_custody_work(self) -> None:
         for cancelled in (False, True):
             observer = self.observer_fixture()
+            observer.control.preparation_guard = "FD_NOT_ALLOWLISTED"
             hosted._CANCELLATION[0] = False
             with (
                 patch.object(os, "pipe2", side_effect=[(11, 12), (13, 14)]),
@@ -913,6 +920,9 @@ class HostedTests(unittest.TestCase):
             ):
                 observer.spawn(MagicMock())
             work.assert_not_called()
+            self.assertIsNone(observer.control.preparation_guard)
+            self.assertIsNone(observer.control.preparation_status)
+            self.assertIsNone(observer.control.preparation_failure)
         hosted._CANCELLATION[0] = False
 
     def test_observer_error_cleans_its_already_spawned_exact_child(self) -> None:
@@ -2079,6 +2089,48 @@ class CoordinatorObservationTests(unittest.TestCase):
         with child.work(observer, "CUSTODY", "C_CREATE_W02", (custody.CustodyError, child.ChildError)):
             raise self.original
 
+    def test_guard_publication_reset_and_new_snapshot_fault_preserve_original_pair_and_masking(self) -> None:
+        status_fixture = fixtures.BuildStatusObservationTests(methodName="runTest")
+        status_fixture.setUp()
+        self.original = OSError("private prepare")
+        release = OSError("private release")
+
+        def prepare(_arguments: object, observer: child.WorkObserver | None) -> None:
+            self.assertIsNone(self.control.preparation_guard)
+            claim = child.refused(observer, "CHILD_PARENT", "B_BUILD_STATUS_REFUSAL")
+            observer.observe_status(
+                claim, 111, status_fixture.lease, status_fixture.proof, sources=fixtures.guard_source_fixture()
+            )
+            observer.finish_status(completed=True)
+            raise self.original
+
+        self.control.preparation_guard = "FD_NOT_ALLOWLISTED"
+        self.prepare.side_effect, self.close.side_effect = prepare, release
+        with patch.object(child, "_runtime_qualified", return_value=True), self.assertRaises(OSError) as raised:
+            self.run_coordinator()
+        self.assertIs(raised.exception, release)
+        self.assertEqual(self.control.preparation_guard, "FD_FSTAT_NON_EBADF")
+        self.assertEqual(self.control.preparation_status, ("EXIT_NONZERO", "MATCH"))
+        self.assertEqual(self.control.preparation_failure, ("CHILD_PARENT", "B_BUILD_STATUS_REFUSAL", "REFUSED"))
+        self.close.side_effect = None
+        with (
+            patch.object(hosted.os, "open", side_effect=(71, 72, 73)),
+            patch.object(child, "_runtime_qualified", return_value=True),
+            patch.object(child.WorkObserver, "guard_snapshot", side_effect=MemoryError),
+            self.assertRaises(OSError) as raised,
+        ):
+            self.run_coordinator()
+        self.assertIs(raised.exception, self.original)
+        self.assertIsNone(self.control.preparation_guard)
+        self.assertEqual(self.control.preparation_status, ("EXIT_NONZERO", "MATCH"))
+        self.assertEqual(self.control.preparation_failure, ("CHILD_PARENT", "B_BUILD_STATUS_REFUSAL", "REFUSED"))
+        self.prepare.side_effect = None
+        with patch.object(hosted.os, "open", side_effect=(71, 72, 73)), self.assertRaises(RuntimeError):
+            self.run_coordinator()
+        self.assertIsNone(self.control.preparation_guard)
+        self.assertIsNone(self.control.preparation_status)
+        self.assertIsNone(self.control.preparation_failure)
+
     def test_first_work_tuple_survives_original_exitstack_masking(self) -> None:
         self.original, release = OSError("private prepare"), OSError("private release")
         self.prepare.side_effect = self.work_fault
@@ -2276,6 +2328,417 @@ class ComposedClockObservationTests(unittest.TestCase):
                 )
                 self.assertEqual(calls, target)
                 self.assertEqual(read.call_count, reads)
+
+
+class GuardPublicationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.fault = {"schema": 1, "context": "CHILD_PARENT", "site": "B_BUILD_STATUS_REFUSAL", "failure": "REFUSED"}
+        self.pair = {"schema": 1, "terminationForm": "EXIT_NONZERO", "receiptCheck": "MATCH"}
+        self.declaration = {"schema": 1, "category": "RESULT_TYPE_OR_SIZE"}
+        self.base = {
+            "schema": 1,
+            "diagnosticOnly": True,
+            "phase": "prepare",
+            "ns": 17,
+            "custodyLocator": None,
+            "childPending": False,
+            "workFailure": self.fault,
+            "buildStatusObservation": self.pair,
+        }
+        self.triple = ("CHILD_PARENT", "B_BUILD_STATUS_REFUSAL", "REFUSED")
+
+    def control(self) -> hosted.Control:
+        control = hosted.Control.__new__(hosted.Control)
+        control.phase = "prepare"
+        control.write = MagicMock(side_effect=lambda _name, value, _deadline: hosted.encoded(value))
+        return control
+
+    def control_case(
+        self, target: int, category: str
+    ) -> tuple[dict[str, object], hosted.Control, custody.CustodyError]:
+        locator = custody.Locator("", custody.DirectoryIdentity(1, 2))
+        base = {**self.base, "custodyLocator": asdict(locator)}
+        size = len(json.dumps(base, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii"))
+        locator = replace(locator, nonce="x" * (target - size))
+        base["custodyLocator"] = asdict(locator)
+        control = self.control()
+        fault = custody.CustodyError(locator, child_pending=False)
+        with patch.object(hosted.time, "monotonic_ns", return_value=17):
+            control.failure(
+                fault, 100, work_failure=self.triple, build_status=("EXIT_NONZERO", "MATCH"), child_guard=category
+            )
+        return base, control, fault
+
+    def test_control_legacy_and_augmented_complete_caps_preserve_one_original_write(self) -> None:
+        for category in ("FD_FSTAT_NON_EBADF", "FD_NOT_ALLOWLISTED", "RESULT_TYPE_OR_SIZE"):
+            for target in (hosted.LIMIT - 1, hosted.LIMIT):
+                with self.subTest(category=category, legacy=target):
+                    base, control, _ = self.control_case(target, category)
+                    self.assertEqual(control.write.call_args.args[1], base)
+                    control.write.assert_called_once()
+            control = self.control()
+            locator = custody.Locator("", custody.DirectoryIdentity(1, 2))
+            base = {**self.base, "custodyLocator": asdict(locator)}
+
+            def body(value: object) -> bytes:
+                return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+
+            declaration = {"schema": 1, "category": category}
+            overhead = len(body({**base, "childGuardDeclaration": declaration})) - len(body(base))
+            for target in (hosted.LIMIT - 1, hosted.LIMIT, hosted.LIMIT + 1):
+                with self.subTest(category=category, augmented=target):
+                    base, control, _ = self.control_case(target - overhead, category)
+                    expected = {**base, "childGuardDeclaration": declaration} if target <= hosted.LIMIT else base
+                    self.assertEqual(control.write.call_args.args[1], expected)
+                    control.write.assert_called_once()
+            oversized = replace(
+                locator, nonce="x" * (hosted.LIMIT + 1 - len(body(base)) + len(base["custodyLocator"]["nonce"]))
+            )
+            control = self.control()
+            with (
+                patch.object(hosted.time, "monotonic_ns", return_value=17),
+                self.assertRaises(custody.CustodyError),
+            ):
+                control.failure(
+                    custody.CustodyError(oversized, child_pending=False),
+                    100,
+                    work_failure=self.triple,
+                    build_status=("EXIT_NONZERO", "MATCH"),
+                    child_guard=category,
+                )
+            control.write.assert_called_once()
+
+    def test_wire_dependencies_unknown_roots_and_new_errors_keep_both_original_facts(self) -> None:
+        valid = {**self.base, "childGuardDeclaration": self.declaration}
+        self.assertEqual(hosted._failure_diagnostic(valid), valid)
+        for value in (
+            None,
+            [],
+            {},
+            {**self.declaration, "schema": True},
+            {**self.declaration, "schema": 1.0},
+            {**self.declaration, "category": "actual-fd"},
+            {**self.declaration, "raw": "private"},
+        ):
+            self.assertEqual(hosted._failure_diagnostic({**self.base, "childGuardDeclaration": value}), self.base)
+        for dependency in (
+            {"phase": "binding"},
+            {"workFailure": {}},
+            {"buildStatusObservation": {}},
+            {"buildStatusObservation": {**self.pair, "receiptCheck": "EMPTY"}},
+        ):
+            self.assertNotIn("childGuardDeclaration", hosted._failure_diagnostic({**valid, **dependency}))
+        with self.assertRaises(custody.CustodyError):
+            hosted._failure_diagnostic({**valid, "unknown": True})
+        for owner, name in (
+            (child, "guard_declaration"),
+            (hosted, "_publication_shape"),
+            (hosted, "_control_declaration_fits"),
+        ):
+            control = self.control()
+            with (
+                patch.object(owner, name, side_effect=MemoryError),
+                patch.object(hosted.time, "monotonic_ns", return_value=17),
+            ):
+                control.failure(
+                    OSError(),
+                    100,
+                    work_failure=self.triple,
+                    build_status=("EXIT_NONZERO", "MATCH"),
+                    child_guard="RESULT_TYPE_OR_SIZE",
+                )
+            self.assertEqual(control.write.call_args.args[1], {**self.base, "childPending": None})
+            control.write.assert_called_once()
+        with patch.object(hosted, "_publication_shape", side_effect=AssertionError) as shape:
+            self.control().failure(OSError(), 100)
+            shape.assert_not_called()
+        for category in child.GUARD_CATEGORIES:
+            self.assertLessEqual(len(json.dumps({"schema": 1, "category": category}).encode("ascii")), 96)
+        control = self.control()
+        control.path, control.check = Path("/synthetic"), MagicMock()
+        raw = json.dumps(valid).replace(
+            '"category": "RESULT_TYPE_OR_SIZE"', '"category": "RESULT_TYPE_OR_SIZE", "category": "FD_NOT_ALLOWLISTED"'
+        )
+        with (
+            patch.object(hosted, "read_root", return_value=(raw.encode(), None)),
+            self.assertRaises(custody.CustodyError),
+        ):
+            control.read("failure.json")
+        control = self.control()
+        control.write.side_effect = OSError
+        with self.assertRaises(OSError):
+            control.failure(
+                OSError(),
+                100,
+                work_failure=self.triple,
+                build_status=("EXIT_NONZERO", "MATCH"),
+                child_guard="RESULT_TYPE_OR_SIZE",
+            )
+        control.write.assert_called_once()
+
+    def test_constructor_resets_closed_outputs_before_its_original_invalid_path_refusal(self) -> None:
+        control = self.control()
+        control.preparation_failure, control.preparation_status, control.preparation_guard = (
+            self.triple,
+            ("EXIT_NONZERO", "MATCH"),
+            "FD_NOT_ALLOWLISTED",
+        )
+        with self.assertRaises(custody.CustodyError):
+            control.__init__(Path("/invalid"))
+        self.assertIsNone(control.preparation_failure)
+        self.assertIsNone(control.preparation_status)
+        self.assertIsNone(control.preparation_guard)
+
+    def artifact(self, diagnostic: dict[str, object], padding: int = 0) -> tuple[str, dict[str, object]]:
+        bootstrap = {
+            "uid": 1001,
+            "gid": 1002,
+            "deadlineNs": 1_000_000_000_000,
+            "padding": "x" * padding,
+            "protected": {"childGuardDeclaration": "retain-user-field"},
+        }
+        observer = MagicMock()
+        observer.run.side_effect = OSError
+        observer.control.read.return_value = diagnostic
+        self.output = io.StringIO()
+        self.writer = MagicMock(wraps=self.output.write)
+        with (
+            patch.object(hosted.os, "umask"),
+            patch.object(hosted.os, "geteuid", return_value=0),
+            patch.object(hosted, "read_root", return_value=(json.dumps(bootstrap).encode(), None)),
+            patch.object(hosted, "installed_tools", return_value={}),
+            patch.object(hosted, "audit_stage", return_value={}),
+            patch.object(hosted, "write_denial_probe", return_value={}),
+            patch.object(hosted, "Clock"),
+            patch.object(hosted, "CycleObserver", return_value=observer),
+            patch.object(hosted.time, "monotonic_ns", return_value=0),
+            patch.object(sys, "stdout", SimpleNamespace(write=self.writer)),
+        ):
+            self.assertEqual(hosted.observer_main("/synthetic-stage"), 1)
+        return self.output.getvalue(), bootstrap
+
+    def test_full_artifact_caps_count_outer_fields_and_lf_without_fixing_old_overflow(self) -> None:
+        declared = {**self.base, "childGuardDeclaration": self.declaration}
+        initial, _ = self.artifact(self.base)
+        initial_size = len(initial.encode())
+        for body_target in (hosted.MAX_ARTIFACT - 1, hosted.MAX_ARTIFACT, hosted.MAX_ARTIFACT + 1):
+            padding = body_target + 1 - initial_size
+            with self.subTest(legacy_body=body_target):
+                if body_target > hosted.MAX_ARTIFACT:
+                    with self.assertRaises(custody.CustodyError):
+                        self.artifact(declared, padding)
+                    self.writer.assert_not_called()
+                else:
+                    actual, _ = self.artifact(declared, padding)
+                    old, _ = self.artifact(self.base, padding)
+                    self.assertEqual(actual, old)
+                    self.assertEqual(len(actual.encode()), body_target + 1)
+                    self.writer.assert_called_once()
+        emitted, _ = self.artifact(declared)
+        for target in (hosted.MAX_ARTIFACT - 1, hosted.MAX_ARTIFACT, hosted.MAX_ARTIFACT + 1):
+            actual, _ = self.artifact(declared, target - len(emitted.encode()))
+            diagnostic = json.loads(actual)["cycles"][0]["diagnostic"]
+            self.assertEqual("childGuardDeclaration" in diagnostic, target <= hosted.MAX_ARTIFACT)
+            self.assertEqual(
+                {key: value for key, value in diagnostic.items() if key != "childGuardDeclaration"}, self.base
+            )
+            self.assertLessEqual(len(actual.encode()), hosted.MAX_ARTIFACT)
+            self.assertEqual(json.loads(actual)["bootstrap"]["protected"]["childGuardDeclaration"], "retain-user-field")
+            self.writer.assert_called_once()
+
+    def test_artifact_new_gate_faults_only_omit_known_slots_and_absence_skips_gate(self) -> None:
+        for name in ("_publication_shape", "_artifact_declaration_fits"):
+            with patch.object(hosted, name, side_effect=MemoryError):
+                actual, _ = self.artifact({**self.base, "childGuardDeclaration": self.declaration})
+            self.assertEqual(json.loads(actual)["cycles"][0]["diagnostic"], self.base)
+            self.writer.assert_called_once()
+        with patch.object(hosted, "_artifact_declaration_fits", side_effect=AssertionError) as gate:
+            self.artifact(self.base)
+            gate.assert_not_called()
+        first = {**self.base, "childGuardDeclaration": self.declaration}
+        second = {**self.base, "childGuardDeclaration": self.declaration}
+        untouched = {"childGuardDeclaration": "user-data"}
+        packet = {
+            "cycles": [{"diagnostic": first}, {"diagnostic": second}, {"diagnostic": untouched}],
+            "childGuardDeclaration": "outer-data",
+            "bootstrap": untouched,
+        }
+        hosted._omit_artifact_declarations(packet)
+        self.assertEqual(first, self.base)
+        self.assertEqual(second, self.base)
+        self.assertEqual(untouched, {"childGuardDeclaration": "user-data"})
+        self.assertEqual(packet["childGuardDeclaration"], "outer-data")
+
+    def test_whole_tree_screen_checks_integer_keys_values_bools_cycles_and_budgets_before_encoding(self) -> None:
+        class IntSubclass(int):
+            pass
+
+        class Proxy:
+            def __getattribute__(self, _name: str) -> object:
+                raise AssertionError
+
+        for value in (0, True, False, (1 << 64) - 1, -((1 << 64) - 1), {1: ["unicode-\U0001f60a", None]}):
+            self.assertTrue(hosted._publication_shape(value, hosted.LIMIT))
+        cycle = []
+        cycle.append(cycle)
+        cases = [
+            1 << 64,
+            -(1 << 64),
+            {1 << 64: "key"},
+            {"value": 1 << 30001},
+            IntSubclass(1),
+            Proxy(),
+            cycle,
+            "x" * (hosted.MAX_ARTIFACT + 2),
+            [None] * (hosted.MAX_ARTIFACT + 2),
+            {"nested": (Proxy(),)},
+            {"prior-small": 1, "later-big": 1 << 30001},
+        ]
+        for value in cases:
+            with (
+                self.subTest(kind=type(value)),
+                patch.object(hosted.json, "dumps", side_effect=AssertionError) as encode,
+            ):
+                self.assertFalse(hosted._control_declaration_fits(value))
+                self.assertFalse(hosted._artifact_declaration_fits(value))
+                encode.assert_not_called()
+        with patch.object(hosted.json, "dumps", wraps=json.dumps) as encode:
+            self.assertTrue(hosted._control_declaration_fits({"ok": True}))
+            self.assertEqual(encode.call_count, 1)
+            encode.reset_mock()
+            self.assertTrue(hosted._artifact_declaration_fits({"ok": True}))
+            self.assertEqual(encode.call_count, 2)
+
+    def test_cold_disabled_digit_limit_omits_big_integer_keys_and_values_before_prospective_json(self) -> None:
+        if not child._runtime_qualified():
+            self.skipTest("cold publication proof requires CPython3.14.4 final")
+        sources = tuple(
+            (name, (fixtures.REPO / "scripts" / (name + ".py")).read_text())
+            for name in ("docker_userns_custody_child", "docker_userns_custody", "docker_userns_hosted")
+        )
+        setup = (
+            "import sys,types,builtins,hashlib,time,select\n"
+            "package=types.ModuleType('scripts');package.__path__=[];sys.modules['scripts']=package\n"
+            f"sources={sources!r}\n"
+            "for name,source in sources:\n"
+            " module=types.ModuleType('scripts.'+name);module.__file__='<inert-source>'\n"
+            " sys.modules[module.__name__]=module;setattr(package,name,module)\n"
+            " exec(compile(source,'<inert-source>','exec'),module.__dict__)\n"
+            "h=package.docker_userns_hosted;c=package.docker_userns_custody\n"
+        )
+        exercise = r"""
+assert h.child._runtime_qualified() and '_pylong' not in sys.modules
+sys.set_int_max_str_digits(0)
+large = 1 << 30001
+held = {large:'inert'} if key else large
+fault={'schema':1,'context':'CHILD_PARENT','site':'B_BUILD_STATUS_REFUSAL','failure':'REFUSED'}
+pair={'schema':1,'terminationForm':'EXIT_NONZERO','receiptCheck':'MATCH'}
+declaration={'schema':1,'category':'RESULT_TYPE_OR_SIZE'}
+diagnostic={'schema':1,'diagnosticOnly':True,'phase':'prepare','ns':17,'custodyLocator':None,
+            'childPending':False,'workFailure':fault,'buildStatusObservation':pair}
+phase='legacy'
+violations=[];prospective=[];gates=[];writes=[]
+class Forbidden(BaseException): pass
+def stop(name):
+    violations.append(name)
+    raise Forbidden(name)
+def trap(name, operation):
+    def run(*args,**kwargs):
+        if phase=='gate': stop(name)
+        return operation(*args,**kwargs)
+    return run
+def audit(event,args):
+    if phase=='gate' and (event in ('open','import')
+                         or event.startswith(('subprocess.','os.fork','os.exec','socket.'))):
+        stop(event)
+real_dumps=h.json.dumps
+def dumps(*args,**kwargs):
+    if phase=='gate':
+        prospective.append(True)
+        stop('prospective-json')
+    return real_dumps(*args,**kwargs)
+h.json.dumps=dumps
+for name in ('time','time_ns','monotonic','monotonic_ns','perf_counter','perf_counter_ns','process_time'):
+    operation=(lambda:17) if name=='monotonic_ns' else getattr(time,name)
+    setattr(time,name,trap('clock:'+name,operation))
+for name in ('open','read','pread','stat','lstat','fstat','wait','waitpid','waitid','getpid','getppid','write'):
+    if hasattr(h.os,name): setattr(h.os,name,trap('os:'+name,getattr(h.os,name)))
+for name in ('Popen','run','call','check_output','check_call'):
+    setattr(h.subprocess,name,trap('process:'+name,getattr(h.subprocess,name)))
+h.selectors.DefaultSelector=trap('selector',h.selectors.DefaultSelector)
+select.select=trap('select',select.select)
+builtins.open=trap('open',builtins.open)
+builtins.print=trap('print',builtins.print)
+class Stream:
+    def __init__(self,real): self.real=real;self.buffer=self
+    def write(self,value):
+        if phase=='gate': stop('output')
+        return self.real.write(value)
+    def flush(self):
+        if phase=='gate': stop('flush')
+        return self.real.flush()
+sys.stdout,sys.stderr=Stream(sys.stdout),Stream(sys.stderr)
+sys.addaudithook(audit)
+phase='gate'
+for operation in (lambda:time.monotonic_ns(),lambda:h.os.read(-1,1),lambda:h.os.stat('/inert'),
+                  lambda:builtins.__import__('inert_forbidden_import'),lambda:h.json.dumps({'small':1}),
+                  lambda:select.select([],[],[],0),lambda:sys.stdout.write('inert')):
+    before=len(violations)
+    try:operation()
+    except Forbidden:pass
+    else:raise AssertionError('sentinel missed')
+    assert len(violations)==before+1
+phase='legacy';violations.clear();prospective.clear()
+assert '_pylong' not in sys.modules
+original_gate=h._control_declaration_fits if boundary=='control' else h._artifact_declaration_fits
+def gate(value):
+    global phase
+    assert '_pylong' not in sys.modules
+    gates.append(True);phase='gate'
+    try:return original_gate(value)
+    finally:phase='legacy'
+if boundary=='control':
+    control=h.Control.__new__(h.Control);control.phase='prepare'
+    def writer(name,value,deadline):
+        assert name=='failure.json' and phase=='legacy'
+        assert 'childGuardDeclaration' not in value
+        assert value['workFailure']==fault and value['buildStatusObservation']==pair
+        assert value['custodyLocator']['nonce']==held
+        writes.append(h.encoded(value))
+    control.write=writer;h._control_declaration_fits=gate
+    control.failure(c.CustodyError(c.Locator(held,c.DirectoryIdentity(1,2)),child_pending=False),100,
+                    work_failure=('CHILD_PARENT','B_BUILD_STATUS_REFUSAL','REFUSED'),build_status=('EXIT_NONZERO','MATCH'),
+                    child_guard='RESULT_TYPE_OR_SIZE' if declared else None)
+else:
+    packet={'bootstrap':{'held':held},'cycles':[{'diagnostic':diagnostic}]}
+    if declared:
+        diagnostic['childGuardDeclaration']=declaration
+        assert gate(packet) is False
+        h._omit_artifact_declarations(packet)
+    assert diagnostic=={'schema':1,'diagnosticOnly':True,'phase':'prepare','ns':17,'custodyLocator':None,
+                       'childPending':False,'workFailure':fault,'buildStatusObservation':pair}
+    h.need(len(h.json.dumps(packet).encode())<=h.MAX_ARTIFACT)
+    writes.append((h.json.dumps(packet,sort_keys=True)+'\n').encode())
+assert len(gates)==int(declared) and len(writes)==1
+assert not prospective and not violations
+sys.stdout.write(hashlib.sha256(writes[0]).hexdigest()+'\n')
+"""
+        for boundary in ("control", "artifact"):
+            for key in (False, True):
+                outputs = []
+                for declared in (False, True):
+                    with self.subTest(boundary=boundary, key=key, declared=declared):
+                        script = setup + f"boundary={boundary!r};key={key!r};declared={declared!r}\n" + exercise
+                        result = subprocess.run(
+                            ["/proc/self/exe", "-I", "-B", "-S", "-"],
+                            input=script.encode("ascii"),
+                            capture_output=True,
+                            timeout=10,
+                            check=False,
+                        )
+                        self.assertEqual(result.returncode, 0, result.stderr.decode())
+                        outputs.append(result.stdout)
+                self.assertEqual(outputs[0], outputs[1])
 
 
 if __name__ == "__main__":

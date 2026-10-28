@@ -304,7 +304,7 @@ records, unknown root fields and duplicate keys keep their existing refusal
 behavior. Recording or capture failure adds no retry or fallback output.
 
 These diagnostics add no reads, child channel, process, probe, wait, deadline or
-runtime authority. Child programs and privilege receipts, strict custody reads,
+runtime authority. The probe program and privilege receipts, strict custody reads,
 and borrowed OS-tool rules remain unchanged. Successful initial tool scans,
 staging and the synthetic write-denial probe do not establish a successful
 normal custody cycle or native runtime qualification. A work label cannot
@@ -335,6 +335,34 @@ adds no authority and shares the existing single bounded diagnostic write. Runti
 qualification is a semantic review constant, not a Python installer/version selector;
 operational admission and existing Renovate managers therefore require no change.
 Qualifying another runtime requires a fresh semantic review.
+
+An optional `childGuardDeclaration` can accompany only that exact preparation
+fault and an `EXIT_NONZERO / MATCH` pair. It contains integer `schema: 1` and one
+closed `category`: `FD_FSTAT_NON_EBADF`, `FD_NOT_ALLOWLISTED`, or `RESULT_TYPE_OR_SIZE`.
+The build child reserves exit values 111, 112 and 113 respectively at those three
+existing negative guards. Every predicate, descriptor allowlist, operation order,
+limit, receipt and positive path stays unchanged; all other failures keep their
+old values. These declarations require the same single consumed attempt, the
+unchanged receipt validator once, the reviewed parent runtime, and exact held
+metadata for both manifest-pinned Source records. No source descriptor is read
+or inspected again. Source changes require manual semantic requalification.
+
+This is a producer-declared category, not proof of an actual host statement,
+errno, descriptor/object/OFD identity, origin or cause. Interpreter/native-library
+and finalization status collisions or replacement are not exhaustively excluded.
+Absence means unobserved. Declaration failures, conflicts or invalid wire data
+cannot erase an otherwise valid original fault or status pair. They cannot
+authorize readiness, runtime work, cleanup or disposal.
+
+Publication independently admits the complete control record against its existing
+32768-byte compact ASCII limit and the complete artifact envelope against its
+existing 131072-byte guard and sorted-output-plus-newline capture limit. Bounded
+pure prospective JSON checks run only when a new declaration is present. Exact
+JSON types, whole-tree budgets and at most 64-bit integer magnitudes are screened
+before any prospective encoding, including dictionary keys. Unsupported shapes,
+overflow or new-gate errors omit only declarations at the known diagnostic slots;
+all original evidence and the original single write remain. Legacy-invalid cases
+and no-declaration/normal paths keep their original serialization behavior.
 
 `.github/docker-userns-unused-admission.json` is a manually reviewed semantic
 admission based on the audited Stage-1 Ubuntu 26 observation, bound to the

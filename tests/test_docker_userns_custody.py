@@ -43,6 +43,15 @@ def policy(name: str) -> bytes:
     return f"abi <abi/4.0>,\nprofile {name} flags=(unconfined) {{\n  userns,\n}}\n".encode("ascii")
 
 
+def guard_source_fixture() -> tuple[child.Source, ...]:
+    """Independent active manifest facts, with descriptors that must never be inspected."""
+    specs = json.loads((REPO / ".github/docker-userns-policy-source.json").read_bytes())["source"]["files"]
+    return tuple(
+        child.Source(module, object(), spec["size"], spec["sha256"])
+        for module, spec in zip(("canonical_policy", "native_outer_diagnostic_capture"), specs[:2], strict=True)
+    )
+
+
 def identity(inode: int, mode: int = 0o644) -> custody.FileIdentity:
     """Create explicit fake fresh root filesystem facts."""
     return custody.FileIdentity(1, inode, 0, stat.S_IFREG | mode, 1, 0, 4, 5)
@@ -1002,6 +1011,33 @@ class ChildTests(unittest.TestCase):
         finally:
             os.close(source.descriptor)
 
+    def test_real_seal_factory_returns_the_exact_metadata_shape_used_by_the_custody_tuple(self) -> None:
+        writable = tuple(os.open(self.root / f"factory-{i}", os.O_RDWR | os.O_CREAT, 0o600) for i in range(2))
+        prior = child.fcntl.fcntl
+
+        def fcntl(descriptor: int, command: int, *arguments: int) -> int:
+            return 0 if command == child.fcntl.F_ADD_SEALS else prior(descriptor, command, *arguments)
+
+        with (
+            patch.object(child.os, "memfd_create", side_effect=writable, create=True),
+            patch.object(child.os, "MFD_CLOEXEC", 1, create=True),
+            patch.object(child.os, "MFD_ALLOW_SEALING", 2, create=True),
+            patch.object(child.fcntl, "fcntl", side_effect=fcntl),
+        ):
+            sealed = tuple(child.seal(module, b"inert factory input") for module in child.MODULES)
+        try:
+            expected = tuple(
+                (module, len(b"inert factory input"), digest(b"inert factory input"))
+                for module in ("canonical_policy", "native_outer_diagnostic_capture")
+            )
+            self.assertTrue(all(type(source) is child.Source for source in sealed))
+            with patch.object(child, "_GUARD_SOURCES", expected):
+                self.assertEqual(child._declared_guard(111, sealed), "FD_FSTAT_NON_EBADF")
+            self.assertIsNone(child._declared_guard(111, sealed))
+        finally:
+            for source in sealed:
+                os.close(source.descriptor)
+
     @contextmanager
     def executing(
         self,
@@ -1053,6 +1089,75 @@ class ChildTests(unittest.TestCase):
         self.assertEqual(proof["groups"], [])
         self.assertEqual(proof["nnp"], 1)
         self.assertEqual(context.libc.prctl.argtypes, [context.ctypes.c_int, *([context.ctypes.c_ulong] * 4)])
+
+    def test_declared_fd_guards_keep_ebadf_continuation_and_all_existing_calls(self) -> None:
+        original = self.executing
+        extra_descriptor = 99999
+        for fault, expected in ((errno.EBADF, None), (errno.EIO, 111), (None, 112)):
+            captured = []
+
+            @contextmanager
+            def altered(
+                *, fault: int | None = fault, captured: list[SimpleNamespace] = captured
+            ) -> Iterator[SimpleNamespace]:
+                with original() as context:
+                    prior = context.os.fstat
+                    entries = context.os.listdir("/proc/self/fd")
+                    context.os.listdir = MagicMock(return_value=[*entries, str(extra_descriptor)])
+
+                    def fstat(descriptor: int) -> object:
+                        if descriptor != extra_descriptor:
+                            return prior(descriptor)
+                        if fault is not None:
+                            raise OSError(fault, "inert")
+                        return object()
+
+                    context.os.fstat = fstat
+                    captured.append(context)
+                    yield context
+
+            with self.subTest(fault=fault), patch.object(self, "executing", side_effect=altered):
+                if expected is None:
+                    self.test_descriptor_loader_executes_complete_source_without_workspace_paths()
+                else:
+                    with self.assertRaises(SystemExit) as raised:
+                        self.test_descriptor_loader_executes_complete_source_without_workspace_paths()
+                    self.assertEqual(raised.exception.code, expected)
+                    self.assertEqual(captured[0].output.getvalue(), b"")
+                    captured[0].os.write.assert_called_once()
+                    self.assertEqual(json.loads(captured[0].os.write.call_args.args[1]), json.loads(self.proof()))
+                captured[0].os.listdir.assert_called_once_with("/proc/self/fd")
+
+    def test_declared_result_guard_has_only_its_original_type_and_size_checks(self) -> None:
+        for expression in ("'wrong type'", "b'x' * 1025"):
+            raw = f"def profile_bytes(name): return {expression}\n".encode("ascii")
+            (self.root / "source-0").write_bytes(raw)
+            self.sources = (replace(self.sources[0], size=len(raw), sha256=digest(raw)), self.sources[1])
+            with self.subTest(expression=expression), self.assertRaises(SystemExit) as raised:
+                self.test_descriptor_loader_executes_complete_source_without_workspace_paths()
+            self.assertEqual(raised.exception.code, 113)
+
+    def test_code_changes_only_three_negative_integer_operands_and_probe_is_exact(self) -> None:
+        original = child.CODE
+        for code in (111, 112, 113):
+            self.assertEqual(original.count(f"raise SystemExit({code})"), 1)
+            original = original.replace(f"raise SystemExit({code})", "raise SystemExit(1)")
+        self.assertEqual(len(child.CODE.encode()), 3944)
+        self.assertEqual(digest(original.encode()), "c056502a4646634447d7c1806f2d75ab96de0071db930c9f308c604d5efa37fb")
+        before, after = list(ast.walk(ast.parse(original))), list(ast.walk(ast.parse(child.CODE)))
+        self.assertEqual(len(before), len(after))
+        differences = []
+        for old, new in zip(before, after, strict=True):
+            self.assertIs(type(new), type(old))
+            if isinstance(old, ast.Constant) and old.value != new.value:
+                differences.append((old.value, new.value))
+                new.value = old.value
+        self.assertEqual(sorted(differences), [(1, 111), (1, 112), (1, 113)])
+        self.assertEqual(ast.dump(after[0]), ast.dump(before[0]))
+        self.assertEqual(len(child.PROBE_CODE.encode()), 2258)
+        self.assertEqual(
+            digest(child.PROBE_CODE.encode()), "c7bbd0da2b38cea2b9d933f76554b2b5199c8e872af21187c559b1ca808f602f"
+        )
 
     def test_saved_ids_groups_capabilities_and_nnp_fail_before_first_source_import(self) -> None:
         clean = b"CapEff: 0\nCapPrm: 0\nCapInh: 0\nCapAmb: 0\nNoNewPrivs: 1\n"
@@ -1805,6 +1910,7 @@ class BuildStatusObservationTests(unittest.TestCase):
         ).encode("ascii")
         self.fault = {"schema": 1, "context": "CHILD_PARENT", "site": "B_BUILD_STATUS_REFUSAL", "failure": "REFUSED"}
         self.clock = MagicMock()
+        self.sources = ()
 
     def refuse(self, observer: child.WorkObserver | None, proof: object, status: object = 1) -> child.ChildError:
         with (
@@ -1815,7 +1921,7 @@ class BuildStatusObservationTests(unittest.TestCase):
             ),
             self.assertRaises(child.ChildError) as raised,
         ):
-            child.build(None, (), self.lease, self.clock, observer=observer)
+            child.build(None, self.sources, self.lease, self.clock, observer=observer)
         self.assertIs(raised.exception.lifetime, child.Lifetime.DEAD)
         self.assertEqual(raised.exception.args, ("child-refused",))
         self.clock.now_ns.assert_not_called()
@@ -2185,11 +2291,13 @@ class BuildStatusObservationTests(unittest.TestCase):
         if not child._runtime_qualified():
             self.skipTest("cold semantic proof requires CPython 3.14.4 final")
         source = (REPO / "scripts/docker_userns_custody_child.py").read_text()
+        guard_specs = tuple((item.module, item.size, item.sha256) for item in guard_source_fixture())
         setup = (
             "import sys, types, builtins, time, select\n"
             "module = types.ModuleType('inert_child'); sys.modules[module.__name__] = module\n"
             f"exec(compile({source!r}, '<inert-child>', 'exec'), module.__dict__)\n"
             f"ordinary = {self.proof!r}\n"
+            f"guard_specs = {guard_specs!r}\n"
         )
         cases = (
             "match",
@@ -2229,11 +2337,18 @@ class BuildStatusObservationTests(unittest.TestCase):
             "oversize",
             "bytes-subclass",
             "build-subclass",
+            "guard-111",
+            "guard-112",
+            "guard-113",
+            "guard-source-size",
+            "guard-source-proxy",
         )
         # Every case starts a new interpreter. Setup imports the inert parent module,
         # but never invokes its parser or imports/prewarms any codec for the test.
         exercise = r"""
 lease = module.Build('inert', 1001, 1002, 100, 200)
+sources, expected_guard = (), None
+guard_sources = tuple(module.Source(name, object(), size, digest) for name, size, digest in guard_specs)
 proof, expected, expected_calls = ordinary, ('EXIT_NONZERO', 'MATCH'), 1
 status, lifetime = 1, module.Lifetime.DEAD
 if case == 'empty': proof, expected, expected_calls = b'', ('EXIT_NONZERO', 'EMPTY'), 0
@@ -2273,6 +2388,18 @@ elif case == 'bytes-subclass':
 elif case == 'build-subclass':
     class BuildSubclass(module.Build): pass
     lease, expected, expected_calls = BuildSubclass('inert', 1001, 1002, 100, 200), None, 0
+elif case.startswith('guard-'):
+    status, sources = 111, guard_sources
+    if case in ('guard-111', 'guard-112', 'guard-113'):
+        status = int(case[-3:])
+        expected_guard = {111:'FD_FSTAT_NON_EBADF',112:'FD_NOT_ALLOWLISTED',113:'RESULT_TYPE_OR_SIZE'}[status]
+    elif case == 'guard-source-size':
+        first = guard_sources[0]
+        sources = (module.Source(first.module, object(), first.size + 1, first.sha256), guard_sources[1])
+    else:
+        class Proxy:
+            def __getattribute__(self, name): raise AssertionError('source proxy inspected')
+        sources = (Proxy(), guard_sources[1])
 assert len(proof) <= (1025 if case == 'oversize' else module.MAX_POLICY)
 assert module._runtime_qualified()
 parser, decoder = module._privilege_receipt, module.json.loads
@@ -2357,13 +2484,14 @@ def profile(frame, event, arg):
 
 def build_failure():
     try:
-        module.build(None, (), lease, clock, observer=observer)
+        module.build(None, sources, lease, clock, observer=observer)
     except module.ChildError as error:
         assert error.args == ('child-refused',) and error.lifetime is held[2]
         assert type(error.__cause__) is module.ChildError
     else: raise AssertionError('build unexpectedly succeeded')
 
 def attempt():
+    global sources
     if case == 'other-first': module.refused(observer, 'CHILD_PARENT', 'B_BUILD_G03')
     if case == 'identical-first': module.refused(observer, 'CHILD_PARENT', 'B_BUILD_STATUS_REFUSAL')
     if case == 'unsupported-runtime': sys.implementation.name = 'pypy'
@@ -2376,7 +2504,8 @@ def attempt():
     module.json.loads = decoder
     sys.implementation.name = implementation_name
     if case not in ('zero-status', 'bool-status', 'unknown-status', 'unknown-lifetime'):
-        held[:] = [ordinary, 1, module.Lifetime.DEAD]
+        held[:] = [ordinary, status, module.Lifetime.DEAD]
+    if case.startswith('guard-'): sources = guard_sources
     build_failure()
     assert len(parser_calls) == expected_calls
     assert len(guard_clocks) == 2 * int(case == 'zero-status')
@@ -2416,6 +2545,7 @@ try:
     assert module._privilege_receipt is parser
     assert not forbidden_calls
     if observer is not None:
+        assert observer.guard_snapshot() == expected_guard
         pair = observer.status_snapshot()
         assert pair == expected, (pair, expected)
         detail = observer.snapshot()
@@ -2444,6 +2574,142 @@ finally:
                 )
                 self.assertEqual(result.returncode, 0, result.stderr.decode())
                 self.assertEqual(result.stdout, b"")
+
+
+class ChildGuardObservationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.fixture = BuildStatusObservationTests(methodName="runTest")
+        self.fixture.setUp()
+        self.sources = guard_source_fixture()
+        self.fixture.sources = self.sources
+
+    def test_declarations_require_one_existing_match_and_preserve_both_original_objects(self) -> None:
+        for status, category in (
+            (111, "FD_FSTAT_NON_EBADF"),
+            (112, "FD_NOT_ALLOWLISTED"),
+            (113, "RESULT_TYPE_OR_SIZE"),
+        ):
+            for proof, receipt in ((self.fixture.proof, "MATCH"), (b"", "EMPTY"), (b"{", "MISMATCH")):
+                observer = child.WorkObserver()
+                with (
+                    self.subTest(status=status, receipt=receipt),
+                    child.observing(observer),
+                    patch.object(child, "_runtime_qualified", return_value=True),
+                    patch.object(child, "_privilege_receipt", wraps=child._privilege_receipt) as parser,
+                ):
+                    self.fixture.refuse(observer, proof, status)
+                    self.assertIsNone(observer.guard_snapshot())
+                    self.fixture.refuse(observer, self.fixture.proof, status)
+                self.assertEqual(observer.snapshot(), self.fixture.fault)
+                self.assertEqual(observer.status_snapshot(), ("EXIT_NONZERO", receipt))
+                self.assertEqual(observer.guard_snapshot(), category if receipt == "MATCH" else None)
+                self.assertEqual(parser.call_count, int(bool(proof)))
+                if proof:
+                    parser.assert_called_once_with(proof, self.fixture.lease, observer=None)
+                self.assertFalse(
+                    any(
+                        type(getattr(observer, name)) in (child.Source, child.Build, bytes)
+                        for name in observer.__slots__
+                    )
+                )
+
+    def test_source_shape_and_scalar_failures_preserve_pair_and_never_retry(self) -> None:
+        class SourceSubclass(child.Source):
+            pass
+
+        class StringSubclass(str):
+            __slots__ = ()
+
+        class Proxy:
+            def __getattribute__(self, _name: str) -> object:
+                raise AssertionError
+
+        cases = [
+            None,
+            [],
+            list(self.sources),
+            self.sources[:1],
+            (*self.sources, self.sources[0]),
+            self.sources[::-1],
+            Proxy(),
+            (Proxy(), self.sources[1]),
+            (SourceSubclass(**asdict(self.sources[0])), self.sources[1]),
+            *(
+                (replace(self.sources[0], **fields), self.sources[1])
+                for fields in (
+                    {"module": "other"},
+                    {"module": StringSubclass("canonical_policy")},
+                    {"module": Proxy()},
+                    {"size": True},
+                    {"size": 31132},
+                    {"size": Proxy()},
+                    {"sha256": "a" * 64},
+                    {"sha256": Proxy()},
+                )
+            ),
+        ]
+        for sources in cases:
+            observer = child.WorkObserver()
+            with (
+                self.subTest(sources=type(sources)),
+                child.observing(observer),
+                patch.object(child, "_runtime_qualified", return_value=True),
+                patch.object(child, "_privilege_receipt", wraps=child._privilege_receipt) as parser,
+            ):
+                self.fixture.sources = sources
+                self.fixture.refuse(observer, self.fixture.proof, 111)
+                self.fixture.sources = self.sources
+                self.fixture.refuse(observer, self.fixture.proof, 111)
+            parser.assert_called_once()
+            self.assertEqual(observer.snapshot(), self.fixture.fault)
+            self.assertEqual(observer.status_snapshot(), ("EXIT_NONZERO", "MATCH"))
+            self.assertIsNone(observer.guard_snapshot())
+
+    def test_other_statuses_are_not_decoded_and_new_boundary_errors_only_disable_declaration(self) -> None:
+        for status in (1, 110, 114, 256 + 111, 111 << 8, -111, -signal.SIGKILL):
+            observer = child.WorkObserver()
+            with child.observing(observer), patch.object(child, "_runtime_qualified", return_value=True):
+                self.fixture.refuse(observer, self.fixture.proof, status)
+            self.assertIsNone(observer.guard_snapshot())
+        for owner, name in (
+            (child, "_declared_guard"),
+            (child.WorkObserver, "_offer_guard"),
+            (child.WorkObserver, "_record_guard"),
+        ):
+            observer = child.WorkObserver()
+            with (
+                self.subTest(boundary=name),
+                child.observing(observer),
+                patch.object(child, "_runtime_qualified", return_value=True),
+            ):
+                with patch.object(owner, name, side_effect=MemoryError):
+                    self.fixture.refuse(observer, self.fixture.proof, 111)
+                with patch.object(child, "_privilege_receipt") as parser:
+                    self.fixture.refuse(observer, self.fixture.proof, 111)
+                parser.assert_not_called()
+            self.assertEqual(observer.snapshot(), self.fixture.fault)
+            self.assertEqual(observer.status_snapshot(), ("EXIT_NONZERO", "MATCH"))
+            self.assertIsNone(observer.guard_snapshot())
+
+    def test_guard_snapshot_conflicts_and_errors_leave_original_pair_available(self) -> None:
+        for second in ("FD_FSTAT_NON_EBADF", "FD_NOT_ALLOWLISTED", True, "private"):
+            observer = child.WorkObserver()
+            with child.observing(observer), patch.object(child, "_runtime_qualified", return_value=True):
+                self.fixture.refuse(observer, self.fixture.proof, 111)
+                observer._record_guard(second)
+                observer._record_guard("FD_FSTAT_NON_EBADF")
+            self.assertEqual(
+                observer.guard_snapshot(), "FD_FSTAT_NON_EBADF" if second == "FD_FSTAT_NON_EBADF" else None
+            )
+            self.assertEqual(observer.status_snapshot(), ("EXIT_NONZERO", "MATCH"))
+        observer = child.WorkObserver()
+        with child.observing(observer), patch.object(child, "_runtime_qualified", return_value=True):
+            self.fixture.refuse(observer, self.fixture.proof, 111)
+        with patch.object(child.WorkObserver, "status_snapshot", side_effect=MemoryError):
+            self.assertIsNone(observer.guard_snapshot())
+        self.assertIsNone(observer.guard_snapshot())
+        self.assertEqual(observer.status_snapshot(), ("EXIT_NONZERO", "MATCH"))
+        self.assertEqual(observer.snapshot(), self.fixture.fault)
 
 
 if __name__ == "__main__":

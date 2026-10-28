@@ -33,6 +33,7 @@ from scripts import docker_userns_custody_child as child
 NS = 1_000_000_000
 CYCLE_NS = 120 * NS
 LIMIT = 32768
+_PUBLICATION_INT_BITS = 64
 PROC_LIMIT = 8192
 CGROUP_LIMIT = 4096
 START_FIELD = 19
@@ -117,6 +118,81 @@ def encoded(value: object) -> bytes:
     raw = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
     need(len(raw) <= LIMIT)
     return raw
+
+
+def _json_scalar_cost(value: object) -> int | None:
+    if value is None or type(value) is bool:
+        return 0
+    if type(value) is str:
+        return len(value)
+    if type(value) is int:
+        bits = value.bit_length()
+        return bits if bits <= _PUBLICATION_INT_BITS else None
+    if type(value) is float:
+        return 32
+    return None
+
+
+def _json_children(value: dict[object, object] | list[object] | tuple[object, ...]) -> Iterator[object]:
+    if type(value) is dict:
+        for key, item in value.items():
+            yield key
+            yield item
+    else:
+        yield from value
+
+
+def _publication_shape(value: object, limit: int) -> bool:
+    """Bound the whole exact-type tree before ANY prospective integer formatting."""
+    nodes = scalars = limit + 1
+    queued = 1
+    pending = [(value, False)]
+    ancestors: set[int] = set()
+    while pending:
+        item, leaving = pending.pop()
+        if leaving:
+            ancestors.remove(id(item))
+            continue
+        queued -= 1
+        nodes -= 1
+        if nodes < 0:
+            return False
+        if type(item) in (dict, list, tuple):
+            children = len(item) * (2 if type(item) is dict else 1)
+            if id(item) in ancestors or children > nodes - queued:
+                return False
+            ancestors.add(id(item))
+            pending.append((item, True))
+            queued += children
+            pending.extend((part, False) for part in _json_children(item))
+        else:
+            cost = _json_scalar_cost(item)
+            if cost is None or cost > scalars:
+                return False
+            scalars -= cost
+    return True
+
+
+def _control_declaration_fits(value: object) -> bool:
+    return (
+        _publication_shape(value, LIMIT)
+        and len(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")) <= LIMIT
+    )
+
+
+def _artifact_declaration_fits(value: object) -> bool:
+    if not _publication_shape(value, MAX_ARTIFACT):
+        return False
+    if len(json.dumps(value).encode()) > MAX_ARTIFACT:
+        return False
+    return len((json.dumps(value, sort_keys=True) + "\n").encode()) <= MAX_ARTIFACT
+
+
+def _omit_artifact_declarations(value: dict[str, Any]) -> None:
+    """Only the two producer-owned cycle slots; never recursively search evidence."""
+    for progress in value["cycles"][:2]:
+        if type(progress) is dict and type(progress.get("diagnostic")) is dict:
+            progress["diagnostic"].pop("childGuardDeclaration", None)
 
 
 def digest(raw: bytes) -> str:
@@ -567,6 +643,7 @@ class Control:
         """Create or authenticate one private finite control directory."""
         self.preparation_failure: tuple[str, str, str] | None = None
         self.preparation_status: tuple[str, str] | None = None
+        self.preparation_guard: str | None = None
         need(path.parent == Path("/run") and re.fullmatch(re.escape(CONTROL_PREFIX) + r"[0-9a-f]{32}", path.name))
         if create:
             path.mkdir(mode=0o700)
@@ -628,6 +705,7 @@ class Control:
         *,
         work_failure: tuple[str, str, str] | None = None,
         build_status: tuple[str, str] | None = None,
+        child_guard: str | None = None,
     ) -> None:
         """Keep the existing diagnostic and optionally one sealed closed preparation fault."""
         need(self.phase in {"control", "admission", "prepare", "binding", "arm", "commit", "close", "finish", "owner"})
@@ -662,6 +740,21 @@ class Control:
                 )
                 if detail is not None:
                     value["buildStatusObservation"] = detail
+        if child_guard is not None:
+            with suppress(Exception):
+                declaration = (
+                    child.guard_declaration(
+                        {"schema": 1, "category": child_guard},
+                        value.get("workFailure"),
+                        value.get("buildStatusObservation"),
+                    )
+                    if self.phase == "prepare"
+                    else None
+                )
+                if declaration is not None:
+                    candidate = {**value, "childGuardDeclaration": declaration}
+                    if _control_declaration_fits(candidate) is True:
+                        value = candidate
         self.write("failure.json", value, deadline)
 
     def listen(self, name: str) -> socket.socket:
@@ -1493,12 +1586,27 @@ def _sealed_build_status(observer: child.WorkObserver | None) -> tuple[str, str]
     return None
 
 
+def _sealed_guard(observer: child.WorkObserver | None) -> str | None:
+    if type(observer) is child.WorkObserver:
+        with suppress(Exception):
+            category = observer.guard_snapshot()
+            if type(category) is str and category in child.GUARD_CATEGORIES:
+                return category
+    return None
+
+
+def _publish_observations(control: Control, observer: child.WorkObserver | None) -> None:
+    with suppress(Exception):
+        control.preparation_status = _sealed_build_status(observer)
+    with suppress(Exception):
+        control.preparation_guard = _sealed_guard(observer)
+
+
 def coordinator_main(
     stage: Path, control: Control, bootstrap: dict[str, Any], observer: custody.Process, deadline: int
 ) -> int:
     """Prepare/arm as the actual root caller, then await its independent observer."""
-    control.preparation_failure = None
-    control.preparation_status = None
+    control.preparation_failure, control.preparation_status, control.preparation_guard = None, None, None
     work_observer = child.new_observer()
     clock = Clock(**child.observer_args(work_observer))
     with ExitStack() as stack:
@@ -1537,7 +1645,7 @@ def coordinator_main(
         finally:
             control.preparation_failure = _sealed_preparation(work_observer)
             with suppress(Exception):
-                control.preparation_status = _sealed_build_status(work_observer)
+                _publish_observations(control, work_observer)
         control.phase = "binding"
         control.write(
             "binding.json",
@@ -1694,7 +1802,11 @@ class CycleObserver:
                 listener.close()
                 os.close(read)
                 os.close(gate_write)
-                self.control.preparation_failure, self.control.preparation_status = None, None
+                self.control.preparation_failure, self.control.preparation_status, self.control.preparation_guard = (
+                    None,
+                    None,
+                    None,
+                )
                 try:
                     os.setsid()
                     raw = encoded(asdict(process(os.getpid()))) + b"\n"
@@ -1718,6 +1830,7 @@ class CycleObserver:
                             self.plan.deadline,
                             work_failure=self.control.preparation_failure,
                             build_status=self.control.preparation_status,
+                            child_guard=self.control.preparation_guard,
                         )
                     status = 1
                 os._exit(status)
@@ -1909,7 +2022,11 @@ class CycleObserver:
 
 def _failure_diagnostic(value: object) -> dict[str, Any]:
     need(type(value) is dict)
-    base = {key: item for key, item in value.items() if key not in {"workFailure", "buildStatusObservation"}}
+    base = {
+        key: item
+        for key, item in value.items()
+        if key not in {"workFailure", "buildStatusObservation", "childGuardDeclaration"}
+    }
     result = exact(base, {"schema", "diagnosticOnly", "phase", "ns", "custodyLocator", "childPending"})
     need(result["schema"] == 1 and result["diagnosticOnly"] is True)
     if result["phase"] == "prepare" and "workFailure" in value:
@@ -1921,10 +2038,17 @@ def _failure_diagnostic(value: object) -> dict[str, Any]:
             observation = child.build_status_observation(value["buildStatusObservation"], result.get("workFailure"))
             if observation is not None:
                 result["buildStatusObservation"] = observation
+    with suppress(Exception):
+        if result["phase"] == "prepare" and "childGuardDeclaration" in value:
+            declaration = child.guard_declaration(
+                value["childGuardDeclaration"], result.get("workFailure"), result.get("buildStatusObservation")
+            )
+            if declaration is not None:
+                result["childGuardDeclaration"] = declaration
     return result
 
 
-def cycle(plan: CyclePlan, result: dict[str, Any]) -> None:
+def cycle(plan: CyclePlan, result: dict[str, Any], *, declaration_seen: list[bool] | None = None) -> None:
     """Refuse a late cycle rather than manufacturing a new cleanup reserve."""
     remaining(plan.deadline - custody.CLEANUP_NS)
     observer = CycleObserver(plan, result)
@@ -1933,6 +2057,8 @@ def cycle(plan: CyclePlan, result: dict[str, Any]) -> None:
     except Exception:
         with suppress(custody.CustodyError, OSError, ValueError):
             result["diagnostic"] = _failure_diagnostic(observer.control.read("failure.json"))
+            if declaration_seen is not None and "childGuardDeclaration" in result["diagnostic"]:
+                declaration_seen[0] = True
         raise
 
 
@@ -2225,6 +2351,7 @@ def observer_main(stage_name: str) -> int:
         "cycles": [],
     }
     status = 1
+    declaration_seen = [False]
     try:
         need(
             type(bootstrap["uid"]) is int
@@ -2239,13 +2366,19 @@ def observer_main(stage_name: str) -> int:
             progress = {}
             result["cycles"].append(progress)
             plan = CyclePlan(stage, bootstrap, min(bootstrap["deadlineNs"], time.monotonic_ns() + CYCLE_NS), killed)
-            cycle(plan, progress)
+            cycle(plan, progress, declaration_seen=declaration_seen)
             need(audit_stage(stage, bootstrap) == result["staging"])
         need(installed_tools(bootstrap["deadlineNs"], ToolDiagnostic(result)) == result["systemTools"])
         result["outcome"] = "closed-disposed-unused"
         status = 0
     except Exception:  # noqa: BLE001 - preserve unresolved custody and avoid exposing protected raw inputs.
         result["retainedStage"] = str(stage)
+    if declaration_seen[0]:
+        admitted = False
+        with suppress(Exception):
+            admitted = _artifact_declaration_fits(result)
+        if admitted is not True:
+            _omit_artifact_declarations(result)
     need(len(json.dumps(result).encode()) <= MAX_ARTIFACT)
     sys.stdout.write(json.dumps(result, sort_keys=True) + "\n")
     return status

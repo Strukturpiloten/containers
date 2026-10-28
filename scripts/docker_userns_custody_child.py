@@ -34,6 +34,13 @@ _RECEIPT_CHECKS = ("MATCH", "EMPTY", "MISMATCH")
 BUILD_STATUS_LIMIT = 128
 BUILD_STATUS_FIELDS = ("terminationForm", "receiptCheck")
 _QUALIFIED_VERSION = (3, 14, 4, "final", 0)
+GUARD_CATEGORIES = ("FD_FSTAT_NON_EBADF", "FD_NOT_ALLOWLISTED", "RESULT_TYPE_OR_SIZE")
+GUARD_DECLARATION_LIMIT = 96
+_GUARD_CODES = {111: GUARD_CATEGORIES[0], 112: GUARD_CATEGORIES[1], 113: GUARD_CATEGORIES[2]}
+_GUARD_SOURCES = (
+    ("canonical_policy", 31133, "17cc280b593466f143ba848183485b796d1e87a60b41d74ca25d49dc86241abe"),
+    ("native_outer_diagnostic_capture", 13870, "23202211ec3b58a70c1120b0395f43663e3cacff1948609a8fb0fe2dac012962"),
+)
 _SEAL_VALUES = tuple(
     getattr(fcntl, name, None) for name in ("F_SEAL_WRITE", "F_SEAL_GROW", "F_SEAL_SHRINK", "F_SEAL_SEAL")
 )
@@ -97,10 +104,10 @@ for entry in os.listdir("/proc/self/fd"):
         os.fstat(descriptor)
     except OSError as error:
         if error.errno != errno.EBADF:
-            raise SystemExit(1)
+            raise SystemExit(111)
         continue
     if descriptor not in allowed:
-        raise SystemExit(1)
+        raise SystemExit(112)
 class SourceLoader(importlib.abc.MetaPathFinder, importlib.abc.SourceLoader):
     def find_spec(self, fullname, path=None, target=None):
         return importlib.util.spec_from_loader(fullname, self) if fullname in records else None
@@ -121,7 +128,7 @@ sys.modules[spec.name] = module
 loader.exec_module(module)
 value = module.profile_bytes(name)
 if type(value) is not bytes or len(value) > 1024:
-    raise SystemExit(1)
+    raise SystemExit(113)
 sys.stdout.buffer.write(value)
 """
 
@@ -426,12 +433,31 @@ def build_status_observation(value: object, fault: object) -> dict[str, object] 
     return result if len(json.dumps(result, ensure_ascii=True).encode("ascii")) <= BUILD_STATUS_LIMIT else None
 
 
+def guard_declaration(value: object, fault: object, observation: object) -> dict[str, object] | None:
+    """Validate a declaration without changing either original diagnostic object."""
+    pair = build_status_observation(observation, fault)
+    if pair is None or (pair["terminationForm"], pair["receiptCheck"]) != ("EXIT_NONZERO", "MATCH"):
+        return None
+    if type(value) is not dict or set(value) != {"schema", "category"}:
+        return None
+    if type(value["schema"]) is not int or value["schema"] != 1:
+        return None
+    category = value["category"]
+    if type(category) is not str or category not in GUARD_CATEGORIES:
+        return None
+    # These three exact ASCII constants have a statically tested <=96-byte wire
+    # form. No additional classifier encoding or numeric formatting is needed.
+    return {"schema": 1, "category": category}
+
+
 class WorkObserver:
     """Keep only immutable closed first-work evidence for one explicit preparation scope."""
 
     __slots__ = (
         "_active",
         "_fault",
+        "_guard_category",
+        "_guard_invalid",
         "_invalid",
         "_mute_depth",
         "_sealed",
@@ -454,6 +480,8 @@ class WorkObserver:
         self._status_finished = False
         self._status_claim: object | None = None
         self._status_pair: tuple[str, str] | None = None
+        self._guard_category: str | None = None
+        self._guard_invalid = False
 
     def _claim_status(self, *, fresh: bool) -> object | None:
         # Consume before inspecting the record or allocating a witness. No later call
@@ -499,12 +527,49 @@ class WorkObserver:
         else:
             self._status_pair = pair
 
-    def observe_status(self, claim: object, status: int, lease: Build, proof: bytes) -> None:
+    def observe_status(self, claim: object, status: int, lease: Build, proof: bytes, *, sources: object = None) -> None:
         """Redeem only this refusal's local witness before any diagnostic work."""
         if self._take_status_claim(claim):
             pair = _build_status_pair(status, lease, proof)
             if pair is not None:
                 self._record_status(pair)
+                if sources is not None:
+                    offered = False
+                    with suppress(Exception):
+                        self._offer_guard(status, sources)
+                        offered = True
+                    if not offered:
+                        self._guard_invalid, self._guard_category = True, None
+
+    def _offer_guard(self, status: int, sources: object) -> None:
+        if not self._status_invalid and self._status_pair == ("EXIT_NONZERO", "MATCH"):
+            category = _declared_guard(status, sources)
+            if category is not None:
+                self._record_guard(category)
+
+    def _record_guard(self, category: object) -> None:
+        if self._guard_invalid or self._sealed or not self._active or self._mute_depth:
+            return
+        if (
+            type(category) is not str
+            or category not in GUARD_CATEGORIES
+            or (self._guard_category is not None and self._guard_category != category)
+        ):
+            self._guard_invalid, self._guard_category = True, None
+        else:
+            self._guard_category = category
+
+    def guard_snapshot(self) -> str | None:
+        """Expose only a sealed declaration still supported by both original facts."""
+        if not self._sealed or self._active:
+            return None
+        if self._guard_invalid or type(self._guard_category) is not str or self._guard_category not in GUARD_CATEGORIES:
+            return None
+        with suppress(Exception):
+            if self.status_snapshot() == ("EXIT_NONZERO", "MATCH"):
+                return self._guard_category
+        self._guard_invalid, self._guard_category = True, None
+        return None
 
     def finish_status(self, *, completed: bool) -> None:
         """Discard the invocation witness even if qualification or recording failed."""
@@ -1089,7 +1154,7 @@ def build(
                     observed = False
                     try:
                         with suppress(Exception):
-                            observer.observe_status(claim, status, lease, proof)
+                            observer.observe_status(claim, status, lease, proof, sources=sources)
                             observed = True
                     finally:
                         with suppress(Exception):
@@ -1158,6 +1223,22 @@ def _termination_form(status: int) -> str:
         if status == -number:
             return name
     return "OTHER_SIGNAL"
+
+
+def _declared_guard(status: int, sources: object) -> str | None:
+    """Interpret held metadata for this semantic cohort, never inspect a descriptor."""
+    if type(status) is not int or status not in _GUARD_CODES:
+        return None
+    if type(sources) is not tuple or len(sources) != len(_GUARD_SOURCES):
+        return None
+    for source, expected in zip(sources, _GUARD_SOURCES, strict=True):
+        if type(source) is not Source:
+            return None
+        if type(source.module) is not str or type(source.size) is not int or type(source.sha256) is not str:
+            return None
+        if (source.module, source.size, source.sha256) != expected:
+            return None
+    return _GUARD_CODES[status]
 
 
 def _privilege_receipt(proof: bytes, lease: Build, *, observer: WorkObserver | None = None) -> None:
