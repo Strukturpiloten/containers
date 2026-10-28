@@ -313,6 +313,40 @@ optional and cannot erase legacy host evidence if unavailable or oversized.
 Host query teardown does not prove guest process death: exact-container cleanup
 remains responsible and native behavior still needs fresh hosted evidence.
 
+After a valid service projection, one separate optional private capture can classify
+the last eight messages from the exact guest's current-boot journal, matching both
+`_UID=1000` and `_SYSTEMD_USER_UNIT=docker.service`. It repeats the private-daemon,
+full-CID ownership and guest placement checks inside the same original deadline.
+Only the root worker sees raw JSON messages in memory under the existing 64 KiB
+query cap. Classification accepts at most 2 KiB; the parent receives only closed
+message labels and bounded
+record/unknown counts. Generic permission errors, unreviewed formats and warnings
+remain unknown. Labels describe observed messages, not a proven cause or actor.
+Malformed, oversized, unavailable, cancelled or late classification cannot erase
+the existing service or host projection. Unverified query teardown still retains
+the sticky custody latch and exact-container cleanup responsibility. The unchanged
+1 KiB guest and 4 KiB optional diagnostic envelopes give existing service and host
+fields priority over this new field. No query is retried or given extra time.
+
+Guest manager `NoNewPrivs` remains explicitly `not-observed`: a service MainPID
+alone does not bind a live process birth/identity through a proc read, and a unit
+property would describe configuration rather than the observed process state.
+No NNP override, security-policy change, service restart or startup wait is added.
+
+Message literals were reviewed read-only on 2026-10-28 using Context7
+`resolve-library-id`/`query-docs` and official-source `open`/`find`, without running
+an external oracle or copying its implementation. References are
+[RootlessKit v3.0.0 parent errors](https://github.com/rootless-containers/rootlesskit/blob/v3.0.0/pkg/parent/parent.go),
+[Moby v28.5.2 daemon configuration errors](https://github.com/moby/moby/blob/v28.5.2/cmd/dockerd/daemon.go),
+[Unix listener errors](https://github.com/moby/moby/blob/v28.5.2/daemon/listeners/listeners_linux.go),
+[network initialization errors](https://github.com/moby/moby/blob/v28.5.2/daemon/daemon.go),
+and [systemd v257 journalctl](https://github.com/systemd/systemd/blob/v257/man/journalctl.xml).
+RootlessKit/Moby sources are Apache-2.0; that systemd manual is LGPL-2.1-or-later.
+These references do not attest the guest's installed versions; unmatched formats
+remain unknown. No upstream implementation or oracle executable is redistributed.
+The existing diagnostics input ownership and already-installed guest journalctl
+cover this change; there is no new dependency, software pin or Renovate extractor.
+
 The stdlib-only `scripts/runtime_docker_systemd_guard.py` holds the existing
 guard and fixed user-manager argv without expanding root import paths. The
 root worker reads only a bounded stable no-follow snapshot of that literal

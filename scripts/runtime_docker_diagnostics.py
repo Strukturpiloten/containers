@@ -38,6 +38,7 @@ JOURNAL_RECORD_LIMIT = 64
 PROTOCOL_LIMIT = 96 * 1024
 GUEST_BYTE_LIMIT = 2048
 GUEST_RECORD_LIMIT = 1024
+GUEST_LOG_RECORD_LIMIT = 8
 DIAGNOSTIC_RECORD_LIMIT = 4096
 GUARD_SOURCE_LIMIT = 4096
 SERVICE_FIELDS = frozenset(
@@ -106,6 +107,37 @@ INSPECT_FORMAT = (
     '"oomKilled":{{json .State.OOMKilled}},"pid":{{json .State.Pid}}}'
 )
 PRIVATE_DAEMON_FORMAT = '{"root":{{json .DockerRootDir}},"securityOptions":{{json .SecurityOptions}}}'
+# Reviewed literal provenance is in docs/runtime-backends.md; these labels describe messages, never causal actors.
+STARTUP_LOG_PATTERNS = (
+    ("uidmap-helper-message", r"^\[rootlesskit:parent\] error: failed to setup UID/GID map: newuidmap .* failed:"),
+    ("gidmap-helper-message", r"^\[rootlesskit:parent\] error: failed to setup UID/GID map: newgidmap .* failed:"),
+    (
+        "subid-range-message",
+        (
+            r"^\[rootlesskit:parent\] error: failed to setup UID/GID map: "
+            r"failed to compute uid/gid map: [Nn]o sub[ug]id ranges found for user "
+        ),
+    ),
+    ("uidgid-map-message", r"^\[rootlesskit:parent\] error: failed to setup UID/GID map: "),
+    ("child-start-message", r"^\[rootlesskit:parent\] error: failed to start the child: "),
+    ("rootless-network-message", r"^\[rootlesskit:parent\] error: failed to setup network "),
+    ("cgroup-path-message", r"^\[rootlesskit:parent\] error: (?:open|mkdir|write) /sys/fs/cgroup/"),
+    ("daemon-socket-message", r"^(?:failed to start daemon: )?failed to load listeners: can't create unix socket "),
+    ("daemon-config-message", r"^(?:failed to start daemon: )?unable to configure the Docker daemon with file "),
+    ("daemon-network-message", r"^(?:failed to start daemon: )?Error initializing network controller: "),
+)
+STARTUP_LOG_UNAVAILABLE = frozenset(
+    {
+        "budget-exhausted",
+        "query-unavailable",
+        "byte-limit",
+        "record-limit",
+        "timeout",
+        "interrupted",
+        "invalid-fields",
+        "cleanup-unverified",
+    }
+)
 
 
 class _UnavailableError(Exception):
@@ -427,6 +459,97 @@ def _guest_worker_arguments(directory: Path, container: str) -> list[str]:
     return [*inspect[:-4], "exec", container, *contract["guarded_command"]("sh", "-euc", script)]
 
 
+def _guest_log_arguments(directory: Path, container: str) -> list[str]:
+    contract = _guest_guard_contract()
+    inspect = _worker_arguments(directory, ["inspect", container])
+    return [
+        *inspect[:-4],
+        "exec",
+        container,
+        *contract["guarded_command"](
+            "sh",
+            "-euc",
+            'test "$(id -u)" = 0; test "$(cat /proc/1/comm)" = systemd; exec "$@"',
+            "--",
+            "journalctl",
+            "--quiet",
+            "--no-pager",
+            "--boot=0",
+            f"--lines={GUEST_LOG_RECORD_LIMIT}",
+            "--output=json",
+            "--output-fields=MESSAGE",
+            "_UID=1000",
+            "_SYSTEMD_USER_UNIT=docker.service",
+        ),
+    ]
+
+
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _UnavailableError("invalid-fields")
+        result[key] = value
+    return result
+
+
+def _classify_startup_log(raw: bytes) -> dict[str, Any]:
+    """Inspect bounded private messages, returning only reviewed message labels."""
+    if len(raw) > GUEST_BYTE_LIMIT:
+        raise _UnavailableError("byte-limit")
+    lines = raw.splitlines()
+    if len(lines) > GUEST_LOG_RECORD_LIMIT:
+        raise _UnavailableError("record-limit")
+    classes: set[str] = set()
+    unknown = 0
+    allowed = {"MESSAGE", "__CURSOR", "__REALTIME_TIMESTAMP", "__MONOTONIC_TIMESTAMP", "_BOOT_ID"}
+    for line in lines:
+        entry = json.loads(line, object_pairs_hook=_unique_object)
+        if (
+            not isinstance(entry, dict)
+            or not entry.keys() <= allowed
+            or not isinstance(entry.get("MESSAGE"), str)
+            or any(not isinstance(value, str) for value in entry.values())
+        ):
+            raise _UnavailableError("invalid-fields")
+        message = entry["MESSAGE"]
+        label = next((name for name, pattern in STARTUP_LOG_PATTERNS if re.search(pattern, message)), None)
+        if label is None:
+            unknown += 1
+        else:
+            classes.add(label)
+    return {
+        "availability": "classified",
+        "records": len(lines),
+        "unknownRecords": unknown,
+        "classes": sorted(classes),
+        "attribution": "message-observation-only",
+        "managerNoNewPrivs": "not-observed",
+    }
+
+
+def _guest_log_capture(arguments: list[str], deadline: float, timeout_executable: str) -> dict[str, Any]:
+    protocol = _query_capture(arguments, deadline, timeout_executable)
+    if protocol.get("status") != "available" or protocol.get("teardownVerified") is not True:
+        return {
+            "status": protocol.get("status")
+            if protocol.get("status") in STARTUP_LOG_UNAVAILABLE
+            else "query-unavailable",
+            "teardownVerified": protocol.get("teardownVerified") is True,
+        }
+    try:
+        projection = _classify_startup_log(base64.b64decode(protocol["data"], validate=True))
+    except _UnavailableError as error:
+        return {"status": str(error), "teardownVerified": True}
+    except Exception:  # noqa: BLE001 - never send raw guest messages or parse failures through the root protocol.
+        return {"status": "invalid-fields", "teardownVerified": True}
+    return {
+        "status": "available",
+        "teardownVerified": True,
+        "data": base64.b64encode(json.dumps(projection).encode()).decode(),
+    }
+
+
 def _verify_guest_container(raw: bytes, owner: str, container: str) -> None:
     projection = _inspect_projection(
         raw, SimpleNamespace(owner=owner, slice="strukturpiloten" + owner + ".slice"), container
@@ -475,7 +598,7 @@ def _guest_query_capture(
     """Root-side ownership readback precedes every fixed, guarded guest read."""
     if (
         len(request) != 3
-        or request[0] != "guest-systemd"
+        or request[0] not in {"guest-systemd", "guest-startup-log"}
         or re.fullmatch(r"[0-9a-f]{64}", request[1]) is None
         or re.fullmatch(r"[0-9a-f]{32}", request[2]) is None
     ):
@@ -489,11 +612,16 @@ def _guest_query_capture(
     try:
         if deadline - time.monotonic() <= 0.05:
             return {"status": "budget-exhausted", "teardownVerified": True}
-        arguments = _guest_worker_arguments(directory, container)
+        arguments = (
+            _guest_log_arguments(directory, container)
+            if request[0] == "guest-startup-log"
+            else _guest_worker_arguments(directory, container)
+        )
     except Exception:  # noqa: BLE001 - refuse exec on any ownership/source-contract uncertainty.
         return {"status": "query-unavailable", "teardownVerified": True}
     # This ACK covers the host query group only. Guest processes remain owned by exact-container cleanup.
-    return _query_capture(arguments, deadline, timeout_executable)
+    capture = _guest_log_capture if request[0] == "guest-startup-log" else _query_capture
+    return capture(arguments, deadline, timeout_executable)
 
 
 def _verified_protocol(output: bytes, returncode: int) -> dict[str, Any]:
@@ -508,6 +636,7 @@ def _verified_protocol(output: bytes, returncode: int) -> dict[str, Any]:
         "timeout",
         "interrupted",
         "invalid-fields",
+        "record-limit",
     }
     if protocol.get("status") not in allowed:
         raise _UnavailableError("cleanup-unverified")
@@ -698,12 +827,77 @@ def _record_size(record: dict[str, Any]) -> int:
 def _with_guest(record: dict[str, Any], guest: dict[str, Any]) -> dict[str, Any]:
     """Keep legacy evidence unchanged when the optional projection cannot fit."""
     try:
+        baseline_guest = {key: value for key, value in guest.items() if key != "startupLog"}
+        baseline = {**record, "guestSystemd": baseline_guest}
+        if _record_size(baseline) > DIAGNOSTIC_RECORD_LIMIT:
+            return record
+        if "startupLog" not in guest:
+            return baseline
+    except Exception:  # noqa: BLE001 - failed baseline preview preserves legacy host evidence.
+        return record
+    try:
         preview = {**record, "guestSystemd": guest}
         if _record_size(preview) <= DIAGNOSTIC_RECORD_LIMIT:
             return preview
-    except Exception:  # noqa: BLE001 - even a serialization failure preserves legacy evidence.
-        return record
-    return record
+    except Exception, KeyboardInterrupt:  # noqa: BLE001 - optional preview preserves valid baseline evidence.
+        return baseline
+    return baseline
+
+
+def _startup_log_projection(raw: bytes) -> dict[str, Any]:
+    if len(raw) > GUEST_BYTE_LIMIT:
+        raise _UnavailableError("byte-limit")
+    value = json.loads(raw, object_pairs_hook=_unique_object)
+    expected = {"availability", "records", "unknownRecords", "classes", "attribution", "managerNoNewPrivs"}
+    if (
+        not isinstance(value, dict)
+        or value.keys() != expected
+        or value["availability"] != "classified"
+        or value["attribution"] != "message-observation-only"
+        or value["managerNoNewPrivs"] != "not-observed"
+        or type(value["records"]) is not int
+        or not 0 <= value["records"] <= GUEST_LOG_RECORD_LIMIT
+        or type(value["unknownRecords"]) is not int
+        or not 0 <= value["unknownRecords"] <= value["records"]
+        or not isinstance(value["classes"], list)
+        or len(value["classes"]) > value["records"] - value["unknownRecords"]
+        or any(
+            not isinstance(label, str) or label not in {name for name, _ in STARTUP_LOG_PATTERNS}
+            for label in value["classes"]
+        )
+        or value["classes"] != sorted(set(value["classes"]))
+        or (not value["classes"] and value["records"] != value["unknownRecords"])
+    ):
+        raise _UnavailableError("invalid-fields")
+    return value
+
+
+def _startup_log(backend: DockerBackend, container: str, deadline: float) -> dict[str, Any]:
+    try:
+        if deadline - time.monotonic() <= 0.05:
+            return {"availability": "budget-exhausted", "managerNoNewPrivs": "not-observed"}
+        raw = _capture(backend, ["guest-startup-log", container, backend.owner], deadline)
+        result = _startup_log_projection(raw)
+    except _UnavailableError as error:
+        reason = str(error) if str(error) in STARTUP_LOG_UNAVAILABLE else "query-unavailable"
+    except KeyboardInterrupt:
+        reason = "interrupted"
+    except Exception:  # noqa: BLE001 - optional classifier errors cannot erase an already validated service projection.
+        reason = "query-unavailable"
+    else:
+        return result
+    return {"availability": reason, "managerNoNewPrivs": "not-observed"}
+
+
+def _with_startup_log(guest: dict[str, Any], classification: dict[str, Any]) -> dict[str, Any]:
+    for optional in (classification, {"availability": "byte-limit", "managerNoNewPrivs": "not-observed"}):
+        try:
+            preview = {**guest, "startupLog": optional}
+            if _record_size(preview) <= GUEST_RECORD_LIMIT:
+                return preview
+        except Exception, KeyboardInterrupt:  # noqa: BLE001 - optional serialization preserves service evidence.
+            return guest
+    return guest
 
 
 def _guest(ctx: RuntimeContext, backend: DockerBackend, container: str, deadline: float) -> dict[str, Any]:
@@ -729,6 +923,9 @@ def _guest(ctx: RuntimeContext, backend: DockerBackend, container: str, deadline
     except Exception:  # noqa: BLE001 - optional guest diagnostics cannot replace host evidence or the launch error.
         reason = "query-unavailable"
     else:
+        # Optional work cannot erase validated services or change the reader's sticky custody state.
+        with suppress(Exception, KeyboardInterrupt):
+            result = _with_startup_log(result, _startup_log(backend, container, deadline))
         return result
     return {"availability": reason, "guestProcessCleanup": "owned-container-cleanup-required"}
 
@@ -813,7 +1010,7 @@ def main() -> None:
             or not 0 < deadline - time.monotonic() <= 5
         ):
             result = {"status": "query-unavailable", "teardownVerified": False}
-        elif args.request[0] == "guest-systemd":
+        elif args.request[0] in {"guest-systemd", "guest-startup-log"}:
             result = _guest_query_capture(args.directory, args.request, deadline, str(args.timeout_executable))
         else:
             result = _query_capture(

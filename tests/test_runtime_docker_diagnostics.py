@@ -485,8 +485,9 @@ class GuestStartupProjection(unittest.TestCase):
             self.assertEqual(record["guestSystemd"]["availability"], expected)
             self.assertEqual(record["status"], "failed")
             self.assertFalse(record["acceptanceEvidence"])
-            self.assertEqual([call.args[2] for call in capture.call_args_list], [1005, 1005, 1005])
-            self.assertEqual(capture.call_args_list[-1].args[1], ["guest-systemd", CONTAINER, self.backend.owner])
+            expected_queries = 4 if expected == "collected" else 3
+            self.assertEqual([call.args[2] for call in capture.call_args_list], [1005] * expected_queries)
+            self.assertEqual(capture.call_args_list[2].args[1], ["guest-systemd", CONTAINER, self.backend.owner])
             self.assertEqual(self.backend.deadline, 2000)
             self.assertNotIn(PRIVATE_MARKER, json.dumps(record))
 
@@ -809,6 +810,321 @@ class GuestStartupProjection(unittest.TestCase):
             self.assertIn("info", query.call_args.args[0])
             guest.assert_not_called()
             self.assertNotIn(PRIVATE_MARKER, json.dumps(result))
+
+    @staticmethod
+    def log_records(*messages: str) -> bytes:
+        return b"\n".join(json.dumps({"MESSAGE": message}).encode() for message in messages)
+
+    def test_reviewed_startup_messages_have_closed_observation_labels(self) -> None:
+        rootless = "[rootlesskit:parent] error: "
+        examples = (
+            (
+                rootless
+                + (
+                    "failed to setup UID/GID map: newuidmap /usr/bin/newuidmap [123 0 1000 1] "
+                    "failed: write failed: Operation not permitted"
+                ),
+                "uidmap-helper-message",
+            ),
+            (
+                rootless
+                + "failed to setup UID/GID map: newgidmap /usr/bin/newgidmap [123 0 1000 1] failed: mapping denied",
+                "gidmap-helper-message",
+            ),
+            (
+                rootless
+                + "failed to setup UID/GID map: failed to compute uid/gid map: No subuid ranges found for user 1000",
+                "subid-range-message",
+            ),
+            (
+                rootless
+                + "failed to setup UID/GID map: failed to compute uid/gid map: no subgid ranges found for user 1000",
+                "subid-range-message",
+            ),
+            (rootless + "failed to setup UID/GID map: another reviewed setup failure", "uidgid-map-message"),
+            (
+                rootless + "failed to start the child: fork/exec /proc/self/exe: operation not permitted",
+                "child-start-message",
+            ),
+            (rootless + "failed to setup network &{slirp4netns}: driver exited", "rootless-network-message"),
+            (rootless + "open /sys/fs/cgroup/user.slice/cgroup.controllers: permission denied", "cgroup-path-message"),
+            (
+                (
+                    "failed to start daemon: failed to load listeners: can't create unix socket "
+                    "/run/user/1000/docker.sock: bind: address already in use"
+                ),
+                "daemon-socket-message",
+            ),
+            (
+                "unable to configure the Docker daemon with file /etc/daemon.json: invalid character",
+                "daemon-config-message",
+            ),
+            (
+                "failed to start daemon: Error initializing network controller: driver setup failed",
+                "daemon-network-message",
+            ),
+        )
+        for message, expected in examples:
+            with self.subTest(expected=expected):
+                result = diagnostics._classify_startup_log(self.log_records(message + " " + PRIVATE_MARKER))
+                self.assertEqual(result["classes"], [expected])
+                self.assertEqual((result["records"], result["unknownRecords"]), (1, 0))
+                self.assertEqual(result["attribution"], "message-observation-only")
+                self.assertEqual(result["managerNoNewPrivs"], "not-observed")
+                self.assertNotIn(PRIVATE_MARKER, json.dumps(result))
+
+    def test_unknown_permission_and_embedded_signatures_do_not_claim_cause(self) -> None:
+        messages = (
+            PRIVATE_MARKER,
+            "permission denied",
+            "NoNewPrivileges=yes",
+            "Operation not permitted",
+            "private config value: [rootlesskit:parent] error: failed to start the child: secret",
+            "[rootlesskit:parent] warning: failed to start the child: not a fatal record",
+            "ordinary startup complete",
+            "AppArmor DENIED " + PRIVATE_MARKER,
+        )
+        result = diagnostics._classify_startup_log(self.log_records(*messages))
+        self.assertEqual(result["classes"], [])
+        self.assertEqual(result["records"], 8)
+        self.assertEqual(result["unknownRecords"], 8)
+        self.assertNotIn(PRIVATE_MARKER, json.dumps(result))
+        empty = diagnostics._classify_startup_log(b"")
+        self.assertEqual((empty["records"], empty["unknownRecords"], empty["classes"]), (0, 0, []))
+
+    def test_root_classifier_rejects_malformed_extra_duplicate_binary_and_oversized_records(self) -> None:
+        for raw, expected in (
+            (b"not-json", "invalid-fields"),
+            (b'{"MESSAGE":"first","MESSAGE":"second"}', "invalid-fields"),
+            (b'{"MESSAGE":null}', "invalid-fields"),
+            (b'{"MESSAGE":[1,2,3]}', "invalid-fields"),
+            (self.log_records("ordinary") + b"\n\n", "invalid-fields"),
+            (json.dumps({"MESSAGE": "ordinary", "Environment": PRIVATE_MARKER}).encode(), "invalid-fields"),
+            (json.dumps({"MESSAGE": "ordinary", "__CURSOR": [PRIVATE_MARKER]}).encode(), "invalid-fields"),
+            (self.log_records(*(["ordinary"] * 9)), "record-limit"),
+            (b"x" * (diagnostics.GUEST_BYTE_LIMIT + 1), "byte-limit"),
+        ):
+            with (
+                self.subTest(expected=expected),
+                patch.object(diagnostics, "_query_capture", return_value=self.protocol(raw)),
+            ):
+                result = diagnostics._guest_log_capture(["fixed-query"], 1005, "/fixed/timeout")
+            self.assertEqual(result, {"status": expected, "teardownVerified": True})
+            self.assertNotIn(PRIVATE_MARKER, json.dumps(result))
+
+    def test_raw_journal_never_leaves_root_protocol_and_mandatory_metadata_is_not_projected(self) -> None:
+        raw = json.dumps(
+            {
+                "MESSAGE": "[rootlesskit:parent] error: failed to start the child: " + PRIVATE_MARKER,
+                "__CURSOR": PRIVATE_MARKER,
+                "__REALTIME_TIMESTAMP": "123",
+                "__MONOTONIC_TIMESTAMP": "456",
+                "_BOOT_ID": PRIVATE_MARKER,
+            }
+        ).encode()
+        with patch.object(diagnostics, "_query_capture", return_value=self.protocol(raw)):
+            protocol = diagnostics._guest_log_capture(["fixed-query"], 1005, "/fixed/timeout")
+        projected = diagnostics.base64.b64decode(protocol["data"])
+        self.assertNotIn(PRIVATE_MARKER.encode(), projected)
+        result = diagnostics._startup_log_projection(projected)
+        self.assertEqual(result["classes"], ["child-start-message"])
+        self.assertNotIn("MESSAGE", result)
+        self.assertNotIn("__CURSOR", result)
+
+    def test_root_query_failure_or_unknown_teardown_never_repackages_raw_data(self) -> None:
+        for status, verified in (("timeout", True), ("interrupted", True), ("cleanup-unverified", False)):
+            original = {"status": status, "teardownVerified": verified, "data": PRIVATE_MARKER}
+            with self.subTest(status=status), patch.object(diagnostics, "_query_capture", return_value=original):
+                self.assertEqual(
+                    diagnostics._guest_log_capture(["fixed-query"], 1005, "/fixed/timeout"),
+                    {"status": status, "teardownVerified": verified},
+                )
+
+    def test_parent_closed_wire_refuses_unknown_keys_labels_types_and_duplicate_fields(self) -> None:
+        valid = diagnostics._classify_startup_log(self.log_records("ordinary"))
+        for value in (
+            valid | {"MESSAGE": PRIVATE_MARKER},
+            valid | {"records": True},
+            valid | {"unknownRecords": 2},
+            valid | {"records": 9},
+            valid | {"availability": "success"},
+            valid | {"classes": [PRIVATE_MARKER]},
+            valid | {"classes": [None]},
+            valid | {"classes": ["child-start-message", "child-start-message"]},
+            valid | {"managerNoNewPrivs": "yes"},
+            valid | {"attribution": "proven-cause"},
+        ):
+            with self.subTest(value=value), self.assertRaises(diagnostics._UnavailableError):
+                diagnostics._startup_log_projection(json.dumps(value).encode())
+        with self.assertRaises(diagnostics._UnavailableError):
+            diagnostics._startup_log_projection(b'{"availability":"classified","availability":"secret"}')
+
+    def test_optional_classifier_failure_preserves_services_host_evidence_and_sticky_custody(self) -> None:
+        for failure, expected in (
+            (diagnostics._UnavailableError("timeout"), "timeout"),
+            (diagnostics._UnavailableError("byte-limit"), "byte-limit"),
+            (KeyboardInterrupt(), "interrupted"),
+            (ValueError(PRIVATE_MARKER), "query-unavailable"),
+            (diagnostics._UnavailableError("cleanup-unverified"), "cleanup-unverified"),
+        ):
+
+            def capture(
+                _backend: DockerBackend,
+                request: list[str],
+                deadline: float,
+                *,
+                result_error: BaseException = failure,
+                availability: str = expected,
+            ) -> bytes:
+                self.assertEqual(deadline, 1005)
+                if request[0] == "inspect":
+                    return json.dumps(self.observed).encode()
+                if request[0] == "journal":
+                    return b""
+                if request[0] == "guest-systemd":
+                    return self.report(service="failed")
+                if availability == "cleanup-unverified":
+                    self.backend.diagnostic_reader_pending = True
+                raise result_error
+
+            self.backend.diagnostic_reader_pending = False
+            with (
+                self.subTest(expected=expected),
+                patch.object(diagnostics, "_capture", side_effect=capture),
+                patch.object(diagnostics.time, "monotonic", return_value=1000),
+                patch.object(diagnostics.time, "time", return_value=110),
+                patch.object(diagnostics.shutil, "which", return_value="/usr/bin/journalctl"),
+            ):
+                diagnostics.diagnose_rootless_failure(self.ctx, CONTAINER, 100)
+            record = self.ctx.checks[-1]
+            self.assertEqual(record["container"]["state"], "running")
+            self.assertEqual(record["kernelJournal"]["rootlesskitUsernsDenialRecords"], 0)
+            self.assertEqual(record["guestSystemd"]["dockerService"]["ExecMainStatus"], 1)
+            self.assertEqual(record["guestSystemd"]["startupLog"]["availability"], expected)
+            self.assertEqual(self.backend.diagnostic_reader_pending, expected == "cleanup-unverified")
+            self.assertNotIn(PRIVATE_MARKER, json.dumps(record))
+
+    def test_exhaustion_after_service_capture_skips_classifier_without_new_timer(self) -> None:
+        clock = [1000]
+
+        def services(*_args: object) -> bytes:
+            clock[0] = 1005
+            return self.report(service="failed")
+
+        with (
+            patch.object(diagnostics, "_capture", side_effect=services) as capture,
+            patch.object(diagnostics.time, "monotonic", side_effect=lambda: clock[0]),
+            patch.object(diagnostics.time, "sleep") as sleep,
+        ):
+            result = diagnostics._guest(self.ctx, self.backend, CONTAINER, 1005)
+        capture.assert_called_once()
+        sleep.assert_not_called()
+        self.assertEqual(result["dockerService"]["ExecMainStatus"], 1)
+        self.assertEqual(result["startupLog"]["availability"], "budget-exhausted")
+
+    def test_classifier_query_has_only_fixed_guest_filters_guard_and_rechecks_ownership(self) -> None:
+        with patch.object(diagnostics.shutil, "which", return_value="/usr/bin/docker"):
+            arguments = diagnostics._guest_log_arguments(self.backend.directory, CONTAINER)
+        index = arguments.index("exec")
+        self.assertEqual(arguments[index + 1 : index + 6], [CONTAINER, *guarded_command()])
+        self.assertIn('test "$(id -u)" = 0;', arguments[index + 8])
+        self.assertIn('test "$(cat /proc/1/comm)" = systemd;', arguments[index + 8])
+        self.assertEqual(
+            arguments[-9:],
+            [
+                "journalctl",
+                "--quiet",
+                "--no-pager",
+                "--boot=0",
+                "--lines=8",
+                "--output=json",
+                "--output-fields=MESSAGE",
+                "_UID=1000",
+                "_SYSTEMD_USER_UNIT=docker.service",
+            ],
+        )
+        for status in ("query-unavailable", "cleanup-unverified"):
+            with (
+                self.subTest(status=status),
+                patch.object(diagnostics.time, "monotonic", return_value=1000),
+                patch.object(
+                    diagnostics,
+                    "_guest_owned_capture",
+                    return_value={"status": status, "teardownVerified": status != "cleanup-unverified"},
+                ),
+                patch.object(diagnostics, "_guest_log_arguments") as prepare,
+                patch.object(diagnostics, "_guest_log_capture") as capture,
+            ):
+                result = diagnostics._guest_query_capture(
+                    self.backend.directory, ["guest-startup-log", CONTAINER, self.backend.owner], 1005, "/fixed/timeout"
+                )
+            self.assertEqual(result["status"], status)
+            prepare.assert_not_called()
+            capture.assert_not_called()
+
+    def test_new_optional_fields_never_displace_service_or_host_records_at_caps(self) -> None:
+        guest = diagnostics._guest_projection(self.report(service="failed"))
+        classification = diagnostics._classify_startup_log(self.log_records("ordinary"))
+        with patch.object(diagnostics, "GUEST_RECORD_LIMIT", diagnostics._record_size(guest)):
+            self.assertIs(diagnostics._with_startup_log(guest, classification), guest)
+        host = {"availability": "collected", "container": {"state": "running"}}
+        baseline = host | {"guestSystemd": guest}
+        with patch.object(diagnostics, "DIAGNOSTIC_RECORD_LIMIT", diagnostics._record_size(baseline)):
+            self.assertEqual(diagnostics._with_guest(host, guest | {"startupLog": classification}), baseline)
+        with patch.object(diagnostics, "_record_size", side_effect=ValueError(PRIVATE_MARKER)):
+            self.assertIs(diagnostics._with_startup_log(guest, classification), guest)
+        with patch.object(diagnostics, "_record_size", side_effect=[1, ValueError(PRIVATE_MARKER)]):
+            self.assertEqual(diagnostics._with_guest(host, guest | {"startupLog": classification}), baseline)
+
+    def test_optional_attachment_cancellation_preserves_validated_services_and_host_evidence(self) -> None:
+        classification = diagnostics._classify_startup_log(self.log_records("ordinary"))
+        record_size = diagnostics._record_size
+        guest = diagnostics._guest_projection(self.report(service="failed"))
+        guest["guestProcessCleanup"] = "owned-container-cleanup-required"
+        for stage in ("classifier-call", "attachment-call", "attachment-preview", "envelope-preview"):
+
+            def capture(_backend: DockerBackend, request: list[str], deadline: float) -> bytes:
+                self.assertEqual(deadline, 1005)
+                if request[0] == "inspect":
+                    return json.dumps(self.observed).encode()
+                if request[0] == "journal":
+                    return b""
+                if request[0] == "guest-systemd":
+                    return self.report(service="failed")
+                self.assertEqual(request[0], "guest-startup-log")
+                return json.dumps(classification).encode()
+
+            def optional_record_size(record: dict[str, Any], *, selected_stage: str = stage) -> int:
+                if (selected_stage == "attachment-preview" and "startupLog" in record) or (
+                    selected_stage == "envelope-preview" and "startupLog" in record.get("guestSystemd", {})
+                ):
+                    raise KeyboardInterrupt
+                return record_size(record)
+
+            target = "_startup_log" if stage == "classifier-call" else "_with_startup_log"
+            original = getattr(diagnostics, target)
+            self.backend.diagnostic_reader_pending = True
+            with (
+                self.subTest(stage=stage),
+                patch.object(diagnostics, "_capture", side_effect=capture),
+                patch.object(diagnostics, "_record_size", side_effect=optional_record_size),
+                patch.object(
+                    diagnostics,
+                    target,
+                    side_effect=KeyboardInterrupt if stage.endswith("-call") else original,
+                ),
+                patch.object(diagnostics.time, "monotonic", return_value=1000),
+                patch.object(diagnostics.time, "time", return_value=110),
+                patch.object(diagnostics.shutil, "which", return_value="/usr/bin/journalctl"),
+            ):
+                diagnostics.diagnose_rootless_failure(self.ctx, CONTAINER, 100)
+                record = self.ctx.checks[-1]
+                self.assertEqual(record["availability"], "collected")
+                self.assertEqual(record["container"]["state"], "running")
+                self.assertEqual(record["kernelJournal"]["rootlesskitUsernsDenialRecords"], 0)
+                self.assertEqual(record["guestSystemd"], guest)
+                self.assertTrue(self.backend.diagnostic_reader_pending)
+                self.assertNotIn(PRIVATE_MARKER, json.dumps(record))
 
 
 class RootlessFailureDiagnostics(unittest.TestCase):

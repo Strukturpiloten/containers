@@ -1150,6 +1150,25 @@ class CustodyProtocolTests(unittest.TestCase):
         self.assertEqual(observer.ctx.observations[-1]["snapshot"]["reason"], "FileNotFoundError")
         self.assertEqual(observer.custody_terminal, terminal)
 
+    def test_terminal_event_count_matches_helper_and_rejects_overflow(self) -> None:
+        self.assertEqual(diagnostics.TERMINAL_MAX_EVENTS, custody.MAX_EVENTS)
+        terminal = self.terminal_fixture()
+        event = terminal["events"][0]
+        terminal["events"] = [copy.deepcopy(event) for _ in range(custody.MAX_EVENTS)]
+        watch = terminal["originalConmonWatch"]
+        diagnostics._terminal_custody_record(terminal, expected_watch=watch)
+        observer = self.closed_observer((json.dumps(terminal) + "\n").encode(), exited=True, watch=watch)
+        result = observer._custody_exchange({"phase": "after-exit"})
+        self.assertEqual(result["availability"], "error")
+        self.assertEqual(observer.custody_terminal, terminal)
+
+        terminal["events"].append(copy.deepcopy(event))
+        observer = self.closed_observer((json.dumps(terminal) + "\n").encode(), exited=True, watch=watch)
+        result = observer._custody_exchange({"phase": "after-exit"})
+        self.assertEqual(result["availability"], "unavailable")
+        self.assertIsNone(observer.custody_terminal)
+        self.assert_failed_terminal_remains_unavailable_without_io(observer)
+
     def test_buffered_terminal_error_survives_broken_pipe_or_already_exited_helper(self) -> None:
         for exited in (False, True):
             with self.subTest(exited=exited):
