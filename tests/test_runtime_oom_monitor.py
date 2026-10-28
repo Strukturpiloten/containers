@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -491,6 +492,7 @@ class MarkerCustodyTests(unittest.TestCase):
             "markers": markers,
             "watch": {
                 "availability": "observed",
+                "file": "memory.events",
                 "path": "/owned",
                 "inode": info.st_ino,
                 "major": os.major(info.st_dev),
@@ -498,6 +500,8 @@ class MarkerCustodyTests(unittest.TestCase):
                 "directoryIdentity": {"dev": group.stat().st_dev, "ino": group.stat().st_ino},
                 "fd": 7,
                 "wd": 1,
+                "rawKernelDevice": None,
+                "deviceEncoding": "Linux raw kernel dev_t; 20 minor bits",
             },
         }
         return request, persist / "oom", group
@@ -824,6 +828,438 @@ class MarkerCustodyTests(unittest.TestCase):
 
 
 class CustodyProtocolTests(unittest.TestCase):
+    def closed_observer(self, payload: bytes, *, exited: bool = False) -> diagnostics.OomDiagnostics:
+        ctx = MagicMock()
+        ctx.timeout, ctx.observations = 1, []
+        observer = diagnostics.OomDiagnostics(ctx, CID)
+        unused_reader, input_writer = os.pipe()
+        os.close(unused_reader)
+        output_reader, output_writer = os.pipe()
+        os.write(output_writer, payload)
+        os.close(output_writer)
+        process = MagicMock()
+        process.stdin = os.fdopen(input_writer, "wb", buffering=0)
+        process.stdout = os.fdopen(output_reader, "rb", buffering=0)
+        process.poll.return_value = 0 if exited else None
+        self.addCleanup(process.stdin.close)
+        self.addCleanup(process.stdout.close)
+        observer.custody = process
+        return observer
+
+    def terminal_fixture(self) -> dict:
+        return {
+            "schemaVersion": 1,
+            "availability": "error",
+            "attribution": "unresolved",
+            "reason": "ValueError",
+            "events": [
+                {"candidate": 0, "mask": custody.IN_CREATE, "observedMonotonicNs": 123, "originalPidAlive": True}
+            ],
+            "uncertainty": ["conmon watch continuity unresolved"],
+        }
+
+    def exchanging_observer(self, payload: bytes) -> tuple[diagnostics.OomDiagnostics, int, int]:
+        observer = self.closed_observer(b"")
+        process = observer.custody
+        process.stdin.close()
+        process.stdout.close()
+        request_reader, request_writer = os.pipe()
+        response_reader, response_writer = os.pipe()
+        process.stdin = os.fdopen(request_writer, "wb", buffering=0)
+        process.stdout = os.fdopen(response_reader, "rb", buffering=0)
+        for descriptor in (request_reader, response_writer):
+            self.addCleanup(os.close, descriptor)
+        self.addCleanup(process.stdin.close)
+        self.addCleanup(process.stdout.close)
+        os.write(response_writer, payload)
+        return observer, request_reader, response_writer
+
+    def terminal_with_content(self) -> dict:
+        record = self.terminal_fixture()
+        record["originalConmonWatch"] = {
+            "availability": "observed",
+            "file": "memory.events",
+            "path": "/owned",
+            "inode": 10,
+            "major": 0,
+            "minor": 1,
+            "directoryIdentity": {"dev": 1, "ino": 2},
+            "fd": 7,
+            "wd": 1,
+            "rawKernelDevice": None,
+            "deviceEncoding": "Linux raw kernel dev_t; 20 minor bits",
+        }
+        record["exitObservedMonotonicNs"] = None
+        identity = {"dev": 1, "ino": 2, "mode": 33152, "uid": 0, "gid": 0, "nlink": 1}
+        record["events"][0].update(
+            fileIdentity=identity,
+            counters={name: {"max": 0, "oom": 0, "oom_kill": 0} for name in ("memory.events", "memory.events.local")},
+            completedContent={
+                "fileIdentity": dict(identity),
+                "version": {"dev": 1, "ino": 2, "size": 0, "mtime_ns": 1, "ctime_ns": 1},
+                "observedWriteEpoch": 0,
+                "observedMonotonicNs": 123,
+                "bytesRead": 0,
+                "sha256": hashlib.sha256(b"").hexdigest(),
+                "linkedAtCapture": True,
+                "readIntervalMonotonicNs": {"start": 122, "end": 123},
+                "limits": "close-observed stable read; future contents and writer identity unresolved",
+            },
+        )
+        return record
+
+    def test_fixed_nested_terminal_records_retain_optional_none_and_unresolved_forms(self) -> None:
+        terminal = self.terminal_with_content()
+        for raw_device in (None, "1a"):
+            with self.subTest(raw_device=raw_device):
+                terminal["originalConmonWatch"]["rawKernelDevice"] = raw_device
+                observer = self.closed_observer((json.dumps(terminal) + "\n").encode(), exited=True)
+                result = observer._custody_exchange({"phase": "after-exit"})
+                self.assertEqual(result["availability"], "error")
+                self.assertEqual(observer.custody_terminal, terminal)
+        minimal = {key: terminal[key] for key in ("schemaVersion", "availability", "attribution", "reason")}
+        diagnostics._terminal_custody_record(minimal)
+        terminal["events"] = [dict(self.terminal_fixture()["events"][0], availability="unresolved")]
+        diagnostics._terminal_custody_record(terminal)
+
+    def test_real_helper_terminal_error_retains_completed_content_after_protocol_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            request, marker, group = MarkerCustodyTests.fixture(self, Path(temporary))
+            held = MarkerCustodyTests.observer(self, request, group)
+            marker.write_bytes(b"authored completed marker fixture")
+            held.drain()
+            self.assertTrue(any("completedContent" in event for event in held.events))
+            reader, writer = os.pipe()
+            self.addCleanup(os.close, reader)
+            self.addCleanup(os.close, writer)
+            os.write(writer, b"phase request ready")
+            stream = MagicMock()
+            stream.fileno.return_value = reader
+            with (
+                patch.object(custody, "MarkerCustody", return_value=held),
+                patch.object(custody.sys, "stdin", stream),
+                patch.object(custody, "_line", side_effect=[b"{}\n", ValueError("partial phase request")]),
+                patch.object(custody, "_reply") as reply,
+            ):
+                custody.main()
+            terminal = reply.call_args.args[0]
+            self.assertEqual(terminal["availability"], "error")
+            self.assertEqual(terminal["reason"], "ValueError")
+            self.assertIsNone(terminal["exitObservedMonotonicNs"])
+            observer = self.closed_observer((json.dumps(terminal) + "\n").encode(), exited=True)
+            result = observer._custody_exchange({"phase": "after-exit"})
+            self.assertEqual(result["availability"], "error")
+            self.assertEqual(observer.custody_terminal, terminal)
+
+    def test_unknown_nested_terminal_fields_are_unavailable_and_not_retained(self) -> None:
+        paths = (
+            ("originalConmonWatch",),
+            ("originalConmonWatch", "directoryIdentity"),
+            ("events", 0, "fileIdentity"),
+            ("events", 0, "counters"),
+            ("events", 0, "counters", "memory.events"),
+            ("events", 0, "counters", "memory.events.local"),
+            ("events", 0, "completedContent"),
+            ("events", 0, "completedContent", "fileIdentity"),
+            ("events", 0, "completedContent", "version"),
+            ("events", 0, "completedContent", "readIntervalMonotonicNs"),
+        )
+        for path in paths:
+            with self.subTest(path=path):
+                terminal = self.terminal_with_content()
+                nested = terminal
+                for key in path:
+                    nested = nested[key]
+                nested["unknownProtectedField"] = "protected nested fixture text"
+                observer = self.closed_observer((json.dumps(terminal) + "\n").encode(), exited=True)
+                observer._custody_sample("after-exit")
+                self.assertEqual(observer.ctx.observations[-1]["snapshot"]["availability"], "unavailable")
+                self.assertIsNone(observer.custody_terminal)
+                self.assertNotIn("protected nested fixture text", json.dumps(observer.ctx.observations))
+
+    def test_terminal_event_count_matches_helper_and_rejects_overflow(self) -> None:
+        self.assertEqual(diagnostics.MAX_CUSTODY_EVENTS, custody.MAX_EVENTS)
+        terminal = self.terminal_fixture()
+        event = terminal["events"][0]
+        terminal["events"] = [copy.deepcopy(event) for _ in range(custody.MAX_EVENTS)]
+        diagnostics._terminal_custody_record(terminal)
+        terminal["events"].append(copy.deepcopy(event))
+        observer = self.closed_observer((json.dumps(terminal) + "\n").encode(), exited=True)
+        result = observer._custody_exchange({"phase": "after-exit"})
+        self.assertEqual(result["availability"], "unavailable")
+        self.assertIsNone(observer.custody_terminal)
+
+    def test_oversize_and_invalid_nested_terminal_values_are_unavailable(self) -> None:
+        mutations = (
+            (("events", 0, "completedContent", "bytesRead"), custody.MAX_FILE + 1),
+            (("events", 0, "counters", "memory.events", "max"), 10**custody.MAX_COUNTER_DIGITS),
+            (("events", 0, "counters", "memory.events.local", "oom_kill"), -1),
+            (("events", 0, "fileIdentity", "ino"), True),
+            (("events", 0, "completedContent", "version", "size"), None),
+            (("originalConmonWatch", "rawKernelDevice"), "f" * 9),
+            (("events", 0, "availability"), "observed"),
+        )
+        for path, value in mutations:
+            with self.subTest(path=path, value=value):
+                terminal = self.terminal_with_content()
+                nested = terminal
+                for key in path[:-1]:
+                    nested = nested[key]
+                nested[path[-1]] = value
+                observer = self.closed_observer((json.dumps(terminal) + "\n").encode(), exited=True)
+                result = observer._custody_exchange({"phase": "after-exit"})
+                self.assertEqual(result["availability"], "unavailable")
+                self.assertIsNone(observer.custody_terminal)
+
+    def test_buffered_terminal_error_survives_broken_pipe_or_already_exited_helper(self) -> None:
+        for exited in (False, True):
+            with self.subTest(exited=exited):
+                terminal = self.terminal_fixture()
+                observer = self.closed_observer((json.dumps(terminal) + "\n").encode(), exited=exited)
+                observer._custody_sample("before-stop-request")
+                record = observer.ctx.observations[-1]
+                self.assertEqual(record["availability"], "error")
+                self.assertEqual(record["snapshot"]["reason"], "ValueError")
+                self.assertEqual(record["snapshot"]["events"], terminal["events"])
+                self.assertEqual(record["snapshot"]["terminalReceipt"], "buffered-after-input-closed")
+                record["snapshot"]["events"].clear()
+                with patch.object(diagnostics.os, "read") as read, patch.object(diagnostics.os, "write") as write:
+                    observer._custody_sample("after-exit")
+                read.assert_not_called()
+                write.assert_not_called()
+                cached = observer.ctx.observations[-1]["snapshot"]
+                self.assertEqual(cached["events"], terminal["events"])
+                self.assertEqual(cached["terminalReceipt"], "previously-retained-terminal")
+                self.assertEqual(cached["attribution"], "unresolved")
+                observer.ctx.command.assert_not_called()
+
+    def test_absent_partial_or_unknown_terminal_record_stays_unavailable(self) -> None:
+        terminal = self.terminal_fixture()
+        payloads = (
+            b"",
+            b"partial",
+            b"{}\n",
+            b"[]\n",
+            b"{malformed}\n",
+            (json.dumps(terminal) + "\n" + json.dumps(terminal) + "\n").encode(),
+            (json.dumps({**terminal, "schemaVersion": True}) + "\n").encode(),
+            (json.dumps({**terminal, "availability": "observed"}) + "\n").encode(),
+            (json.dumps({**terminal, "schemaVersion": 2}) + "\n").encode(),
+            (json.dumps({**terminal, "rawStderr": "protected fixture text"}) + "\n").encode(),
+            (json.dumps({**terminal, "events": [{"rawMessage": "protected fixture text"}]}) + "\n").encode(),
+            (json.dumps({**terminal, "uncertainty": [{"rawMessage": "protected fixture text"}]}) + "\n").encode(),
+        )
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                observer = self.closed_observer(payload)
+                observer._custody_sample("after-exit")
+                result = observer.ctx.observations[-1]["snapshot"]
+                self.assertEqual(result["availability"], "unavailable")
+                self.assertEqual(result["reason"], "terminal-record-unavailable-or-invalid")
+                self.assertIsNone(observer.custody_terminal)
+                self.assertNotIn("protected fixture text", json.dumps(observer.ctx.observations))
+
+    def test_ordinary_terminal_error_is_retained_without_later_pipe_or_process_operations(self) -> None:
+        terminal = self.terminal_fixture()
+        observer = self.closed_observer((json.dumps(terminal) + "\n").encode())
+        with patch.object(diagnostics.os, "write", side_effect=lambda _fd, payload: len(payload)):
+            observer._custody_sample("before-stop-request")
+        first = observer.ctx.observations[-1]["snapshot"]
+        self.assertEqual(first, terminal)
+        first["events"].clear()
+        with (
+            patch.object(diagnostics.os, "read") as read,
+            patch.object(diagnostics.os, "write") as write,
+            patch.object(diagnostics.select, "select") as select_ready,
+            patch.object(diagnostics.subprocess, "Popen") as spawn,
+        ):
+            observer.custody.poll.reset_mock()
+            observer._custody_sample("after-exit")
+            observer.custody.poll.assert_not_called()
+        read.assert_not_called()
+        write.assert_not_called()
+        select_ready.assert_not_called()
+        spawn.assert_not_called()
+        cached = observer.ctx.observations[-1]["snapshot"]
+        self.assertEqual(cached["events"], terminal["events"])
+        self.assertEqual(cached["terminalReceipt"], "previously-retained-terminal")
+        cached["events"].clear()
+        self.assertEqual(observer.custody_terminal, terminal)
+        observer.ctx.command.assert_not_called()
+
+    def test_complete_terminal_record_arriving_after_deadline_is_unavailable(self) -> None:
+        terminal = self.terminal_fixture()
+        observer = self.closed_observer((json.dumps(terminal) + "\n").encode(), exited=True)
+        with patch.object(diagnostics.time, "monotonic", side_effect=[100, 100.1, 100.2, 101.1]):
+            result = observer._custody_exchange({"phase": "after-exit"})
+        self.assertEqual(result["availability"], "unavailable")
+        self.assertEqual(result["reason"], "terminal-record-unavailable-or-invalid")
+        self.assertIsNone(observer.custody_terminal)
+        self.assert_failed_terminal_remains_unavailable_without_io(observer)
+
+    def assert_failed_terminal_remains_unavailable_without_io(self, observer: diagnostics.OomDiagnostics) -> None:
+        process = observer.custody
+        process.poll.reset_mock()
+        with (
+            patch.object(diagnostics.time, "monotonic") as monotonic,
+            patch.object(diagnostics.os, "read") as read,
+            patch.object(diagnostics.os, "write") as write,
+            patch.object(diagnostics.select, "select") as select_ready,
+            patch.object(diagnostics.subprocess, "Popen") as spawn,
+            patch.object(diagnostics, "_custody_reply") as drain,
+        ):
+            for phase in ("before-shutdown", "before-stop-request", "after-exit"):
+                observer._custody_sample(phase)
+                result = observer.ctx.observations[-1]["snapshot"]
+                self.assertEqual(result["availability"], "unavailable")
+                self.assertEqual(result["reason"], "terminal-record-unavailable-or-invalid")
+                self.assertEqual(result["terminalReceipt"], "previously-retired-terminal")
+                result.clear()  # Later results and the failure cache must be independent copies.
+        for operation in (monotonic, read, write, select_ready, spawn, drain, process.poll):
+            operation.assert_not_called()
+        observer.ctx.command.assert_not_called()
+        self.assertIsNone(observer.custody_terminal)
+
+    def test_failed_terminal_records_retire_stream_without_cross_phase_io(self) -> None:
+        terminal = self.terminal_fixture()
+        payloads = (
+            b"",
+            b"partial",
+            b"{malformed}\n",
+            b"{}\n",
+            (json.dumps({**terminal, "schemaVersion": 2}) + "\n").encode(),
+            (json.dumps({**terminal, "unknown": "protected fixture text"}) + "\n").encode(),
+            (json.dumps(terminal) + "\n" + json.dumps(terminal) + "\n").encode(),
+        )
+        for exited in (False, True):
+            for payload in payloads:
+                with self.subTest(exited=exited, payload=payload):
+                    observer = self.closed_observer(payload, exited=exited)
+                    observer._custody_sample("after-inner-memory")
+                    result = observer.ctx.observations[-1]["snapshot"]
+                    self.assertEqual(result["availability"], "unavailable")
+                    result.clear()
+                    self.assert_failed_terminal_remains_unavailable_without_io(observer)
+        observer = self.closed_observer(b"x", exited=True)
+        with patch.object(diagnostics.os, "read", return_value=b"x" * (diagnostics.MAX_BYTES + 1)):
+            observer._custody_sample("after-inner-memory")
+        self.assertEqual(observer.ctx.observations[-1]["snapshot"]["availability"], "unavailable")
+        self.assert_failed_terminal_remains_unavailable_without_io(observer)
+
+    def test_failed_terminal_deadline_cannot_be_laundered_by_a_later_phase(self) -> None:
+        terminal = self.terminal_fixture()
+        observer = self.closed_observer((json.dumps(terminal) + "\n").encode(), exited=True)
+        with patch.object(
+            diagnostics, "_custody_reply", side_effect=[ValueError("deadline expired"), terminal]
+        ) as drain:
+            observer._custody_sample("before-stop-request")
+            self.assertEqual(observer.ctx.observations[-1]["snapshot"]["availability"], "unavailable")
+            observer._custody_sample("after-exit")
+            self.assertEqual(observer.ctx.observations[-1]["snapshot"]["availability"], "unavailable")
+        self.assertEqual(drain.call_count, 1)
+        self.assert_failed_terminal_remains_unavailable_without_io(observer)
+
+    def test_failed_normal_responses_retire_before_late_terminal_and_helper_exit(self) -> None:
+        terminal = self.terminal_fixture()
+        cases = (
+            (b"", ValueError, "response deadline expired"),
+            (b"partial", ValueError, "response deadline expired"),
+            (b"{malformed}\n", json.JSONDecodeError, "Expecting property name"),
+            ((json.dumps({**terminal, "schemaVersion": 2}) + "\n").encode(), ValueError, "terminal schema"),
+            (
+                (json.dumps({**terminal, "unknown": "protected fixture text"}) + "\n").encode(),
+                ValueError,
+                "terminal schema",
+            ),
+        )
+        for payload, error, message in cases:
+            with self.subTest(payload=payload):
+                observer, request_reader, response_writer = self.exchanging_observer(payload)
+                process = observer.custody
+                ready = [([], [process.stdin.fileno()], [])]
+                if payload:
+                    ready.append(([process.stdout], [], []))
+                ready.append(([], [], []))
+                with (
+                    patch.object(diagnostics.select, "select", side_effect=ready),
+                    self.assertRaisesRegex(error, message),
+                ):
+                    observer._custody_exchange({"phase": "before-stop-request"})
+                self.assertEqual(os.read(request_reader, diagnostics.MAX_BYTES), b'{"phase": "before-stop-request"}\n')
+                self.assertEqual(observer.custody_terminal_unavailable["terminalReceipt"], "exchange-failed")
+                os.write(response_writer, (json.dumps(terminal) + "\n").encode())
+                process.poll.return_value = 0
+                self.assert_failed_terminal_remains_unavailable_without_io(observer)
+
+    def test_partial_request_failure_retires_and_preserves_first_phase_error(self) -> None:
+        observer, _, response_writer = self.exchanging_observer(b"")
+        process = observer.custody
+        with (
+            patch.object(diagnostics.os, "write", return_value=1) as write,
+            patch.object(diagnostics.select, "select", side_effect=[([], [process.stdin.fileno()], []), ([], [], [])]),
+        ):
+            observer._custody_sample("before-stop-request")
+        write.assert_called_once()
+        self.assertEqual(observer.ctx.observations[-1]["availability"], "error")
+        self.assertEqual(observer.ctx.observations[-1]["reason"], "ValueError")
+        os.write(response_writer, (json.dumps(self.terminal_fixture()) + "\n").encode())
+        process.poll.return_value = 0
+        self.assert_failed_terminal_remains_unavailable_without_io(observer)
+
+    def test_failed_normal_response_still_closes_pipes_and_waits_for_owned_helper(self) -> None:
+        observer, _, _ = self.exchanging_observer(b"{malformed}\n")
+        observer._custody_sample("before-stop-request")
+        self.assertEqual(observer.ctx.observations[-1]["availability"], "error")
+        self.assertEqual(observer.ctx.observations[-1]["reason"], "JSONDecodeError")
+        process = observer.custody
+        process.poll.return_value = process.returncode = 0
+        observer.close()
+        self.assertIsNone(observer.custody)
+        self.assertTrue(process.stdin.closed)
+        self.assertTrue(process.stdout.closed)
+        process.wait.assert_called_once_with(timeout=diagnostics.MONITOR_CLEANUP_SECONDS)
+        process.kill.assert_not_called()
+        self.assertEqual(observer.ctx.observations[-1]["phase"], "cleanup")
+        self.assertEqual(observer.ctx.observations[-1]["availability"], "observed")
+
+    def test_retired_terminal_stream_still_closes_pipes_and_waits_for_owned_helper(self) -> None:
+        for timeout in (False, True):
+            with self.subTest(timeout=timeout):
+                observer = self.closed_observer(b"partial", exited=True)
+                observer._custody_sample("after-exit")
+                process = observer.custody
+                process.returncode = 0
+                if timeout:
+                    process.wait.side_effect = subprocess.TimeoutExpired("authored helper", 0.5)
+                observer.close()
+                self.assertIsNone(observer.custody)
+                self.assertTrue(process.stdin.closed)
+                self.assertTrue(process.stdout.closed)
+                process.wait.assert_called_once_with(timeout=diagnostics.MONITOR_CLEANUP_SECONDS)
+                process.kill.assert_not_called()
+                result = observer.ctx.observations[-1]
+                self.assertEqual(result["phase"], "cleanup")
+                self.assertEqual(result["availability"], "unresolved" if timeout else "observed")
+
+    def test_terminal_drain_never_renews_deadline_or_exceeds_response_bound(self) -> None:
+        payload = (json.dumps(self.terminal_fixture()) + "\n").encode()
+        observer = self.closed_observer(payload)
+        with (
+            patch.object(diagnostics.time, "monotonic", side_effect=[100, 100.1, 101.1]),
+            patch.object(diagnostics.os, "read") as read,
+        ):
+            result = observer._custody_exchange({"phase": "after-exit"})
+        read.assert_not_called()
+        self.assertEqual(result["availability"], "unavailable")
+        self.assertIsNone(observer.custody_terminal)
+        observer = self.closed_observer(b"x", exited=True)
+        with patch.object(diagnostics.os, "read", return_value=b"x" * (diagnostics.MAX_BYTES + 1)) as read:
+            result = observer._custody_exchange({"phase": "after-exit"})
+        self.assertEqual(read.call_count, 1)
+        self.assertEqual(read.call_args.args[1], diagnostics.MAX_BYTES + 1)
+        self.assertEqual(result["availability"], "unavailable")
+        self.assertIsNone(observer.custody_terminal)
+
     def test_eof_partial_input_and_expired_input_are_bounded(self) -> None:
         for value in (b"", b"partial", None):
             with self.subTest(value=value):

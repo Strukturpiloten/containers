@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
 MAX_BYTES = 65536
 MAX_GROUPS = 32
+MAX_CUSTODY_EVENTS = 32  # Schema v1 helper runtime_oom_watch.MAX_EVENTS.
 SNAPSHOT_SECONDS = 10
 MAX_FILE_BYTES = 4096
 STARTTIME_INDEX = 19
@@ -783,6 +784,161 @@ def _collect_after_exit(request: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _custody_reply(process: subprocess.Popen[bytes], deadline: float) -> dict[str, Any]:
+    _require(process.stdout is not None, "diagnostic custody output unavailable")
+    raw = bytearray()
+    while not raw.endswith(b"\n"):
+        _require(time.monotonic() < deadline, "diagnostic custody response deadline expired")
+        _require(len(raw) <= MAX_BYTES, "diagnostic custody response exceeded bound")
+        ready, _, _ = select.select([process.stdout], [], [], max(0, deadline - time.monotonic()))
+        _require(bool(ready), "diagnostic custody response deadline expired")
+        part = os.read(process.stdout.fileno(), MAX_BYTES + 1 - len(raw))
+        _require(bool(part), "diagnostic custody closed without response")
+        raw.extend(part)
+    _require(
+        time.monotonic() < deadline and len(raw) <= MAX_BYTES and raw.count(b"\n") == 1,
+        "diagnostic custody response framing or deadline invalid",
+    )
+    value = json.loads(raw)
+    _require(isinstance(value, dict), "diagnostic custody response was not an object")
+    return value
+
+
+def _terminal_custody_record(value: dict[str, Any]) -> None:
+    required = {"schemaVersion", "attribution", "availability", "reason"}
+    optional = {"events", "originalConmonWatch", "exitObservedMonotonicNs", "uncertainty"}
+    _require(
+        required <= value.keys() <= required | optional
+        and type(value["schemaVersion"]) is int
+        and value["schemaVersion"] == 1
+        and value["attribution"] == "unresolved"
+        and value["availability"] == "error"
+        and isinstance(value["reason"], str)
+        and re.fullmatch(r"[A-Za-z]{1,64}", value["reason"]) is not None,
+        "diagnostic custody terminal schema was invalid",
+    )
+    _require(
+        isinstance(value.get("events", []), list)
+        and len(value.get("events", [])) <= MAX_CUSTODY_EVENTS
+        and isinstance(value.get("uncertainty", []), list)
+        and len(value.get("uncertainty", [])) <= MAX_GROUPS
+        and isinstance(value.get("originalConmonWatch", {}), dict)
+        and (value.get("exitObservedMonotonicNs") is None or type(value["exitObservedMonotonicNs"]) is int),
+        "diagnostic custody terminal fields exceeded their closed bounds",
+    )
+
+    def integer_fields(record: object, fields: str) -> bool:
+        return (
+            isinstance(record, dict)
+            and record.keys() == set(fields.split())
+            and all(type(item) is int for item in record.values())
+        )
+
+    def identity(record: object) -> bool:
+        return integer_fields(record, "dev ino mode uid gid nlink")
+
+    if "originalConmonWatch" in value:
+        watch = value["originalConmonWatch"]
+        _require(
+            watch.keys()
+            == {
+                "availability",
+                "file",
+                "path",
+                "inode",
+                "major",
+                "minor",
+                "directoryIdentity",
+                "fd",
+                "wd",
+                "rawKernelDevice",
+                "deviceEncoding",
+            }
+            and watch["availability"] == "observed"
+            and watch["file"] == "memory.events"
+            and isinstance(watch["path"], str)
+            and all(type(watch[key]) is int for key in ("inode", "major", "minor", "fd", "wd"))
+            and integer_fields(watch["directoryIdentity"], "dev ino")
+            and (
+                watch["rawKernelDevice"] is None
+                or (
+                    isinstance(watch["rawKernelDevice"], str)
+                    and re.fullmatch(r"[0-9a-fA-F]{1,8}", watch["rawKernelDevice"]) is not None
+                )
+            )
+            and watch["deviceEncoding"] == "Linux raw kernel dev_t; 20 minor bits",
+            "diagnostic custody terminal watch schema was invalid",
+        )
+
+    event_fields = {
+        "candidate",
+        "mask",
+        "observedMonotonicNs",
+        "originalPidAlive",
+        "fileIdentity",
+        "counters",
+        "availability",
+        "completedContent",
+    }
+    for event in value.get("events", []):
+        _require(
+            isinstance(event, dict)
+            and {"candidate", "mask", "observedMonotonicNs", "originalPidAlive"} <= event.keys() <= event_fields
+            and type(event["candidate"]) is int
+            and event["candidate"] in {0, 1}
+            and type(event["mask"]) is int
+            and type(event["observedMonotonicNs"]) is int
+            and type(event["originalPidAlive"]) is bool,
+            "diagnostic custody terminal event schema was invalid",
+        )
+        if "availability" in event:
+            _require(event["availability"] == "unresolved", "diagnostic custody terminal event status was invalid")
+        if "fileIdentity" in event:
+            _require(identity(event["fileIdentity"]), "diagnostic custody terminal identity schema was invalid")
+        if "counters" in event:
+            counters = event["counters"]
+            _require(
+                isinstance(counters, dict)
+                and counters.keys() == {"memory.events", "memory.events.local"}
+                and all(integer_fields(values, "max oom oom_kill") for values in counters.values())
+                and all(0 <= count < 10**20 for values in counters.values() for count in values.values()),
+                "diagnostic custody terminal counters schema was invalid",
+            )
+        if "completedContent" in event:
+            completed = event["completedContent"]
+            _require(
+                isinstance(completed, dict)
+                and completed.keys()
+                == {
+                    "fileIdentity",
+                    "version",
+                    "observedWriteEpoch",
+                    "observedMonotonicNs",
+                    "bytesRead",
+                    "sha256",
+                    "linkedAtCapture",
+                    "readIntervalMonotonicNs",
+                    "limits",
+                }
+                and identity(completed["fileIdentity"])
+                and integer_fields(completed["version"], "dev ino size mtime_ns ctime_ns")
+                and type(completed["observedWriteEpoch"]) is int
+                and type(completed["observedMonotonicNs"]) is int
+                and type(completed["bytesRead"]) is int
+                and 0 <= completed["bytesRead"] <= MAX_FILE_BYTES
+                and isinstance(completed["sha256"], str)
+                and re.fullmatch(r"[0-9a-f]{64}", completed["sha256"]) is not None
+                and type(completed["linkedAtCapture"]) is bool
+                and integer_fields(completed["readIntervalMonotonicNs"], "start end")
+                and completed["limits"] == "close-observed stable read; future contents and writer identity unresolved",
+                "diagnostic custody terminal completed content schema was invalid",
+            )
+    _require(
+        all(isinstance(reason, str) and len(reason) <= MAX_FILE_BYTES for reason in value.get("uncertainty", [])),
+        "diagnostic custody terminal uncertainty schema was invalid",
+    )
+
+
 class OomDiagnostics:
     """Retain read-only observations without changing lifecycle admission or cleanup."""
 
@@ -798,29 +954,61 @@ class OomDiagnostics:
         self.custody: subprocess.Popen[bytes] | None = None
         self.custody_started = False
         self.last_watch: dict[str, Any] | None = None
+        self.custody_terminal: dict[str, Any] | None = None
+        self.custody_terminal_unavailable: dict[str, Any] | None = None
+
+    def _retire_custody_reply(self, receipt: str) -> dict[str, Any]:
+        self.custody_terminal_unavailable = {
+            "schemaVersion": 1,
+            "availability": "unavailable",
+            "attribution": "unresolved",
+            "reason": "terminal-record-unavailable-or-invalid",
+            "terminalReceipt": receipt,
+        }
+        return copy.deepcopy(self.custody_terminal_unavailable)
+
+    def _closed_custody_reply(self, process: subprocess.Popen[bytes], deadline: float) -> dict[str, Any]:
+        try:
+            terminal = _custody_reply(process, deadline)
+            _terminal_custody_record(terminal)
+        except Exception:  # noqa: BLE001 — absent/late/invalid terminal evidence stays explicitly unavailable.
+            return self._retire_custody_reply("input-closed")
+        self.custody_terminal = copy.deepcopy(terminal)
+        return {**terminal, "terminalReceipt": "buffered-after-input-closed"}
 
     def _custody_exchange(self, request: dict[str, Any]) -> dict[str, Any]:
         _require(self.custody is not None, "diagnostic custody was not armed")
+        if self.custody_terminal is not None:
+            return {**copy.deepcopy(self.custody_terminal), "terminalReceipt": "previously-retained-terminal"}
+        if self.custody_terminal_unavailable is not None:
+            return {
+                **copy.deepcopy(self.custody_terminal_unavailable),
+                "terminalReceipt": "previously-retired-terminal",
+            }
         process = self.custody
         _require(process.stdin is not None and process.stdout is not None, "diagnostic custody pipes unavailable")
         deadline = time.monotonic() + min(2, self.ctx.timeout)
+        if process.poll() is not None:
+            return self._closed_custody_reply(process, deadline)
         payload = (json.dumps(request) + "\n").encode("utf-8")
         _require(len(payload) <= MAX_BYTES, "diagnostic custody request exceeded bound")
         descriptor = process.stdin.fileno()
-        while payload:
-            _, ready, _ = select.select([], [descriptor], [], max(0, deadline - time.monotonic()))
-            _require(bool(ready), "diagnostic custody request deadline expired")
-            payload = payload[os.write(descriptor, payload) :]
-        raw = bytearray()
-        while not raw.endswith(b"\n"):
-            _require(len(raw) <= MAX_BYTES, "diagnostic custody response exceeded bound")
-            ready, _, _ = select.select([process.stdout], [], [], max(0, deadline - time.monotonic()))
-            _require(bool(ready), "diagnostic custody response deadline expired")
-            part = os.read(process.stdout.fileno(), MAX_BYTES + 1 - len(raw))
-            _require(bool(part), "diagnostic custody closed without response")
-            raw.extend(part)
-        _require(len(raw) <= MAX_BYTES and raw.count(b"\n") == 1, "diagnostic custody response framing invalid")
-        return json.loads(raw)
+        try:
+            try:
+                while payload:
+                    _, ready, _ = select.select([], [descriptor], [], max(0, deadline - time.monotonic()))
+                    _require(bool(ready), "diagnostic custody request deadline expired")
+                    payload = payload[os.write(descriptor, payload) :]
+            except BrokenPipeError:
+                return self._closed_custody_reply(process, deadline)
+            value = _custody_reply(process, deadline)
+            if value.get("availability") == "error":
+                _terminal_custody_record(value)
+                self.custody_terminal = copy.deepcopy(value)
+        except Exception:
+            self._retire_custody_reply("exchange-failed")
+            raise
+        return value
 
     def _custody_sample(self, phase: str, *, request: dict[str, Any] | None = None) -> None:
         record: dict[str, Any] = {

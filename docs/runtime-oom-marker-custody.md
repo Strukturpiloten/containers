@@ -46,6 +46,17 @@ cleanup half a second. It accepts eight phase requests, 32 directory events,
 interfaces and uncertain helper cleanup remain diagnostics, never admission.
 EOF, error and timeout close the helper's read-only descriptors; uncertain driver
 cleanup retains the helper's independent absolute expiry.
+If the input pipe closes or the owned helper exits, the client can retain one
+buffered terminal error record within the same exchange deadline and byte cap.
+Only the closed versioned error schema and its fixed nested watch, identity,
+counter and completed-content fields are retained, with at most 32 events.
+Missing, late, partial, oversized or unknown records stay explicitly unavailable.
+A failed request/response exchange or terminal drain retires the stream; later
+phases reuse an unavailable result without a new deadline or pipe/process
+operations. The original exchange failure remains explicit in its phase. Valid
+retained errors also remain available to later phases without restarting or
+retrying the helper.
+Final owned cleanup still closes the pipes and waits for the helper.
 
 The existing snapshot evidence schema and historical native evidence are retained.
 No image recipe, software version, dependency, pin or operational workflow changes
