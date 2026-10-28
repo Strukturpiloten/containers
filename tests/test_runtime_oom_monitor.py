@@ -826,6 +826,172 @@ class MarkerCustodyTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "budget exhausted"):
                 observer.sample("after-inner-memory")
 
+    @staticmethod
+    def directory_event_bytes(events: list[tuple[int, int, int, bytes]]) -> bytes:
+        records = []
+        for wd, mask, cookie, name in events:
+            length = ((len(name) + 16) // 16) * 16 if name else 0
+            records.append(custody.EVENT_HEADER.pack(wd, mask, cookie, length) + name.ljust(length, b"\0"))
+        return b"".join(records)
+
+    def test_directory_noise_above_marker_cap_preserves_marker_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            request, marker, group = self.fixture(Path(directory))
+            observer = self.observer(request, group)
+            for index in range(40):
+                marker.with_name(f"authored-noise-before-{index}").write_bytes(b"noise")
+            marker.write_bytes(b"closed marker across noise")
+            for index in range(40):
+                marker.with_name(f"authored-noise-after-{index}").write_bytes(b"noise")
+            record = observer.sample("after-inner-memory")
+            self.assertGreater(observer.event_count, 32)
+            self.assertLessEqual(len(record["events"]), 32)
+            self.assertEqual(record["markers"][0]["sha256"], hashlib.sha256(b"closed marker across noise").hexdigest())
+            self.assertTrue(record["markers"][0]["completedContents"])
+            self.assertNotIn("authored-noise", json.dumps(record))
+            self.assertEqual(record["attribution"], "unresolved")
+
+    def test_close_then_open_rewrite_across_directory_noise_cannot_seal_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            request, marker, group = self.fixture(Path(directory))
+            observer = self.observer(request, group)
+            marker.write_bytes(b"old closed contents")
+            for index in range(40):
+                marker.with_name(f"authored-noise-{index}").write_bytes(b"noise")
+            with marker.open("wb") as writer:
+                writer.write(b"open rewrite prefix")
+                writer.flush()
+                record = observer.sample("after-inner-memory")
+            self.assertGreater(observer.event_count, 32)
+            self.assertEqual(record["markers"][0]["availability"], "unresolved")
+            self.assertEqual(record["markers"][0]["completedContents"], [])
+            self.assertTrue(all("completedContent" not in event for event in record["events"]))
+            self.assertNotIn(hashlib.sha256(b"open rewrite prefix").hexdigest(), json.dumps(record))
+
+    def test_invalid_suffix_after_noise_never_publishes_proposed_completion(self) -> None:
+        def pending(observer: custody.MarkerCustody, batches: list[bytes]) -> list[tuple[int, int, int, bytes]]:
+            return observer._queued_events(batches.pop(0))
+
+        for phase in ("initial", "post-read"):
+            for failure in ("overflow", "watch-loss", "cookie", "partial-header", "partial-name"):
+                with self.subTest(phase=phase, failure=failure), tempfile.TemporaryDirectory() as directory:
+                    request, marker, group = self.fixture(Path(directory))
+                    observer = self.observer(request, group)
+                    marker.write_bytes(b"closed candidate must remain unpublished")
+                    initial = self.directory_event_bytes(observer._pending_events())
+                    wd = observer.markers[0]["wd"]
+                    noise = self.directory_event_bytes([(wd, custody.IN_CREATE, 0, b"authored-noise")] * 40)
+                    suffixes = {
+                        "overflow": (custody.EVENT_HEADER.pack(-1, custody.IN_Q_OVERFLOW, 0, 0), "overflow"),
+                        "watch-loss": (custody.EVENT_HEADER.pack(wd, custody.IN_IGNORED, 0, 0), "watch lost"),
+                        "cookie": (self.directory_event_bytes([(wd, custody.IN_MOVED_TO, 7, b"noise")]), "rename"),
+                        "partial-header": (b"x", "partial inotify header"),
+                        "partial-name": (
+                            custody.EVENT_HEADER.pack(wd, custody.IN_CREATE, 0, 16) + b"x",
+                            "partial inotify name",
+                        ),
+                    }
+                    suffix, message = suffixes[failure]
+                    batches = [initial + noise + suffix] if phase == "initial" else [initial, noise + suffix]
+                    with (
+                        patch.object(observer, "_pending_events", side_effect=partial(pending, observer, batches)),
+                        self.assertRaisesRegex(ValueError, message),
+                    ):
+                        observer.drain()
+                    self.assertEqual(observer.markers[0]["completedContents"], [])
+                    self.assertFalse(observer.markers[0]["closedWrite"])
+                    self.assertTrue(all("completedContent" not in event for event in observer.events))
+                    if phase == "initial" and failure.startswith("partial"):
+                        self.assertEqual(observer.events, [])
+
+    def test_directory_header_ceiling_is_distinct_from_marker_and_read_byte_caps(self) -> None:
+        self.assertEqual(custody.MAX_EVENTS, 32)
+        self.assertEqual(custody.MAX_DIRECTORY_EVENTS, 32768)
+        self.assertEqual(custody.MAX_DIRECTORY_EVENTS, custody.MAX_TOTAL_BYTES // custody.EVENT_HEADER.size)
+        for limit in ("directory", "marker", "reads", "bytes"):
+            with self.subTest(limit=limit), tempfile.TemporaryDirectory() as directory:
+                request, _marker, group = self.fixture(Path(directory))
+                observer = self.observer(request, group)
+                wd = observer.markers[0]["wd"]
+                if limit == "directory":
+                    observer.event_count = custody.MAX_DIRECTORY_EVENTS - 1
+                    raw = self.directory_event_bytes([(wd, custody.IN_CREATE, 0, b"noise")])
+                    observer._consume_events(observer._queued_events(raw), capture=True)
+                    self.assertEqual(observer.events, [])
+                    self.assertEqual(observer.event_count, custody.MAX_DIRECTORY_EVENTS)
+                    with self.assertRaisesRegex(ValueError, "directory event count exceeded bound"):
+                        observer._queued_events(raw)
+                elif limit == "marker":
+                    raw = self.directory_event_bytes([(wd, custody.IN_MODIFY, 0, b"oom")] * 32)
+                    observer._consume_events(observer._queued_events(raw), capture=True)
+                    self.assertEqual(len(observer.events), 32)
+                    raw = self.directory_event_bytes([(wd, custody.IN_MODIFY, 0, b"oom")])
+                    with self.assertRaisesRegex(ValueError, "marker event count exceeded bound"):
+                        observer._consume_events(observer._queued_events(raw), capture=True)
+                    self.assertEqual(len(observer.events), 32)
+                else:
+                    if limit == "reads":
+                        observer.reads = custody.MAX_READS
+                    else:
+                        observer.bytes = custody.MAX_TOTAL_BYTES - custody.MAX_BYTES + 1
+                    with patch.object(custody.os, "read") as read, self.assertRaisesRegex(ValueError, "read budget"):
+                        observer._pending_events()
+                    read.assert_not_called()
+
+    def test_noise_decode_consume_and_publication_obey_original_deadline(self) -> None:
+        for phase in ("decode", "consume", "lookahead", "publish"):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as directory:
+                request, marker, group = self.fixture(Path(directory))
+                observer = self.observer(request, group)
+                wd = observer.markers[0]["wd"]
+                raw = self.directory_event_bytes([(wd, custody.IN_CREATE, 0, b"noise")] * 40)
+                if phase == "decode":
+                    observer.deadline = 100
+                    with (
+                        patch.object(custody.time, "monotonic", side_effect=[99] * 33 + [100]),
+                        self.assertRaisesRegex(ValueError, "custody deadline expired"),
+                    ):
+                        observer._queued_events(raw)
+                elif phase == "consume":
+                    queued = observer._queued_events(raw)
+                    observer.deadline = 100
+                    with (
+                        patch.object(custody.time, "monotonic", side_effect=[99] * 33 + [100]),
+                        self.assertRaisesRegex(ValueError, "custody deadline expired"),
+                    ):
+                        observer._consume_events(queued, capture=True)
+                elif phase == "lookahead":
+                    observer.deadline = 100
+                    with (
+                        patch.object(custody.time, "monotonic", side_effect=[99, 100]),
+                        patch.object(observer, "_marker_event") as capture,
+                        self.assertRaisesRegex(ValueError, "custody deadline expired"),
+                    ):
+                        observer._consume_events([(wd, custody.IN_CLOSE_WRITE, 0, b"oom")], capture=True)
+                    capture.assert_not_called()
+                else:
+                    marker.write_bytes(b"candidate before expiry")
+                    proposed = observer._consume_events(observer._pending_events(), capture=True)
+                    self.assertEqual(len(proposed), 1)
+                    observer.deadline = 100
+                    with (
+                        patch.object(custody.time, "monotonic", side_effect=[99, 100]),
+                        self.assertRaisesRegex(ValueError, "custody deadline expired"),
+                    ):
+                        observer._finish_capture(*proposed[0], [])
+                self.assertEqual(observer.markers[0]["completedContents"], [])
+                self.assertTrue(all("completedContent" not in event for event in observer.events))
+
+    def test_parent_loss_after_noise_remains_sticky_uncertainty(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            request, _marker, group = self.fixture(Path(directory))
+            observer = self.observer(request, group)
+            wd = observer.markers[0]["wd"]
+            queued = [(wd, custody.IN_CREATE, 0, b"noise")] * 40 + [(wd, custody.IN_DELETE_SELF, 0, b"")]
+            observer._consume_events(queued, capture=True)
+            self.assertIn("original marker parent removed or moved", observer.reasons)
+            self.assertEqual(observer.events, [])
+
 
 class CustodyProtocolTests(unittest.TestCase):
     def closed_observer(self, payload: bytes, *, exited: bool = False) -> diagnostics.OomDiagnostics:
@@ -951,7 +1117,7 @@ class CustodyProtocolTests(unittest.TestCase):
                 elif failure == "reads":
                     held.reads = custody.MAX_READS
                 elif failure == "directory-events":
-                    held.event_count = custody.MAX_EVENTS
+                    held.event_count = custody.MAX_DIRECTORY_EVENTS
                     marker.with_name("authored-unrelated-event").touch()
                 elif failure == "marker-events":
                     held.events = [self.terminal_fixture()["events"][0] for _ in range(custody.MAX_EVENTS)]

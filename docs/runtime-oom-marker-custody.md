@@ -40,9 +40,15 @@ prove correspondence between a monitor binary and upstream source.
 The helper expires at the earlier of 640 seconds and the existing work deadline
 plus the existing 40-second orderly-stop allowance. It never renews native work
 budgets. Phase exchanges allow two seconds, output writes half a second, and EOF
-cleanup half a second. It accepts eight phase requests, 32 directory events,
-1,024 reads, 512 KiB of aggregate observed file/event bytes, 4 KiB per file and
-64 KiB per protocol message. Overflow, expiry, interruption, unavailable kernel
+cleanup half a second. It accepts eight phase requests and retains at most 32
+marker events. All directory headers, including unrelated names, count toward a
+separate cumulative ceiling of 32,768, derived from the existing 512 KiB aggregate
+byte limit divided by the 16-byte inotify header. Names and file reads still
+consume that same byte budget, and unrelated names are never retained. The
+1,024-read, 4 KiB per-file and 64 KiB per-message limits remain unchanged. Decode
+and consume loops check the original absolute deadline; framing, lookahead and
+the nonrecursive post-read bracket still complete before publishing content.
+Overflow, expiry, interruption, unavailable kernel
 interfaces and uncertain helper cleanup remain diagnostics, never admission.
 EOF, error and timeout close the helper's read-only descriptors; uncertain driver
 cleanup retains the helper's independent absolute expiry.

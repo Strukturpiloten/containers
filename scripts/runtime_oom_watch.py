@@ -40,6 +40,7 @@ IN_DELETE_SELF = 0x400
 IN_IGNORED = 0x8000
 IN_Q_OVERFLOW = 0x4000
 EVENT_HEADER = struct.Struct("iIII")
+MAX_DIRECTORY_EVENTS = MAX_TOTAL_BYTES // EVENT_HEADER.size
 # Closed wire values are also declared by the lightweight client; do not import
 # this standalone ctypes helper there. Unknown exception messages stay private.
 FAILURE_GUARDS = {
@@ -319,10 +320,11 @@ class MarkerCustody:
         result = []
         offset = 0
         while offset < len(raw):
+            _require(time.monotonic() < self.deadline, "custody deadline expired")
             _require(offset + EVENT_HEADER.size <= len(raw), "partial inotify header")
             wd, mask, cookie, length = EVENT_HEADER.unpack_from(raw, offset)
             self.event_count += 1
-            _require(self.event_count <= MAX_EVENTS, "directory event count exceeded bound")
+            _require(self.event_count <= MAX_DIRECTORY_EVENTS, "directory event count exceeded bound")
             offset += EVENT_HEADER.size
             _require(offset + length <= len(raw), "partial inotify name")
             name = raw[offset : offset + length].rstrip(b"\0")
@@ -417,6 +419,7 @@ class MarkerCustody:
     ) -> list[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]]:
         proposed = []
         for index, (wd, mask, cookie, name) in enumerate(queued):
+            _require(time.monotonic() < self.deadline, "custody deadline expired")
             _require(not mask & (IN_Q_OVERFLOW | IN_IGNORED), "inotify overflow or watch lost")
             _require(cookie == 0, "marker rename event unresolved")
             if mask & (IN_DELETE_SELF | IN_MOVE_SELF):
@@ -438,6 +441,7 @@ class MarkerCustody:
                 later_wd == wd and later_name == name and later_mask & (IN_MODIFY | IN_CREATE | IN_MOVED_TO)
                 for later_wd, later_mask, _cookie, later_name in queued[index + 1 :]
             )
+            _require(time.monotonic() < self.deadline, "custody deadline expired")
             completed = self._marker_event(marker, event, superseded=superseded, capture=capture)
             if completed is not None:
                 proposed.append((marker, event, completed))
@@ -458,6 +462,7 @@ class MarkerCustody:
             )
             for wd, mask, _cookie, name in following
         )
+        _require(time.monotonic() < self.deadline, "custody deadline expired")
         try:
             _require(
                 not changed
@@ -471,6 +476,7 @@ class MarkerCustody:
             self._uncertain("completed marker changed during post-read bracket")
             event["availability"] = "unresolved"
             return
+        _require(time.monotonic() < self.deadline, "custody deadline expired")
         marker["completedContents"].append(completed)
         marker["closedWrite"] = True
         event["completedContent"] = completed
