@@ -121,6 +121,27 @@ STARTUP_LOG_PATTERNS = (
         ),
     ),
     ("uidgid-map-message", r"^\[rootlesskit:parent\] error: failed to setup UID/GID map: "),
+    (
+        "child-fork-exec-operation-not-permitted-message",
+        (
+            r"^\[rootlesskit:parent\] error: failed to start the child: "
+            r"fork/exec /proc/self/exe: operation not permitted\Z"
+        ),
+    ),
+    (
+        "child-fork-exec-permission-denied-message",
+        (
+            r"^\[rootlesskit:parent\] error: failed to start the child: "
+            r"fork/exec /proc/self/exe: permission denied\Z"
+        ),
+    ),
+    (
+        "child-fork-exec-resource-temporarily-unavailable-message",
+        (
+            r"^\[rootlesskit:parent\] error: failed to start the child: "
+            r"fork/exec /proc/self/exe: resource temporarily unavailable\Z"
+        ),
+    ),
     ("child-start-message", r"^\[rootlesskit:parent\] error: failed to start the child: "),
     ("rootless-network-message", r"^\[rootlesskit:parent\] error: failed to setup network "),
     ("cgroup-path-message", r"^\[rootlesskit:parent\] error: (?:open|mkdir|write) /sys/fs/cgroup/"),

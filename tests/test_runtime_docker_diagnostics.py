@@ -873,6 +873,66 @@ class GuestStartupProjection(unittest.TestCase):
                 self.assertEqual(result["managerNoNewPrivs"], "not-observed")
                 self.assertNotIn(PRIVATE_MARKER, json.dumps(result))
 
+    def test_exact_child_fork_exec_error_text_has_closed_message_labels(self) -> None:
+        prefix = "[rootlesskit:parent] error: failed to start the child: fork/exec /proc/self/exe: "
+        for suffix, expected in (
+            ("operation not permitted", "child-fork-exec-operation-not-permitted-message"),
+            ("permission denied", "child-fork-exec-permission-denied-message"),
+            ("resource temporarily unavailable", "child-fork-exec-resource-temporarily-unavailable-message"),
+        ):
+            message = prefix + suffix
+            raw = json.dumps({"MESSAGE": message, "__CURSOR": PRIVATE_MARKER}).encode()
+            with (
+                self.subTest(suffix=suffix),
+                patch.object(diagnostics, "_query_capture", return_value=self.protocol(raw)),
+            ):
+                protocol = diagnostics._guest_log_capture(["fixed-query"], 1005, "/fixed/timeout")
+                self.assertEqual(protocol["status"], "available")
+                self.assertTrue(protocol["teardownVerified"])
+                projected = diagnostics.base64.b64decode(protocol["data"])
+                result = diagnostics._startup_log_projection(projected)
+                self.assertEqual(result["classes"], [expected])
+                self.assertEqual((result["records"], result["unknownRecords"]), (1, 0))
+                self.assertEqual(result["attribution"], "message-observation-only")
+                self.assertEqual(result["managerNoNewPrivs"], "not-observed")
+                for private in (PRIVATE_MARKER, message, "/proc/self/exe", suffix):
+                    self.assertNotIn(private.encode(), projected)
+                    self.assertNotIn(private, json.dumps(result))
+
+    def test_child_fork_exec_near_matches_keep_generic_or_unknown_classification(self) -> None:
+        prefix = "[rootlesskit:parent] error: failed to start the child: fork/exec /proc/self/exe: "
+        generic = ["child-start-message"]
+        for suffix in ("operation not permitted", "permission denied", "resource temporarily unavailable"):
+            exact = prefix + suffix
+            for message, expected in (
+                (exact.replace("/proc/self/exe", "/proc/1/exe"), generic),
+                (exact.replace("/proc/self/exe", "/usr/bin/rootlesskit"), generic),
+                (exact.replace("/proc/self/exe", "/proc/self/exe-private"), generic),
+                (exact.replace("fork/exec", "exec"), generic),
+                (prefix + suffix.upper(), generic),
+                (prefix + "unreviewed error " + PRIVATE_MARKER, generic),
+                (exact + " ", generic),
+                (exact + "\n", generic),
+                (exact + "\n" + PRIVATE_MARKER, generic),
+                (exact + " " + PRIVATE_MARKER, generic),
+                (prefix + PRIVATE_MARKER + suffix, generic),
+                (PRIVATE_MARKER + " " + exact, []),
+                (PRIVATE_MARKER + "\n" + exact, []),
+                (exact.replace("] error:", "] warning:"), []),
+            ):
+                with (
+                    self.subTest(suffix=suffix, message=message),
+                    patch.object(diagnostics, "_query_capture", return_value=self.protocol(self.log_records(message))),
+                ):
+                    protocol = diagnostics._guest_log_capture(["fixed-query"], 1005, "/fixed/timeout")
+                    self.assertEqual(protocol["status"], "available")
+                    projected = diagnostics.base64.b64decode(protocol["data"])
+                    result = diagnostics._startup_log_projection(projected)
+                    self.assertEqual(result["classes"], expected)
+                    self.assertEqual(result["unknownRecords"], int(not expected))
+                    self.assertNotIn(PRIVATE_MARKER.encode(), projected)
+                    self.assertNotIn(PRIVATE_MARKER, json.dumps(result))
+
     def test_unknown_permission_and_embedded_signatures_do_not_claim_cause(self) -> None:
         messages = (
             PRIVATE_MARKER,

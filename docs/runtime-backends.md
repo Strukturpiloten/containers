@@ -355,6 +355,31 @@ and [systemd v257 journalctl](https://github.com/systemd/systemd/blob/v257/man/j
 RootlessKit/Moby sources are Apache-2.0; the systemd references are LGPL-2.1-or-later.
 These references do not attest the guest's installed versions; unmatched formats
 remain unknown. No upstream implementation or oracle executable is redistributed.
+
+Child-start message refinements were reviewed read-only on 2026-10-29 with
+Context7 and official tagged sources, without running an oracle or copying its
+implementation. RootlessKit v3.0.0's parent starts `/proc/self/exe` and wraps
+`cmd.Start` errors. Go 1.25.3's
+[`Cmd.Start`](https://github.com/golang/go/blob/go1.25.3/src/os/exec/exec.go)
+propagates [`startProcess`](https://github.com/golang/go/blob/go1.25.3/src/os/exec_posix.go)
+errors with operation `fork/exec`; its
+[`PathError.Error`](https://github.com/golang/go/blob/go1.25.3/src/io/fs/fs.go)
+joins operation, path and error text. Its
+[`Errno.Error`](https://github.com/golang/go/blob/go1.25.3/src/syscall/syscall_unix.go)
+uses the [Linux amd64 error table](https://github.com/golang/go/blob/go1.25.3/src/syscall/zerrors_linux_amd64.go).
+Go's reference source is BSD-3-Clause; RootlessKit remains Apache-2.0.
+These are source references, not evidence of the guest's compiled Go version.
+
+Three separate message labels recognize the complete existing RootlessKit parent
+error prefix followed by `fork/exec /proc/self/exe: ` and exactly `operation not
+permitted`, `permission denied` or `resource temporarily unavailable`. No extra
+text or newline is accepted for these refinements. Other suffixes, paths and
+multiline messages retain the general child-start label when its prefix matches;
+embedded or different prefixes remain unknown. A label observes text only: it
+does not establish a numeric errno, the failed syscall, a policy actor, a cause or
+guest manager `NoNewPrivs`. Authored positive and mismatch fixtures do not attest
+the failing guest's actual suffix or identify why its child failed to start.
+
 The existing diagnostics input ownership and already-installed guest journalctl
 cover this change; there is no new dependency, software pin or Renovate extractor.
 
