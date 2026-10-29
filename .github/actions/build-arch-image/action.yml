@@ -100,6 +100,25 @@ runs:
               '.github/docker-userns-policy-source.json',
           )
 
+          DIAGNOSTIC = {'schemaVersion': 1, 'consumer': CONSUMER, 'kind': 'active-qualification-failure',
+              'actor': 'root-bootstrap', 'operation': 'bootstrap', 'phase': 'bootstrap-entry', 'reason': 'refused',
+              'context': None, 'bindingSha256': None, 'sourceVerified': False, 'bindingVerified': False,
+              'sourceManifestSha256': None, 'reportingLease': None, 'lastDurablePhase': None, 'lastIntent': None,
+              'attemptedPhase': None, 'durabilityUnknown': False, 'readerPending': None, 'childPending': None,
+              'ownerDisposition': 'not-recorded', 'comparisons': {}, 'retained': None, 'cleanupAuthority': False}
+
+          def failure(error):
+              if isinstance(error, OSError):
+                  reason = {1: 'permission-denied', 13: 'permission-denied', 2: 'missing', 40: 'unsafe-link', 11: 'busy'}.get(error.errno, 'os-error')
+              elif isinstance(error, (ValueError, KeyError, TypeError)):
+                  reason = 'invalid-data'
+              else:
+                  reason = 'unexpected'
+              DIAGNOSTIC['reason'] = reason
+              raw = (json.dumps(DIAGNOSTIC, sort_keys=True) + '\n').encode('ascii')
+              require(len(raw) <= 8192)
+              sys.stdout.buffer.write(raw)
+
           def require(value):
               if not value:
                   raise ValueError('active-root-bootstrap-refused')
@@ -233,13 +252,19 @@ runs:
               requested = event.get('inputs', {}).get('validation_profile', 'full')
               canonical = validation_profile(requested)
               require(canonical == 'docker-rootless-diagnostic')
+              DIAGNOSTIC['phase'] = 'bootstrap-context'
               trusted = {'candidate': candidate, 'workflow': workflow, 'checkout': checkout,
                   'repository': 'Strukturpiloten/containers', 'event': 'workflow_dispatch', 'ref': 'refs/heads/TheRealBecks/issue527',
                   'job': 'smoke-build', 'run': run, 'attempt': attempt, 'architecture': architecture,
                   'image': 'docker-29-conformance-rootless', 'imageOS': 'ubuntu26', 'imageVersion': image_version,
                   'imageVersionKind': 'workflow-reported-provenance-not-vm-attestation',
                   'validationProfile': canonical, 'validationProfileRequested': requested}
+              DIAGNOSTIC['context'] = {key: trusted[key] for key in ('candidate', 'run', 'attempt', 'job', 'image', 'architecture')}
+              DIAGNOSTIC['context']['phase'] = None
+              DIAGNOSTIC['phase'] = 'bootstrap-proof'
               files, sdk = verify_bundle(read_input(handoff, uid, 2097152), trusted)
+              DIAGNOSTIC.update(sourceVerified=True, sourceManifestSha256=SOURCE_MANIFEST_SHA256, phase='bootstrap-stage')
+              DIAGNOSTIC['comparisons']['bootstrap-proof'] = True
               require(time.monotonic_ns() < deadline)
               stage = Path('/run') / ('containers-userns-active.' + os.urandom(16).hex())
               stage.mkdir(mode=0o700)
@@ -266,8 +291,9 @@ runs:
           if __name__ == '__main__':
               try:
                   main()
-              except Exception:
-                  raise SystemExit('active-root-bootstrap-refused-or-retained-unknown') from None
+              except Exception as error:
+                  failure(error)
+                  raise SystemExit(1) from None
       run: |
         set -euo pipefail
 
@@ -284,14 +310,24 @@ runs:
           test "${ACTIVE_CANDIDATE}" = "${active_checkout}"
           active_deadline="$(/usr/bin/python3 -I -B -S -c 'import time;print(time.monotonic_ns()+1800000000000)')"
           active_handoff="${RUNNER_TEMP}/docker-userns-active-${IMAGE_ARCH}.json"
+          active_failure="${RUNNER_TEMP}/runtime-evidence/${IMAGE_NAME}-${IMAGE_ARCH}-userns-failure.json"
+          /usr/bin/python3 -I -B -S -c 'import json,sys; value={"schemaVersion":1,"kind":"active-qualification-failure","actor":"workflow","operation":"producer","phase":"producer-launch","reason":"execution-unverified","cleanupAuthority":False,"context":{"candidate":sys.argv[2],"run":sys.argv[3],"attempt":sys.argv[4],"job":"smoke-build","image":"docker-29-conformance-rootless","architecture":sys.argv[5],"phase":None}};open(sys.argv[1],"x").write(json.dumps(value)+"\n")' \
+            "${active_failure}" "${ACTIVE_CANDIDATE}" "${ACTIVE_RUN}" "${ACTIVE_ATTEMPT}" "${IMAGE_ARCH}"
           uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.docker_userns_active_bootstrap_bundle \
-            --architecture "${IMAGE_ARCH}" --output "${active_handoff}"
-          active_stage="$(sudo -n /usr/bin/timeout --signal=TERM --kill-after=1s 25s \
+            --architecture "${IMAGE_ARCH}" --output "${active_handoff}" --failure-output "${active_failure}"
+          /usr/bin/python3 -I -B -S -c 'import json,sys; p=sys.argv[1];value=json.load(open(p));value.update(actor="workflow",operation="bootstrap",phase="bootstrap-launch",reason="execution-unverified");open(p,"w").write(json.dumps(value)+"\n")' "${active_failure}"
+          if active_stage="$(sudo -n /usr/bin/timeout --signal=TERM --kill-after=1s 25s \
             /usr/bin/python3.14 -I -B -S -c "${FIXED_ACTIVE_ROOT_BOOTSTRAP}" \
             "${active_handoff}" "${ACTIVE_CANDIDATE}" "${ACTIVE_WORKFLOW}" "${active_checkout}" \
             "${ACTIVE_RUN}" "${ACTIVE_ATTEMPT}" "${IMAGE_ARCH}" "${ImageVersion}" \
-            "$(id -u)" "$(id -g)" "${active_deadline}")"
+            "$(id -u)" "$(id -g)" "${active_deadline}")"; then
+            :
+          else
+            printf '%s' "${active_stage}" | uv run --frozen --python "${PYTHON_VERSION}" python -c 'import json,sys;from pathlib import Path;from scripts.docker_userns_active import valid_failure;raw=sys.stdin.buffer.read(8193);value=json.loads(raw) if len(raw)<=8192 and raw else None;sys.exit(1) if not valid_failure(value) or value["actor"]!="root-bootstrap" else Path(sys.argv[1]).write_bytes(raw)' "${active_failure}" || true
+            exit 1
+          fi
           [[ "${active_stage}" =~ ^/run/containers-userns-active\.[0-9a-f]{32}$ ]]
+          rm -- "${active_failure}"
           runtime_args+=(--active-userns-stage "${active_stage}")
           finish_active_stage() {
             active_status=$?
@@ -318,7 +354,9 @@ runs:
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
         name: ${{ steps.build.outputs.image_name }}-${{ steps.build.outputs.arch }}-runtime-evidence
-        path: ${{ runner.temp }}/runtime-evidence/${{ steps.build.outputs.image_name }}-${{ steps.build.outputs.arch }}.json
+        path: |
+          ${{ runner.temp }}/runtime-evidence/${{ steps.build.outputs.image_name }}-${{ steps.build.outputs.arch }}.json
+          ${{ runner.temp }}/runtime-evidence/${{ steps.build.outputs.image_name }}-${{ steps.build.outputs.arch }}-userns-failure.json
         if-no-files-found: error
         retention-days: 7
 

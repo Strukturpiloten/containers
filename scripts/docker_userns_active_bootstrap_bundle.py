@@ -12,10 +12,13 @@ import hashlib
 import json
 import os
 import re
+import sys
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+from scripts import docker_userns_active as diagnostic
 from scripts import docker_userns_bootstrap_bundle as git
 from scripts import docker_userns_policy_source as source
 from scripts.docker_userns_qualification import QualificationError, validation_profile
@@ -52,7 +55,9 @@ def require(value: object) -> None:
         raise ValueError(reason)
 
 
-def context(environment: dict[str, str], architecture: str) -> dict[str, str]:
+def context(
+    environment: dict[str, str], architecture: str, *, progress: dict[str, Any] | None = None
+) -> dict[str, str]:
     """Bind only the reviewed diagnostic dispatch, never a publication caller."""
     expected = {
         "GITHUB_ACTIONS": "true",
@@ -74,6 +79,15 @@ def context(environment: dict[str, str], architecture: str) -> dict[str, str]:
         require(re.fullmatch(r"[1-9][0-9]{0,19}", environment.get(key, "")))
     version = environment.get("ImageVersion", "")
     require(re.fullmatch(r"[0-9]{8}\.[0-9]+\.[0-9]+", version))
+    if progress is not None:
+        progress["context"] = {
+            "candidate": selected,
+            "run": environment["GITHUB_RUN_ID"],
+            "attempt": environment["GITHUB_RUN_ATTEMPT"],
+            "job": expected["GITHUB_JOB"],
+            "image": "docker-29-conformance-rootless",
+            "architecture": architecture,
+        }
     event_path = Path("/home/runner/work/_temp/_github_workflow/event.json")
     require(environment.get("GITHUB_EVENT_PATH") == str(event_path))
     with event_path.open("rb") as stream:
@@ -131,10 +145,12 @@ def proof(candidate: str) -> list[dict[str, str]]:
     return [{"oid": oid, "kind": kind, "data": base64.b64encode(raw).decode()} for oid, (kind, raw) in objects.items()]
 
 
-def bundle(architecture: str) -> dict[str, Any]:
+def bundle(architecture: str, *, progress: dict[str, Any] | None = None) -> dict[str, Any]:
     """Collect source bytes without root execution or policy compilation/loading."""
+    progress = {} if progress is None else progress
     require(os.geteuid() != 0)
-    binding = context(dict(os.environ), architecture)
+    binding = context(dict(os.environ), architecture, progress=progress)
+    progress.update(context=binding, phase="producer-source")
     manifest = source.manifest(ROOT / MANIFEST)
     sdk = {}
     deadline = time.monotonic() + 30
@@ -142,11 +158,15 @@ def bundle(architecture: str) -> dict[str, Any]:
         raw = source.fetch(manifest["source"]["commit"], item["path"], item["size"], deadline)
         require(len(raw) == item["size"] and hashlib.sha256(raw).hexdigest() == item["sha256"])
         sdk[item["path"]] = base64.b64encode(raw).decode()
+    diagnostic.comparison(progress, "producer-source", matched=True)
+    progress["phase"] = "producer-proof"
+    objects = proof(binding["candidate"])
+    diagnostic.comparison(progress, "producer-proof", matched=True)
     return {
         "schemaVersion": 1,
         "consumer": CONSUMER,
         "context": binding,
-        "objects": proof(binding["candidate"]),
+        "objects": objects,
         "sdk": sdk,
     }
 
@@ -156,14 +176,22 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--architecture", choices=("amd64", "arm64"), required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--failure-output", type=Path)
     arguments = parser.parse_args()
+    progress: dict[str, Any] = {"actor": "producer", "operation": "producer", "phase": "producer-context"}
     try:
-        encoded = (json.dumps(bundle(arguments.architecture), sort_keys=True) + "\n").encode("ascii")
+        encoded = (json.dumps(bundle(arguments.architecture, progress=progress), sort_keys=True) + "\n").encode("ascii")
+        progress["phase"] = "producer-output"
         require(len(encoded) <= MAX_BUNDLE)
         descriptor = os.open(arguments.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(encoded)
-    except OSError, ValueError, KeyError, TypeError, QualificationError:
+    except (OSError, ValueError, KeyError, TypeError, QualificationError, diagnostic.RefusedError) as error:
+        raw = diagnostic.encoded(diagnostic.failure_receipt(progress, error))
+        if arguments.failure_output is not None:
+            with suppress(OSError):
+                arguments.failure_output.write_bytes(raw)
+        sys.stdout.buffer.write(raw)
         return 1
     return 0
 

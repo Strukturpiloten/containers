@@ -19,10 +19,12 @@ import yaml
 
 from scripts import docker_userns_active as active
 from scripts import docker_userns_active_bootstrap_bundle as producer
-from tests.test_docker_userns_qualification import binding
+from tests.test_docker_userns_qualification import PRIVATE, binding
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+    from scripts.docker_userns_active_client import ActiveClient
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -823,6 +825,7 @@ class ConcreteBoundedOperations(unittest.TestCase):
 
     def test_actual_private_image_identity_must_match_before_loading(self) -> None:
         port = active.RootPort.__new__(active.RootPort)
+        port.record = {}
         port.binding = binding()
         image = {
             "Id": binding().config_digest,
@@ -1328,6 +1331,626 @@ class DurableTerminalCancellation(unittest.TestCase):
         self.assertTrue(fixture.path.is_dir())
         self.assertTrue((fixture.path / "owner-closed.json").is_file())
         self.assertTrue((fixture.path / "owner-retained.json").is_file())
+
+
+class TrustedOsReleaseAlias(unittest.TestCase):
+    def test_reviewed_alias_uses_strict_canonical_read_and_refuses_unsafe_mutable_or_missing_target(self) -> None:
+        import stat  # noqa: PLC0415
+
+        from scripts import docker_userns_hosted as host  # noqa: PLC0415
+
+        for fault in (None, "alias-owner", "target-mode", "target-mutation", "alias-mutation", "missing-target"):
+            with self.subTest(fault=fault):
+                self._alias_case(fault, host, stat)
+
+    def _alias_case(self, fault: str | None, host: object, stat: object) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "etc").mkdir()
+            (root / "lib").mkdir()
+            target = root / "lib/os-release"
+            target.write_bytes(b'ID=ubuntu\nVERSION_ID="26.04"\n')
+            target.chmod(0o400)
+            second = root / "lib/other-release"
+            second.write_bytes(b"ID=other\n")
+            second.chmod(0o400)
+            alias = root / "etc/os-release"
+            alias.symlink_to("../lib/os-release")
+            self._prepare_alias_fault(fault, target)
+            original_lstat, original_fstat = Path.lstat, os.fstat
+            original_safe, original_read, original_bytes = host.safe_path, host.read_root, host.child.bytes_at
+
+            def trusted(info: os.stat_result, path: Path | None = None) -> SimpleNamespace:
+                fields = {name: getattr(info, name) for name in dir(info) if name.startswith("st_")}
+                fields["st_uid"] = 1000 if fault == "alias-owner" and path == alias else 0
+                if path is not None and path != root and root not in path.parents and stat.S_ISDIR(info.st_mode):
+                    fields["st_mode"] &= ~0o022
+                return SimpleNamespace(**fields)
+
+            def lstat(path: Path) -> SimpleNamespace:
+                return trusted(original_lstat(path), path)
+
+            def resolve(path: Path, *args: object, **kwargs: object) -> Path:
+                return original_safe(alias if path == Path("/etc/os-release") else path, *args, **kwargs)
+
+            def bounded(descriptor: int, limit: int, **kwargs: object) -> bytes:
+                raw = original_bytes(descriptor, limit, **kwargs)
+                if fault == "target-mutation":
+                    target.chmod(0o600)
+                    target.write_bytes(b"changed\n")
+                    target.chmod(0o400)
+                return raw
+
+            def read(path: Path, *args: object, **kwargs: object) -> tuple[bytes, object]:
+                self.assertEqual(path, target)
+                result = original_read(path, *args, **kwargs)
+                if fault == "alias-mutation":
+                    alias.unlink()
+                    alias.symlink_to("../lib/other-release")
+                return result
+
+            with (
+                patch.object(Path, "lstat", autospec=True, side_effect=lstat),
+                patch.object(host.os, "fstat", side_effect=lambda descriptor: trusted(original_fstat(descriptor))),
+                patch.object(host, "safe_path", side_effect=resolve),
+                patch.object(host, "read_root", side_effect=read),
+                patch.object(host.child, "bytes_at", side_effect=bounded),
+            ):
+                if fault is None:
+                    raw, identity = active.os_release(SimpleNamespace(host=host))
+                    self.assertEqual(raw, b'ID=ubuntu\nVERSION_ID="26.04"\n')
+                    self.assertEqual(identity.owner, 0)
+                else:
+                    with self.assertRaises(
+                        (OSError, active.RefusedError, host.custody.CustodyError, host.child.ChildError)
+                    ):
+                        active.os_release(SimpleNamespace(host=host))
+
+    @staticmethod
+    def _prepare_alias_fault(fault: str | None, target: Path) -> None:
+        if fault == "target-mode":
+            target.chmod(0o422)
+        if fault == "missing-target":
+            target.unlink()
+
+
+def failure_port() -> active.RootPort:
+    """Use actual journal persistence/retention with inert external-effect ports."""
+    from scripts import docker_userns_qualification as qualification  # noqa: PLC0415
+
+    port = active.RootPort.__new__(active.RootPort)
+    port.binding = binding()
+    port.record = {
+        "state": "prepared",
+        "lastDurablePhase": "prepared",
+        "lastIntent": None,
+        "attemptedPhase": None,
+        "generation": 0,
+        "readerPending": False,
+        "childPending": False,
+        "retained": False,
+        "diagnostic": {"phase": "admission", "comparisons": {}},
+    }
+    port.durable = "prepared", None
+    port.store = SimpleNamespace(write=Mock())
+    port.clean_owner = lambda _binding: None
+    port.arm = lambda _binding: port.record.update(ownerReady=True)
+    port.guard = lambda _binding: None
+    port.load = Mock()
+    port.modules = SimpleNamespace(qualification=qualification)
+    return port
+
+
+class BoundedFailureJournal(unittest.TestCase):
+    def test_distinct_failure_boundaries_preserve_intent_and_never_authorize_unknown_cleanup(self) -> None:
+        for fault, expected_state, expected_intent, phase in (
+            ("admission", "prepared", None, "admission"),
+            ("owner", "arm-intent", "arm-intent", "owner-active"),
+            ("before-load", "armed", "arm-intent", "namespace"),
+            ("after-parser", "load-intent", "load-intent", "registry-present"),
+        ):
+            with self.subTest(fault=fault):
+                self._boundary_case(fault, (expected_state, expected_intent, phase))
+
+    def _boundary_case(self, fault: str, expected: tuple[str, str | None, str]) -> None:
+        import errno  # noqa: PLC0415
+
+        from scripts import docker_userns_qualification as qualification  # noqa: PLC0415
+
+        expected_state, expected_intent, phase = expected
+        port = failure_port()
+        parser = Mock()
+
+        def admit(_binding: object) -> None:
+            port.point("admission")
+            if fault == "admission":
+                raise PermissionError(errno.EACCES, PRIVATE)
+
+        def arm(_binding: object) -> None:
+            port.point("owner-active")
+            port.record["ownerIntents"] = {"owner": {}}
+            port.commit()
+            if fault == "owner":
+                raise FileNotFoundError(errno.ENOENT, PRIVATE)
+            port.record["ownerReady"] = True
+
+        def guard(_binding: object) -> None:
+            if fault == "before-load":
+                port.point("namespace")
+                raise active.RefusedError(PRIVATE)
+
+        def load() -> None:
+            port.point("parser-add")
+            parser()
+            active.comparison(port.point("registry-present"), "registry-present", matched=False)
+
+        port.admit, port.arm, port.guard, port.load = admit, arm, guard, load
+        lease = qualification.ProfileLease(binding(), port)
+        with self.assertRaises((active.RefusedError, OSError)) as raised:
+            lease.prepare()
+        before = port.record["lastDurablePhase"], port.record["lastIntent"]
+        port.retain()
+        self.assertEqual(before, (expected_state, expected_intent))
+        self.assertEqual((port.record["lastDurablePhase"], port.record["lastIntent"]), before)
+        self.assertEqual(port.record["state"], "retained")
+        with self.assertRaises(active.RefusedError):
+            port.persist(qualification.State.LOADED, None)
+        with self.assertRaises(qualification.QualificationError):
+            lease.close()
+        value = active.failure_receipt(
+            {
+                "actor": "root",
+                "operation": "prepare",
+                "binding": binding(),
+                "sourceVerified": True,
+                "sourceManifestSha256": active.SOURCE_MANIFEST_SHA256,
+                "lease": "f" * 32,
+                "record": port.record,
+            },
+            raised.exception,
+        )
+        self.assertTrue(active.valid_failure(value))
+        self.assertEqual(value["phase"], phase)
+        self.assertEqual(value["lastDurablePhase"], expected_state)
+        self.assertEqual(value["lastIntent"], expected_intent)
+        self.assertFalse(value["cleanupAuthority"])
+        self.assertNotIn(PRIVATE, active.encoded(value).decode())
+        self.assertEqual(parser.call_count, 1 if fault == "after-parser" else 0)
+
+    def test_partial_preflight_records_only_already_completed_safe_comparisons(self) -> None:
+        import errno  # noqa: PLC0415
+
+        from scripts import docker_userns_qualification as qualification  # noqa: PLC0415
+
+        admission = (ROOT / ".github/docker-userns-active-admission.json").read_bytes()
+        manifest = (ROOT / ".github/docker-userns-policy-source.json").read_bytes()
+        context = SyntheticProof().context
+        context.update(candidate="a" * 40, workflow="a" * 40, checkout="a" * 40)
+        progress: dict[str, object] = {}
+        host = SimpleNamespace(
+            safe_path=Mock(return_value=Path("/canonical/os-release")),
+            read_root=Mock(
+                side_effect=[(b'ID=ubuntu\nVERSION_ID="26.04"\n', None), PermissionError(errno.EACCES, PRIVATE)]
+            ),
+        )
+        modules = SimpleNamespace(
+            host=host,
+            qualification=SimpleNamespace(
+                validation_profile=qualification.validation_profile,
+                observe_controls=Mock(
+                    return_value=qualification.HostControls(
+                        enabled=True, restricted_userns=1, maximum_userns=1024, legacy_clone=None
+                    )
+                ),
+            ),
+        )
+        cohort = json.loads(admission)["cohort"]
+        with (
+            patch.object(
+                active,
+                "root_bytes",
+                side_effect=lambda path, *_args: admission if path.name.endswith("active-admission.json") else manifest,
+            ),
+            patch.object(
+                active.os, "uname", return_value=SimpleNamespace(machine=cohort["machine"], release=cohort["kernel"])
+            ),
+            patch.object(active, "check"),
+            self.assertRaises(PermissionError),
+        ):
+            active.root_preflight(ROOT, {"context": context, "deadlineNs": 10**18}, modules, progress=progress)
+        self.assertEqual(progress["phase"], "preflight-parser-hash")
+        self.assertEqual(
+            progress["comparisons"],
+            dict.fromkeys(
+                (
+                    "preflight-source",
+                    "preflight-os-release",
+                    "preflight-os-values",
+                    "preflight-host",
+                    "preflight-controls",
+                ),
+                True,
+            ),
+        )
+        self.assertNotIn(PRIVATE, json.dumps(progress))
+
+    def test_failed_durable_write_preserves_last_acknowledged_intent_and_retention_latch(self) -> None:
+        from scripts import docker_userns_qualification as qualification  # noqa: PLC0415
+
+        port = failure_port()
+        port.store.write.side_effect = OSError("private filesystem failure")
+        with self.assertRaises(OSError):
+            port.persist(qualification.State.ARM_INTENT, None)
+        self.assertEqual(port.record["lastDurablePhase"], "prepared")
+        self.assertIsNone(port.record["lastIntent"])
+        self.assertEqual(port.record["attemptedPhase"], "arm-intent")
+        self.assertTrue(port.record["durabilityUnknown"])
+        port.store.write.side_effect = None
+        port.retain()
+        self.assertTrue(port.record["retained"])
+        self.assertEqual(port.record["lastDurablePhase"], "prepared")
+        self.assertIsNone(port.record["lastIntent"])
+        projected = active.failure_receipt(
+            {
+                "actor": "root",
+                "operation": "prepare",
+                "binding": binding(),
+                "sourceVerified": True,
+                "sourceManifestSha256": active.SOURCE_MANIFEST_SHA256,
+                "record": port.record,
+            },
+            OSError("private fsync failure"),
+        )
+        self.assertTrue(active.valid_failure(projected))
+        self.assertEqual(projected["lastDurablePhase"], "prepared")
+        self.assertIsNone(projected["lastIntent"])
+        self.assertEqual(projected["attemptedPhase"], "arm-intent")
+        self.assertTrue(projected["durabilityUnknown"])
+        self.assertFalse(projected["cleanupAuthority"])
+
+
+def client_fixture(directory: Path) -> ActiveClient:
+    """Construct the unprivileged response boundary without launching a root command."""
+    from scripts.docker_userns_active_client import ActiveClient  # noqa: PLC0415
+
+    client = ActiveClient.__new__(ActiveClient)
+    client.binding, client.stage, client.name = binding(), Path("/run/containers-userns-active." + "e" * 32), "new"
+    client.provenance = {
+        "validationProfile": "docker-rootless-diagnostic",
+        "validationProfileRequested": "docker-rootless-diagnostic",
+    }
+    client.evidence, client.failures = {}, []
+    client.ctx = SimpleNamespace(
+        checks=[],
+        scoped_failure_output=directory / "failure.json",
+        backend=SimpleNamespace(
+            privileged=lambda command, _seconds: command,
+            directory=directory,
+            timeout_executable=lambda: "/usr/bin/timeout",
+        ),
+    )
+    return client
+
+
+def bound_root_failure() -> dict[str, object]:
+    """Use a real finite failure projection from an unknown load-intent record."""
+    record = {
+        "state": "retained",
+        "lastDurablePhase": "load-intent",
+        "lastIntent": "load-intent",
+        "attemptedPhase": "load-intent",
+        "retained": True,
+        "readerPending": True,
+        "childPending": False,
+        "ownerReady": True,
+        "diagnostic": {"phase": "parser-add", "comparisons": {"preflight-source": True}},
+    }
+    return active.failure_receipt(
+        {
+            "actor": "root",
+            "operation": "prepare",
+            "binding": binding(),
+            "sourceVerified": True,
+            "sourceManifestSha256": active.SOURCE_MANIFEST_SHA256,
+            "record": record,
+            "lease": "f" * 32,
+        },
+        active.RefusedError(PRIVATE),
+    )
+
+
+class FailureTransport(unittest.TestCase):
+    def test_nonzero_error_is_captured_before_teardown_and_reporting_lease_grants_no_cleanup(self) -> None:
+        from scripts.runtime_docker_backend import DockerBackend, DockerBackendError  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            client = client_fixture(directory)
+            value = bound_root_failure()
+
+            def command(_name: str, _command: list[str], **kwargs: object) -> str:
+                self.assertFalse(kwargs["check"])
+                client.ctx.checks.append(
+                    {"exitCode": 1, "status": "failed", "stdout": PRIVATE, "stderr": PRIVATE, "error": PRIVATE}
+                )
+                return json.dumps(value)
+
+            client.ctx.command = Mock(side_effect=command)
+            with self.assertRaises(ValueError):
+                client.prepare()
+            self.assertEqual(client.name, "new")
+            self.assertEqual(client.evidence["failures"][0], value)
+            self.assertEqual(value["reportingLease"], "f" * 32)
+            self.assertFalse(value["cleanupAuthority"])
+            self.assertNotIn(PRIVATE, client.ctx.scoped_failure_output.read_text())
+            self.assertNotIn(PRIVATE, json.dumps(client.ctx.checks))
+            from scripts import evidence_gate  # noqa: PLC0415
+
+            record, phase = QualificationEvidence().fixture()
+            phase["scopedProfile"] = client.evidence
+            with patch.dict(os.environ, {}, clear=True), self.assertRaises(evidence_gate.EvidenceError):
+                evidence_gate._scoped_phase(record, phase)
+            backend = DockerBackend(directory, ())
+            backend.ready, backend.scoped_profile = True, client
+            backend._remove_containers, backend._remove_network, backend._remove_images, backend.stop_services = (
+                Mock(),
+                Mock(),
+                Mock(),
+                Mock(),
+            )
+            with self.assertRaises(DockerBackendError):
+                backend.cleanup(client.ctx)
+            client.ctx.command.assert_called_once()
+            backend.stop_services.assert_not_called()
+            backend._remove_network.assert_not_called()
+            self.assertTrue(directory.is_dir())
+
+    def test_malformed_oversized_mismatched_and_error_on_success_exit_all_fail_closed(self) -> None:
+        values: list[tuple[object, str]] = [
+            (PRIVATE, "malformed-receipt"),
+            (PRIVATE * active.MAX_STATE, "oversized-receipt"),
+            ([PRIVATE], "malformed-receipt"),
+        ]
+        for key, replacement in (
+            ("bindingSha256", "0" * 64),
+            ("sourceManifestSha256", "0" * 64),
+            ("operation", "close"),
+            ("phase", [PRIVATE]),
+            ("comparisons", {PRIVATE: True}),
+            ("cleanupAuthority", True),
+            ("schemaVersion", True),
+        ):
+            value = bound_root_failure()
+            value[key] = replacement
+            values.append((value, "receipt-mismatch"))
+        for raw, reason in values:
+            with self.subTest(reason=reason), tempfile.TemporaryDirectory() as temporary:
+                client = client_fixture(Path(temporary))
+                client.ctx.command = Mock(return_value=raw if type(raw) is str else json.dumps(raw))
+                with self.assertRaises(ValueError):
+                    client.rpc("prepare", {})
+                failure = client.evidence["failures"][0]
+                self.assertEqual(failure["actor"], "client")
+                self.assertEqual(failure["reason"], reason)
+                self.assertNotIn(PRIVATE, client.ctx.scoped_failure_output.read_text())
+                self.assertEqual(client.name, "new")
+        with tempfile.TemporaryDirectory() as temporary:
+            client = client_fixture(Path(temporary))
+            client.ctx.command = Mock(return_value=json.dumps(bound_root_failure()))
+            client.ctx.checks.append({"exitCode": 0})
+            with self.assertRaises(ValueError):
+                client.rpc("prepare", {})
+            self.assertEqual(client.evidence["status"], "failed")
+
+    def test_producer_and_bootstrap_emit_only_executed_closed_failure_receipts(self) -> None:
+        import io  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "failure.json"
+            stdout = SimpleNamespace(buffer=io.BytesIO())
+            with (
+                patch.object(producer, "bundle", side_effect=PermissionError(13, PRIVATE)),
+                patch.object(
+                    producer.sys,
+                    "argv",
+                    [
+                        "producer",
+                        "--architecture",
+                        "amd64",
+                        "--output",
+                        str(Path(temporary) / "bundle.json"),
+                        "--failure-output",
+                        str(output),
+                    ],
+                ),
+                patch.object(producer.sys, "stdout", stdout),
+            ):
+                self.assertEqual(producer.main(), 1)
+            value = json.loads(output.read_bytes())
+            self.assertEqual(value["actor"], "producer")
+            self.assertEqual(value["phase"], "producer-context")
+            self.assertEqual(value["reason"], "permission-denied")
+            self.assertNotIn(PRIVATE, stdout.buffer.getvalue().decode())
+            scope = literal_namespace()
+            scope["sys"] = SimpleNamespace(stdout=SimpleNamespace(buffer=io.BytesIO()))
+            scope["failure"](PermissionError(13, PRIVATE))
+            emitted = scope["sys"].stdout.buffer.getvalue()
+            value = json.loads(emitted)
+            self.assertTrue(active.valid_failure(value))
+            self.assertEqual(value["actor"], "root-bootstrap")
+            self.assertEqual(value["phase"], "bootstrap-entry")
+            self.assertIsNone(value["context"])
+            self.assertNotIn(PRIVATE, emitted.decode())
+
+
+class FailureBoundaryEmission(unittest.TestCase):
+    def test_root_catch_emits_bound_journal_without_exception_text(self) -> None:
+        import io  # noqa: PLC0415
+        from contextlib import nullcontext  # noqa: PLC0415
+
+        stdout = SimpleNamespace(buffer=io.BytesIO())
+        context = SyntheticProof().context
+        context.update(candidate="a" * 40, workflow="a" * 40, checkout="a" * 40)
+        bootstrap = {
+            "context": context,
+            "files": {".github/docker-userns-policy-source.json": active.SOURCE_MANIFEST_SHA256},
+        }
+
+        def refuse(_stage: Path, _bootstrap: object, _modules: object, route: object) -> object:
+            route.diagnostic.update(
+                binding=binding(),
+                lease="f" * 32,
+                record={
+                    "lastDurablePhase": "arm-intent",
+                    "lastIntent": "arm-intent",
+                    "readerPending": True,
+                    "childPending": False,
+                    "retained": True,
+                    "diagnostic": {"phase": "owner-active", "comparisons": {"preflight-source": True}},
+                },
+            )
+            raise PermissionError(13, PRIVATE)
+
+        with (
+            patch.object(active.sys, "argv", ["root", "prepare", "/run/unused-stage"]),
+            patch.object(active.sys, "stdout", stdout),
+            patch.object(active, "verify_stage", return_value=bootstrap),
+            patch.object(active, "dependencies", return_value=SimpleNamespace()),
+            patch.object(active, "stage_lock", return_value=nullcontext()),
+            patch.object(active, "root_rpc", side_effect=refuse),
+        ):
+            self.assertEqual(active.main(), 1)
+        value = json.loads(stdout.buffer.getvalue())
+        self.assertTrue(active.valid_failure(value))
+        self.assertEqual(value["actor"], "root")
+        self.assertEqual(value["bindingSha256"], binding().digest())
+        self.assertEqual(value["phase"], "owner-active")
+        self.assertEqual(value["lastIntent"], "arm-intent")
+        self.assertEqual(value["reason"], "permission-denied")
+        self.assertNotIn(PRIVATE, stdout.buffer.getvalue().decode())
+
+    def test_always_upload_covers_pre_runtime_producer_and_bootstrap_failure_files(self) -> None:
+        action = yaml.safe_load((ROOT / ".github/actions/build-arch-image/action.yml").read_text())
+        runtime = next(step for step in action["runs"]["steps"] if step.get("name") == "Verify image runtime")
+        upload = next(step for step in action["runs"]["steps"] if step.get("name") == "Upload runtime evidence")
+        self.assertIn("always()", upload["if"])
+        self.assertIn("-userns-failure.json", upload["with"]["path"])
+        self.assertIn('--failure-output "${active_failure}"', runtime["run"])
+        self.assertIn('if active_stage="$(sudo', runtime["run"])
+        self.assertIn("execution-unverified", runtime["run"])
+        self.assertIn('value["actor"]!="root-bootstrap"', runtime["run"])
+        self.assertIn("failure(error)", runtime["env"]["FIXED_ACTIVE_ROOT_BOOTSTRAP"])
+
+
+class InitialJournalDurability(unittest.TestCase):
+    def test_initial_success_acknowledges_only_after_store_returns(self) -> None:
+        record = {"state": "prepared", "lastDurablePhase": "prepared", "lastIntent": None, "durabilityUnknown": False}
+        progress: dict[str, object] = {}
+
+        def write(value: dict[str, object]) -> None:
+            self.assertIs(progress["record"], value)
+            self.assertIsNone(value["lastDurablePhase"])
+            self.assertTrue(value["durabilityUnknown"])
+
+        active.initialize_record(SimpleNamespace(write=Mock(side_effect=write)), record, progress)
+        self.assertEqual(record["lastDurablePhase"], "prepared")
+        self.assertIsNone(record["lastIntent"])
+        self.assertFalse(record["durabilityUnknown"])
+
+    def test_initial_replace_then_directory_fsync_failure_keeps_known_record_and_unknown_ack(self) -> None:
+        import errno  # noqa: PLC0415
+        from dataclasses import asdict  # noqa: PLC0415
+
+        from scripts import docker_userns_qualification as qualification  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory() as temporary:
+            stage = Path(temporary)
+            path = stage / "leases" / ("f" * 32)
+            path.mkdir(parents=True)
+            (path / "lock").write_bytes(b"")
+            store = active.Store.__new__(active.Store)
+            store.path = path
+            info = path.stat()
+            store.identity = info.st_dev, info.st_ino
+            store.descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+            store.lock = os.open(path / "lock", os.O_RDWR)
+            record = {
+                "binding": asdict(binding()),
+                "state": "prepared",
+                "lastDurablePhase": "prepared",
+                "lastIntent": None,
+                "attemptedPhase": None,
+                "durabilityUnknown": False,
+                "readerPending": False,
+                "childPending": False,
+                "retained": False,
+                "diagnostic": {"phase": "store-open", "comparisons": {}},
+            }
+            progress = {
+                "actor": "root",
+                "operation": "prepare",
+                "sourceVerified": True,
+                "sourceManifestSha256": active.SOURCE_MANIFEST_SHA256,
+            }
+            route = SimpleNamespace(operation="prepare", name="new", request="e30=", diagnostic=progress)
+            real_replace, real_fsync = os.replace, os.fsync
+            replacements: list[bool] = []
+
+            def replace(*args: object, **kwargs: object) -> None:
+                real_replace(*args, **kwargs)
+                replacements.append(True)
+
+            def fsync(descriptor: int) -> None:
+                if descriptor == store.descriptor and replacements:
+                    raise OSError(errno.EIO, PRIVATE)
+                real_fsync(descriptor)
+
+            def prepared(*_args: object, **kwargs: object) -> dict[str, object]:
+                kwargs["progress"]["binding"] = binding()
+                return record
+
+            with (
+                patch.object(active, "Store", return_value=store),
+                patch.object(active.secrets, "token_hex", return_value="f" * 32),
+                patch.object(active, "new_record", side_effect=prepared),
+                patch.object(active, "RootPort") as root_port,
+                patch.object(active.os, "replace", side_effect=replace),
+                patch.object(active.os, "fsync", side_effect=fsync),
+                self.assertRaises(OSError) as raised,
+            ):
+                active.root_rpc(stage, {}, SimpleNamespace(qualification=qualification), route)
+            self.assertEqual(replacements, [True])
+            self.assertTrue((path / "state.json").is_file())
+            self.assertEqual(
+                {
+                    key: json.loads((path / "state.json").read_bytes())[key]
+                    for key in ("lastDurablePhase", "durabilityUnknown")
+                },
+                {"lastDurablePhase": None, "durabilityUnknown": True},
+            )
+            self.assertIs(progress["record"], record)
+            self.assertEqual(
+                (
+                    record["durabilityUnknown"],
+                    record["lastDurablePhase"],
+                    record["lastIntent"],
+                    record["attemptedPhase"],
+                ),
+                (True, None, None, "prepared"),
+            )
+            root_port.assert_not_called()
+            value = active.failure_receipt(progress, raised.exception)
+            self.assertTrue(active.valid_failure(value))
+            self.assertEqual(value["context"]["phase"], binding().phase)
+            self.assertEqual(value["bindingSha256"], binding().digest())
+            self.assertTrue(value["durabilityUnknown"])
+            self.assertIsNone(value["lastDurablePhase"])
+            self.assertIsNone(value["lastIntent"])
+            self.assertFalse(value["readerPending"])
+            self.assertFalse(value["childPending"])
+            self.assertEqual(value["ownerDisposition"], "not-recorded")
+            self.assertFalse(value["cleanupAuthority"])
+            self.assertNotIn(PRIVATE, active.encoded(value).decode())
 
 
 if __name__ == "__main__":

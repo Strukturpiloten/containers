@@ -68,6 +68,303 @@ FILES = (
 )
 
 
+FAILURE_PHASES = frozenset(
+    {
+        "unknown",
+        "bootstrap-entry",
+        "bootstrap-context",
+        "bootstrap-proof",
+        "bootstrap-stage",
+        "producer-launch",
+        "bootstrap-launch",
+        "stage-verification",
+        "helper-import",
+        "request-binding",
+        "store-open",
+        "coordinator-proof",
+        "admission",
+        "preflight-source",
+        "preflight-os-release",
+        "preflight-os-values",
+        "preflight-host",
+        "preflight-controls",
+        "preflight-parser-hash",
+        "preflight-abi-hash",
+        "preflight-namespace-mask",
+        "preflight-policy-v9",
+        "preflight-python-hash",
+        "preflight-capabilities",
+        "preflight-parser-version",
+        "daemon",
+        "image",
+        "builder",
+        "compile",
+        "owner-probe",
+        "owner-active",
+        "namespace",
+        "parser-add",
+        "parser-remove",
+        "registry-absent",
+        "registry-present",
+        "subject",
+        "guest-absence",
+        "profile-absence",
+        "dispose",
+        "producer-context",
+        "producer-source",
+        "producer-proof",
+        "producer-output",
+        "client-response",
+        "prepared",
+        "arm-intent",
+        "armed",
+        "load-intent",
+        "loaded",
+        "create-intent",
+        "attached",
+        "remove-intent",
+        "removed",
+        "unload-intent",
+        "closed",
+        "retained",
+    }
+)
+FAILURE_REASONS = frozenset(
+    {
+        "refused",
+        "permission-denied",
+        "missing",
+        "unsafe-link",
+        "busy",
+        "timeout",
+        "cancelled",
+        "invalid-data",
+        "unavailable-api",
+        "os-error",
+        "unexpected",
+        "malformed-receipt",
+        "oversized-receipt",
+        "receipt-mismatch",
+        "execution-unverified",
+    }
+)
+FAILURE_OPERATIONS = frozenset(
+    {"prepare", "create-intent", "bind", "close", "compile", "owner", "dispose-stage", "producer", "bootstrap"}
+)
+FAILURE_CONTEXT = ("candidate", "run", "attempt", "job", "image", "architecture", "phase")
+FAILURE_STATES = frozenset(
+    {
+        "prepared",
+        "arm-intent",
+        "armed",
+        "load-intent",
+        "loaded",
+        "create-intent",
+        "attached",
+        "remove-intent",
+        "removed",
+        "unload-intent",
+        "closed",
+        "retained",
+    }
+)
+SOURCE_MANIFEST_SHA256 = "7f6693f40311617e4854f8c6a35cbe13b3afdd3d7a8bef58978397ba1178dbd8"
+MAX_FAILURE = 8192
+
+
+def failure_reason(error: BaseException) -> str:
+    """Classify only exception type/errno; never serialize exception text or operands."""
+    if isinstance(error, KeyboardInterrupt):
+        return "cancelled"
+    if isinstance(error, OSError):
+        return {
+            errno.EACCES: "permission-denied",
+            errno.EPERM: "permission-denied",
+            errno.ENOENT: "missing",
+            errno.ELOOP: "unsafe-link",
+            errno.EAGAIN: "busy",
+            errno.ETIMEDOUT: "timeout",
+        }.get(error.errno, "os-error")
+    if isinstance(error, AttributeError):
+        return "unavailable-api"
+    if isinstance(error, (ValueError, TypeError, KeyError, UnicodeError)):
+        return "invalid-data"
+    return (
+        "refused"
+        if isinstance(error, RefusedError)
+        or type(error).__name__ in {"QualificationError", "CustodyError", "ChildError"}
+        else "unexpected"
+    )
+
+
+def failure_context(value: dict[str, Any], phase: str | None = None) -> dict[str, Any] | None:
+    """Project already validated routing identity without exporting native paths or host values."""
+    context = {key: value.get(key) for key in FAILURE_CONTEXT}
+    context["phase"] = phase
+    if not (
+        type(context["candidate"]) is str
+        and re.fullmatch(r"[0-9a-f]{40}", context["candidate"])
+        and all(
+            type(context[key]) is str and re.fullmatch(r"[1-9][0-9]{0,19}", context[key]) for key in ("run", "attempt")
+        )
+        and context["job"] == "smoke-build"
+        and context["image"] == "docker-29-conformance-rootless"
+        and context["architecture"] in {"amd64", "arm64"}
+        and phase in {None, "clean-control", "enforcement"}
+    ):
+        return None
+    return context
+
+
+def _failure_receipt(progress: dict[str, Any], error: BaseException) -> dict[str, Any]:
+    """Render only bounded finite observations from the existing operation journal."""
+    record = progress.get("record") or {}
+    diagnostic = record.get("diagnostic", progress)
+    binding = progress.get("binding")
+    context = (
+        failure_context(asdict(binding), binding.phase)
+        if binding is not None
+        else failure_context(progress.get("context", {}))
+    )
+    source_hash = progress.get("sourceManifestSha256")
+    lease = progress.get("lease")
+    phase = diagnostic.get("phase", "unknown")
+    comparisons = {
+        key: value
+        for key, value in diagnostic.get("comparisons", {}).items()
+        if key in FAILURE_PHASES and type(value) is bool
+    }
+    owner = (
+        "terminated"
+        if record.get("ownerTerminationVerified") is True
+        else (
+            "last-recorded-ready"
+            if record.get("ownerReady") is True
+            else "intent-recorded"
+            if record.get("ownerIntents")
+            else "not-recorded"
+        )
+    )
+    return {
+        "schemaVersion": 1,
+        "consumer": CONSUMER,
+        "kind": "active-qualification-failure",
+        "actor": progress.get("actor")
+        if progress.get("actor") in {"root", "root-bootstrap", "workflow", "producer", "client"}
+        else "root",
+        "operation": progress.get("operation") if progress.get("operation") in FAILURE_OPERATIONS else "prepare",
+        "phase": phase if phase in FAILURE_PHASES else "unknown",
+        "reason": failure_reason(error),
+        "context": context,
+        "bindingSha256": binding.digest() if binding is not None else None,
+        "sourceVerified": progress.get("sourceVerified") is True,
+        "bindingVerified": binding is not None,
+        "sourceManifestSha256": source_hash
+        if type(source_hash) is str and re.fullmatch(r"[0-9a-f]{64}", source_hash)
+        else None,
+        "reportingLease": lease
+        if binding is not None and type(lease) is str and re.fullmatch(r"[0-9a-f]{32}", lease)
+        else None,
+        "lastDurablePhase": record.get("lastDurablePhase")
+        if record.get("lastDurablePhase") in FAILURE_STATES
+        else None,
+        "lastIntent": record.get("lastIntent") if record.get("lastIntent") in FAILURE_STATES else None,
+        "attemptedPhase": record.get("attemptedPhase") if record.get("attemptedPhase") in FAILURE_STATES else None,
+        "durabilityUnknown": record.get("durabilityUnknown") is True,
+        "readerPending": record.get("readerPending") if type(record.get("readerPending")) is bool else None,
+        "childPending": record.get("childPending") if type(record.get("childPending")) is bool else None,
+        "ownerDisposition": owner,
+        "comparisons": comparisons,
+        "retained": record.get("retained") if type(record.get("retained")) is bool else None,
+        "cleanupAuthority": False,
+    }
+
+
+def failure_receipt(progress: dict[str, Any], error: BaseException) -> dict[str, Any]:
+    """Never let malformed diagnostic state turn the error boundary into a traceback."""
+    try:
+        return _failure_receipt(progress, error)
+    except TypeError, ValueError, KeyError, AttributeError:
+        return _failure_receipt({"actor": "root", "phase": "unknown"}, error)
+
+
+def _valid_failure(value: object) -> bool:
+    """Reject malformed/oversized diagnostic envelopes; they never grant admission or cleanup."""
+    if type(value) is not dict or len(encoded(value)) > MAX_FAILURE:
+        return False
+    template = failure_receipt({}, RefusedError())
+    if set(value) != set(template):
+        return False
+    context = value["context"]
+    return (
+        type(value["schemaVersion"]) is int
+        and value["schemaVersion"] == 1
+        and value["consumer"] == CONSUMER
+        and value["kind"] == template["kind"]
+        and value["actor"] in {"root", "root-bootstrap", "workflow", "producer", "client"}
+        and value["operation"] in FAILURE_OPERATIONS
+        and value["phase"] in FAILURE_PHASES
+        and value["reason"] in FAILURE_REASONS
+        and value["cleanupAuthority"] is False
+        and (
+            context is None
+            or (
+                type(context) is dict
+                and set(context) == set(FAILURE_CONTEXT)
+                and failure_context(context, context.get("phase")) == context
+            )
+        )
+        and all(type(value[key]) is bool for key in ("sourceVerified", "bindingVerified", "durabilityUnknown"))
+        and all(value[key] is None or type(value[key]) is bool for key in ("readerPending", "childPending", "retained"))
+        and all(
+            value[key] is None or (type(value[key]) is str and re.fullmatch(pattern, value[key]))
+            for key, pattern in (
+                ("bindingSha256", r"[0-9a-f]{64}"),
+                ("sourceManifestSha256", r"[0-9a-f]{64}"),
+                ("reportingLease", r"[0-9a-f]{32}"),
+            )
+        )
+        and all(
+            value[key] is None or value[key] in FAILURE_STATES
+            for key in ("lastDurablePhase", "lastIntent", "attemptedPhase")
+        )
+        and value["ownerDisposition"] in {"not-recorded", "intent-recorded", "last-recorded-ready", "terminated"}
+        and type(value["comparisons"]) is dict
+        and all(key in FAILURE_PHASES and type(match) is bool for key, match in value["comparisons"].items())
+        and (
+            not value["bindingVerified"]
+            or (context is not None and value["bindingSha256"] is not None and context["phase"] is not None)
+        )
+        and (not value["sourceVerified"] or (value["sourceManifestSha256"] is not None and context is not None))
+        and (value["reportingLease"] is None or (value["bindingVerified"] and value["sourceVerified"]))
+    )
+
+
+def valid_failure(value: object) -> bool:
+    """Keep every malformed protocol refusal closed, including wrong nested types."""
+    try:
+        return _valid_failure(value)
+    except TypeError, ValueError, KeyError, RefusedError:
+        return False
+
+
+def comparison(progress: dict[str, Any], phase: str, matched: object) -> None:
+    """Record an existing comparison before refusing; never collect additional facts."""
+    require(phase in FAILURE_PHASES)
+    progress["phase"] = phase
+    progress.setdefault("comparisons", {})[phase] = bool(matched)
+    require(matched)
+
+
+def os_release(modules: SimpleNamespace) -> tuple[bytes, Any]:
+    """Resolve the reviewed root alias, then retain the strict canonical bounded reader."""
+    alias = Path("/etc/os-release")
+    canonical = modules.host.safe_path(alias)
+    raw, identity = modules.host.read_root(canonical, 8192)
+    require(modules.host.safe_path(alias) == canonical)
+    return raw, identity
+
+
 class RefusedError(Exception):
     """A closed refusal; raw paths, labels, exceptions and tool output remain private."""
 
@@ -272,8 +569,12 @@ class Clock:
         return time.monotonic_ns()
 
 
-def root_preflight(stage: Path, bootstrap: dict[str, Any], modules: SimpleNamespace) -> dict[str, Any]:
+def root_preflight(
+    stage: Path, bootstrap: dict[str, Any], modules: SimpleNamespace, *, progress: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Check actual fixed OS/tool/content facts, separate from workflow provenance."""
+    progress = {} if progress is None else progress
+    progress["phase"] = "preflight-source"
     context = bootstrap["context"]
     admission = json.loads(root_bytes(stage / ".github/docker-userns-active-admission.json"), object_pairs_hook=unique)
     require(
@@ -298,7 +599,12 @@ def root_preflight(stage: Path, bootstrap: dict[str, Any], modules: SimpleNamesp
         and admission["purpose"] == "single-candidate-qualification"
         and admission["qualification"] == "none"
     )
-    require(digest(root_bytes(stage / ".github/docker-userns-policy-source.json")) == admission["sourceManifestSha256"])
+    comparison(
+        progress,
+        "preflight-source",
+        digest(root_bytes(stage / ".github/docker-userns-policy-source.json")) == admission["sourceManifestSha256"],
+    )
+    progress["phase"] = "admission"
     expected = admission["context"]
     require(
         context["repository"] == expected["repository"] == "Strukturpiloten/containers"
@@ -315,48 +621,32 @@ def root_preflight(stage: Path, bootstrap: dict[str, Any], modules: SimpleNamesp
         and re.fullmatch(r"[0-9]{8}\.[0-9]+\.[0-9]+", context["imageVersion"])
     )
     cohort = admission["cohort"]
-    distro_raw, _ = modules.host.read_root(Path("/etc/os-release"), 8192)
+    progress["phase"] = "preflight-os-release"
+    distro_raw, _ = os_release(modules)
+    comparison(progress, "preflight-os-release", matched=True)
     distro = dict(
         line.split("=", 1)
         for line in distro_raw.decode("ascii").splitlines()
         if "=" in line and not line.startswith("#")
     )
-    require(
+    comparison(
+        progress,
+        "preflight-os-values",
         distro.get("ID", "").strip('"') == cohort["osID"] == "ubuntu"
-        and distro.get("VERSION_ID", "").strip('"') == cohort["osVersion"] == "26.04"
+        and distro.get("VERSION_ID", "").strip('"') == cohort["osVersion"] == "26.04",
     )
+    progress["phase"] = "preflight-host"
     actual = os.uname()
     machine = {"amd64": "x86_64", "arm64": "aarch64"}.get(context["architecture"])
     require(actual.machine == machine)
     if context["architecture"] == "amd64":
         require(actual.machine == cohort["machine"] and actual.release == cohort["kernel"])
+    comparison(progress, "preflight-host", matched=True)
+    progress["phase"] = "preflight-controls"
     check(bootstrap["deadlineNs"] - RESERVE_NS)
     controls = modules.qualification.observe_controls(bootstrap["deadlineNs"] - RESERVE_NS)
-    paths = {
-        "parserSha256": (Path("/usr/sbin/apparmor_parser"), 16 * 1024 * 1024),
-        "abiSha256": (Path("/etc/apparmor.d/abi/4.0"), 65536),
-        "namespaceMaskSha256": (Path("/sys/kernel/security/apparmor/features/namespaces/mask"), 4096),
-        "policyVersion9Sha256": (Path("/sys/kernel/security/apparmor/features/policy/versions/v9"), 4096),
-        "interpreterSha256": (Path(PYTHON), 16 * 1024 * 1024),
-    }
-    files = {}
-    for key, (path, limit) in paths.items():
-        raw, identity = modules.host.read_root(path, limit)
-        if context["architecture"] == "amd64" or key not in {"parserSha256", "interpreterSha256"}:
-            require(digest(raw) == cohort[key])
-        if key in {"parserSha256", "interpreterSha256"}:
-            require(raw.startswith(b"\x7fELF") and identity.mode & 0o111 and not identity.mode & 0o7022)
-            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-            try:
-                try:
-                    capabilities = os.getxattr(descriptor, "security.capability")
-                except OSError as error:
-                    require(error.errno == errno.ENODATA)
-                    capabilities = b""
-                require(not capabilities)
-            finally:
-                os.close(descriptor)
-        files[key] = {"sha256": digest(raw), "identity": asdict(identity)}
+    comparison(progress, "preflight-controls", matched=True)
+    files = cohort_files(modules, context, cohort, progress)
     check(bootstrap["deadlineNs"] - RESERVE_NS)
     return {
         "controls": asdict(controls),
@@ -370,6 +660,47 @@ def root_preflight(stage: Path, bootstrap: dict[str, Any], modules: SimpleNamesp
         "validationProfile": context["validationProfile"],
         "validationProfileRequested": context["validationProfileRequested"],
     }
+
+
+def cohort_files(
+    modules: SimpleNamespace, context: dict[str, Any], cohort: dict[str, Any], progress: dict[str, Any]
+) -> dict[str, Any]:
+    """Read the same fixed cohort leaves and retain only completed comparison booleans on failure."""
+    paths = {
+        "parserSha256": (Path("/usr/sbin/apparmor_parser"), 16 * 1024 * 1024),
+        "abiSha256": (Path("/etc/apparmor.d/abi/4.0"), 65536),
+        "namespaceMaskSha256": (Path("/sys/kernel/security/apparmor/features/namespaces/mask"), 4096),
+        "policyVersion9Sha256": (Path("/sys/kernel/security/apparmor/features/policy/versions/v9"), 4096),
+        "interpreterSha256": (Path(PYTHON), 16 * 1024 * 1024),
+    }
+    files = {}
+    phases = {
+        "parserSha256": "preflight-parser-hash",
+        "abiSha256": "preflight-abi-hash",
+        "namespaceMaskSha256": "preflight-namespace-mask",
+        "policyVersion9Sha256": "preflight-policy-v9",
+        "interpreterSha256": "preflight-python-hash",
+    }
+    for key, (path, limit) in paths.items():
+        progress["phase"] = phases[key]
+        raw, identity = modules.host.read_root(path, limit)
+        if context["architecture"] == "amd64" or key not in {"parserSha256", "interpreterSha256"}:
+            comparison(progress, phases[key], digest(raw) == cohort[key])
+        if key in {"parserSha256", "interpreterSha256"}:
+            progress["phase"] = "preflight-capabilities"
+            require(raw.startswith(b"\x7fELF") and identity.mode & 0o111 and not identity.mode & 0o7022)
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            try:
+                try:
+                    capabilities = os.getxattr(descriptor, "security.capability")
+                except OSError as error:
+                    require(error.errno == errno.ENODATA)
+                    capabilities = b""
+                require(not capabilities)
+            finally:
+                os.close(descriptor)
+        files[key] = {"sha256": digest(raw), "identity": asdict(identity)}
+    return files
 
 
 def compile_worker(bootstrap: dict[str, Any], modules: SimpleNamespace, directory: Path) -> dict[str, Any]:
@@ -500,12 +831,26 @@ class RootPort:
         )
         self.work_until = self.binding.deadline_ns - RESERVE_NS - FINALIZER_HEADSTART_NS
         self.cleanup = False
+        self.durable = (record.get("lastDurablePhase", record["state"]), record.get("lastIntent"))
         self.provider = record["timeoutExecutable"]
         require(self.provider in {"/usr/bin/gnutimeout", "/usr/bin/timeout"})
 
     def commit(self) -> None:
         """Preserve all uncertainty before returning any result or acquiring further authority."""
-        self.store.write(self.record)
+        try:
+            self.store.write(self.record)
+        except BaseException:
+            self.record["durabilityUnknown"] = True
+            self.record["lastDurablePhase"], self.record["lastIntent"] = self.durable
+            raise
+        self.durable = self.record.get("lastDurablePhase"), self.record.get("lastIntent")
+
+    def point(self, phase: str) -> dict[str, Any]:
+        """Track the existing operation boundary without performing any probe."""
+        require(phase in FAILURE_PHASES)
+        diagnostic = self.record.setdefault("diagnostic", {})
+        diagnostic["phase"] = phase
+        return diagnostic
 
     def query(self, arguments: list[str], *, pass_fds: tuple[int, ...] = ()) -> bytes:
         """Reuse the owned query group, original deadline and affirmative drain protocol."""
@@ -551,6 +896,7 @@ class RootPort:
 
     def daemon(self) -> None:
         """Rebind the exact rootful private daemon before every subject operation."""
+        self.point("daemon")
         directory = Path(self.record["daemonDirectory"])
         socket = (directory / "docker.sock").lstat()
         require(stat.S_ISSOCK(socket.st_mode) and socket.st_uid == 0 and socket.st_nlink == 1)
@@ -630,13 +976,14 @@ class RootPort:
 
     def preflight(self) -> dict[str, Any]:
         """Probe held parser version afresh with durable child lifetime custody."""
-        observed = root_preflight(self.stage, self.bootstrap, self.modules)
+        observed = root_preflight(self.stage, self.bootstrap, self.modules, progress=self.point("preflight-source"))
         end = self.binding.deadline_ns if self.cleanup else self.work_until
         with ExitStack() as stack:
             interpreter = os.open(PYTHON, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
             stack.callback(os.close, interpreter)
             parser = os.open("/usr/sbin/apparmor_parser", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
             stack.callback(os.close, parser)
+            self.point("preflight-parser-version")
             self.record["childPending"] = True
             self.commit()
             cutoff = min(end - 1_000_000_000, time.monotonic_ns() + 5_000_000_000)
@@ -657,6 +1004,7 @@ class RootPort:
 
     def image(self) -> None:
         """Require the actual private daemon's immutable image before policy load."""
+        self.point("image")
         value = json.loads(
             self.docker("image", "inspect", "--format", "{{json .}}", self.binding.config_digest),
             object_pairs_hook=unique,
@@ -670,6 +1018,7 @@ class RootPort:
 
     def admit(self, binding: NativeBinding) -> None:
         """Freshly admit source, fixed content, current scalar controls and same-job provenance."""
+        self.point("admission")
         require(binding.digest() == self.record["bindingSha256"])
         context = self.bootstrap["context"]
         require(
@@ -684,9 +1033,11 @@ class RootPort:
         observed = self.preflight()
         self.record["preflight"] = observed
         self.commit()
-        require(
+        comparison(
+            self.point("admission"),
+            "admission",
             binding.architecture == "amd64"
-            and self.admission["architectures"]["amd64"] == "experimental-load-candidate"
+            and self.admission["architectures"]["amd64"] == "experimental-load-candidate",
         )
         for path in (
             Path("/usr/bin/gnutimeout") if self.provider.endswith("gnutimeout") else Path("/usr/bin/timeout"),
@@ -699,6 +1050,7 @@ class RootPort:
         require(re.fullmatch(rb"(?:gnu)?timeout \(GNU coreutils\) [0-9]+(?:\.[0-9]+)+", banner))
         self.daemon()
         self.image()
+        self.point("builder")
         with ExitStack() as stack:
             interpreter = os.open(PYTHON, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
             stack.callback(os.close, interpreter)
@@ -731,6 +1083,7 @@ class RootPort:
             self.record["policySha256"] = digest(outcome.policy)
             self.commit()
             write_leaf(self.store.path, "policy", outcome.policy)
+        self.point("compile")
         self.record["childPending"] = True
         self.commit()
         compiled = json.loads(
@@ -774,7 +1127,13 @@ class RootPort:
 
     def persist(self, state: State, container: str | None) -> None:
         """Persist complete context plus intent before its corresponding external effect."""
+        require(not self.record["retained"])
         self.record["state"], self.record["container"] = state.value, container
+        self.record["attemptedPhase"] = state.value
+        self.record["lastDurablePhase"] = state.value
+        if state.value.endswith("-intent"):
+            self.record["lastIntent"] = state.value
+        self.point(state.value)
         self.record["generation"] += 1
         self.commit()
 
@@ -795,6 +1154,7 @@ class RootPort:
 
     def parser(self, mode: str) -> None:
         """Run the held exact parser with held policy input; no replace or wildcard operation."""
+        self.point("parser-add" if mode == "--add" else "parser-remove")
         require(mode in {"--add", "--remove"} and self.record["compiled"] is True)
         require(namespace_snapshot(self.modules, self.admission) == self.record["namespace"])
         self.verify_owner("owner")
@@ -819,9 +1179,10 @@ class RootPort:
 
     def load(self) -> None:
         """Never replace a collision or guess whether an unacknowledged load succeeded."""
+        self.point("registry-absent")
         require(self.profile_absent())
         self.parser("--add")
-        require(self.profile_present())
+        comparison(self.point("registry-present"), "registry-present", self.profile_present())
 
     def inspect(self, container: str) -> dict[str, Any]:
         """Read only the exact CID through the fresh private endpoint."""
@@ -841,6 +1202,7 @@ class RootPort:
 
     def bind_subject(self, container: str, binding: NativeBinding) -> None:
         """Verify before/after through one held task and exact container incarnation."""
+        self.point("subject")
         self.daemon()
         namespace = namespace_snapshot(self.modules, self.admission)
         before = self.inspect(container)
@@ -956,6 +1318,7 @@ class RootPort:
 
     def remove_subject(self, container: str | None) -> None:
         """Prove exact guest absence while the independently verified endpoint is still alive."""
+        self.point("guest-absence")
         self.cleanup = True
         self.daemon()
         if container is not None:
@@ -983,6 +1346,7 @@ class RootPort:
 
     def unload(self) -> None:
         """Unloading follows affirmative absence, never a failed or unavailable inspect."""
+        self.point("profile-absence")
         require(self.record.get("guestAbsenceVerified") is True and self.profile_present())
         self.parser("--remove")
         require(self.profile_absent())
@@ -991,6 +1355,10 @@ class RootPort:
 
     def retain(self) -> None:
         """Keep the original intent and every uncertain reader/load/create outcome sticky."""
+        if self.record["state"] != "retained":
+            self.record.setdefault("lastDurablePhase", self.record["state"])
+            self.record.setdefault("lastIntent", None)
+            self.record.setdefault("retainedFrom", self.record["state"])
         self.record["retained"] = True
         self.record["state"] = "retained"
         self.commit()
@@ -1002,6 +1370,7 @@ class RootPort:
 
     def start_owner(self, kind: str) -> dict[str, Any]:
         """Persist exact source/argv/time intent before starting an independent root owner."""
+        self.point("owner-probe" if kind == "probe" else "owner-active")
         unit = self.owner_unit(kind)
         arguments = [
             PYTHON,
@@ -1242,6 +1611,7 @@ class RootPort:
 
     def dispose(self) -> None:
         """Dispose only after the finalizer and every query have affirmative completion."""
+        self.point("dispose")
         require(
             self.record["state"] == "closed"
             and not self.record["readerPending"]
@@ -1489,12 +1859,21 @@ def request_value(raw_argument: str) -> dict[str, Any]:
 
 
 def new_record(
-    bootstrap: dict[str, Any], modules: SimpleNamespace, request: dict[str, Any], name: str
+    bootstrap: dict[str, Any],
+    modules: SimpleNamespace,
+    request: dict[str, Any],
+    name: str,
+    *,
+    progress: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Bind a phase to its actual unprivileged coordinator and private runtime."""
     require(set(request) == {"binding", "daemonDirectory", "timeoutExecutable", "coordinatorPid"})
     binding = modules.qualification.NativeBinding(**request["binding"])
     binding.validate()
+    if progress is not None:
+        progress["binding"] = binding
+        comparison(progress, "request-binding", matched=True)
+        progress["phase"] = "coordinator-proof"
     check(binding.deadline_ns - RESERVE_NS)
     require(binding.deadline_ns <= bootstrap["deadlineNs"])
     pid = request["coordinatorPid"]
@@ -1522,6 +1901,11 @@ def new_record(
         "coordinatorTask": task,
         "profileName": f"dockerlens-127-upstream-rootless-{binding.run}-{binding.attempt}-{name}",
         "state": "prepared",
+        "lastDurablePhase": "prepared",
+        "lastIntent": None,
+        "attemptedPhase": None,
+        "durabilityUnknown": False,
+        "diagnostic": {"phase": "store-open", "comparisons": {}},
         "container": None,
         "generation": 0,
         "readerPending": False,
@@ -1565,31 +1949,45 @@ def receipt(port: RootPort) -> dict[str, Any]:
     }
 
 
+def initialize_record(store: Store, record: dict[str, Any], progress: dict[str, Any]) -> None:
+    """Expose pending initialization before I/O; only a returned fsync acknowledges it."""
+    record.update(lastDurablePhase=None, attemptedPhase="prepared", durabilityUnknown=True)
+    progress["record"] = record
+    store.write(record)
+    record.update(lastDurablePhase="prepared", durabilityUnknown=False)
+
+
 def root_rpc(
     stage: Path, bootstrap: dict[str, Any], modules: SimpleNamespace, route: argparse.Namespace
 ) -> dict[str, Any]:
     """Serialize every privileged lifecycle effect through identity-bound custody."""
     operation, name = route.operation, route.name
+    progress = getattr(route, "diagnostic", {})
+    progress["phase"] = "request-binding"
     request = request_value(route.request)
     create = operation == "prepare"
     if create:
         require(name == "new")
         name = secrets.token_hex(16)
+    progress["phase"] = "store-open"
     store = Store(stage, name, create=create)
+    progress["lease"] = name
     try:
         with store.locked():
             if create:
                 # Stage is an authenticated root locator, never request authority.
                 details = {**bootstrap, "stage": str(stage)}
-                record = new_record(details, modules, request, name)
-                store.write(record)
+                record = new_record(details, modules, request, name, progress=progress)
+                initialize_record(store, record, progress)
                 (store.path / "cli").mkdir(mode=0o700)
                 write_leaf(store.path / "cli", "config.json", b"{}\n", 0o600)
             else:
                 require(set(request) == {"bindingSha256", "container"})
                 record = store.read()
                 require(request["bindingSha256"] == record["bindingSha256"])
+            progress["record"] = record
             port = RootPort(stage, bootstrap, modules, store, record)
+            progress["binding"] = port.binding
             lease = modules.qualification.ProfileLease(port.binding, port)
             lease.state = modules.qualification.State(record["state"])
             lease.container = record.get("container")
@@ -1668,8 +2066,16 @@ def main() -> int:
     parser.add_argument("kind", nargs="?", choices=("probe", "owner"))
     parser.add_argument("--request", default="e30=")
     args = parser.parse_args()
+    progress: dict[str, Any] = {"actor": "root", "operation": args.operation, "phase": "stage-verification"}
+    args.diagnostic = progress
     try:
         bootstrap = verify_stage(args.stage)
+        progress.update(
+            sourceVerified=True,
+            context=bootstrap["context"],
+            sourceManifestSha256=bootstrap["files"][".github/docker-userns-policy-source.json"],
+            phase="helper-import",
+        )
         modules = dependencies(args.stage)
         if args.operation == "compile":
             store = Store(args.stage, args.name)
@@ -1687,8 +2093,8 @@ def main() -> int:
             with stage_lock(args.stage):
                 result = root_rpc(args.stage, bootstrap, modules, args)
         sys.stdout.buffer.write(encoded(result))
-    except Exception, KeyboardInterrupt:  # noqa: BLE001 - root output must never expose private failures.
-        sys.stdout.buffer.write(b'{"error":"active-scoped-profile-refused-or-retained-unknown"}\n')
+    except (Exception, KeyboardInterrupt) as error:  # noqa: BLE001 - serialize only the closed journal, never raw failures.
+        sys.stdout.buffer.write(encoded(failure_receipt(progress, error)))
         return 1
     else:
         return 0

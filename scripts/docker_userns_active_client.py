@@ -8,8 +8,9 @@ import os
 import re
 from dataclasses import asdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
+from scripts import docker_userns_active as protocol
 from scripts.docker_userns_active_bootstrap_bundle import context
 from scripts.docker_userns_qualification import NativeBinding
 
@@ -49,6 +50,7 @@ class ActiveClient:
         self.binding.validate()
         self.name = "new"
         self.evidence: dict[str, Any] = {}
+        self.failures: list[dict[str, Any]] = []
 
     def prepare(self) -> None:
         """Acquire authority only after the backend records this pending client."""
@@ -79,19 +81,105 @@ class ActiveClient:
             "--request",
             raw,
         ]
-        result = self.ctx.command(
-            "scoped userns profile " + operation, self.ctx.backend.privileged(command, 45), timeout=45
-        )
-        value = json.loads(result)
+        try:
+            result = self.ctx.command(
+                "scoped userns profile " + operation, self.ctx.backend.privileged(command, 45), timeout=45, check=False
+            )
+        except (Exception, KeyboardInterrupt) as error:  # noqa: BLE001 - preserve only bounded classification.
+            self.redact_command()
+            self.capture_failure(self.local_failure(operation, protocol.failure_reason(error)))
+            reason = "active qualification command unavailable; runtime retained"
+            raise ValueError(reason) from None
+        self.redact_command()
+        if type(result) is not str:
+            self.refuse_response(operation, "malformed-receipt")
+        if len(result.encode("utf-8")) > protocol.MAX_STATE:
+            self.refuse_response(operation, "oversized-receipt")
+        try:
+            value = json.loads(result, object_pairs_hook=protocol.unique)
+        except ValueError, TypeError, protocol.RefusedError:
+            self.refuse_response(operation, "malformed-receipt")
+        if type(value) is not dict:
+            self.refuse_response(operation, "malformed-receipt")
+        if value.get("kind") == "active-qualification-failure":
+            if not self.matches_failure(value, operation):
+                self.refuse_response(operation, "receipt-mismatch")
+            self.capture_failure(value)
+            reason = "active qualification root refusal; runtime retained"
+            raise ValueError(reason)
+        checks = getattr(self.ctx, "checks", [])
         if (
-            value.get("bindingSha256") != self.binding.digest()
+            (checks and checks[-1].get("exitCode") != 0)
+            or value.get("bindingSha256") != self.binding.digest()
             or value.get("retained") is not False
             or value.get("validationProfile") != self.provenance["validationProfile"]
             or value.get("validationProfileRequested") != self.provenance["validationProfileRequested"]
         ):
-            reason = "active qualification response refused"
-            raise ValueError(reason)
+            self.refuse_response(operation, "receipt-mismatch")
         return value
+
+    def matches_failure(self, value: dict[str, Any], operation: str) -> bool:
+        """Accept diagnostics only when their claimed verification matches this exact request."""
+        if not protocol.valid_failure(value) or value["actor"] != "root" or value["operation"] != operation:
+            return False
+        expected = protocol.failure_context(asdict(self.binding), self.binding.phase)
+        if value["bindingVerified"]:
+            if value["bindingSha256"] != self.binding.digest() or value["context"] != expected:
+                return False
+        elif value["bindingSha256"] is not None or value["reportingLease"] is not None:
+            return False
+        if value["context"] is not None and any(
+            value["context"][key] != expected[key] for key in expected if key != "phase"
+        ):
+            return False
+        return not value["sourceVerified"] or value["sourceManifestSha256"] == protocol.SOURCE_MANIFEST_SHA256
+
+    def redact_command(self) -> None:
+        """Replace raw root transport output with the separately validated diagnostic protocol."""
+        checks = getattr(self.ctx, "checks", [])
+        if checks:
+            checks[-1].pop("stdout", None)
+            checks[-1].pop("stderr", None)
+            if "error" in checks[-1]:
+                checks[-1]["error"] = "active-userns-command-failed"
+
+    def local_failure(self, operation: str, reason: str) -> dict[str, Any]:
+        """Bind a failed capture without attributing unobserved root operations."""
+        value = protocol.failure_receipt(
+            {"actor": "client", "operation": operation, "phase": "client-response", "binding": self.binding},
+            ValueError(),
+        )
+        value["reason"] = reason
+        return value
+
+    def refuse_response(self, operation: str, code: str) -> NoReturn:
+        """Discard unsafe response bytes and retain their closed protocol category."""
+        self.capture_failure(self.local_failure(operation, code))
+        reason = "active qualification response unavailable; runtime retained"
+        raise ValueError(reason)
+
+    def capture_failure(self, value: dict[str, Any]) -> None:
+        """Export before endpoint teardown; a reporting locator never changes the active lease name."""
+        self.failures = [*self.failures[:1], *self.failures[1:3], value]
+        self.evidence = {
+            "schemaVersion": 1,
+            "consumer": protocol.CONSUMER,
+            "qualification": "none",
+            "status": "failed",
+            "bindingSha256": self.binding.digest(),
+            "context": protocol.failure_context(asdict(self.binding), self.binding.phase),
+            "failures": self.failures,
+            "retained": True,
+            "cleanupAuthority": False,
+        }
+        output = getattr(self.ctx, "scoped_failure_output", None)
+        if output is not None:
+            raw = (json.dumps(self.evidence, sort_keys=True) + "\n").encode("ascii")
+            if len(raw) <= protocol.MAX_OUTPUT:
+                try:
+                    Path(output).write_bytes(raw)
+                except OSError:
+                    self.evidence["artifactCapture"] = "unavailable"
 
     def create_options(self) -> tuple[str, ...]:
         """Persist one create intent before adding the exact scoped label and profile."""

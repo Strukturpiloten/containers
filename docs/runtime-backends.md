@@ -746,6 +746,31 @@ may ordinary native network/image/daemon/store teardown proceed. A later native
 teardown failure remains a failure. Unverified scoped close retains the private
 runtime rather than deleting its endpoint or store.
 
+The active OS-release read first uses the existing trusted root-owned component
+resolver, then the unchanged strict bounded reader on its canonical result and
+checks that the alias still resolves consistently. Unsafe ownership/modes,
+changed contents or alias targets, and missing targets still refuse. This fixes a
+source portability defect for conventional trusted Ubuntu aliases; the failed
+trial did not establish that this read caused its root preparation exit.
+
+Failure receipts identify an actually executed producer, root bootstrap, root
+RPC or client capture boundary. They contain only a finite checkpoint/reason,
+verified routing/source hashes, completed comparison booleans and the existing
+journal's last durable phase/intent, pending-reader/child flags and last recorded
+owner disposition. Exception text, native paths, environment and raw host facts
+are excluded. A launcher that emitted no valid receipt remains explicitly
+`execution-unverified`; a printed bootstrap literal is not an emitted error or
+proof that ARM reached bootstrap.
+
+The client parses bounded nonzero root replies before failing and exports the
+redacted receipt into the native evidence and explicit always-uploaded diagnostic
+artifact before endpoint teardown. Invalid, oversized or mismatched replies
+produce a closed client failure instead. A reporting lease locator grants no
+cleanup authority: unknown/refused preparation still retains the runtime, and no
+preflight category can automatically justify absence, unload or disposal.
+Retention preserves the prior phase/intent and any uncertain durable write
+rather than replacing that history with only `retained`.
+
 The evidence gate requires both original clean-control/enforcement phases and
 bound scoped evidence in this exact candidate context. It rejects absent or
 mismatched receipts, host fingerprints, effective-profile evidence, task/scope

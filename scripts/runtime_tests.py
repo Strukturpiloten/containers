@@ -1065,6 +1065,8 @@ def _docker_phase_work(plan: _DockerPhasePlan, ctx: RuntimeContext, result: dict
             if stage is not None:
                 if ctx.outer_engine != "docker":
                     raise ProbeError("active userns qualification requires the explicit Docker backend")
+                evidence_path = Path(plan.args.evidence)
+                ctx.scoped_failure_output = evidence_path.with_name(evidence_path.stem + "-userns-failure.json")
                 ctx.backend.prepare_scoped_profile(ctx, stage, identity)
             profile = plan.metadata["tests"]["docker"]
             if plan.phase is DockerProbePhase.CLEAN_CONTROL:
