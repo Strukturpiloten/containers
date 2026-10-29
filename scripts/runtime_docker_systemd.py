@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 from scripts.runtime_docker_systemd_guard import PLACEMENT_GUARD, USER_MANAGER, guarded_command  # noqa: F401 - preserve public re-exports.
 from scripts.runtime_errors import ProbeError
-from scripts.runtime_oom_diagnostics import DOCKER_CHECKS, OomDiagnostics
+from scripts.runtime_oom_diagnostics import DOCKER_CHECKS, DOCKER_EXIT_MAX, OomDiagnostics
 from scripts.runtime_resource_budgets import verify_outer_container_limits
 
 if TYPE_CHECKING:
@@ -1520,6 +1520,39 @@ def _inner_enforcement_state(
 # Each mode has its own baseline. These fixed tags never grant admission authority.
 LEAF_WITNESS_PURPOSE = "leaf-memory-witness"
 LEAF_WITNESS_SECONDS = 10
+LEAF_WITNESS_FAILURE_CAPTURE_SECONDS = 2
+LEAF_WITNESS_FAILURE_STATE_BYTES = 1024
+LEAF_WITNESS_FAILURE_STAGES = frozenset(
+    {
+        "child-identity",
+        "start-gate",
+        "before-snapshot",
+        "release-child",
+        "wait-child",
+        "result-write",
+        "after-snapshot",
+        "after-sentinel",
+        "finish-gate",
+    }
+)
+LEAF_WITNESS_AWAIT_COMMAND = (
+    "base=/proc/$1/root$2; "
+    'if ! touch "$base"; then printf "leaf-witness-await=release-failed\n"; exit 0; fi; '
+    'n=0; while test "$n" -lt 80; do '
+    'if test -f "$base.after"; then printf "leaf-witness-await=after-observed\n"; exit 0; fi; '
+    'n=$((n+1)); sleep 0.1; done; printf "leaf-witness-await=poll-exhausted\n"'
+)
+LEAF_WITNESS_FAILURE_STATE_COMMAND = (
+    "{ if docker inspect --format '"
+    '{"id":{{json .Id}},"name":{{json .Name}},"state":{'
+    '"Running":{{json .State.Running}},"OOMKilled":{{json .State.OOMKilled}},'
+    '"ExitCode":{{json .State.ExitCode}}}}'
+    '\' "$1" 2>/dev/null; then printf "leaf-witness-state-complete=yes\\n"; fi; } | head -c 1025'
+)
+LEAF_WITNESS_FAILURE_LOG_COMMAND = (
+    '{ if docker logs --tail 80 "$1" 2>/dev/null; then '
+    'printf "leaf-witness-capture-complete=yes\n"; fi; } | head -c 65537'
+)
 LEAF_WITNESS_STAGES = frozenset(
     {
         "room-check",
@@ -2009,6 +2042,189 @@ def _leaf_witness_stage(record: dict[str, Any], stage: str) -> Iterator[None]:
     record["completedStage"] = stage
 
 
+def _leaf_witness_await_result(raw: str) -> str:
+    choices = {
+        "leaf-witness-await=release-failed": "release-failed",
+        "leaf-witness-await=after-observed": "after-observed",
+        "leaf-witness-await=poll-exhausted": "poll-exhausted",
+    }
+    if raw not in choices:
+        raise ProbeError("witness await result unavailable")
+    return choices[raw]
+
+
+def _leaf_witness_await(
+    collection: RuntimeContext,
+    budget: IsolatedStoreDiskBudget,
+    container: str,
+    controller: str,
+    record: dict[str, Any],
+) -> None:
+    raw = _exec(
+        collection,
+        budget,
+        container,
+        "release diagnostic leaf and await actual after",
+        "sh",
+        "-euc",
+        LEAF_WITNESS_AWAIT_COMMAND,
+        "--",
+        controller,
+        RESOURCE_START_FILE,
+    )
+    record["awaitResult"] = _leaf_witness_await_result(raw)
+    if record["awaitResult"] != "after-observed":
+        raise ProbeError("witness actual after not observed")
+
+
+def _leaf_witness_unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ProbeError("witness duplicate state field")
+        result[key] = value
+    return result
+
+
+def _leaf_witness_failure_state(raw: str, workload: str) -> dict[str, Any]:
+    if len(raw.encode()) > LEAF_WITNESS_FAILURE_STATE_BYTES or "\r" in raw:
+        raise ProbeError("witness state capture oversized or malformed")
+    state_raw, separator, receipt = raw.partition("\n")
+    if not separator or receipt != "leaf-witness-state-complete=yes":
+        raise ProbeError("witness state capture incomplete")
+    value = json.loads(state_raw, object_pairs_hook=_leaf_witness_unique_object)
+    if (
+        not isinstance(value, dict)
+        or value.keys() != {"id", "name", "state"}
+        or value["id"] != workload
+        or value["name"] != "/" + LEAF_WITNESS_NAME
+    ):
+        raise ProbeError("witness state identity unavailable")
+    state = value["state"]
+    if (
+        not isinstance(state, dict)
+        or state.keys() != {"Running", "OOMKilled", "ExitCode"}
+        or type(state["Running"]) is not bool
+        or type(state["OOMKilled"]) is not bool
+        or type(state["ExitCode"]) is not int
+        or not 0 <= state["ExitCode"] <= DOCKER_EXIT_MAX
+    ):
+        raise ProbeError("witness state fields unavailable")
+    return {"availability": "observed", **state}
+
+
+def _leaf_witness_failure_protocol(raw: str) -> dict[str, Any]:
+    if len(raw.encode()) > MAX_MEMORY_READBACK or "\r" in raw:
+        raise ProbeError("witness failure protocol oversized or malformed")
+    lines = raw.split("\n")
+    if not lines or lines.pop() != "leaf-witness-capture-complete=yes":
+        raise ProbeError("witness failure capture incomplete")
+    seen = set()
+    failure = {}
+    fields = {
+        "before": LEAF_WITNESS_FIELDS,
+        "after": LEAF_WITNESS_FIELDS,
+        "result": {"child-reaped", "child-signal", "child-signaled"},
+        "failure": {"stage", "signal"},
+    }
+    for line in lines:
+        match = re.fullmatch(r"leaf-witness-(before|after|result|failure)-([^=]+)=(.+)", line)
+        if match is None:
+            raise ProbeError("witness failure protocol malformed")
+        phase, key, value = match.groups()
+        if key not in fields[phase] or (phase, key) in seen:
+            raise ProbeError("witness failure field unknown or duplicate")
+        seen.add((phase, key))
+        if phase == "failure":
+            failure[key] = value
+    if (
+        failure.keys() != {"stage", "signal"}
+        or failure["stage"] not in LEAF_WITNESS_FAILURE_STAGES
+        or failure["signal"] not in {"none", "sigalrm", "sigterm", "sigint"}
+    ):
+        raise ProbeError("witness controller failure unavailable")
+    return {"availability": "observed", "stage": failure["stage"], "receivedSignal": failure["signal"]}
+
+
+def _leaf_witness_failure_command(
+    collection: RuntimeContext,
+    budget: IsolatedStoreDiskBudget,
+    probe: tuple[str, str],
+    deadline: float,
+    command: tuple[str, str],
+) -> str:
+    budget.checkpoint()
+    now = time.monotonic()
+    remaining = min(deadline - now, collection.timeout, collection.runtime_deadline - now)
+    reserved = collection.backend.command_timeout(remaining)
+    if type(reserved) not in {int, float} or not math.isfinite(reserved) or reserved <= 0:
+        raise ProbeError("witness failure capture reserve unavailable")
+    allowance = min(remaining, reserved)
+    if not math.isfinite(allowance) or allowance <= 0:
+        raise ProbeError("witness failure capture allowance unavailable")
+    raw = collection.exec(command[0], probe[0], "sh", "-euc", command[1], "--", probe[1], timeout=allowance)
+    budget.checkpoint()
+    if time.monotonic() > deadline:
+        raise ProbeError("witness failure capture returned late")
+    return raw
+
+
+def _leaf_witness_failure_deadline(collection: RuntimeContext) -> float:
+    timeout, work_deadline = collection.timeout, collection.runtime_deadline
+    if any(type(value) not in {int, float} or not math.isfinite(value) for value in (timeout, work_deadline)):
+        raise ProbeError("witness failure capture deadline unavailable")
+    now = time.monotonic()
+    return min(now + LEAF_WITNESS_FAILURE_CAPTURE_SECONDS, now + timeout, work_deadline)
+
+
+def _leaf_witness_failure_capture(
+    collection: RuntimeContext,
+    budget: IsolatedStoreDiskBudget,
+    container: str,
+    workload: str | None,
+    record: dict[str, Any],
+) -> None:
+    if record["enteredStage"] != "release-await-after" or workload is None:
+        return
+    capture: dict[str, Any] = {
+        "availability": "unavailable",
+        "enteredStage": None,
+        "completedStage": None,
+        "ociState": {"availability": "unavailable"},
+        "controllerFailure": {"availability": "unavailable"},
+    }
+    record["failureCapture"] = capture
+    try:
+        deadline = _leaf_witness_failure_deadline(collection)
+        capture["enteredStage"] = "owned-state"
+        raw = _leaf_witness_failure_command(
+            collection,
+            budget,
+            (container, workload),
+            deadline,
+            ("read private diagnostic leaf failure state", LEAF_WITNESS_FAILURE_STATE_COMMAND),
+        )
+        state = _leaf_witness_failure_state(raw, workload)
+        _leaf_witness_require("witness failure state validation returned late", condition=time.monotonic() <= deadline)
+        capture["ociState"] = state
+        capture["completedStage"] = "owned-state"
+        capture["enteredStage"] = "controller-failure"
+        raw = _leaf_witness_failure_command(
+            collection,
+            budget,
+            (container, workload),
+            deadline,
+            ("read private diagnostic leaf failure log", LEAF_WITNESS_FAILURE_LOG_COMMAND),
+        )
+        failure = _leaf_witness_failure_protocol(raw)
+        _leaf_witness_require("witness failure log validation returned late", condition=time.monotonic() <= deadline)
+        capture["controllerFailure"] = failure
+        capture["completedStage"] = "controller-failure"
+        capture["availability"] = "observed"
+    except Exception:  # noqa: BLE001 — optional capture never replaces the original diagnostic failure.
+        return
+
+
 def _collect_leaf_memory_witness(
     ctx: RuntimeContext, budget: IsolatedStoreDiskBudget, container: str, mode: str
 ) -> None:
@@ -2021,6 +2237,7 @@ def _collect_leaf_memory_witness(
         "attribution": "unresolved",
         "authority": "observation-only",
         "controllerCompletion": "unavailable",
+        "awaitResult": "unavailable",
         "enteredStage": None,
         "completedStage": None,
         "cleanupEnteredStage": None,
@@ -2036,8 +2253,7 @@ def _collect_leaf_memory_witness(
     }
     collection = copy.copy(ctx)
     collection.checks = []
-    workload = None
-    launched = False
+    workload, launched = None, False
     try:
         with _leaf_witness_stage(record, "room-check"):
             _leaf_witness_room(ctx)
@@ -2054,19 +2270,7 @@ def _collect_leaf_memory_witness(
             roots = [_leaf_witness_snapshot_root(observer, "root-before")]
         with _leaf_witness_stage(record, "release-await-after"):
             window = [time.monotonic_ns()]
-            _exec(
-                collection,
-                budget,
-                container,
-                "release diagnostic leaf and await actual after",
-                "sh",
-                "-euc",
-                'base=/proc/$1/root$2; touch "$base"; '
-                'for n in $(seq 1 80); do test ! -f "$base.after" || exit 0; sleep 0.1; done; exit 1',
-                "--",
-                controller,
-                RESOURCE_START_FILE,
-            )
+            _leaf_witness_await(collection, budget, container, controller, record)
         with _leaf_witness_stage(record, "log-read"):
             output = _exec(
                 collection, budget, container, "read private leaf witness protocol", "docker", "logs", workload
@@ -2130,6 +2334,7 @@ def _collect_leaf_memory_witness(
                 record["availability"] = "unavailable"
     except Exception:  # noqa: BLE001 — optional diagnostic errors never replace the original failure.
         record["availability"] = "unavailable"
+        _leaf_witness_failure_capture(collection, budget, container, workload, record)
     finally:
         if launched:
             _leaf_witness_cleanup_record(collection, container, workload, record)

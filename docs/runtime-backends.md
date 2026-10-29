@@ -916,3 +916,12 @@ Cleanup progress is recorded separately and cannot replace that location;
 controller completion retains its independent unavailable/failed/completed
 meaning. A completed collection operation alone does not establish valid
 accounting or successful controller termination.
+
+An unavailable leaf witness may retain a closed release/await outcome and a
+separate bounded failure capture. Exact owned CID/name binding precedes typed
+OCI state; only fixed controller failure stages and received-signal tokens
+leave private logs. One shared cap of at most two seconds is reduced by the
+existing command timeout, work deadline and cleanup reserve, without renewal.
+Unavailable observations remain unknown. Capture cannot overwrite the failed
+collection stage, establish controller completion, identify an OOM cause or
+change strict shutdown and cleanup requirements.

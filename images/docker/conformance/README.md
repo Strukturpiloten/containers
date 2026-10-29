@@ -194,6 +194,22 @@ the existing cleanup outcome; cleanup never overwrites the collection location.
 A returned completion wait is distinct from controller success, and completed
 sampling does not establish valid accounting until projection validation.
 No raw commands, paths, process identities or exception text enter these facts.
+On release/await failure, `awaitResult` retains only an actual closed guest
+result: release failed, after sentinel observed, or polling exhausted. Guard,
+transport and malformed-result failures remain unavailable; polling exhaustion
+does not prove controller death or why the sentinel was not observed.
+A separate `failureCapture` may retain exact-CID/name-bound typed OCI state
+and fixed controller failure-stage/received-signal tokens from private logs.
+C emits these tokens only on failure, in normal cleanup after retiring child
+custody. Failure output and process-exit stdio flushing use nonblocking stdout;
+if that mode cannot be enabled, the controller exits without a stdio fallback. Signal receipt is sampled once; it is not complete signal history. A SIGALRM
+receipt is not timer-expiry or cause proof.
+Capture has one nonrenewed cap of at most two seconds, clipped to the existing
+command timeout, original work deadline and backend cleanup reserve. Both reads
+share that allowance; expired, failed, oversized, truncated or malformed reads
+remain unavailable. Capture progress never replaces the original collection
+stages or establishes controller completion. Raw logs and OCI operands remain
+private; existing success and mandatory allocator protocols are unchanged.
 
 One nonrenewable ten-second controller alarm covers all gates, allocation and
 after hold, within the existing original work deadline and cleanup reserve.

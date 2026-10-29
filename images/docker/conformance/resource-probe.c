@@ -313,11 +313,17 @@ static int memory_witness(const char *start) {
     sigprocmask(SIG_SETMASK, &previous, NULL);
     close(pipefd[0]);
     if (child < 0) { close(pipefd[1]); return 12; }
+    const char *stage = "child-identity";
     snprintf(path, sizeof(path), "/proc/%ld/stat", (long)child);
-    if (!read_text(path, child_stat, sizeof(child_stat)) || !witness_gate(start) ||
-        !witness_snapshot("before", child, child_stat)) goto done;
+    if (!read_text(path, child_stat, sizeof(child_stat))) goto done;
+    stage = "start-gate";
+    if (!witness_gate(start)) goto done;
+    stage = "before-snapshot";
+    if (!witness_snapshot("before", child, child_stat)) goto done;
+    stage = "release-child";
     if (write(pipefd[1], "x", 1) != 1) goto done;
     close(pipefd[1]); pipefd[1] = -1;
+    stage = "wait-child";
     while (!reaped) {
         /* Signals cannot observe a stale PID between waitpid and ownership retirement. */
         if (sigprocmask(SIG_BLOCK, &blocked, &previous) != 0) goto done;
@@ -329,15 +335,19 @@ static int memory_witness(const char *start) {
         if (!reaped) { const struct timespec interval = {.tv_sec = 0, .tv_nsec = 10000000}; nanosleep(&interval, NULL); }
     }
     if (witness_cancelled) goto done;
+    stage = "result-write";
     if (!witness_field("result", "child-reaped", "yes")) goto done;
     char termination[32];
     snprintf(termination, sizeof(termination), "%d", WIFSIGNALED(status) ? WTERMSIG(status) : 0);
     if (!witness_field("result", "child-signal", termination) ||
-        !witness_field("result", "child-signaled", WIFSIGNALED(status) ? "yes" : "no") ||
-        !witness_snapshot("after", child, child_stat)) goto done;
+        !witness_field("result", "child-signaled", WIFSIGNALED(status) ? "yes" : "no")) goto done;
+    stage = "after-snapshot";
+    if (!witness_snapshot("after", child, child_stat)) goto done;
+    stage = "after-sentinel";
     int ready = open(after, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
     if (ready < 0) goto done;
     close(ready);
+    stage = "finish-gate";
     if (witness_gate(finish) && !witness_cancelled) result = 0; /* Observation completion only. */
 done:
     if (pipefd[1] >= 0) close(pipefd[1]);
@@ -349,6 +359,17 @@ done:
         sigprocmask(SIG_SETMASK, &previous, NULL);
     }
     alarm(0);
+    if (result != 0 || witness_cancelled) {
+        /* Keep both explicit output and main-exit stdio flushing nonblocking, including an expired alarm. */
+        int output_flags = fcntl(STDOUT_FILENO, F_GETFL);
+        if (output_flags < 0 || fcntl(STDOUT_FILENO, F_SETFL, output_flags | O_NONBLOCK) != 0)
+            _exit(witness_cancelled ? 12 : result);
+        sig_atomic_t reported_signal = witness_cancelled;
+        const char *received = reported_signal == SIGALRM ? "sigalrm" :
+            reported_signal == SIGTERM ? "sigterm" : reported_signal == SIGINT ? "sigint" : "none";
+        /* Normal cleanup only, after owned child custody is retired. Sampled receipt is not signal history or timer proof. */
+        if (witness_field("failure", "stage", stage) && witness_field("failure", "signal", received)) fflush(stdout);
+    }
     return witness_cancelled ? 12 : result;
 }
 
