@@ -66,6 +66,24 @@ def _context() -> MagicMock:
 
 
 class OomDiagnosticTests(unittest.TestCase):
+    def test_docker_retains_state_but_never_fabricates_conmon_custody(self) -> None:
+        ctx = _context()
+        ctx.outer_engine = "docker"
+        state = {"Running": True, "Pid": 123, "OOMKilled": False}
+        ctx.podman.return_value = json.dumps(state)
+        observer = diagnostics.OomDiagnostics(ctx, CONTAINER)
+        observer.snapshot("before-inner-memory", scope=SCOPE, scope_inode=40)
+        observer.snapshot("after-inner-memory")
+        observer.after_exit(CONTAINER, {"Running": False, "Pid": 0, "OOMKilled": True, "ExitCode": 0})
+        ctx.command.assert_not_called()
+        self.assertIsNone(observer.custody)
+        self.assertEqual(len(ctx.observations), 3)
+        self.assertTrue(ctx.observations[-1]["ociState"]["OOMKilled"])
+        for record in ctx.observations:
+            self.assertEqual(record["availability"], "backend-not-applicable")
+            self.assertEqual(record["attribution"], "unresolved")
+            self.assertEqual(record["sources"]["conmonMarkers"], "not-applicable")
+
     def test_counter_fixture_preserves_local_and_hierarchical_fields_and_missing_support(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -186,7 +204,7 @@ class OomDiagnosticTests(unittest.TestCase):
         self.assertEqual(delta[-1]["events"]["memory.events"]["oom_kill"], 1)
         self.assertEqual(delta[-1]["events"]["memory.events.local"]["oom_kill"], 0)
         self.assertTrue(all(item["attribution"] == "unresolved" for item in ctx.observations))
-        self.assertIn("no host ancestors or observer through shutdown", ctx.observations[-1]["limits"])
+        self.assertIn("separate bounded custody observer", ctx.observations[-1]["limits"])
         self.assertEqual(ctx.checks, [])
         command = ctx.command.call_args.args[1]
         self.assertIn("-I", command)
@@ -235,6 +253,31 @@ class OomDiagnosticTests(unittest.TestCase):
         with self.assertRaisesRegex(ProbeError, "bounded inner wait failed"):
             _inner_enforcement_state(ctx, MagicMock(), CONTAINER, ("memory", "b" * 64), diagnostics=observer)
         observer.snapshot.assert_called_once_with("after-inner-memory")
+
+    def test_failed_release_samples_before_owned_cleanup_and_preserves_failure(self) -> None:
+        ctx, observer = MagicMock(unsafe=True), MagicMock()
+        ctx.checks = [_hierarchy_evidence(hierarchy_fixture(), kind="service", mode="rootful", unit="docker.service")]
+        timeline = []
+        failure_message = "original allocator release failure"
+        failure = ProbeError(failure_message)
+
+        def execute(name: str, *_args: object) -> str:
+            timeline.append(name)
+            if name == "read exact inner memory cgroup limits":
+                raise failure
+            return {
+                "start bounded inner memory probe": "a" * 64,
+                "verify inner memory scope placement and ownership": hierarchy_fixture(kind="scope"),
+                "read actual memory allocator swap and namespace association": memory_association_fixture(),
+            }.get(name, "")
+
+        ctx.exec.side_effect = execute
+        observer.snapshot.side_effect = lambda phase, **_kwargs: timeline.append(phase)
+        with self.assertRaisesRegex(ProbeError, "original allocator release failure"):
+            verify_inner_limits(ctx, MagicMock(), CONTAINER, diagnostics=observer)
+        self.assertLess(timeline.index("after-inner-memory"), timeline.index("remove owned inner memory probe"))
+        self.assertNotIn("start bounded inner pids probe", timeline)
+        observer.snapshot.assert_any_call("after-inner-memory")
 
     def test_real_context_optional_command_failures_persist_outside_unchanged_admission_checks(self) -> None:
         for failure in ("inspect", "collector", "unknown"):
@@ -293,6 +336,8 @@ class OomDiagnosticTests(unittest.TestCase):
         with (
             patch("scripts.runtime_tests.RuntimeContext", return_value=ctx),
             patch.object(ctx, "load_archive", return_value={}),
+            patch.object(ctx, "bind_guest_profile"),
+            patch.object(ctx, "prepare", return_value={"engine": "podman", "clientVersion": "podman version fixture"}),
             patch.object(ctx, "cleanup"),
             patch("scripts.runtime_tests._docker"),
             patch(

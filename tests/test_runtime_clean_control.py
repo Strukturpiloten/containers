@@ -81,12 +81,16 @@ class _Fixture:
 
     def _podman_output(self, args: list[str]) -> str:
         output = ""
-        if "images" in args:
+        if "--version" in args and Path(args[0]).name in {"timeout", "gnutimeout"}:
+            output = "timeout (GNU coreutils) 9.5"
+        elif "images" in args:
             output = self.identity["configDigest"]
         elif "{{.Architecture}}" in args:
             output = "amd64"
         elif "--version" in args:
-            output = "podman fixture"
+            output = "podman version fixture"
+        elif "{{.Host.Security.Rootless}}" in args:
+            output = "false"
         elif "load" in args:
             source = Path(args[args.index("--input") + 1])
             self.loads.append((str(source), source.stat().st_ino, source.read_bytes()))
@@ -140,6 +144,48 @@ class _Fixture:
 
 
 class CleanControlTests(unittest.TestCase):
+    def test_required_phases_resolve_outer_engine_before_owned_backend_preparation(self) -> None:
+        for selection, expected in (("profile", "docker"), ("podman", "podman")):
+            for phase in runtime_docker.DockerProbePhase:
+                with self.subTest(selection=selection, phase=phase):
+                    ctx = MagicMock()
+                    ctx.checks, ctx.observations = [], []
+                    ctx.prepare.return_value = {"engine": expected, "clientVersion": "observed fixture"}
+                    plan = runtime_tests._DockerPhasePlan(
+                        args=SimpleNamespace(timeout=45, outer_engine=selection),
+                        metadata={
+                            "name": "docker-29-conformance-rootless",
+                            "tests": {"docker": {"launcher": "systemd"}},
+                        },
+                        architecture="amd64",
+                        use_sudo=True,
+                        archive=MagicMock(),
+                        phase=phase,
+                        deadline=200,
+                        cancellation=runtime_tests._PairCancellation(),
+                        expected_identity=None,
+                    )
+
+                    def work(
+                        _plan: object, context: runtime_tests.RuntimeContext, result: dict, engine: str = expected
+                    ) -> None:
+                        self.assertEqual(context.runtime_deadline, 200)
+                        self.assertEqual(result["outerRuntime"]["engine"], engine)
+                        context.checks.append({"name": "independent phase work", "status": "passed"})
+
+                    with (
+                        patch("scripts.runtime_tests.RuntimeContext", return_value=ctx) as construct,
+                        patch("scripts.runtime_tests.time.monotonic", return_value=100),
+                        patch("scripts.runtime_tests._docker_phase_work", side_effect=work),
+                    ):
+                        result = runtime_tests._execute_docker_phase(plan)
+                    self.assertEqual(construct.call_args.kwargs["outer_engine"], expected)
+                    ctx.bind_guest_profile.assert_called_once_with(plan.metadata["tests"]["docker"])
+                    self.assertEqual(result["status"], "passed")
+                    self.assertTrue(result["cleanupVerified"])
+                    ctx.prepare.assert_called_once_with()
+                    ctx.cleanup.assert_called_once_with()
+
     def test_control_cleanup_precedes_enforcement_with_distinct_lifetimes_and_same_pinned_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             fixture = _Fixture(Path(directory))

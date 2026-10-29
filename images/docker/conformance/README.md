@@ -12,12 +12,20 @@ linger state and `Delegate=yes` provide the intended user-service hierarchy.
 The native harness must prove the actual daemon identity, user manager, service,
 controller delegation, and stable cgroup hierarchy before it admits nested work.
 
-The trusted outer runtime is rootful Podman with crun, a private cgroup namespace,
-`--systemd=always`, and crun's `run.oci.systemd.subgroup=container` annotation.
+GitHub selects an invocation-owned rootful Docker backend for this Docker profile;
+local development explicitly selects isolated Podman, with no engine fallback.
+Both use a private cgroup namespace. Podman retains crun, `--systemd=always`, and
+crun's `run.oci.systemd.subgroup=container` annotation. Docker uses the private
+daemon's systemd cgroup driver, its declared runc runtime and bounded `/run` and
+`/run/lock` tmpfs mounts; no Podman option is sent to Docker. Its actual private
+daemon metadata and installed runtime prerequisite version/hash are recorded
+separately; a declared runtime path does not establish task-binary correspondence.
 Guest systemd manages the private cgroup namespace root directly, creating its
 own nonroot PID 1 leaf and user hierarchy. The guest receives no host Docker
-socket, host DBus socket, or host cgroup bind mount. The harness neither migrates
-host controllers nor modifies host services, cgroups or sysctls. Guest boot units
+socket, host DBus socket, or host cgroup bind mount. Docker's reviewed backend
+owns its transient host services, slice and private network; the harness does not
+reconfigure unrelated host services, controllers, cgroups, security profiles or
+sysctls. Guest boot units
 that could alter shared kernel state are masked; journald's audit capability is
 removed and its actual descriptors and normal logging endpoints are checked.
 Before admission, a bounded observer performs only passive proc/cgroup reads.
@@ -35,6 +43,9 @@ smoke checks retain their existing independent command timeouts.
 After placement admission, all execs must remain in the exact nonroot guest PID 1 leaf, with an empty,
 root-owned namespace-root distributor and delegated CPU, memory and PID
 controllers. Missing readiness or placement evidence fails closed.
+Docker admission permits PID 1 to move below its exact CID-owned scope only for
+this declared fixture, with the original private slice identity still verified.
+The outer scope's resource limits remain distinct from PID 1's descendant leaf.
 Only the existing read-only daemon-info readiness condition may be polled within
 the remaining startup deadline. Each API sample has the normal pre/post placement
 guard and returns a closed ready/pending marker; guard, OCI, I/O and malformed
@@ -43,8 +54,8 @@ failures refused the first guarded exec but passed the same guard at shutdown;
 their evidence did not identify the transient predicate. Fresh native runs remain
 required to qualify this passive startup observation.
 
-The former extra `payload` delegation subtree is incompatible with the pinned
-Docker Engine 29.8.2. Its [Moby revision 8af9fe3, `withRootless`](https://github.com/moby/moby/blob/8af9fe3a36bab3e039862a2ab1cef1880c9b4d03/daemon/oci_linux.go#L63)
+The historical Docker Engine 29.8.2 candidate was incompatible with the former
+extra `payload` delegation subtree. Its [Moby revision 8af9fe3, `withRootless`](https://github.com/moby/moby/blob/8af9fe3a36bab3e039862a2ab1cef1880c9b4d03/daemon/oci_linux.go#L63)
 reads `/sys/fs/cgroup/user.slice/user-<uid>.slice/cgroup.controllers` directly,
 before converting the container spec; it does not discover a systemd prefix.
 Both native architectures failed that lookup under `/payload` despite passing
@@ -128,9 +139,15 @@ observed watch and marker to the native run. Missing or ambiguous evidence stays
 unresolved; snapshots alone do not provide accounting through shutdown. Neither
 these source references nor an additional control run qualifies an image or
 authorizes relaxing the strict shutdown predicate.
+Conmon marker custody applies to Podman outer runs. Docker has no conmon source:
+its observations explicitly report backend-not-applicable and unresolved
+attribution while retaining the actual Docker state, including `OOMKilled`.
+No marker or PID custody evidence is invented for Docker.
 
 Run the repository harness against the exact built OCI archive on each native
-architecture, using `--sudo --allow-privileged`; see the generated image page and
+architecture. GitHub's shared action selects `--outer-engine profile`; local
+development selects `--outer-engine podman --sudo --allow-privileged` explicitly.
+See the generated image page and
 the [Docker guide](../README.md#runtime-modes-and-admission). A PR must remain
 unqualified until both native architectures pass the full contract. A skipped
 runtime check, offline test, cross-build, or passing direct-launch image cannot

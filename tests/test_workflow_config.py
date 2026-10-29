@@ -76,12 +76,27 @@ class WorkflowConfigurationTests(unittest.TestCase):
             if item.get("description", "").startswith("Keep pinned action references")
         )
         pattern = manager["matchStrings"][0].replace("(?<", "(?P<")
-        match = re.search(pattern, f"uses: actions/checkout@{'a' * 40} # v4.2.0")
-        self.assertIsNotNone(match)
-        if match is not None:
-            self.assertEqual(
-                match.groupdict(), {"depName": "actions/checkout", "currentDigest": "a" * 40, "currentValue": "v4.2.0"}
-            )
+        for tag in ("v4", "v4.2", "v4.2.0"):
+            with self.subTest(tag=tag):
+                match = re.search(pattern, f"uses: actions/checkout@{'a' * 40} # {tag}")
+                self.assertIsNotNone(match)
+                self.assertEqual(
+                    match.groupdict(), {"depName": "actions/checkout", "currentDigest": "a" * 40, "currentValue": tag}
+                )
+        source = (engine._repo_root() / ".github/workflow-templates/documentation.yml.j2").read_text()
+        packages = {match.group("depName") for match in re.finditer(pattern, source)}
+        self.assertTrue({"actions/deploy-pages", "actions/upload-pages-artifact"} <= packages)
+
+    def test_python_runtime_and_project_updates_share_a_reviewed_group(self) -> None:
+        config = json.loads((engine._repo_root() / ".github/renovate.json").read_text())
+        manager = next(item for item in config["customManagers"] if item.get("datasourceTemplate") == "python-version")
+        pattern = manager["matchStrings"][0].replace("(?<", "(?P<")
+        self.assertEqual(re.search(pattern, 'PYTHON_VERSION: "3.14"').group("currentValue"), "3.14")
+        self.assertEqual(manager["depNameTemplate"], "python")
+        self.assertEqual(manager["versioningTemplate"], "python")
+        rule = next(item for item in config["packageRules"] if item.get("matchDatasources") == ["python-version"])
+        self.assertEqual(rule["matchPackageNames"], ["python"])
+        self.assertFalse(rule["automerge"])
 
 
 if __name__ == "__main__":

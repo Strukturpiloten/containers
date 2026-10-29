@@ -9,11 +9,13 @@ import copy
 import json
 import math
 import re
+import shutil
 import signal as signals
 import time
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any
 
+from scripts.runtime_docker_systemd_guard import PLACEMENT_GUARD, USER_MANAGER, guarded_command  # noqa: F401 - preserve public re-exports.
 from scripts.runtime_errors import ProbeError
 from scripts.runtime_resource_budgets import verify_outer_container_limits
 
@@ -39,20 +41,12 @@ SYSTEMD_OPTIONS = (
     "--annotation",
     "run.oci.systemd.subgroup=container",
 )
-USER_MANAGER = (
-    "runuser",
-    "-u",
-    "dockertest",
-    "--",
-    "env",
-    "HOME=/home/docker",
-    "XDG_RUNTIME_DIR=/run/user/1000",
-    "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus",
-    "systemctl",
-    "--user",
+DOCKER_SYSTEMD_OPTIONS = (
+    "--tmpfs",
+    "/run:rw,nosuid,nodev,size=64m,mode=755",
+    "--tmpfs",
+    "/run/lock:rw,nosuid,nodev,size=16m,mode=755",
 )
-
-
 MAX_CGROUP_DEPTH = 32
 MAX_CGROUP_PATH = 4096
 MAX_HIERARCHY_READBACK = 256 * 1024
@@ -206,15 +200,6 @@ done
 """
 
 
-PLACEMENT_GUARD = (
-    "init=$(cut -d: -f3 /proc/1/cgroup); current=$(cut -d: -f3 /proc/self/cgroup); "
-    'printf "%s\\n" "$init" | LC_ALL=C grep -Eq "^(/[A-Za-z0-9_.@:-]+)+$"; '
-    'case "$init/" in */./*|*/../*) exit 90 ;; esac; '
-    'test "$init" = "$current"; '
-    'root_procs=$(cat /sys/fs/cgroup/cgroup.procs); test -z "$root_procs"; '
-    'leaf_controllers=$(cat "/sys/fs/cgroup$current/cgroup.subtree_control"); test -z "$leaf_controllers"; '
-)
-
 # Passive observation only: no daemon requests or cgroup/service changes before admission.
 PLACEMENT_READBACK_COMMAND = r"""
 LC_ALL=C; export LC_ALL
@@ -337,12 +322,6 @@ JOURNAL_BOUNDARY_COMMAND = (
     'grep -qFx "systemd=$version" /usr/share/strukturpiloten/docker/conformance-packages; '
     'printf "systemd-version=%s\\n" "$version"'
 )
-
-
-def guarded_command(*args: str) -> tuple[str, ...]:
-    """Refuse guest helpers in a distributor or outside the delegated parent."""
-    script = PLACEMENT_GUARD + 'set +e; "$@"; result=$?; set -e; ' + PLACEMENT_GUARD + 'exit "$result"'
-    return ("sh", "-euc", script, "--", *args)
 
 
 def startup_deadline(ctx: RuntimeContext) -> float:
@@ -724,10 +703,62 @@ def _journal_boundary_evidence(output: str) -> dict[str, Any]:
     }
 
 
+def systemd_options(ctx: RuntimeContext) -> tuple[str, ...]:
+    """Select only the declared outer backend's guest launch prerequisites."""
+    if getattr(ctx, "outer_engine", "podman") == "docker":
+        if ctx.name != "docker-29-conformance-rootless" or vars(ctx).get("declared_launcher") != "systemd":
+            raise ProbeError("Docker systemd options require the reviewed declared fixture")
+        return DOCKER_SYSTEMD_OPTIONS
+    return SYSTEMD_OPTIONS
+
+
+def _verify_docker_runtime(ctx: RuntimeContext) -> None:
+    raw = ctx.podman("read selected outer Docker systemd prerequisites", "info", "--format", "{{json .}}")
+    info = json.loads(raw)
+    runtime = info.get("Runtimes", {}).get("runc", {})
+    security = info.get("SecurityOptions")
+    executable = shutil.which("runc")
+    if (
+        info.get("CgroupDriver") != "systemd"
+        or info.get("CgroupVersion") != "2"
+        or info.get("DefaultRuntime") != "runc"
+        or not isinstance(security, list)
+        or any("rootless" in str(value) for value in security)
+        or not executable
+        or not executable.startswith("/")
+        or runtime.get("path") not in {"runc", executable}
+        or info.get("DockerRootDir") != str(ctx.directory / "root")
+    ):
+        raise ProbeError("private Docker systemd guest requires rootful cgroup-v2/systemd and the selected runc")
+    version = ctx.command("read selected Docker runc version", [*ctx._sudo, executable, "--version"])  # noqa: SLF001
+    if len(version) > MAX_VERSION_REPORT or not re.fullmatch(
+        r"runc version [0-9]+\.[0-9]+\.[0-9]+(?:[^\n]*)", version.splitlines()[0] if version else ""
+    ):
+        raise ProbeError("selected Docker runc version report is unavailable or invalid")
+    digest = ctx.command("hash selected Docker runc executable", [*ctx._sudo, "sha256sum", executable])  # noqa: SLF001
+    if not re.fullmatch(r"[0-9a-f]{64}  /[^\n]+", digest):
+        raise ProbeError("selected Docker runc executable hash was unavailable")
+    ctx.checks.append(
+        {
+            "name": "outer Docker runtime prerequisite observation",
+            "status": "passed",
+            "path": executable,
+            "sha256": digest.split()[0],
+            "rawVersionReport": version,
+            "source": "private daemon default-runtime declaration plus installed executable readback",
+            "declaredRuntimePath": runtime["path"],
+            "taskExecutableCorrespondence": "unresolved; daemon declaration is not a held task executable identity",
+        }
+    )
+
+
 def verify_runtime(ctx: RuntimeContext) -> None:
     """Verify the actual rootful launcher and crun version before starting a guest."""
     uid = ctx.command("systemd outer runtime identity", [*ctx._sudo, "id", "-u"])  # noqa: SLF001
-    ctx.assert_equal("systemd requires rootful outer Podman", uid, "0")
+    ctx.assert_equal("systemd requires rootful outer runtime", uid, "0")
+    if getattr(ctx, "outer_engine", "podman") == "docker":
+        _verify_docker_runtime(ctx)
+        return
     raw = ctx.podman(
         "inspect selected systemd OCI runtime", "--runtime", "crun", "info", "--format", "{{json .Host.OCIRuntime}}"
     )
@@ -1563,19 +1594,26 @@ def verify_inner_limits(
                     scope=association["allocator"]["group"],
                     scope_inode=int(association["scope-inode"]),
                 )
-            readback = _exec(
-                ctx,
-                budget,
-                container,
-                f"read exact inner {kind} cgroup limits",
-                "docker",
-                "exec",
-                name,
-                "sh",
-                "-euc",
-                "cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/pids.max; touch /tmp/resource-start",
-            )
-            ctx.assert_equal(f"inner {kind} hard limit values", readback, f"{MEMORY_BYTES}\n{INNER_PIDS}")
+            try:
+                readback = _exec(
+                    ctx,
+                    budget,
+                    container,
+                    f"read exact inner {kind} cgroup limits",
+                    "docker",
+                    "exec",
+                    name,
+                    "sh",
+                    "-euc",
+                    "cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/pids.max; touch /tmp/resource-start",
+                )
+                ctx.assert_equal(f"inner {kind} hard limit values", readback, f"{MEMORY_BYTES}\n{INNER_PIDS}")
+            except BaseException:
+                # Release can have reached the allocator even if exec/readback
+                # failed. Preserve that failure and sample before owned removal.
+                if kind == "memory" and diagnostics is not None:
+                    diagnostics.snapshot("after-inner-memory")
+                raise
             exit_code, state = _inner_enforcement_state(
                 ctx, budget, container, (kind, workload), diagnostics=diagnostics
             )
@@ -1641,8 +1679,29 @@ def _assert_orderly_state(ctx: RuntimeContext, state: dict[str, Any]) -> None:
     ctx.checks.append({"name": "owned systemd orderly lifecycle state", "status": "passed", "actual": state})
 
 
+def _observe_before_stop(ctx: RuntimeContext, observer: Callable[[], None] | None) -> None:
+    if observer is None:
+        return
+    try:
+        observer()
+    except Exception as error:  # noqa: BLE001 — evidence cannot alter the native shutdown result.
+        ctx.observations.append(
+            {
+                "name": "owned systemd OOM custody",
+                "phase": "before-stop-request",
+                "availability": "error",
+                "attribution": "unresolved",
+                "reason": type(error).__name__,
+            }
+        )
+
+
 def stop_guest(
-    ctx: RuntimeContext, container: str, *, on_exit: Callable[[str, dict[str, Any]], None] | None = None
+    ctx: RuntimeContext,
+    container: str,
+    *,
+    on_exit: Callable[[str, dict[str, Any]], None] | None = None,
+    before_stop: Callable[[], None] | None = None,
 ) -> None:
     """Request exit.target without force; verify zero exit, never admit emergency halt."""
     if container not in ctx.containers:
@@ -1686,6 +1745,7 @@ def stop_guest(
     # launched after this request; only exact-ID host readback establishes exit.
     request = PLACEMENT_GUARD + 'test "$(id -u)" = 0; test "$(cat /proc/1/comm)" = systemd; exec "$@"'
     try:
+        _observe_before_stop(ctx, before_stop)
         ctx.podman(
             "request owned systemd exit.target with pre-shutdown placement guard",
             "exec",

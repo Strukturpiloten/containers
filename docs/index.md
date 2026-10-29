@@ -13,7 +13,9 @@ Start with the [image catalogue](image-catalogue.md) to see every declared image
 | Read JSON or Markdown exports | [Catalogue data and discovery](data-and-discovery.md) |
 | Change a recipe or metadata | [Contributing](../CONTRIBUTING.md) |
 | Build, release, or recover a publication | [Operations](operations.md) |
+| Understand native smoke-test runtime isolation | [Runtime backends](runtime-backends.md) |
 | Track upstream releases and maintain Docker/Podman version lines | [Upstream release automation](upstream-releases.md) |
+| Identify the website operator and review privacy information | [Legal Notice](legal-notice.md) · [Privacy Policy](privacy-policy.md) · [Impressum](impressum.md) · [Datenschutz](datenschutz.md) |
 
 The [Docker](../images/docker/README.md), [Podman](../images/podman/README.md), [Nextcloud PHP-FPM](../images/nextcloud/nextcloud-phpfpm/README.md), [Nextcloud notify_push](../images/nextcloud/nextcloud-notifypush/README.md), and [TYPO3 PHP-FPM](../images/typo3/typo3-phpfpm/README.md) guides describe family-specific runtime behavior. The [maintenance evidence](maintenance-evidence.md), [vulnerability scanning](vulnerability-scanning.md), [workflow configuration](workflow-configuration.md), and [monorepo concept](container-monorepo-concept.md) guides cover repository operations and design.
 

@@ -12,6 +12,9 @@ from scripts import container_engine
 from scripts.admission import image_policy
 from scripts.oci_artifacts import archive_identity
 
+MAX_VERSION_CHARACTERS = 256
+FIRST_PRINTABLE_CHARACTER = 32
+
 
 class EvidenceError(ValueError):
     """Required architecture evidence is missing, failed, or bound to another image."""
@@ -45,6 +48,91 @@ def _runtime_skips(record: dict[str, Any], *, nested_disabled: bool, profile: st
         if not intentional_nested and not documented_scope:
             msg = f"Runtime check {check.get('name')} was skipped without a declared exemption."
             raise EvidenceError(msg)
+
+
+def _observed_version(value: object, prefix: str) -> bool:
+    return (
+        isinstance(value, str)
+        and value.startswith(prefix)
+        and len(prefix) < len(value) <= MAX_VERSION_CHARACTERS
+        and bool(value[len(prefix) :].strip())
+        and not any(ord(character) < FIRST_PRINTABLE_CHARACTER for character in value)
+        and (bool(prefix) or value[0].isdigit())
+    )
+
+
+def _outer_runtime(record: dict[str, Any], profile: str) -> None:
+    """Require the CI caller policy independently of the inner engine mode."""
+    engines = {"docker": "docker", "podman": "podman", "phpFpm": "podman", "notifyPush": "podman"}
+    host = record.get("host")
+    if not isinstance(host, dict):
+        msg = "Runtime evidence lacks outer-runtime host observations."
+        raise EvidenceError(msg)
+    observed = host.get("outerRuntime")
+    engine = engines.get(profile)
+    if (
+        engine is None
+        or host.get("outerEngineSelection") != "profile"
+        or not isinstance(observed, dict)
+        or observed.get("engine") != engine
+        or observed.get("rootMode") != "rootful"
+        or observed.get("storage") != "invocation-owned"
+    ):
+        msg = "Runtime evidence does not establish the required private CI outer engine."
+        raise EvidenceError(msg)
+    prefix = "Docker version " if engine == "docker" else "podman version "
+    version = observed.get("clientVersion")
+    if not _observed_version(version, prefix):
+        msg = "Runtime evidence lacks an observed outer-engine client version."
+        raise EvidenceError(msg)
+    if engine == "docker":
+        values = (("serverVersion", ""), ("containerdVersion", "containerd "), ("systemdVersion", "systemd "))
+        for name, required_prefix in values:
+            value = observed.get(name)
+            if not _observed_version(value, required_prefix):
+                msg = "Runtime evidence lacks an observed private Docker dependency version."
+                raise EvidenceError(msg)
+        if observed.get("endpoint") != "private-unix" or "podmanVersion" in host:
+            msg = "Docker runtime evidence has an ambient endpoint or misleading Podman identity."
+            raise EvidenceError(msg)
+    elif host.get("podmanVersion") != version:
+        msg = "Podman runtime version fields disagree."
+        raise EvidenceError(msg)
+
+
+def _systemd_phase_backends(record: dict[str, Any], profile: str, configuration: object) -> None:
+    if (
+        profile != "docker"
+        or not isinstance(configuration, dict)
+        or configuration.get("launcher") != "systemd"
+        or configuration.get("mode") != "rootless"
+    ):
+        return
+    phases = record.get("phases")
+    expected = ("clean-control", "enforcement")
+    if not isinstance(phases, list) or len(phases) != len(expected):
+        msg = "Systemd Docker evidence lacks both required independent runtime phases."
+        raise EvidenceError(msg)
+    for name, phase in zip(expected, phases, strict=True):
+        if (
+            not isinstance(phase, dict)
+            or phase.get("phase") != name
+            or phase.get("status") != "passed"
+            or phase.get("cleanupVerified") is not True
+            or phase.get("imageIdentity") != record.get("imageIdentity")
+        ):
+            msg = "Systemd Docker phase identity, admission or cleanup differs from its required contract."
+            raise EvidenceError(msg)
+        _runtime_skips(phase, nested_disabled=False, profile="docker")
+        _outer_runtime(
+            {
+                "host": {
+                    "outerEngineSelection": record["host"]["outerEngineSelection"],
+                    "outerRuntime": phase.get("outerRuntime"),
+                }
+            },
+            "docker",
+        )
 
 
 def verify_architecture(  # noqa: PLR0913
@@ -84,6 +172,8 @@ def verify_architecture(  # noqa: PLR0913
         msg = f"Runtime evidence does not prove {name} linux/{architecture} from this archive and run."
         raise EvidenceError(msg)
     _runtime_skips(runtime, nested_disabled=nested_disabled, profile=profile)
+    _outer_runtime(runtime, profile)
+    _systemd_phase_backends(runtime, profile, test_profile)
     candidate = scan.get("candidateSource")
     if (
         scan.get("image") != policy["image"]

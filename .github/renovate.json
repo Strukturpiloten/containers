@@ -13,6 +13,36 @@
   "customManagers": [
     {
       "customType": "regex",
+      "description": "Own the active unprivileged userns diagnostic source branch digest",
+      "managerFilePatterns": [
+        "/^\\.github/docker-userns-policy-source\\.json$/"
+      ],
+      "matchStrings": [
+        "\"repository\":\\s*\"Strukturpiloten/docker-lens\",\\s*\"ref\":\\s*\"(?<currentValue>TheRealBecks/issue127)\",\\s*\"commit\":\\s*\"(?<currentDigest>[a-f0-9]{40})\""
+      ],
+      "depNameTemplate": "Strukturpiloten/docker-lens",
+      "packageNameTemplate": "Strukturpiloten/docker-lens",
+      "datasourceTemplate": "github-digest",
+      "versioningTemplate": "exact"
+    },
+    {
+      "customType": "regex",
+      "description": "Review the active AppArmor parser contract version against official GitLab tags",
+      "managerFilePatterns": [
+        "/^\\.github/docker-userns-policy-source\\.json$/"
+      ],
+      "matchStrings": [
+        "\"repository\":\\s*\"apparmor/apparmor\",\\s*\"expectedVersion\":\\s*\"(?<currentValue>\\d+\\.\\d+\\.\\d+)\""
+      ],
+      "depNameTemplate": "apparmor/apparmor",
+      "packageNameTemplate": "apparmor/apparmor",
+      "datasourceTemplate": "gitlab-tags",
+      "registryUrlTemplate": "https://gitlab.com",
+      "extractVersionTemplate": "^v(?<version>\\d+\\.\\d+\\.\\d+)$",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
       "description": "Update each Grype release and architecture archive checksum together",
       "managerFilePatterns": [
         "/^\\.github\\/actions\\/scan-vulnerabilities\\/action\\.yml$/"
@@ -168,7 +198,7 @@
         "/^\\.github/workflow-templates/.+\\.yml\\.j2$/"
       ],
       "matchStrings": [
-        "uses:\\s*(?<depName>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@(?<currentDigest>[a-f0-9]{40})\\s+#\\s*(?<currentValue>v?\\d+\\.\\d+\\.\\d+)"
+        "uses:\\s*(?<depName>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@(?<currentDigest>[a-f0-9]{40})\\s+#\\s*(?<currentValue>v?\\d+(?:\\.\\d+){0,2})"
       ],
       "datasourceTemplate": "github-tags",
       "versioningTemplate": "semver-coerced"
@@ -258,6 +288,19 @@
       "packageNameTemplate": "composer/composer",
       "datasourceTemplate": "github-releases",
       "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "description": "Track the canonical Python interpreter alongside project requirements",
+      "managerFilePatterns": [
+        "/^\\.github/automation\\.yml$/"
+      ],
+      "matchStrings": [
+        "PYTHON_VERSION:\\s*\"?(?<currentValue>\\d+\\.\\d+(?:\\.\\d+)?)\"?"
+      ],
+      "depNameTemplate": "python",
+      "datasourceTemplate": "python-version",
+      "versioningTemplate": "python"
     }
   ],
   "github-actions": {
@@ -273,10 +316,36 @@
   },
   "packageRules": [
     {
+      "description": "Require coordinated human review of compile/unused diagnostic source and parser consumers; manually re-admit .github/docker-userns-unused-admission.json on any source/contract change; no automatic cohort hashes or load admission",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "github-digest",
+        "gitlab-tags"
+      ],
+      "matchFileNames": [
+        ".github/docker-userns-policy-source.json"
+      ],
+      "matchPackageNames": [
+        "Strukturpiloten/docker-lens",
+        "apparmor/apparmor"
+      ],
+      "groupName": "Userns compile and unused source and parser review",
+      "dependencyDashboardApproval": true,
+      "automerge": false
+    },
+    {
       "description": "Review both Grype architecture release assets in one update",
-      "matchManagers": ["custom.regex"],
-      "matchDatasources": ["github-release-attachments"],
-      "matchPackageNames": ["anchore/grype"],
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "github-release-attachments"
+      ],
+      "matchPackageNames": [
+        "anchore/grype"
+      ],
       "groupName": "Grype scanner archives",
       "automerge": false
     },
@@ -568,6 +637,23 @@
       ]
     },
     {
+      "description": "Update PHP and Alpine versions together while preserving the FPM Alpine variant",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "docker.io/php"
+      ],
+      "matchFileNames": [
+        "images/nextcloud/nextcloud-phpfpm/container.yaml",
+        "images/typo3/typo3-phpfpm/container.yaml"
+      ],
+      "versioning": "regex:^(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)-(?<compatibility>fpm-alpine)(?<build>\\d+)\\.(?<revision>\\d+)$"
+    },
+    {
       "description": "PHP extension and Composer version updates require human review",
       "matchPackageNames": [
         "krakjoe/apcu",
@@ -743,6 +829,26 @@
         "digest"
       ],
       "groupName": "Docker Arch distro base"
+    },
+    {
+      "description": "Update Podman CentOS Stream 10 distro base digest for both root modes together",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "quay.io/centos/centos"
+      ],
+      "matchCurrentValue": "/^stream10$/",
+      "matchFileNames": [
+        "/^images\\/podman\\/podman-centos-stream-10-(?:rootful|rootless)\\/container\\.yaml$/"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "groupName": "Podman CentOS Stream 10 distro base"
     },
     {
       "description": "Update Docker and Podman Debian 11 distro base digest for both root modes together",
@@ -944,6 +1050,20 @@
         "digest"
       ],
       "groupName": "Docker Ubuntu 26.04 distro base"
+    },
+    {
+      "description": "Coordinate reviewed Python runtime, project constraint and lockfile migrations",
+      "matchDatasources": [
+        "python-version"
+      ],
+      "matchPackageNames": [
+        "python"
+      ],
+      "groupName": "Python runtime",
+      "automerge": false
     }
+  ],
+  "gitIgnoredAuthors": [
+    "/^41898282\\+github-actions\\[bot\\]@users\\.noreply\\.github\\.com$/"
   ]
 }

@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "consumer": "containers-ubuntu26-userns-unused",
+  "qualification": "none",
+  "sourceManifestSha256": "7f6693f40311617e4854f8c6a35cbe13b3afdd3d7a8bef58978397ba1178dbd8",
+  "contracts": {
+    "scripts/docker_userns_custody.py": "8d38ba82d0c1798b56cf796e7965ced4fc82f64dd7b3b17857e40f1a62b40fbe",
+    "scripts/docker_userns_custody_child.py": "e26cade2b6c3dbd7a8f303cdfcd0ec33fa03c23e981e8b5b40e4180374983025",
+    "scripts/docker_userns_hosted.py": "6c78600aa1a222449869410912e38a91d427520239a4eff07c02b8551cef8f04",
+    "scripts/docker_userns_policy_source.py": "cafc4121a424b3053528a5c8284314decdcf370878666c39edc83c15b2234927",
+    ".github/docker-userns-helper-closure.json": "48d06e8cb16f495b32a0037d868c7d057a9040e2756c420438a2a302a7ca359f"
+  },
+  "cohort": {
+    "os_id": "ubuntu",
+    "os_version": "26.04",
+    "architecture": "x86_64",
+    "kernel": "7.0.0-1017-azure",
+    "image_os": "ubuntu26",
+    "image_version": "20261023.163.3",
+    "parser_version": "5.0.2",
+    "parser_sha256": "955e4cd5f092604fe75131b264e26924108371a8764d02f395f7493f6bcd691a",
+    "abi_sha256": "e510bb8f6788b45e48de2f859a6f94a7b8416cbac5a1051814cfce925fa911bd",
+    "namespace_mask": [
+      "userns_create"
+    ]
+  },
+  "review": {
+    "kind": "manual-unused-only-semantic-admission",
+    "evidenceRun": "40277997638",
+    "evidenceMerge": "08cba8705b0f81f38a47c3315ce86da76418580e",
+    "limits": "compile-only historical observation; fresh identities required; no load or guest qualification",
+    "integrityException": "preinstalled OS parser/interpreter/stdlib and systemd are observed root-owned OS trust; no vendor checksum claimed",
+    "renovate": "manual review on source/contract change; never automatically rewrite cohort or content hashes"
+  }
+}

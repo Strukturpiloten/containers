@@ -27,6 +27,7 @@ from scripts.runtime_docker import (
     run_docker,
 )
 from scripts.runtime_docker_systemd import (
+    DOCKER_SYSTEMD_OPTIONS,
     INNER_PIDS,
     MEMORY_BYTES,
     PLACEMENT_GUARD,
@@ -138,7 +139,12 @@ class DockerSystemdTests(unittest.TestCase):
             event_name="push", ref_name="main", default_branch="main", before="a" * 40, sha="b" * 40, max_stages=None
         )
         expected = {"docker-29-conformance-rootless"}
-        for changed in ("scripts/runtime_docker_systemd.py", "images/docker/conformance/resource-probe.c"):
+        for changed in (
+            "scripts/runtime_docker_systemd.py",
+            "scripts/runtime_oom_diagnostics.py",
+            "scripts/runtime_oom_watch.py",
+            "images/docker/conformance/resource-probe.c",
+        ):
             with (
                 self.subTest(changed=changed),
                 patch("scripts.container_engine._changed_files", return_value=[changed]),
@@ -208,6 +214,51 @@ class DockerSystemdTests(unittest.TestCase):
         profile["outerPrivilege"] = "unprivileged"
         with self.assertRaisesRegex(ProbeError, "rootful outer"):
             run_docker(ctx, profile, archive=Path("unused"), allow_privileged=False, skip_nested=True)
+
+    def test_docker_systemd_uses_private_namespace_tmpfs_without_podman_flags(self) -> None:
+        ctx = self.context()
+        ctx.outer_engine, ctx.declared_launcher = "docker", "systemd"
+        profile = {"mode": "rootless", "launcher": "systemd", "outerPrivilege": "privileged"}
+        options = _outer_options(ctx, profile, Path("owned/fixture.tar"))
+        for value in (*outer_container_limits(), *DOCKER_SYSTEMD_OPTIONS, "--privileged"):
+            self.assertIn(value, options)
+        for forbidden in ("--runtime", "crun", "--systemd=always", "--annotation"):
+            self.assertNotIn(forbidden, options)
+        self.assertFalse(any("/sys/fs/cgroup:" in value or "docker.sock:" in value for value in options))
+        ctx.declared_launcher = "direct"
+        with self.assertRaisesRegex(ProbeError, "reviewed declared fixture"):
+            _outer_options(ctx, profile, Path("owned/fixture.tar"))
+
+    def test_docker_runtime_requires_actual_private_systemd_cgroup2_metadata(self) -> None:
+        baseline = {
+            "CgroupDriver": "systemd",
+            "CgroupVersion": "2",
+            "DefaultRuntime": "runc",
+            "Runtimes": {"runc": {"path": "runc"}},
+            "SecurityOptions": [],
+            "DockerRootDir": "owned-store/root",
+        }
+        for changed in (
+            {},
+            {"CgroupDriver": "cgroupfs"},
+            {"CgroupVersion": "1"},
+            {"SecurityOptions": ["name=rootless"]},
+            {"DockerRootDir": "/var/lib/docker"},
+            {"DefaultRuntime": "unreviewed"},
+        ):
+            with self.subTest(changed=changed):
+                ctx = self.context()
+                ctx.outer_engine, ctx.declared_launcher = "docker", "systemd"
+                ctx.podman.return_value = json.dumps({**baseline, **changed})
+                ctx.command.side_effect = ["0", "runc version 1.3.3", "a" * 64 + "  /usr/bin/runc"]
+                with patch("scripts.runtime_docker_systemd.shutil.which", return_value="/usr/bin/runc"):
+                    if changed:
+                        with self.assertRaisesRegex(ProbeError, "private Docker systemd guest"):
+                            verify_runtime(ctx)
+                    else:
+                        verify_runtime(ctx)
+                        self.assertEqual(ctx.command.call_args.args[1][-2:], ["sha256sum", "/usr/bin/runc"])
+                self.assertTrue(all("--runtime" not in call.args for call in ctx.podman.call_args_list))
 
     def test_runtime_requires_root_crun_exact_path_version_and_hash(self) -> None:
         for name, version, uid, valid in (

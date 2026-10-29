@@ -43,7 +43,7 @@ permissions: {}
 
 env:
   PYTHON_VERSION: "3.14"
-  UV_VERSION: 0.13.0
+  UV_VERSION: 0.13.5
 
 jobs:
   gate:
@@ -176,7 +176,7 @@ jobs:
           uv run --frozen --group docs --python "${PYTHON_VERSION}" python -m scripts.documentation \
             --output _site --snapshot "${RUNNER_TEMP}/registry-snapshot.json"
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
         with:
           path: _site
 
@@ -195,4 +195,4 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

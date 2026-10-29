@@ -128,6 +128,34 @@ class PlanningTests(unittest.TestCase):
         with patch.object(engine, "_changed_files", return_value=["scripts/container_engine.py"]):
             self.assertEqual(engine._selected_image_names(self.images, _options()), {"base", "app"})
 
+    def test_rootless_diagnostic_helper_only_change_selects_every_native_image(self) -> None:
+        for changed in (
+            "scripts/runtime_backends.py",
+            "scripts/runtime_docker_backend.py",
+            "scripts/runtime_docker_diagnostics.py",
+            "scripts/runtime_docker_expiry.py",
+            "scripts/runtime_resource_budgets.py",
+        ):
+            with self.subTest(changed=changed), patch.object(engine, "_changed_files", return_value=[changed]):
+                self.assertEqual(engine._selected_image_names(self.images, _options()), {"base", "app"})
+
+    def test_systemd_guard_only_change_selects_conformance_and_skips_unrelated_images(self) -> None:
+        images = engine._load_images()
+        with patch.object(engine, "_changed_files", return_value=["scripts/runtime_docker_systemd_guard.py"]):
+            plan = engine._build_plan(images, _options())
+        self.assertEqual(plan["selection"]["directImages"], ["docker-29-conformance-rootless"])
+        self.assertEqual(plan["selection"]["reverseDependencies"], [])
+        self.assertEqual([image["name"] for image in plan["images"]], ["docker-29-conformance-rootless"])
+        self.assertEqual(
+            {(entry["name"], entry["arch"]) for entry in plan["smokeBuildMatrix"]["include"]},
+            {("docker-29-conformance-rootless", "amd64"), ("docker-29-conformance-rootless", "arm64")},
+        )
+        selected = {image["name"] for image in plan["images"]}
+        for unrelated in ("docker-29-rootless", "podman-debian-13-rootful", "nextcloud-phpfpm"):
+            with self.subTest(unrelated=unrelated):
+                self.assertNotIn(unrelated, selected)
+        self.assertEqual(plan["selection"]["reason"], "image-specific or shared runtime input changed")
+
     def test_validation_only_change_selects_no_images(self) -> None:
         for changed_file in (".github/renovate.json", "container.schema.json", "pyproject.toml", "uv.lock"):
             with (

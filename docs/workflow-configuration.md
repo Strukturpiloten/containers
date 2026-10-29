@@ -21,13 +21,112 @@ The actionlint compatibility allowlist covers only those two labels until the
 linter's built-in inventory catches up; successful scheduling and builds are
 verified by GitHub CI.
 
+`ci.yml` offers a manual `validation_profile` choice: `full` (the default) or
+`docker-rootless-diagnostic`. Only `workflow_dispatch` can select the latter;
+other events ignore the input, and unknown manual values fail planning. Known
+profile names match without ASCII case sensitivity; whitespace and unknown
+values remain invalid. Concurrency uses closed `full`, `diagnostic`, and `invalid`
+components, so invalid manual inputs cannot cancel full validation.
+The diagnostic uses the existing planner and build action for one catalogue image
+on both native architectures. Its always-running aggregate is named
+`Docker fixture diagnostic (not Required CI)`, including when planning fails,
+so it never supplies a successful or skipped `Required CI` context. Event and
+manual profile are separate concurrency groups. See the
+[dispatch command and evidence limits](operations.md#test-a-change).
+
+The selected image name is a stable catalogue identity, not a software version
+pin. This profile introduces no dependency or operational version pin. Existing
+Renovate ownership for workflow templates, generated workflows, action pins, and
+image metadata remains applicable; their extraction paths and update policies
+are unchanged.
+
 Renovate updates canonical tool/runner values and the corresponding literals in
 generated workflow YAML in the same dependency update. Its custom template
-manager tracks action tags and commit digests together, alongside the native
-manager's generated-workflow references. There are no privileged post-upgrade
-commands. A missed source or generated update fails the generation check rather
-than silently changing workflow behavior. Manually regenerate on the Renovate
-branch if an update cannot be represented by its configured managers.
+manager tracks major-only, minor and full action tags with their commit digests,
+alongside the native manager's generated-workflow references. Python interpreter
+updates share a reviewed group with project requirements and the lockfile.
+
+## Completing Renovate updates automatically
+
+`Complete Renovate updates` reconciles generated files on same-repository PRs
+authored by `renovate[bot]`. It runs on PR updates, hourly for recovery, and on
+manual dispatch. Dispatch with a PR number to check one branch, or leave it empty
+to check all open Renovate PRs.
+
+The workflow checks out only the trusted default branch and installs its locked
+dependencies. `scripts.renovate_updates` reads immutable Git objects from a PR;
+it never checks out or imports PR code. It previews the PR combined with current
+`main`, regenerates the maintenance catalogue and workflows, synchronizes action
+pin updates between templates and outputs, and aligns the canonical interpreter
+when a Python requirement and matching lockfile have changed. Template changes
+must match trusted `main` except for literal action tags and commit hashes.
+
+When generated changes are necessary, one completion commit incorporates that
+preview of `main` and the generated files. A remote-head lease prevents replacing
+concurrent edits. Queued PRs stay unchanged. A real merge conflict requests
+Renovate's own rebase checkbox; merely falling behind `main` does not request a
+rebase. Plain historical merges of trusted `main` are accepted only when their
+trees match Git's clean merge; custom edits remain protected. Repeated runs with
+matching files make no commits.
+
+The existing `RELEASE_AUTOMATION_TOKEN` must have repository Contents, Pull requests
+and Workflows write access. Its pushes trigger normal PR CI automatically. The
+built-in Actions token would require manual approval for the resulting workflow
+runs. `gitIgnoredAuthors` allows Renovate to replace the completion bot's commits
+when it updates its own branch; human edits retain Renovate's usual protection.
+Mend-hosted post-upgrade commands are not required.
+
+Freshness checks, Required CI, the merge queue and dependency review policies
+remain enforced. A successful completion run establishes generated-file
+consistency; image builds, runtime tests and admission checks still decide whether
+a dependency update can merge.
+
+## CI-tool changes and image-input preflight
+
+Non-major `UV_VERSION` and `ACTIONLINT_VERSION` updates receive focused PR and
+merge-queue verification. The planner reads the configuration and every generated
+workflow at both Git revisions. Only those version fields may differ; executable
+workflow changes, stale generated values, runner/Python/Syft changes, template or
+source changes, and unavailable history retain ordinary build selection. Merely
+changing a file under `.github/` never grants the smaller matrix.
+
+Focused verification still runs all repository tests, metadata checks, strict
+documentation generation, and workflow freshness/lint checks. It builds and tests
+`docker-29-rootless`, `podman-alpine-3.24-rootful`, and `nextcloud-phpfpm` on AMD64
+and ARM64, including the usual runtime and vulnerability admission checks. This
+selects six architecture jobs and two Docker payload jobs instead of the full
+fleet. A tool-only push selects no images for publication. Scheduled and manual
+runs retain their full or explicitly requested scope; image and runtime changes
+retain affected-image and reverse-dependency coverage.
+
+Before PR and queue matrices start, `scripts.image_inputs` checks the
+selected image arguments and private payload base-image arguments. Lookups are
+deduplicated by digest, then checked for manifest identity and required Linux
+platforms. Empty indexes, missing architectures, and missing digests fail the plan
+job before expensive builds start. Transient registry failures have a bounded
+retry budget; permanently missing manifests are reported immediately. Unselected
+images do not participate in this preflight.
+
+Publication planning runs the same check as an advisory and retains its evidence.
+A failed preflight there cannot prevent unrelated images from publishing: every
+image still has to pass its own build, runtime, vulnerability, and provenance
+gates. This preserves independent publication when an upstream registry removes
+one base image. PR and merge-queue preflight failures always block `Required CI`.
+
+The `container-build-plan` artifact includes `image-inputs.json`, including on a
+preflight failure. Its failed checks identify the exact reference, architectures,
+and metadata/payload consumers. Repair a missing pin by resolving a replacement
+for the intended tag, verifying both architectures, and updating all intended
+consumers together. Keep the digest pin: a valid tag alone does not establish that
+the pinned manifest is usable. Preflight is an availability/platform check, not a
+replacement for building, testing, scanning, or provenance verification.
+
+To reproduce a plan's input check locally with `skopeo` installed:
+
+```sh
+uv run --frozen --python 3.14 python -m scripts.image_inputs \
+  --plan build-plan.json --output image-inputs.json
+```
 
 ## Automatic dependency merges
 
@@ -76,10 +175,12 @@ Use these initial settings:
 | Maximum pull requests to merge | 1 |
 | Wait time for minimum group size | 0 minutes |
 
-Keep **Allow auto-merge** enabled in the repository's general settings. Keep the
-existing `Required CI` ruleset and organisation review, history, and code quality
-rules. The queue validates the current integration result, so eligible PRs do
-not need repeated manual branch updates. These settings are repository state,
+Keep **Allow auto-merge** enabled in the repository's general settings. Keep
+`Required CI` required in the effective default-branch rules, including when that
+requirement is inherited from the organisation. Keep the review, history, and
+code quality rules. Disable **Require branches to be up to date** in every
+applicable ruleset: the queue validates the current integration result, so
+eligible PRs do not need repeated manual branch updates. These settings are repository state,
 not something that merging the workflow file enables automatically.
 
 After activation, check the merge queue and Actions for `merge_group` runs. A

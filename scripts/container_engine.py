@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any, NoReturn, cast
 import yaml
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
-from scripts import build_payloads
+from scripts import build_payloads, ci_scope
 from scripts.metadata_schema import MetadataSchemaError, validate_metadata_schema
 from scripts.policy import (
     canonical_build_tag,
@@ -61,9 +61,17 @@ GLOBAL_IMAGE_INPUTS = (
     ".github/actions/finalize-release/**",
     ".github/actions/publish-image/**",
     ".github/actions/scan-vulnerabilities/**",
+    ".github/actions/preflight-images/**",
     "security/**",
     "scripts/container_engine.py",
+    "scripts/ci_scope.py",
+    "scripts/image_inputs.py",
     "scripts/runtime_tests.py",
+    "scripts/runtime_backends.py",
+    "scripts/runtime_docker_backend.py",
+    "scripts/runtime_docker_diagnostics.py",
+    "scripts/runtime_resource_budgets.py",
+    "scripts/runtime_docker_expiry.py",
     "scripts/oci_artifacts.py",
     "scripts/runtime_docker.py",
     "scripts/admission.py",
@@ -871,6 +879,17 @@ def _selected_images(images: list[JsonMap], options: PlanOptions) -> tuple[set[s
     if files is None:
         return {image["name"] for image in images}, None, "changed-file diff unavailable; safe full rebuild"
 
+    if options.before and ci_scope.is_tool_only_change(_repo_root(), options.before, options.sha, files):
+        selected: set[str] = set()
+        reason = "CI tool versions changed; no container publication"
+        if options.event_name != "push":
+            missing = ci_scope.CANARY_IMAGES - {image["name"] for image in images}
+            if missing:
+                _fail(f"CI tool validation images are missing: {', '.join(sorted(missing))}.")
+            selected = set(ci_scope.CANARY_IMAGES)
+            reason = "CI tool versions changed; representative architecture validation"
+        return selected, files, reason
+
     if any(_input_matches(pattern, changed_file) for pattern in GLOBAL_IMAGE_INPUTS for changed_file in files):
         return {image["name"] for image in images}, files, "global image-build input changed"
 
@@ -1079,6 +1098,8 @@ def _plan_summary(plan: JsonMap) -> str:
         f"- Event: `{plan.get('eventName', '')}`",
         f"- Selection: {selection.get('reason', 'unknown')}",
         f"- Cache disabled: `{'yes' if selection.get('noCache') else 'no'}`",
+        f"- Architecture builds: {len(plan.get('smokeBuildMatrix', {}).get('include', []))}",
+        f"- Shared payload builds: {len(plan.get('payloadMatrix', {}).get('include', []))}",
     ]
     changed_files = _string_list(selection.get("changedFiles", [])) or []
     if changed_files:
@@ -1514,6 +1535,7 @@ def _command_test_podman_image(args: argparse.Namespace) -> None:
                 sudo=False,
                 no_sudo=False,
                 timeout=45,
+                outer_engine="podman",
             )
         )
         if result["status"] != "passed":

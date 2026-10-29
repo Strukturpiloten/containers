@@ -1,7 +1,7 @@
 """Native, bounded Docker daemon checks using the isolated outer Podman context."""
 
 # The synthetic resource names and shell commands are intentionally explicit in evidence.
-# ruff: noqa: EM101, EM102, PLR0915, S108, TRY003
+# ruff: noqa: EM101, EM102, PLR0915, TRY003
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from scripts import runtime_docker_systemd
+from scripts.runtime_docker_diagnostics import diagnose_rootless_failure
 from scripts.runtime_errors import ProbeError
 from scripts.runtime_oom_diagnostics import OomDiagnostics
 from scripts.runtime_resource_budgets import (
@@ -43,6 +44,7 @@ def _validate_phase(profile: dict[str, Any], phase: DockerProbePhase) -> None:
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from typing import BinaryIO
 
     from scripts.runtime_tests import RuntimeContext
 
@@ -214,7 +216,7 @@ def _outer_options(ctx: RuntimeContext, profile: dict[str, Any], fixture: Path) 
         "127.0.0.1::18080",
     ]
     if profile.get("launcher", "direct") == "systemd":
-        outer_args.extend(runtime_docker_systemd.SYSTEMD_OPTIONS)
+        outer_args.extend(runtime_docker_systemd.systemd_options(ctx))
     legacy_rootless = ctx.name in LEGACY_ROOTLESS_OOM_PROFILES
     if legacy_rootless:
         # Native Bullseye Docker 20.10.5 predates the OOM-score fix in Moby #46626.
@@ -229,6 +231,16 @@ def _outer_options(ctx: RuntimeContext, profile: dict[str, Any], fixture: Path) 
     return tuple(outer_args)
 
 
+def _close_oom_diagnostics(
+    ctx: RuntimeContext, diagnostics: OomDiagnostics | None, work_deadline: float | None
+) -> None:
+    try:
+        if diagnostics is not None:
+            diagnostics.close()
+    finally:
+        ctx.runtime_deadline = work_deadline
+
+
 def _stop_owned_daemon(
     ctx: RuntimeContext, container: str, *, systemd: bool, diagnostics: OomDiagnostics | None = None
 ) -> None:
@@ -236,7 +248,9 @@ def _stop_owned_daemon(
         if diagnostics is None:
             runtime_docker_systemd.stop_guest(ctx, container)
         else:
-            runtime_docker_systemd.stop_guest(ctx, container, on_exit=diagnostics.after_exit)
+            runtime_docker_systemd.stop_guest(
+                ctx, container, on_exit=diagnostics.after_exit, before_stop=diagnostics.before_stop
+            )
     else:
         ctx.podman("signal owned Docker daemon PID 1", "exec", container, "sh", "-c", "kill -TERM 1", check=False)
         ctx.podman("wait for owned Docker daemon exit", "wait", container, timeout=30)
@@ -301,6 +315,51 @@ def _run_nested_docker(
     *,
     phase: DockerProbePhase = DockerProbePhase.ENFORCEMENT,
 ) -> None:
+    with ctx.private_fixture_archive() as archive:
+        _run_nested_docker_with_archive(ctx, profile, (expected_uid, phase), budget, archive)
+
+
+def _require_api_range(version: dict[str, Any]) -> None:
+    if not version.get("ApiVersion") or not version.get("MinAPIVersion"):
+        raise ProbeError("daemon did not report API version range")
+
+
+def _require_storage_driver(info: dict[str, Any]) -> None:
+    if not info.get("Driver"):
+        raise ProbeError("daemon did not initialize a storage driver")
+
+
+def _diagnose_failed_start(ctx: RuntimeContext, container: str, started: float, mode: str, *, api_ready: bool) -> None:
+    if mode == "rootless" and not api_ready:
+        diagnose_rootless_failure(ctx, container, started)
+
+
+def _shutdown_docker_phase(
+    ctx: RuntimeContext, container: str, *, systemd: bool, diagnostics: OomDiagnostics | None
+) -> None:
+    work_deadline = getattr(ctx, "runtime_deadline", None)
+    ctx.runtime_deadline = None
+    try:
+        if diagnostics is not None:
+            diagnostics.snapshot("before-shutdown")
+    finally:
+        try:
+            ctx.logs(container)
+        finally:
+            try:
+                _stop_owned_daemon(ctx, container, systemd=systemd, diagnostics=diagnostics)
+            finally:
+                _close_oom_diagnostics(ctx, diagnostics, work_deadline)
+
+
+def _run_nested_docker_with_archive(
+    ctx: RuntimeContext,
+    profile: dict[str, Any],
+    invocation: tuple[str, DockerProbePhase],
+    budget: IsolatedStoreDiskBudget,
+    archive: BinaryIO,
+) -> None:
+    expected_uid, phase = invocation
     _validate_phase(profile, phase)
     mode = profile["mode"]
     systemd = profile.get("launcher", "direct") == "systemd"
@@ -314,21 +373,23 @@ def _run_nested_docker(
         "save",
         "--format",
         "docker-archive",
-        "--output",
-        str(fixture),
         ctx.image_ref,
         timeout=180,
+        stdout=archive,
     )
     budget.checkpoint()
     outer_args = _outer_options(ctx, profile, fixture)
     budget.checkpoint()
     deadline = runtime_docker_systemd.startup_deadline(ctx) if systemd else None
     launch_timeout = {} if deadline is None else {"timeout": runtime_docker_systemd.startup_remaining(ctx, deadline)}
+    started = time.time()
     container = ctx.start("start nested Docker daemon", options=tuple(outer_args), **launch_timeout)
+    api_ready = False
     diagnostics: OomDiagnostics | None = None
     try:
         budget.checkpoint()
         _prepare_started_daemon(ctx, budget, container, profile, deadline)
+        api_ready = True
         _verify_daemon_user(ctx, budget, container, expected_uid, systemd=systemd)
         version_text = _docker(
             ctx, budget, container, "read Docker API versions", "version", "--format", "{{json .Server}}"
@@ -343,14 +404,12 @@ def _run_nested_docker(
             "/usr/share/strukturpiloten/docker/engine-version",
         )
         ctx.assert_equal("daemon Engine version", version["Version"], engine_version)
-        if not version.get("ApiVersion") or not version.get("MinAPIVersion"):
-            raise ProbeError("daemon did not report API version range")
+        _require_api_range(version)
         info_text = _docker(
             ctx, budget, container, "inspect Docker storage and security", "info", "--format", "{{json .}}"
         )
         info = json.loads(info_text)
-        if not info.get("Driver"):
-            raise ProbeError("daemon did not initialize a storage driver")
+        _require_storage_driver(info)
         security = [str(value) for value in info.get("SecurityOptions", [])]
         rootless = any("rootless" in value for value in security)
         ctx.assert_equal("daemon rootless security", str(rootless).lower(), str(mode == "rootless").lower())
@@ -359,9 +418,10 @@ def _run_nested_docker(
             diagnostics = OomDiagnostics(ctx, container)
             diagnostics.snapshot("before-ordinary-work")
 
-        _docker(
-            ctx, budget, container, "load synthetic nested image", "load", "--input", "/tmp/docker-native-fixture.tar"
-        )
+        budget.checkpoint()
+        archive.seek(0)
+        ctx.load_fixture_archive("load synthetic nested image", container, archive)
+        budget.checkpoint()
         nested = ctx.image_ref
         if systemd and phase is DockerProbePhase.ENFORCEMENT:
             runtime_docker_systemd.verify_inner_limits(ctx, budget, container, mode=mode, diagnostics=diagnostics)
@@ -507,17 +567,8 @@ def _run_nested_docker(
                 "! docker network inspect docker-native-probe >/dev/null 2>&1; "
                 "! docker volume inspect docker-native-probe >/dev/null 2>&1",
             )
+    except Exception:
+        _diagnose_failed_start(ctx, container, started, mode, api_ready=api_ready)
+        raise
     finally:
-        work_deadline = getattr(ctx, "runtime_deadline", None)
-        ctx.runtime_deadline = None
-        try:
-            if diagnostics is not None:
-                diagnostics.snapshot("before-shutdown")
-        finally:
-            try:
-                ctx.logs(container)
-            finally:
-                try:
-                    _stop_owned_daemon(ctx, container, systemd=systemd, diagnostics=diagnostics)
-                finally:
-                    ctx.runtime_deadline = work_deadline
+        _shutdown_docker_phase(ctx, container, systemd=systemd, diagnostics=diagnostics)
