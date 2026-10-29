@@ -331,7 +331,12 @@ def _read_query(process: subprocess.Popen[bytes], deadline: float, limit: int = 
 
 
 def _spawn_query(
-    arguments: list[str], work_deadline: float, remaining: float, timeout_executable: str | None
+    arguments: list[str],
+    work_deadline: float,
+    remaining: float,
+    timeout_executable: str | None,
+    *,
+    pass_fds: tuple[int, ...] = (),
 ) -> subprocess.Popen[bytes]:
     if remaining <= 0.05:
         raise _UnavailableError("budget-exhausted")
@@ -347,17 +352,25 @@ def _spawn_query(
         start_new_session=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
+        **({"pass_fds": pass_fds} if pass_fds else {}),
     )
 
 
 def _query_capture(
-    arguments: list[str], deadline: float, timeout_executable: str | None = None, *, limit: int = BYTE_LIMIT
+    arguments: list[str],
+    deadline: float,
+    timeout_executable: str | None = None,
+    *,
+    limit: int = BYTE_LIMIT,
+    pass_fds: tuple[int, ...] = (),
 ) -> dict[str, Any]:
     remaining = deadline - time.monotonic()
     # Prepay cleanup and protocol transmission inside the one original budget.
     work_deadline = deadline - min(2.0, remaining * 0.6)
     try:
-        process = _spawn_query(arguments, work_deadline, remaining, timeout_executable)
+        process = _spawn_query(
+            arguments, work_deadline, remaining, timeout_executable, **({"pass_fds": pass_fds} if pass_fds else {})
+        )
     except _UnavailableError as error:
         return {"status": str(error), "teardownVerified": True}
     raw = b""

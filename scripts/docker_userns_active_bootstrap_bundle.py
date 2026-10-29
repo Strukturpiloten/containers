@@ -1,0 +1,172 @@
+"""Produce a bounded unprivileged proof for the separate active root bootstrap.
+
+The producer has no policy authority. The fixed workflow program independently
+verifies every Git object and immutable source pin before staging root code.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import json
+import os
+import re
+import time
+from pathlib import Path
+from typing import Any
+
+from scripts import docker_userns_bootstrap_bundle as git
+from scripts import docker_userns_policy_source as source
+from scripts.docker_userns_qualification import QualificationError, validation_profile
+
+ROOT = Path(__file__).resolve().parents[1]
+CONSUMER = "containers-ubuntu26-userns-active"
+ADMISSION = ".github/docker-userns-active-admission.json"
+CLOSURE = ".github/docker-userns-active-helper-closure.json"
+MANIFEST = ".github/docker-userns-policy-source.json"
+FILES = (
+    "scripts/__init__.py",
+    "scripts/docker_userns_active.py",
+    "scripts/docker_userns_qualification.py",
+    "scripts/docker_runner_security.py",
+    "scripts/docker_userns_custody_child.py",
+    "scripts/docker_userns_policy_source.py",
+    "scripts/docker_userns_custody.py",
+    "scripts/docker_userns_hosted.py",
+    "scripts/docker_userns_dryparse.py",
+    "scripts/runtime_docker_diagnostics.py",
+    "scripts/runtime_docker_systemd_guard.py",
+    ADMISSION,
+    CLOSURE,
+    MANIFEST,
+)
+MAX_BUNDLE = 2 * 1024 * 1024
+MAX_EVENT = 262144
+
+
+def require(value: object) -> None:
+    """Refuse the producer without emitting caller-supplied content."""
+    if not value:
+        reason = "active-bootstrap-bundle-refused"
+        raise ValueError(reason)
+
+
+def context(environment: dict[str, str], architecture: str) -> dict[str, str]:
+    """Bind only the reviewed diagnostic dispatch, never a publication caller."""
+    expected = {
+        "GITHUB_ACTIONS": "true",
+        "RUNNER_ENVIRONMENT": "github-hosted",
+        "RUNNER_OS": "Linux",
+        "GITHUB_REPOSITORY": "Strukturpiloten/containers",
+        "GITHUB_EVENT_NAME": "workflow_dispatch",
+        "GITHUB_REF": "refs/heads/TheRealBecks/issue527",
+        "GITHUB_JOB": "smoke-build",
+        "ImageOS": "ubuntu26",
+        "GITHUB_WORKFLOW_REF": "Strukturpiloten/containers/.github/workflows/ci.yml@refs/heads/TheRealBecks/issue527",
+    }
+    require(all(environment.get(key) == value for key, value in expected.items()))
+    require(architecture in {"amd64", "arm64"})
+    require(environment.get("RUNNER_ARCH") == {"amd64": "X64", "arm64": "ARM64"}[architecture])
+    selected = environment.get("GITHUB_SHA", "")
+    require(re.fullmatch(r"[0-9a-f]{40}", selected) and environment.get("GITHUB_WORKFLOW_SHA") == selected)
+    for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"):
+        require(re.fullmatch(r"[1-9][0-9]{0,19}", environment.get(key, "")))
+    version = environment.get("ImageVersion", "")
+    require(re.fullmatch(r"[0-9]{8}\.[0-9]+\.[0-9]+", version))
+    event_path = Path("/home/runner/work/_temp/_github_workflow/event.json")
+    require(environment.get("GITHUB_EVENT_PATH") == str(event_path))
+    with event_path.open("rb") as stream:
+        raw = stream.read(MAX_EVENT + 1)
+    require(len(raw) <= MAX_EVENT)
+    event = json.loads(raw, object_pairs_hook=source.unique_object)
+    require(type(event) is dict and type(event.get("inputs", {})) is dict)
+    requested = event.get("inputs", {}).get("validation_profile", "full")
+    canonical = validation_profile(requested)
+    require(canonical == "docker-rootless-diagnostic")
+    return {
+        "candidate": selected,
+        "workflow": selected,
+        "checkout": selected,
+        "repository": expected["GITHUB_REPOSITORY"],
+        "event": "workflow_dispatch",
+        "ref": expected["GITHUB_REF"],
+        "job": expected["GITHUB_JOB"],
+        "run": environment["GITHUB_RUN_ID"],
+        "attempt": environment["GITHUB_RUN_ATTEMPT"],
+        "architecture": architecture,
+        "image": "docker-29-conformance-rootless",
+        "imageOS": "ubuntu26",
+        "imageVersion": version,
+        "imageVersionKind": "workflow-reported-provenance-not-vm-attestation",
+        "validationProfile": canonical,
+        "validationProfileRequested": requested,
+    }
+
+
+def proof(candidate: str) -> list[dict[str, str]]:
+    """Reuse only finite raw Git readers; connect the new exact closure independently."""
+    objects: dict[str, tuple[str, bytes]] = {}
+
+    def get(kind: str, identifier: str) -> bytes:
+        if identifier not in objects:
+            objects[identifier] = (kind, git.git_object(kind, identifier))
+        require(objects[identifier][0] == kind)
+        return objects[identifier][1]
+
+    commit = get("commit", candidate)
+    header = commit.split(b"\n", 1)[0]
+    require(re.fullmatch(rb"tree [0-9a-f]{40}", header))
+    for path in FILES:
+        current = header[5:].decode("ascii")
+        parts = path.split("/")
+        for index, name in enumerate(parts):
+            mode, identifier = git.tree_entries(get("tree", current))[name]
+            if index == len(parts) - 1:
+                require(mode == "100644")
+                get("blob", identifier)
+            else:
+                require(mode == "40000")
+                current = identifier
+    return [{"oid": oid, "kind": kind, "data": base64.b64encode(raw).decode()} for oid, (kind, raw) in objects.items()]
+
+
+def bundle(architecture: str) -> dict[str, Any]:
+    """Collect source bytes without root execution or policy compilation/loading."""
+    require(os.geteuid() != 0)
+    binding = context(dict(os.environ), architecture)
+    manifest = source.manifest(ROOT / MANIFEST)
+    sdk = {}
+    deadline = time.monotonic() + 30
+    for item in manifest["source"]["files"]:
+        raw = source.fetch(manifest["source"]["commit"], item["path"], item["size"], deadline)
+        require(len(raw) == item["size"] and hashlib.sha256(raw).hexdigest() == item["sha256"])
+        sdk[item["path"]] = base64.b64encode(raw).decode()
+    return {
+        "schemaVersion": 1,
+        "consumer": CONSUMER,
+        "context": binding,
+        "objects": proof(binding["candidate"]),
+        "sdk": sdk,
+    }
+
+
+def main() -> int:
+    """Write one exclusive bounded handoff; no bootstrap or mutation occurs here."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--architecture", choices=("amd64", "arm64"), required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    arguments = parser.parse_args()
+    try:
+        encoded = (json.dumps(bundle(arguments.architecture), sort_keys=True) + "\n").encode("ascii")
+        require(len(encoded) <= MAX_BUNDLE)
+        descriptor = os.open(arguments.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(encoded)
+    except OSError, ValueError, KeyError, TypeError, QualificationError:
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

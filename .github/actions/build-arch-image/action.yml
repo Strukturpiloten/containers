@@ -79,6 +79,195 @@ runs:
         IMAGE_NAME: ${{ steps.build.outputs.image_name }}
         IMAGE_PATH: ${{ steps.build.outputs.archive_path }}
         TRUSTED_RUNTIME: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+        ACTIVE_USERNS_CONTEXT: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/TheRealBecks/issue527' && github.event.inputs.validation_profile == 'docker-rootless-diagnostic' && github.job == 'smoke-build' }}
+        ACTIVE_CANDIDATE: ${{ github.sha }}
+        ACTIVE_WORKFLOW: ${{ github.workflow_sha }}
+        ACTIVE_RUN: ${{ github.run_id }}
+        ACTIVE_ATTEMPT: ${{ github.run_attempt }}
+        FIXED_ACTIVE_ROOT_BOOTSTRAP: |
+          import base64, hashlib, json, os, re, stat, sys, time
+          from pathlib import Path
+
+          CONSUMER = 'containers-ubuntu26-userns-active'
+          SOURCE_MANIFEST_SHA256 = '7f6693f40311617e4854f8c6a35cbe13b3afdd3d7a8bef58978397ba1178dbd8'
+          CLOSED_FILES = (
+              'scripts/__init__.py', 'scripts/docker_userns_active.py', 'scripts/docker_userns_qualification.py',
+              'scripts/docker_runner_security.py', 'scripts/docker_userns_custody_child.py',
+              'scripts/docker_userns_policy_source.py', 'scripts/docker_userns_custody.py',
+              'scripts/docker_userns_hosted.py', 'scripts/docker_userns_dryparse.py',
+              'scripts/runtime_docker_diagnostics.py', 'scripts/runtime_docker_systemd_guard.py',
+              '.github/docker-userns-active-admission.json', '.github/docker-userns-active-helper-closure.json',
+              '.github/docker-userns-policy-source.json',
+          )
+
+          def require(value):
+              if not value:
+                  raise ValueError('active-root-bootstrap-refused')
+
+          def validation_profile(value):
+              require(type(value) is str and value.isascii() and value.lower() in {'', 'full', 'docker-rootless-diagnostic'})
+              return value.lower() or 'full'
+
+          def unique(pairs):
+              result = {}
+              for key, value in pairs:
+                  require(key not in result)
+                  result[key] = value
+              return result
+
+          def sha256(raw):
+              return hashlib.sha256(raw).hexdigest()
+
+          def exact(value, keys):
+              require(type(value) is dict and set(value) == set(keys))
+              return value
+
+          def tree(raw):
+              result, order, offset = {}, [], 0
+              while offset < len(raw):
+                  end = raw.index(b'\0', offset)
+                  mode, name = raw[offset:end].split(b' ', 1)
+                  require(mode in {b'40000', b'100644', b'100755'} and end + 21 <= len(raw))
+                  require(re.fullmatch(rb'[A-Za-z0-9_.-]{1,128}', name) and name not in {b'.', b'..'})
+                  key = name.decode('ascii')
+                  require(key not in result)
+                  result[key] = mode, raw[end + 1:end + 21].hex()
+                  order.append(name + (b'/' if mode == b'40000' else b''))
+                  offset = end + 21
+              require(offset == len(raw) and order == sorted(order))
+              return result
+
+          def verify_bundle(raw, trusted):
+              value = exact(json.loads(raw, object_pairs_hook=unique), ('schemaVersion', 'consumer', 'context', 'objects', 'sdk'))
+              require(type(value['schemaVersion']) is int and value['schemaVersion'] == 1 and value['consumer'] == CONSUMER)
+              context = exact(value['context'], ('candidate', 'workflow', 'checkout', 'repository', 'event', 'ref', 'job',
+                  'run', 'attempt', 'architecture', 'image', 'imageOS', 'imageVersion', 'imageVersionKind',
+                  'validationProfile', 'validationProfileRequested'))
+              require(context == trusted)
+              require(type(value['objects']) is list and 1 <= len(value['objects']) <= 48)
+              objects, used, total = {}, set(), 0
+              for item in value['objects']:
+                  item = exact(item, ('oid', 'kind', 'data'))
+                  oid, kind = item['oid'], item['kind']
+                  require(type(oid) is str and re.fullmatch(r'[0-9a-f]{40}', oid) and oid not in objects)
+                  require(kind in ('commit', 'tree', 'blob') and type(item['data']) is str)
+                  content = base64.b64decode(item['data'], validate=True)
+                  require(len(content) <= (8192 if kind == 'commit' else 262144))
+                  total += len(content)
+                  require(total <= 1048576)
+                  computed = hashlib.sha1(kind.encode('ascii') + b' ' + str(len(content)).encode('ascii') + b'\0' + content,
+                      usedforsecurity=False).hexdigest()
+                  require(computed == oid)
+                  objects[oid] = kind, content
+              def get(kind, oid):
+                  require(oid in objects and objects[oid][0] == kind)
+                  used.add(oid)
+                  return objects[oid][1]
+              commit = get('commit', trusted['candidate'])
+              header = commit.split(b'\n', 1)[0]
+              require(re.fullmatch(rb'tree [0-9a-f]{40}', header))
+              files = {}
+              for path in CLOSED_FILES:
+                  current = header[5:].decode('ascii')
+                  parts = path.split('/')
+                  for index, name in enumerate(parts):
+                      mode, identifier = tree(get('tree', current))[name]
+                      if index == len(parts) - 1:
+                          require(mode == b'100644')
+                          files[path] = get('blob', identifier)
+                      else:
+                          require(mode == b'40000')
+                          current = identifier
+              require(used == set(objects))
+              closure = json.loads(files['.github/docker-userns-active-helper-closure.json'], object_pairs_hook=unique)
+              require(closure == {'schemaVersion': 1, 'consumer': CONSUMER, 'stdlibOnly': True, 'files': list(CLOSED_FILES)})
+              require(sha256(files['.github/docker-userns-policy-source.json']) == SOURCE_MANIFEST_SHA256)
+              manifest = json.loads(files['.github/docker-userns-policy-source.json'], object_pairs_hook=unique)
+              source = manifest['source']
+              require(source['repository'] == 'Strukturpiloten/docker-lens' and source['license'] == 'MPL-2.0'
+                  and source['commit'] == '26bf21298c839893177c96fc2036b64e2911344f')
+              require(type(value['sdk']) is dict and set(value['sdk']) == {item['path'] for item in source['files']})
+              sdk = {}
+              for item in source['files']:
+                  content = base64.b64decode(value['sdk'][item['path']], validate=True)
+                  require(len(content) == item['size'] and sha256(content) == item['sha256'])
+                  sdk[Path(item['path']).name] = content
+              return files, sdk
+
+          def read_input(path, uid, limit):
+              descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC)
+              try:
+                  before = os.fstat(descriptor)
+                  require(stat.S_ISREG(before.st_mode) and before.st_uid == uid and before.st_nlink == 1 and before.st_size <= limit)
+                  raw = bytearray()
+                  while len(raw) <= limit:
+                      part = os.read(descriptor, min(65536, limit + 1 - len(raw)))
+                      if not part:
+                          break
+                      raw.extend(part)
+                  require(len(raw) <= limit and before == os.fstat(descriptor))
+                  return bytes(raw)
+              finally:
+                  os.close(descriptor)
+
+          def create(path, raw):
+              descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o400)
+              try:
+                  require(os.write(descriptor, raw) == len(raw))
+                  os.fsync(descriptor)
+              finally:
+                  os.close(descriptor)
+
+          def main():
+              require(os.getuid() == os.geteuid() == 0 and len(sys.argv) == 12)
+              require(sys.implementation.name == 'cpython' and tuple(sys.version_info) == (3, 14, 4, 'final', 0)
+                  and sys.flags.isolated == 1 and sys.flags.no_site == 1 and sys.dont_write_bytecode)
+              handoff, candidate, workflow, checkout, run, attempt, architecture, image_version, uid, gid, deadline = sys.argv[1:]
+              uid, gid, deadline = int(uid), int(gid), int(deadline)
+              require(uid > 0 and gid > 0 and time.monotonic_ns() < deadline <= time.monotonic_ns() + 1800_000_000_000)
+              require(re.fullmatch(r'[0-9a-f]{40}', candidate) and candidate == workflow == checkout)
+              require(all(re.fullmatch(r'[1-9][0-9]{0,19}', item) for item in (run, attempt)))
+              require(architecture in {'amd64', 'arm64'} and re.fullmatch(r'[0-9]{8}\.[0-9]+\.[0-9]+', image_version))
+              event = json.loads(read_input('/home/runner/work/_temp/_github_workflow/event.json', uid, 262144), object_pairs_hook=unique)
+              require(type(event) is dict and type(event.get('inputs', {})) is dict)
+              requested = event.get('inputs', {}).get('validation_profile', 'full')
+              canonical = validation_profile(requested)
+              require(canonical == 'docker-rootless-diagnostic')
+              trusted = {'candidate': candidate, 'workflow': workflow, 'checkout': checkout,
+                  'repository': 'Strukturpiloten/containers', 'event': 'workflow_dispatch', 'ref': 'refs/heads/TheRealBecks/issue527',
+                  'job': 'smoke-build', 'run': run, 'attempt': attempt, 'architecture': architecture,
+                  'image': 'docker-29-conformance-rootless', 'imageOS': 'ubuntu26', 'imageVersion': image_version,
+                  'imageVersionKind': 'workflow-reported-provenance-not-vm-attestation',
+                  'validationProfile': canonical, 'validationProfileRequested': requested}
+              files, sdk = verify_bundle(read_input(handoff, uid, 2097152), trusted)
+              require(time.monotonic_ns() < deadline)
+              stage = Path('/run') / ('containers-userns-active.' + os.urandom(16).hex())
+              stage.mkdir(mode=0o700)
+              for name in ('scripts', '.github', 'sdk', 'leases'):
+                  (stage / name).mkdir(mode=0o700)
+              create(stage / "lock", b"")
+              os.chmod(stage / "lock", 0o600)
+              for name, raw in files.items():
+                  create(stage / name, raw)
+              for name, raw in sdk.items():
+                  create(stage / 'sdk' / name, raw)
+              info = stage.lstat()
+              bootstrap = {'schemaVersion': 1, 'consumer': CONSUMER, 'context': trusted,
+                  'uid': uid, 'gid': gid, 'deadlineNs': deadline, 'stageIdentity': [info.st_dev, info.st_ino],
+                  'files': {name: sha256(raw) for name, raw in files.items()}}
+              create(stage / 'bootstrap.json', (json.dumps(bootstrap, sort_keys=True) + '\n').encode('ascii'))
+              descriptor = os.open(stage, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+              try:
+                  os.fsync(descriptor)
+              finally:
+                  os.close(descriptor)
+              print(stage, flush=True)
+
+          if __name__ == '__main__':
+              try:
+                  main()
+              except Exception:
+                  raise SystemExit('active-root-bootstrap-refused-or-retained-unknown') from None
       run: |
         set -euo pipefail
 
@@ -86,6 +275,35 @@ runs:
         runtime_args=()
         if [ "${TRUSTED_RUNTIME}" = "true" ]; then
           runtime_args+=(--allow-privileged)
+        fi
+        active_stage=""
+        if [ "${ACTIVE_USERNS_CONTEXT}" = "true" ] && [ "${IMAGE_NAME}" = "docker-29-conformance-rootless" ]; then
+          readonly FIXED_ACTIVE_ROOT_BOOTSTRAP
+          active_checkout="$(git rev-parse HEAD)"
+          test "${ACTIVE_CANDIDATE}" = "${ACTIVE_WORKFLOW}"
+          test "${ACTIVE_CANDIDATE}" = "${active_checkout}"
+          active_deadline="$(/usr/bin/python3 -I -B -S -c 'import time;print(time.monotonic_ns()+1800000000000)')"
+          active_handoff="${RUNNER_TEMP}/docker-userns-active-${IMAGE_ARCH}.json"
+          uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.docker_userns_active_bootstrap_bundle \
+            --architecture "${IMAGE_ARCH}" --output "${active_handoff}"
+          active_stage="$(sudo -n /usr/bin/timeout --signal=TERM --kill-after=1s 25s \
+            /usr/bin/python3.14 -I -B -S -c "${FIXED_ACTIVE_ROOT_BOOTSTRAP}" \
+            "${active_handoff}" "${ACTIVE_CANDIDATE}" "${ACTIVE_WORKFLOW}" "${active_checkout}" \
+            "${ACTIVE_RUN}" "${ACTIVE_ATTEMPT}" "${IMAGE_ARCH}" "${ImageVersion}" \
+            "$(id -u)" "$(id -g)" "${active_deadline}")"
+          [[ "${active_stage}" =~ ^/run/containers-userns-active\.[0-9a-f]{32}$ ]]
+          runtime_args+=(--active-userns-stage "${active_stage}")
+          finish_active_stage() {
+            active_status=$?
+            trap - EXIT
+            if ! sudo -n /usr/bin/timeout --signal=TERM --kill-after=1s 20s \
+              /usr/bin/python3.14 -I -B -S "${active_stage}/scripts/docker_userns_active.py" \
+              dispose-stage "${active_stage}"; then
+              active_status=1
+            fi
+            exit "${active_status}"
+          }
+          trap finish_active_stage EXIT
         fi
         uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.runtime_tests \
           --image-name "${IMAGE_NAME}" \

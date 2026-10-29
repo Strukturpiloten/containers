@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 from scripts.runtime_docker_diagnostics import qualify_gnu_timeout
 
 if TYPE_CHECKING:
+    from scripts.docker_userns_active_client import ActiveClient
     from scripts.runtime_tests import RuntimeContext
 
 
@@ -57,6 +58,7 @@ class DockerBackend:
         self.slice_identity: str | None = None
         self.watchdog: str | None = None
         self.diagnostic_reader_pending = False
+        self.scoped_profile: ActiveClient | None = None
         self._gnu_timeout_provider: tuple[str, str, str] | None = None
 
     @staticmethod
@@ -552,6 +554,23 @@ class DockerBackend:
             self.slice,
         )
 
+    def prepare_scoped_profile(self, ctx: RuntimeContext, stage: str, identity: dict[str, str]) -> None:
+        """Record pending authority before attempting the separate root qualification."""
+        from scripts.docker_userns_active_client import ActiveClient  # noqa: PLC0415
+
+        if self.scoped_profile is not None:
+            raise DockerBackendError("active qualification cannot prepare twice")
+        self.scoped_profile = ActiveClient(ctx, stage, identity)
+        self.scoped_profile.prepare()
+
+    def scoped_run_options(self, options: tuple[str, ...]) -> tuple[str, ...]:
+        """Qualify only the one owned detached systemd guest in this phase."""
+        if self.scoped_profile is None:
+            return options
+        if any("apparmor=" in option for option in options):
+            raise DockerBackendError("systemd guest cannot override the qualified scoped profile")
+        return (*options, *self.scoped_profile.create_options())
+
     @staticmethod
     def save_arguments(arguments: tuple[str, ...]) -> tuple[str, ...]:
         """Docker saves Docker transport; never pass Podman's format switch."""
@@ -590,6 +609,8 @@ class DockerBackend:
                 raise DockerBackendError("systemd guest lost its original private slice identity")
             if not valid:
                 raise DockerBackendError("outer Docker process is outside its exact owned scope")
+        if self.scoped_profile is not None and self._systemd_guest(ctx, identifier):
+            self.scoped_profile.bind(identifier)
 
     @staticmethod
     def _systemd_guest(ctx: RuntimeContext, identifier: str) -> bool:
@@ -716,13 +737,7 @@ class DockerBackend:
         """Remove exact resources, drain the full slice, then remove the store."""
         self.cleaning_up = True
         failures = []
-        try:
-            if self.ready:
-                self._remove_containers(ctx)
-                self._remove_network(ctx)
-                self._remove_images(ctx)
-        except Exception as error:  # noqa: BLE001 - service and scope cleanup must still run.
-            failures.append(str(error))
+        failures.extend(self._cleanup_resources(ctx))
         try:
             self.stop_services(ctx)
         except Exception as error:  # noqa: BLE001 - retain original resource failure too.
@@ -750,6 +765,41 @@ class DockerBackend:
         ctx.run_containers.clear()
         ctx.checks.append({"name": "cleanup isolated store", "status": "passed"})
         self._assert_orderly_cleanup()
+
+    def _cleanup_resources(self, ctx: RuntimeContext) -> list[str]:
+        """Close scoped custody before touching endpoint dependencies."""
+        if self.scoped_profile is None:
+            return self._ordinary_resource_cleanup(ctx)
+        failures: list[str] = []
+        if self.ready:
+            try:
+                self._remove_containers(ctx)
+            except Exception as error:  # noqa: BLE001 - still attempt the independently owned scoped cleanup.
+                failures.append(str(error))
+            if self.scoped_profile is not None:
+                try:
+                    self.scoped_profile.close()
+                except Exception as error:
+                    # Preserve endpoint/store for independent custody. No later
+                    # backend teardown may turn uncertainty into apparent absence.
+                    raise DockerBackendError("scoped profile cleanup unverified; retaining private runtime") from error
+            try:
+                self._remove_network(ctx)
+                self._remove_images(ctx)
+            except Exception as error:  # noqa: BLE001 - service cleanup still runs after affirmative profile absence.
+                failures.append(str(error))
+        return failures
+
+    def _ordinary_resource_cleanup(self, ctx: RuntimeContext) -> list[str]:
+        """Preserve the existing ordinary backend cleanup and failure order."""
+        try:
+            if self.ready:
+                self._remove_containers(ctx)
+                self._remove_network(ctx)
+                self._remove_images(ctx)
+        except Exception as error:  # noqa: BLE001 - service and scope cleanup must still run.
+            return [str(error)]
+        return []
 
     def _assert_orderly_cleanup(self) -> None:
         if self.lifecycle_failures:

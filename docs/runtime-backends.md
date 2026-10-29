@@ -652,3 +652,112 @@ the available pipe capacity. Moving only the immutable program into the literal
 environment carrier avoids that defect without disabling checks, changing host
 settings or claiming an unreleased fixed tool version. Earlier cancelled or
 timed-out validation attempts remain nonpasses.
+
+## Experimental issue527 active qualification candidate
+
+The separate `containers-ubuntu26-userns-active` contract is restricted to a
+`workflow_dispatch` with `validation_profile=docker-rootless-diagnostic` on
+`refs/heads/TheRealBecks/issue527`, the `smoke-build` job, and
+`docker-29-conformance-rootless`. Other shared-action and publication contexts
+keep their existing runtime path. Known ASCII upper/mixed-case diagnostic choices
+normalize to the same canonical choice; bootstrap, producer, client and evidence
+checks also retain and compare the exact raw requested value. Unknown, non-ASCII
+or malformed choices refuse instead of skipping the scoped requirement. The old
+`armed_unused` admission, immutable
+bootstrap, and never-load observer are unchanged. The new admission records
+`qualification: none`: source admission and hermetic checks do not establish
+native compatibility, authorize a release, or establish ARM load support.
+
+The workflow carries a separate fixed root-bootstrap literal. An unprivileged
+producer supplies a finite Git commit/tree/blob proof and the existing pinned
+SDK source closure. Before importing a helper, the literal requires the trusted
+candidate, workflow, and checkout commits to be identical, verifies every
+connected source object and source pin, and creates root-owned 0400 files in a
+0700 stage. Root Python uses fixed `-I -B -S` execution from that stage; it never
+imports the checkout under sudo. The SDK's immutable pure `profile_bytes`
+builder is reused without invoking its active `RunnerProfile` CLI. The existing
+`dockerlens-127-upstream-rootless-RUN-ATTEMPT-NONCE` spelling remains an identifier;
+it does not confer DockerLens admission or policy authority.
+
+The manually reviewed active admission requires Ubuntu 26.04 AMD64, kernel
+`7.0.0-1017-azure`, parser 5.0.2, and the exact parser, ABI, feature and Python
+3.14.4 fingerprints recorded in
+[the active admission](../.github/docker-userns-active-admission.json).
+Actual actor preflight reads the fixed AppArmor-enabled, restricted-userns and
+maximum-userns scalar files. The legacy `unprivileged_userns_clone` control must
+be `1` or explicitly absent with ENOENT; unreadable, malformed, disabled, or
+changed controls refuse. ARM remains compile/observation-only and refuses load
+until an independently reviewed ARM cohort exists.
+
+`ImageVersion` is the workflow-reported per-job provenance value. It is frozen
+once and compared exactly across bootstrap, phase custody, receipts and evidence
+checks. It is neither an independent VM identity attestation nor a historical
+compatibility pin. The unused admission's historical image cohort is not widened
+by this contract.
+
+Each actual root actor freshly opens `.ns_name`, `.ns_level`, and `.stacked`
+directly under a held genuine `/sys/kernel/security/apparmor` securityfs
+directory. They must be exactly `root\n`, `0\n`, and `no\n`. There is no `/policy/`
+namespace read and no normalization of stacked labels. The guest's effective
+profile is read through its held task's `attr/apparmor/current` and must equal the
+generated name followed by ` (unconfined)\n`. Enforce, complain, namespace-qualified,
+stacked, and other default-allow representations refuse. A mismatch retains
+bounded raw bytes privately and exports only the source, length, digest and
+match diagnostics.
+
+The pre-exec actor namespace check is not a measured parser post-exec namespace
+attestation. This candidate explicitly relies on the independently reviewed
+trusted-fixed-OS assumption that executing the held pinned parser performs no
+AppArmor namespace transition; its receipt records `measuredPostExec: false`.
+That limitation remains visible to review and the evidence gate.
+
+Each native phase has separate root-private locked custody, the same held source
+archive identity, and the original phase deadline. A fresh same-source/VM
+no-policy owner cycle must close before arming the real independent finalizer.
+The finalizer acknowledges its exact source, PID/start incarnation, namespace,
+cgroup and deadline from a separate `system.slice` service outside the runtime
+slice and coordinator process group. Its verified runtime and stop allowances
+fit within the original deadline. It begins emergency cleanup 75 seconds before
+that deadline, ahead of the existing backend's 60-second expiry; no allowance is
+renewed.
+
+Durable load/create/remove/unload intents precede effects. The single detached
+owned systemd guest receives the exact profile option and lease label after its
+create intent; one-shot checks retain their existing options. The root helper
+binds the CID, run labels, archive/configuration identity, live task incarnation,
+cgroup and effective profile. An unknown reader, child lifetime, load, create or
+absence outcome is sticky and retains custody. Emergency cleanup cannot infer
+that an unacknowledged load/create intent succeeded or that no guest exists.
+
+A contended custody lock is retried nonblockingly within the same original
+absolute deadline. Every retry still checks the explicit release handshake
+without taking the closing coordinator's held lock; no fresh allowance or forced
+unlock is granted. Cancellation/coordinator-death causes remain sticky across
+retries, and a cleanup effect's error is never mistaken for lock contention.
+Exhaustion or an uncertain effect publishes a separate retained marker that
+blocks later state reuse and disposal, including a late release after expiry.
+
+Normal close first proves exact guest absence while the private endpoint is
+alive, including the bound task's absence and an absent or recursively empty
+exact guest cgroup. It then unloads only the exact profile and verifies registry
+absence, holds the independent finalizer's pidfd before releasing it, proves
+normal finalizer death and unit/cgroup absence, and removes custody. Only then
+may ordinary native network/image/daemon/store teardown proceed. A later native
+teardown failure remains a failure. Unverified scoped close retains the private
+runtime rather than deleting its endpoint or store.
+
+The evidence gate requires both original clean-control/enforcement phases and
+bound scoped evidence in this exact candidate context. It rejects absent or
+mismatched receipts, host fingerprints, effective-profile evidence, task/scope
+absence, finalizer termination, pending readers, or custody disposal. This is an
+experimental qualification path; it carries no native passing result before a
+reviewed exact-source hosted run completes.
+
+The conformance image's machine-readable inputs include the new active files
+and the reused root helper closure. Renovate retains its existing two source
+manifest managers (`github-digest` and `gitlab-tags`) as the sole upstream pin
+owners, including dashboard approval and no automerge. The coordinated review
+rule now names the active admission. No manager rewrites active/unused cohort
+fingerprints or the root verifier's manifest commitment: source/parser/helper
+changes require coordinated manual re-admission and closure/proof regression
+review, without adding duplicate upstream extraction.

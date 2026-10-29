@@ -316,7 +316,7 @@
   },
   "packageRules": [
     {
-      "description": "Require coordinated human review of compile/unused diagnostic source and parser consumers; manually re-admit .github/docker-userns-unused-admission.json on any source/contract change; no automatic cohort hashes or load admission",
+      "description": "Require coordinated human review of compile, unused and issue527 active qualification source/parser consumers; manually re-admit docker-userns-unused-admission.json and docker-userns-active-admission.json on source/contract changes; no automatic cohort hashes or load admission",
       "matchManagers": [
         "custom.regex"
       ],

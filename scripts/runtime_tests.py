@@ -344,6 +344,8 @@ class RuntimeContext:
                 if "--systemd=always" in options
                 else "direct"
             )
+            if docker and self.container_launchers[container_name] == "systemd":
+                options = self.backend.scoped_run_options(options)
             completed = False
             try:
                 output = self.command(
@@ -1021,6 +1023,8 @@ def _execute_docker_phase(plan: _DockerPhasePlan) -> dict[str, Any]:
                     _phase_error(result, error, key="cleanupError")
         finally:
             plan.cancellation.defer_interrupts = False
+        if ctx is not None and getattr(ctx.backend, "scoped_profile", None) is not None:
+            result["scopedProfile"] = ctx.backend.scoped_profile.evidence
         finished = time.monotonic()
         result["durationSeconds"] = round(finished - started, 3)
         if plan.cancellation.cancelled:
@@ -1057,6 +1061,11 @@ def _docker_phase_work(plan: _DockerPhasePlan, ctx: RuntimeContext, result: dict
                 raise ProbeError("Docker phase archive architecture differs from the requested native architecture")
             if ctx.outer_engine == "podman":
                 result["podmanVersion"] = result["outerRuntime"]["clientVersion"]
+            stage = getattr(plan.args, "active_userns_stage", None)
+            if stage is not None:
+                if ctx.outer_engine != "docker":
+                    raise ProbeError("active userns qualification requires the explicit Docker backend")
+                ctx.backend.prepare_scoped_profile(ctx, stage, identity)
             profile = plan.metadata["tests"]["docker"]
             if plan.phase is DockerProbePhase.CLEAN_CONTROL:
                 _run_docker_phase(
@@ -1088,6 +1097,8 @@ def _run_systemd_pair(
     source: tempfile.TemporaryDirectory[str] | None = None
     archive: _ArchiveSnapshot | None = None
     evidence["phases"] = []
+    if getattr(args, "active_userns_stage", None) is not None:
+        evidence["scopedProfileRequired"] = True
     evidence["observations"] = []
     evidence["budgets"] = {
         "controlSeconds": CONTROL_SECONDS,
@@ -1361,6 +1372,7 @@ def main() -> int:
         default="podman",
         help="outer runtime policy; local default is Podman, profile selection is explicit",
     )
+    parser.add_argument("--active-userns-stage", help=argparse.SUPPRESS)
     parser.add_argument("--evidence", required=True)
     parser.add_argument("--allow-privileged", action="store_true")
     parser.add_argument("--skip-nested", action="store_true")

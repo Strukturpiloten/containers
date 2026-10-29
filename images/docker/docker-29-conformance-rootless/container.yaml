@@ -48,6 +48,21 @@ inputs:
   - images/docker/upstream/29/payload.yaml
   - images/docker/upstream/payload.Containerfile
   - images/docker/upstream/fetch-payload.sh
+  - scripts/docker_userns_active.py
+  - scripts/docker_userns_active_client.py
+  - scripts/docker_userns_active_bootstrap_bundle.py
+  - scripts/docker_userns_bootstrap_bundle.py
+  - scripts/docker_userns_qualification.py
+  - .github/docker-userns-active-admission.json
+  - .github/docker-userns-active-helper-closure.json
+  - scripts/__init__.py
+  - scripts/docker_runner_security.py
+  - scripts/docker_userns_custody_child.py
+  - scripts/docker_userns_policy_source.py
+  - scripts/docker_userns_custody.py
+  - scripts/docker_userns_hosted.py
+  - scripts/docker_userns_dryparse.py
+  - .github/docker-userns-policy-source.json
   - scripts/runtime_docker_systemd.py
   - scripts/runtime_docker_systemd_guard.py
   - scripts/runtime_oom_diagnostics.py
