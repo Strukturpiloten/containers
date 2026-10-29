@@ -163,3 +163,34 @@ package names; the new Debian base pin uses the existing metadata regex manager,
 OS-release freeze rule, shared Debian 13 digest group, and digest approval policy.
 The probe compiler is confined to a build stage; installed package and compiler
 provenance are retained in the final image.
+
+### Diagnostic leaf-after witness
+
+The mandatory single-PID1 allocator, its genuine `137`/Docker OOM predicate,
+its possibly unavailable after sample, and the strict outer OOM refusal remain
+unchanged. Only after that primary probe has already exposed the typed outer
+Docker OOM marker does the harness optionally run a separate diagnostic leaf.
+Passing paths and Podman do not start this additional actor.
+
+The opt-in repository-owned `memory-witness` mode runs as inner PID1 with one
+bounded allocator child in the same 32 MiB, zero-swap, 16-PID leaf. It reads and
+requires actual `memory.oom.group=0`; it never writes group policy or lowers an
+OOM score. The child waits on a pipe while the driver binds both exact process
+identities and the complete leaf membership. A fresh purpose-tagged root sample
+precedes the start gate. The controller samples hierarchical and local memory
+events before releasing its child, records direct `waitpid` signal status and
+reaps the child, then samples the same populated leaf and holds it for the root
+after sample. Separate bounded reads are not atomic. Raw identities, paths,
+collector output and error operands remain private; public observations retain
+hashes, counter sets, completed binding checks and monotonic window envelopes.
+
+One nonrenewable ten-second controller alarm covers all gates, allocation and
+after hold, within the existing original work deadline and cleanup reserve.
+Insufficient time, controller death, group killing, missing after data, changed
+identities, non-SIGKILL termination or unsupported accounting produces bounded
+unavailable evidence. The existing runtime watchdog and exact owned-guest
+cleanup also bound stalled cleanup; a failed or unknown cleanup is not success.
+Controller exit zero means observation completion only. Even a bound child
+SIGKILL and increasing leaf counters do not identify the OOM cause, excuse the
+outer marker, or qualify this image. Synthetic syscall-shim and mock tests are
+not native namespace or genuine OOM evidence.

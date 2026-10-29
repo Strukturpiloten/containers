@@ -900,3 +900,13 @@ rule now names the active admission. No manager rewrites active/unused cohort
 fingerprints or the root verifier's manifest commitment: source/parser/helper
 changes require coordinated manual re-admission and closure/proof regression
 review, without adding duplicate upstream extraction.
+
+The Docker guest-systemd conformance fixture may collect a separate
+[leaf-after memory witness](../images/docker/conformance/README.md#diagnostic-leaf-after-witness)
+only after its mandatory allocator has already exposed a typed outer OOM marker.
+The witness uses the existing invocation-owned guest, daemon, image and original
+budgets. Its fresh root counter baseline is purpose-tagged and never mixed with
+the mandatory allocator's samples. Controller completion and private identity
+bindings provide diagnostic observations only; the strict outer OOM and orderly
+shutdown guards retain their existing refusal behavior. Unknown or incomplete
+witness evidence grants no native qualification or attribution authority.

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import math
 import re
@@ -17,12 +18,12 @@ from typing import TYPE_CHECKING, Any
 
 from scripts.runtime_docker_systemd_guard import PLACEMENT_GUARD, USER_MANAGER, guarded_command  # noqa: F401 - preserve public re-exports.
 from scripts.runtime_errors import ProbeError
+from scripts.runtime_oom_diagnostics import DOCKER_CHECKS, OomDiagnostics
 from scripts.runtime_resource_budgets import verify_outer_container_limits
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from scripts.runtime_oom_diagnostics import OomDiagnostics
     from scripts.runtime_resource_budgets import IsolatedStoreDiskBudget
     from scripts.runtime_tests import RuntimeContext
 
@@ -1515,6 +1516,568 @@ def _inner_enforcement_state(
             diagnostics.snapshot("after-inner-memory")
 
 
+# Each mode has its own baseline. These fixed tags never grant admission authority.
+LEAF_WITNESS_PURPOSE = "leaf-memory-witness"
+LEAF_WITNESS_SECONDS = 10
+LEAF_WITNESS_NAME = "docker-native-limit-memory-witness"
+LEAF_WITNESS_CIDFILE = "/tmp/docker-native-limit-memory-witness.cid"  # noqa: S108 — private owned guest.
+LEAF_WITNESS_FIELDS = frozenset(
+    {
+        "scope-identity",
+        "controller-pid",
+        "controller-stat",
+        "controller-cgroup",
+        "controller-pidns",
+        "controller-cgroupns",
+        "controller-userns",
+        "child-pid",
+        "child-stat",
+        "memory.max",
+        "memory.current",
+        "memory.swap.max",
+        "memory.swap.current",
+        "memory.events",
+        "memory.events.local",
+        "memory.oom.group",
+        "pids.max",
+        "complete",
+    }
+)
+# Reuse the read-only identity/mount/ancestry reader, adding exactly the controller's direct child.
+LEAF_WITNESS_ASSOCIATION_COMMAND = MEMORY_ASSOCIATION_COMMAND.replace(
+    "for phase in before after; do",
+    'child=$(bounded "/proc/$allocator/task/$allocator/children" 1024)\n'
+    'set -- $child; test "$#" -eq 1; child=$1\n'
+    "for phase in before after; do",
+).replace(
+    'identity allocator "$allocator"',
+    'identity allocator "$allocator"\n'
+    'test "$(awk \'/^PPid:/ {print $2}\' /proc/$child/status)" = "$allocator"\n'
+    'test "$(bounded /proc/$allocator/task/$allocator/children 1024 | xargs)" = "$child"\n'
+    'identity child "$child"\n'
+    'test "$(stat -c %d /sys/fs/cgroup$scope)" = "$(stat -c %d /proc/$allocator/root/sys/fs/cgroup)"\n'
+    'printf "witness-%s-scope-device=%s\\n" "$phase" "$(stat -c %d /sys/fs/cgroup$scope)"',
+)
+
+
+def _leaf_witness_require(message: str, *, condition: bool) -> None:
+    if not condition:
+        raise ProbeError(message)
+
+
+def _leaf_witness_needed(ctx: RuntimeContext, diagnostics: OomDiagnostics | None) -> bool:
+    if diagnostics is None or getattr(ctx, "outer_engine", None) != "docker":
+        return False
+    candidates = [
+        record
+        for record in ctx.observations
+        if record.get("name") == "owned systemd OOM diagnostic"
+        and record.get("phase") == "after-inner-memory"
+        and "purpose" not in record
+    ]
+    if not candidates:
+        return False
+    record = candidates[-1]
+    state = record.get("ociState")
+    return (
+        type(record.get("schemaVersion")) is int
+        and record["schemaVersion"] == 1
+        and record.get("authority") == "observation-only"
+        and type(state) is dict
+        and state.get("OOMKilled") is True
+    )
+
+
+def _leaf_witness_members(hierarchy: dict[str, Any], controller: dict[str, Any], child: dict[str, Any]) -> None:
+    expected = {"probe-" + str(process["pid"]): process for process in (controller, child)}
+    actual = {role: values for role, values in hierarchy["processes"].items() if role.startswith("probe-")}
+    members = set(hierarchy["groups"][hierarchy["controlGroup"]][4].split())
+    if len(expected) != 2 or set(actual) != set(expected) or members != {str(controller["pid"]), str(child["pid"])}:  # noqa: PLR2004 — controller plus one child.
+        raise ProbeError("witness leaf did not contain exactly two owned processes")
+    for role, process in expected.items():
+        pid, uids, group, executable, starttime = actual[role]
+        if [
+            str(process["pid"]),
+            " ".join(map(str, process["uids"])),
+            process["group"],
+            process["exe"],
+            process["starttime"],
+        ] != [pid, uids, group, executable, starttime]:
+            raise ProbeError("witness process disagreed with full leaf membership")
+
+
+def _leaf_witness_association_records(output: str) -> dict[str, Any]:
+    child_records, child_parents, devices, retained = {}, {}, {}, []
+    for line in output.splitlines():
+        device_match = re.fullmatch(r"witness-(before|after)-scope-device=([0-9]+)", line)
+        if device_match:
+            if device_match[1] in devices:
+                raise ProbeError("duplicate witness mount device")
+            devices[device_match[1]] = _memory_decimal(device_match[2])
+            continue
+        match = re.fullmatch(r"association-(before|after)-child=(.+)", line)
+        if match:
+            if match[1] in child_records:
+                raise ProbeError("duplicate witness child")
+            child_records[match[1]] = _association_process(match[2])
+            child_parents[match[1]] = _memory_decimal(
+                match[2].split("|")[4].rsplit(") ", 1)[1].split()[1], positive=True
+            )
+        else:
+            retained.append(line)
+    if set(child_records) != {"before", "after"} or child_records["before"] != child_records["after"]:
+        raise ProbeError("changed witness child")
+    association, scope_fields = _association_records("\n".join(retained))
+    return {
+        "association": association,
+        "scope": scope_fields,
+        "children": child_records,
+        "parents": child_parents,
+        "devices": devices,
+    }
+
+
+def _leaf_witness_association(output: str, hierarchy: dict[str, Any], service: dict[str, Any]) -> dict[str, Any]:
+    records = _leaf_witness_association_records(output)
+    association, scope_fields = records["association"], records["scope"]
+    child_records, child_parents, devices = records["children"], records["parents"], records["devices"]
+    _retained_daemon(association["daemon"], service, hierarchy)
+    _verify_memory_namespace_mapping(association)
+    controller, child = association["allocator"], child_records["before"]
+    if set(devices) != {"before", "after"} or devices["before"] != devices["after"]:
+        raise ProbeError("witness accounting device missing or changed")
+    if set(child_parents.values()) != {controller["pid"]}:
+        raise ProbeError("witness child parent mismatch")
+    _leaf_witness_members(hierarchy, controller, child)
+    if (
+        any(child[key] != controller[key] for key in ("uids", "group", "exe", "pidns", "cgroupns", "userns", "uidmap"))
+        or child["nspid"][:-1] == controller["nspid"][:-1]
+        or len(child["nspid"]) != len(controller["nspid"])
+        or child["nspid"][-1] <= 1
+        or controller["uids"] != [_mapped_root_uid(controller["uidmap"])] * UID_FIELD_COUNT
+    ):
+        raise ProbeError("witness child namespace or ownership mismatch")
+    # At each namespace level the child is distinct; both share the same namespaces.
+    inode = int(hierarchy["groups"][hierarchy["controlGroup"]][0].split(":")[0])
+    if (
+        int(association["scope-inode"]) != inode
+        or int(association["mount-inode"]) != inode
+        or association["mount-type"] != CGROUP2_MAGIC
+        or controller["group"] != hierarchy["controlGroup"]
+    ):
+        raise ProbeError("witness accounting mount or leaf mismatch")
+    values = _memory_values(scope_fields)
+    if values["memory.max"] != MEMORY_BYTES or values["memory.swap.max"] != 0:
+        raise ProbeError("witness hard limits mismatch")
+    return {
+        **association,
+        "child": child,
+        "scopeMemory": values,
+        "scope-device": devices["before"],
+        "hierarchy": hierarchy,
+    }
+
+
+def _leaf_witness_records(output: str) -> dict[str, dict[str, str]]:
+    if len(output) > MAX_MEMORY_READBACK:
+        raise ProbeError("witness protocol oversized")
+    records: dict[str, dict[str, str]] = {"before": {}, "after": {}, "result": {}}
+    for line in output.splitlines():
+        match = re.fullmatch(r"leaf-witness-(before|after|result)-([^=]+)=(.*)", line)
+        if not match or match[2] in records[match[1]]:
+            raise ProbeError("witness protocol malformed")
+        records[match[1]][match[2]] = match[3]
+    if any(
+        set(records[phase]) != LEAF_WITNESS_FIELDS or records[phase]["complete"] != "yes"
+        for phase in ("before", "after")
+    ):
+        raise ProbeError("witness before or actual after missing")
+    if set(records["result"]) != {"child-reaped", "child-signal", "child-signaled"}:
+        raise ProbeError("witness wait status missing")
+    return records
+
+
+def _leaf_witness_snapshot(fields: dict[str, str], association: dict[str, Any]) -> dict[str, Any]:
+    controller, child = association["allocator"], association["child"]
+    device, separator, inode = fields["scope-identity"].partition(":")
+    if (
+        not separator
+        or not device.isdecimal()
+        or not inode.isdecimal()
+        or int(device) != association["scope-device"]
+        or int(inode) != int(association["scope-inode"])
+        or _memory_decimal(fields["controller-pid"], positive=True) != 1
+        or _journal_starttime(fields["controller-stat"], "1") != controller["starttime"]
+        or fields["controller-cgroup"] != "0::/"
+        or _memory_decimal(fields["child-pid"], positive=True) != child["nspid"][-1]
+        or _journal_starttime(fields["child-stat"], str(child["nspid"][-1])) != child["starttime"]
+        or fields["child-stat"].rsplit(") ", 1)[-1].split()[1] != "1"
+        or any(
+            _namespace_inode(fields["controller-" + key], kind) != controller[key]
+            for key, kind in (("pidns", "pid"), ("cgroupns", "cgroup"), ("userns", "user"))
+        )
+    ):
+        raise ProbeError("witness leaf or process identity changed")
+    values = _memory_values({key: fields[key] for key in MEMORY_VALUE_FIELDS})
+    local = _memory_values(
+        {**{key: fields[key] for key in MEMORY_VALUE_FIELDS}, "memory.events": fields["memory.events.local"]}
+    )["memory.events"]
+    if (
+        values["memory.max"] != MEMORY_BYTES
+        or values["memory.swap.max"] != 0
+        or values["memory.swap.current"] != 0
+        or fields["memory.oom.group"] != "0"
+        or fields["pids.max"] != str(INNER_PIDS)
+    ):
+        raise ProbeError("witness effective limits or group policy invalid")
+    return {"identity": fields["scope-identity"], "memory": values, "local": local}
+
+
+def _leaf_witness_retained_after(output: str, association: dict[str, Any]) -> None:
+    before = association["hierarchy"]
+    after = _hierarchy_evidence(output, kind="scope", mode=before["mode"], unit=before["unit"])
+    if before["groups"].keys() != after["groups"].keys():
+        raise ProbeError("witness hierarchy changed")
+    if any(old[:4] != after["groups"][group][:4] for group, old in before["groups"].items()):
+        raise ProbeError("witness leaf or ancestor identity changed")
+    expected = {
+        role: values
+        for role, values in before["processes"].items()
+        if role != "probe-" + str(association["child"]["pid"])
+    }
+    if after["processes"] != expected:
+        raise ProbeError("witness controller after identity or leaf membership changed")
+    if after["groups"][after["controlGroup"]][4].split() != [str(association["allocator"]["pid"])]:
+        raise ProbeError("witness after leaf was not solely populated by the controller")
+
+
+def _leaf_witness_counter_pair(old: object, new: object) -> None:
+    if not isinstance(old, dict) or not isinstance(new, dict) or old.keys() != new.keys():
+        raise ProbeError("witness counter set missing or changed")
+    maximum = (1 << 64) - 1
+    if any(type(value) is not int or not 0 <= value <= maximum for values in (old, new) for value in values.values()):
+        raise ProbeError("witness counter value malformed")
+    if any(new[key] < value for key, value in old.items()):
+        raise ProbeError("witness counters regressed")
+
+
+def _leaf_witness_root_pair(roots: list[dict[str, Any]], window: list[int]) -> None:
+    if len(roots) != 2:  # noqa: PLR2004 — before and after.
+        raise ProbeError("witness root samples missing")
+    before, after = roots
+    for candidate in [window, *(root.get("sampleWindowMonotonicNs") for root in roots)]:
+        if (
+            not isinstance(candidate, list)
+            or len(candidate) != 2  # noqa: PLR2004 — closed monotonic interval.
+            or any(type(value) is not int or value < 0 for value in candidate)
+            or candidate[0] > candidate[1]
+        ):
+            raise ProbeError("witness monotonic window malformed")
+    if any(
+        root.get("availability") != "observed"
+        or root.get("authority") != "observation-only"
+        or set(root.get("bindingChecks", {})) != set(DOCKER_CHECKS)
+        or not root.get("bindingChecks")
+        or not all(value is True for value in root["bindingChecks"].values())
+        or root.get("mountSemantics", {}).get("memoryLocalevents") is not False
+        or root.get("mountSemantics", {}).get("root") != "full-hierarchy"
+        for root in roots
+    ):
+        raise ProbeError("witness root binding or mount semantics unavailable")
+    for name in ("memory.events", "memory.events.local"):
+        for root in roots:
+            if root.get("counters", {}).get(name, {}).get("availability") != "observed":
+                raise ProbeError("witness actual root counters unavailable")
+        _leaf_witness_counter_pair(before["counters"][name].get("values"), after["counters"][name].get("values"))
+    if before["bindings"] != after["bindings"] or before["mountSemantics"] != after["mountSemantics"]:
+        raise ProbeError("witness root identity changed")
+    if not (before["sampleWindowMonotonicNs"][1] <= window[0] <= window[1] <= after["sampleWindowMonotonicNs"][0]):
+        raise ProbeError("witness root window did not enclose leaf window")
+
+
+def _leaf_witness_public(
+    output: str, association: dict[str, Any], roots: list[dict[str, Any]], window: list[int]
+) -> dict[str, Any]:
+    records = _leaf_witness_records(output)
+    before, after = (_leaf_witness_snapshot(records[phase], association) for phase in ("before", "after"))
+    if before["identity"] != after["identity"] or records["before"]["child-stat"] != records["after"]["child-stat"]:
+        raise ProbeError("witness retained identity changed")
+    _leaf_witness_root_pair(roots, window)
+    deltas = {}
+    for name, old, new in (
+        ("memory.events", before["memory"]["memory.events"], after["memory"]["memory.events"]),
+        ("memory.events.local", before["local"], after["local"]),
+    ):
+        _leaf_witness_counter_pair(old, new)
+        deltas[name] = {
+            "availability": "observed",
+            "before": old,
+            "after": new,
+            "delta": {key: new[key] - value for key, value in old.items()},
+        }
+    result = records["result"]
+    if result["child-reaped"] != "yes" or result["child-signaled"] not in {"yes", "no"}:
+        raise ProbeError("witness child reaping malformed")
+    signum = _memory_decimal(result["child-signal"])
+    if result["child-signaled"] != "yes" or signum != signals.SIGKILL:
+        raise ProbeError("witness child did not terminate by SIGKILL")
+    return {
+        "availability": "observed",
+        "beforeStatus": "observed",
+        "afterStatus": "observed",
+        "childTermination": "waitpid-signaled-sigkill",
+        "childReaped": True,
+        "leafWindowMonotonicNs": window,
+        "counters": deltas,
+        "bindings": {
+            "controllerChildAndLeaf": hashlib.sha256(json.dumps(association, sort_keys=True).encode()).hexdigest()
+        },
+        "effectiveLimits": {"memoryBytes": MEMORY_BYTES, "swapBytes": 0, "pids": INNER_PIDS, "oomGroup": 0},
+        "checks": {
+            "exactTwoMemberLeaf": True,
+            "liveControllerAfter": True,
+            "rootEnclosesLeaf": True,
+            "stableCounters": True,
+        },
+        "oomAccountingObserved": deltas["memory.events.local"]["delta"]["oom_kill"] > 0,
+    }
+
+
+def _leaf_witness_snapshot_root(observer: OomDiagnostics, role: str) -> dict[str, Any]:
+    first = len(observer.ctx.observations)
+    observer.snapshot("before-inner-memory" if role == "root-before" else "after-inner-memory")
+    added = observer.ctx.observations[first:]
+    for record in added:
+        record.update({"purpose": LEAF_WITNESS_PURPOSE, "role": role})
+    if len(added) != 1:
+        raise ProbeError("witness root sample count invalid")
+    return added[0]
+
+
+def _leaf_witness_room(ctx: RuntimeContext) -> None:
+    deadline = getattr(ctx, "runtime_deadline", None)
+    if (
+        type(deadline) not in {int, float}
+        or not math.isfinite(deadline)
+        or deadline - time.monotonic() < LEAF_WITNESS_SECONDS
+    ):
+        raise ProbeError("witness original work deadline insufficient")
+    if ctx.backend.command_timeout(LEAF_WITNESS_SECONDS) < LEAF_WITNESS_SECONDS:
+        raise ProbeError("witness original cleanup reserve insufficient")
+
+
+def _leaf_witness_bind(
+    collection: RuntimeContext,
+    budget: IsolatedStoreDiskBudget,
+    container: str,
+    probe: tuple[str, str],
+    service: dict[str, Any],
+) -> dict[str, Any]:
+    mode, workload = probe
+    unit = "docker-" + workload + ".scope"
+    hierarchy = _hierarchy_evidence(
+        _exec(
+            collection,
+            budget,
+            container,
+            "bind complete diagnostic leaf",
+            "sh",
+            "-euc",
+            HIERARCHY_READBACK_COMMAND,
+            "--",
+            "scope",
+            mode,
+            unit,
+        ),
+        kind="scope",
+        mode=mode,
+        unit=unit,
+    )
+    candidates = [values for role, values in hierarchy["processes"].items() if role.startswith("probe-")]
+    if len(candidates) != 2:  # noqa: PLR2004 — no discarded extra members.
+        raise ProbeError("witness full leaf membership unavailable")
+    # PID1 is resolved from Docker through the existing namespace map, not guessed by PID order.
+    associations = []
+    for candidate in candidates:
+        try:
+            raw = _exec(
+                collection,
+                budget,
+                container,
+                "bind diagnostic controller and direct child",
+                "sh",
+                "-euc",
+                LEAF_WITNESS_ASSOCIATION_COMMAND,
+                "--",
+                hierarchy["controlGroup"],
+                candidate[0],
+                workload,
+            )
+            associations.append(_leaf_witness_association(raw, hierarchy, service))
+        except ProbeError:
+            continue
+    if len(associations) != 1:
+        raise ProbeError("witness controller identity ambiguous")
+    return associations[0]
+
+
+def _leaf_witness_cleanup(collection: RuntimeContext, container: str, workload: str | None) -> None:
+    # The cidfile is created by this docker run in the fresh private guest, including partial launches.
+    collection.exec(
+        "remove and read back exact diagnostic leaf",
+        container,
+        "sh",
+        "-euc",
+        'cid=$(head -c 65 "$1"); test "${#cid}" -eq 64; '
+        'case "$cid" in *[!a-f0-9]*) exit 1;; esac; '
+        'test -z "$2" || test "$cid" = "$2"; '
+        'test "$(docker inspect --format {{.Name}} "$cid")" = "/$3"; '
+        'docker rm --force "$cid"; ! docker inspect "$cid" >/dev/null 2>&1',
+        "--",
+        LEAF_WITNESS_CIDFILE,
+        workload or "",
+        LEAF_WITNESS_NAME,
+    )
+
+
+def _collect_leaf_memory_witness(
+    ctx: RuntimeContext, budget: IsolatedStoreDiskBudget, container: str, mode: str
+) -> None:
+    """Observe a second leaf only after the existing outer marker has already refused admission."""
+    record: dict[str, Any] = {
+        "name": "inner leaf memory witness",
+        "schemaVersion": 1,
+        "purpose": LEAF_WITNESS_PURPOSE,
+        "availability": "unavailable",
+        "attribution": "unresolved",
+        "authority": "observation-only",
+        "controllerCompletion": "unavailable",
+        "childTermination": "unavailable",
+        "beforeStatus": "unavailable",
+        "afterStatus": "unavailable",
+        "bindings": {},
+        "counters": {name: {"availability": "unavailable"} for name in ("memory.events", "memory.events.local")},
+        "leafWindowMonotonicNs": None,
+        "cleanup": "not-created",
+        "limits": "separate non-atomic observation; no victim-cause or native qualification authority",
+    }
+    collection = copy.copy(ctx)
+    collection.checks = []
+    workload = None
+    launched = False
+    try:
+        _leaf_witness_room(ctx)
+        launched = True
+        workload = _exec(
+            collection,
+            budget,
+            container,
+            "start diagnostic-only leaf memory witness",
+            "docker",
+            "run",
+            "--detach",
+            "--name",
+            LEAF_WITNESS_NAME,
+            "--cidfile",
+            LEAF_WITNESS_CIDFILE,
+            "--memory",
+            str(MEMORY_BYTES),
+            "--memory-swap",
+            str(MEMORY_BYTES),
+            "--pids-limit",
+            str(INNER_PIDS),
+            ctx.image_ref,
+            "docker-resource-probe",
+            "memory-witness",
+            "--wait-for-start",
+            RESOURCE_START_FILE,
+        )
+        if not re.fullmatch(r"[a-f0-9]{64}", workload):
+            workload = None
+            _leaf_witness_require("witness exact owned CID missing", condition=False)
+        association = _leaf_witness_bind(collection, budget, container, (mode, workload), _retained_service(ctx, mode))
+        controller = str(association["allocator"]["pid"])
+        observer = OomDiagnostics(ctx, container)
+        roots = [_leaf_witness_snapshot_root(observer, "root-before")]
+        window = [time.monotonic_ns()]
+        _exec(
+            collection,
+            budget,
+            container,
+            "release diagnostic leaf and await actual after",
+            "sh",
+            "-euc",
+            'base=/proc/$1/root$2; touch "$base"; '
+            'for n in $(seq 1 80); do test ! -f "$base.after" || exit 0; sleep 0.1; done; exit 1',
+            "--",
+            controller,
+            RESOURCE_START_FILE,
+        )
+        output = _exec(collection, budget, container, "read private leaf witness protocol", "docker", "logs", workload)
+        after_raw = _exec(
+            collection,
+            budget,
+            container,
+            "rebind live diagnostic controller",
+            "sh",
+            "-euc",
+            MEMORY_ASSOCIATION_COMMAND,
+            "--",
+            association["allocator"]["group"],
+            controller,
+            workload,
+        )
+        after_association, _ = _association_records(after_raw)
+        if any(after_association[key] != association[key] for key in after_association):
+            _leaf_witness_require("witness controller or mount changed after child reap", condition=False)
+        after_hierarchy = _exec(
+            collection,
+            budget,
+            container,
+            "verify diagnostic leaf retained only controller",
+            "sh",
+            "-euc",
+            HIERARCHY_READBACK_COMMAND,
+            "--",
+            "scope",
+            mode,
+            "docker-" + workload + ".scope",
+        )
+        _leaf_witness_retained_after(after_hierarchy, association)
+        window.append(time.monotonic_ns())
+        roots.append(_leaf_witness_snapshot_root(observer, "root-after"))
+        record.update(_leaf_witness_public(output, association, roots, window))
+        _exec(
+            collection,
+            budget,
+            container,
+            "finish diagnostic leaf hold",
+            "sh",
+            "-euc",
+            "touch /proc/$1/root$2.finish",
+            "--",
+            controller,
+            RESOURCE_START_FILE,
+        )
+        completion = _exec(
+            collection, budget, container, "wait diagnostic controller completion", "docker", "wait", workload
+        )
+        record["controllerCompletion"] = "observation-complete" if completion == "0" else "failed"
+        if completion != "0":
+            record["availability"] = "unavailable"
+    except Exception:  # noqa: BLE001 — optional diagnostic errors never replace the original failure.
+        record["availability"] = "unavailable"
+    finally:
+        if launched:
+            try:
+                _leaf_witness_cleanup(collection, container, workload)
+                record["cleanup"] = "verified"
+            except Exception:  # noqa: BLE001 — preserve native failure; existing guest cleanup remains mandatory.
+                record["cleanup"] = "unavailable"
+                record["availability"] = "unavailable"
+        ctx.observations.append(record)
+
+
 def verify_inner_limits(
     ctx: RuntimeContext,
     budget: IsolatedStoreDiskBudget,
@@ -1622,6 +2185,8 @@ def verify_inner_limits(
                     ctx, budget, container, "read actual memory allocator self telemetry", "docker", "logs", workload
                 )
                 _memory_probe_result(ctx, association, output, exit_code, state)
+                if _leaf_witness_needed(ctx, diagnostics):
+                    _collect_leaf_memory_witness(ctx, budget, container, mode)
             else:
                 output = _exec(ctx, budget, container, "read bounded inner PID refusal", "docker", "logs", name)
                 event = re.fullmatch(r"bounded-pid-refusal events-before=(\d+) events-after=(\d+)", output)

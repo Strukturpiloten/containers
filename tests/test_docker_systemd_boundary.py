@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+import json
 import os
 import re
 import shutil
@@ -12,7 +14,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from scripts.runtime_docker_systemd import (
     HIERARCHY_READBACK_COMMAND,
@@ -23,11 +25,18 @@ from scripts.runtime_docker_systemd import (
     _allocator_telemetry,
     _cgroup_ancestors,
     _cgroup_path,
+    _collect_leaf_memory_witness,
     _hierarchy_evidence,
     _journal_boundary_evidence,
+    _leaf_witness_association,
+    _leaf_witness_needed,
+    _leaf_witness_public,
+    _leaf_witness_records,
+    _leaf_witness_retained_after,
     _memory_association,
     _memory_probe_result,
     _memory_values,
+    verify_inner_limits,
 )
 from scripts.runtime_tests import ProbeError
 
@@ -892,6 +901,9 @@ ACCOUNTING_SHIM = r"""
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/vfs.h>
+#include <unistd.h>
+pid_t __real_getpid(void);
+pid_t __wrap_getpid(void) { return getenv("TEST_WITNESS_PID1") ? 1 : __real_getpid(); }
 FILE *__real_fopen(const char *, const char *);
 int __real_stat(const char *, struct stat *);
 int __real_statfs(const char *, struct statfs *);
@@ -955,7 +967,7 @@ class CompiledResourceGateTests(unittest.TestCase):
                 "-Werror",
                 str(source),
                 str(shim),
-                "-Wl,--wrap=fopen,--wrap=stat,--wrap=statfs",
+                "-Wl,--wrap=fopen,--wrap=stat,--wrap=statfs,--wrap=getpid",
                 "-o",
                 str(cls.instrumented),
             ],
@@ -1144,6 +1156,87 @@ class CompiledResourceGateTests(unittest.TestCase):
                     [str(self.binary), *arguments], capture_output=True, text=True, check=False, timeout=12
                 )
                 self.assertEqual(result.returncode, expected, result.stderr)
+
+    def witness_accounting(self, root: Path) -> None:
+        self.accounting(root)
+        for name, value in {
+            "memory.events.local": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\n",
+            "memory.oom.group": "0",
+            "pids.max": "16",
+        }.items():
+            (root / name).write_text(value)
+
+    def witness_child(self, probe: subprocess.Popen) -> int:
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            children = (Path("/proc") / str(probe.pid) / "task" / str(probe.pid) / "children").read_text().split()
+            if children:
+                self.assertEqual(len(children), 1)
+                return int(children[0])
+            time.sleep(0.01)
+        message = "authored controller did not create its one bounded child"
+        raise AssertionError(message)
+
+    def test_witness_controller_survives_reaps_and_retains_actual_after_for_manual_sigkill(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.witness_accounting(root / "accounting")
+            start = root / "start"
+            with subprocess.Popen(  # noqa: S603 — bounded authored controller and synthetic read-only accounting.
+                [str(self.instrumented), "memory-witness", "--wait-for-start", str(start)],
+                env={**os.environ, "TEST_ACCOUNTING": str(root / "accounting"), "TEST_WITNESS_PID1": "1"},
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            ) as probe:
+                try:
+                    child = self.witness_child(probe)
+                    os.kill(child, signals.SIGSTOP)
+                    start.touch()
+                    # Child is stopped, so the owned pipe remains open while controller writes release.
+                    time.sleep(0.05)
+                    os.kill(child, signals.SIGKILL)
+                    deadline = time.monotonic() + 2
+                    while not Path(str(start) + ".after").exists() and time.monotonic() < deadline:
+                        self.assertIsNone(probe.poll())
+                        time.sleep(0.01)
+                    self.assertTrue(Path(str(start) + ".after").is_file())
+                    self.assertIsNone(probe.poll())
+                    self.assertEqual(self.identity(probe.pid)[4], "")
+                    self.assertFalse((Path("/proc") / str(child)).exists())
+                    Path(str(start) + ".finish").touch()
+                    stdout, stderr = probe.communicate(timeout=2)
+                    self.assertEqual(probe.returncode, 0, stderr)
+                    records = _leaf_witness_records(stdout)
+                    self.assertEqual(
+                        records["result"], {"child-reaped": "yes", "child-signal": "9", "child-signaled": "yes"}
+                    )
+                    self.assertEqual(records["before"]["scope-identity"], records["after"]["scope-identity"])
+                    self.assertEqual(records["after"]["memory.events.local"], "low 0;high 0;max 0;oom 0;oom_kill 0")
+                    self.assertNotIn("allocator-before-", stdout)
+                finally:
+                    if probe.poll() is None:
+                        probe.terminate()
+                        probe.communicate(timeout=2)
+
+    def test_witness_cancellation_and_timeout_reap_only_owned_unreaped_child(self) -> None:
+        for cancellation in (signals.SIGTERM, signals.SIGALRM):
+            with self.subTest(signal=cancellation), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                self.witness_accounting(root / "accounting")
+                with subprocess.Popen(  # noqa: S603 — synthetic accounting, no allocation gate release.
+                    [str(self.instrumented), "memory-witness", "--wait-for-start", str(root / "never")],
+                    env={**os.environ, "TEST_ACCOUNTING": str(root / "accounting"), "TEST_WITNESS_PID1": "1"},
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                ) as probe:
+                    child = self.witness_child(probe)
+                    probe.send_signal(cancellation)
+                    stdout, _ = probe.communicate(timeout=2)
+                    self.assertEqual(probe.returncode, 12)
+                    self.assertFalse((Path("/proc") / str(child)).exists())
+                    self.assertNotIn("leaf-witness-after-", stdout)
 
 
 class JournalBoundaryTests(unittest.TestCase):
@@ -1445,3 +1538,325 @@ class JournalBoundaryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LeafWitnessProtocolTests(unittest.TestCase):
+    def association(self) -> dict:
+        hierarchy = _hierarchy_evidence(
+            hierarchy_fixture(kind="scope"), kind="scope", mode="rootful", unit="docker-" + "a" * 64 + ".scope"
+        )
+        service = _hierarchy_evidence(hierarchy_fixture(), kind="service", mode="rootful", unit="docker.service")
+        association = _memory_association(memory_association_fixture(), hierarchy, service)
+        association["scope-device"] = 4
+        association["child"] = {**association["allocator"], "pid": 102, "starttime": 200, "nspid": [102, 2]}
+        return association
+
+    def full_binding(self, mode: str = "rootful") -> tuple[str, dict, dict]:
+        source = hierarchy_fixture(kind="scope", mode=mode)
+        fields = _memory_fixture_process(mode, "allocator")
+        fields[0] = "102"
+        fields[4] = "102 (/usr/bin/docker-resource-probe) S " + "101 " + "1 " * 17 + "200 1"
+        fields[5] = "102 202 2" if mode == "rootless" else "102 2"
+        lines = [
+            line + " 102" if line.startswith("group-") and line.endswith("|101") else line
+            for line in source.splitlines()
+        ]
+        raw = memory_association_fixture(mode=mode)
+        for phase in ("before", "after"):
+            lines.append(f"process-{phase}=probe-102|102|{fields[1]}|{fields[2][3:]}|{fields[3]}|{fields[4]}")
+            raw += f"\nassociation-{phase}-child=" + "|".join(fields)
+            raw += f"\nwitness-{phase}-scope-device=4"
+        hierarchy = _hierarchy_evidence("\n".join(lines), kind="scope", mode=mode, unit="docker-" + "a" * 64 + ".scope")
+        service = _hierarchy_evidence(hierarchy_fixture(mode=mode), kind="service", mode=mode, unit="docker.service")
+        return raw, hierarchy, service
+
+    def test_full_membership_child_parent_namespace_and_device_bindings(self) -> None:
+        for mode in ("rootful", "rootless"):
+            raw, hierarchy, service = self.full_binding(mode)
+            association = _leaf_witness_association(raw, hierarchy, service)
+            self.assertEqual(association["child"]["pid"], 102)
+            self.assertEqual(association["allocator"]["pid"], 101)
+            self.assertEqual(
+                {role for role in hierarchy["processes"] if role.startswith("probe-")}, {"probe-101", "probe-102"}
+            )
+            _leaf_witness_retained_after(hierarchy_fixture(kind="scope", mode=mode), association)
+            for changed in (
+                raw.replace(") S 101 ", ") S 103 "),
+                raw.replace("association-after-child=102", "association-after-child=103"),
+                raw.replace("witness-after-scope-device=4", "witness-after-scope-device=5"),
+                raw.replace("association-after-child=", "unknown-child="),
+            ):
+                with self.subTest(mode=mode, changed=changed[-60:]), self.assertRaises(ProbeError):
+                    _leaf_witness_association(changed, hierarchy, service)
+            extra = copy.deepcopy(hierarchy)
+            extra["groups"][extra["controlGroup"]][4] += " 103"
+            with self.assertRaises(ProbeError):
+                _leaf_witness_association(raw, extra, service)
+            with self.assertRaises(ProbeError):
+                _leaf_witness_retained_after(
+                    "\n".join(
+                        line.replace("|101", "|101 102") if line.startswith("group-") else line
+                        for line in hierarchy_fixture(kind="scope", mode=mode).splitlines()
+                    ),
+                    association,
+                )
+
+    def protocol(self) -> str:
+        association = self.association()
+        fields = {
+            "scope-identity": "4:" + association["scope-inode"],
+            "controller-pid": "1",
+            "controller-stat": "1 (resource-probe) S " + " ".join(["0"] * 18 + ["100"] + ["0"] * 5),
+            "controller-cgroup": "0::/",
+            "controller-pidns": "pid:[701]",
+            "controller-cgroupns": "cgroup:[801]",
+            "controller-userns": "user:[900]",
+            "child-pid": "2",
+            "child-stat": "2 (resource-probe) S " + " ".join(["1"] + ["0"] * 17 + ["200"] + ["0"] * 5),
+            "memory.max": str(MEMORY_BYTES),
+            "memory.current": "8192",
+            "memory.swap.max": "0",
+            "memory.swap.current": "0",
+            "memory.events": "low 0;high 0;max 0;oom 0;oom_kill 0;oom_group_kill 0",
+            "memory.events.local": "low 0;high 0;max 0;oom 0;oom_kill 0;oom_group_kill 0",
+            "memory.oom.group": "0",
+            "pids.max": "16",
+            "complete": "yes",
+        }
+        lines = [
+            f"leaf-witness-{phase}-{key}={value}" for phase in ("before", "after") for key, value in fields.items()
+        ]
+        lines.extend(
+            [
+                "leaf-witness-result-child-reaped=yes",
+                "leaf-witness-result-child-signal=9",
+                "leaf-witness-result-child-signaled=yes",
+            ]
+        )
+        return "\n".join(lines)
+
+    def roots(self) -> list[dict]:
+        events = {"availability": "observed", "values": {"low": 0, "high": 0, "max": 0, "oom": 0, "oom_kill": 0}}
+        return [
+            {
+                "availability": "observed",
+                "authority": "observation-only",
+                "bindingChecks": dict.fromkeys(
+                    (
+                        "ownedContainer",
+                        "containerIncarnation",
+                        "ownedSlice",
+                        "hostProcess",
+                        "cgroup2Mount",
+                        "outerCgroup",
+                        "stableRead",
+                    ),
+                    True,
+                ),
+                "bindings": {"scope": "private-hash"},
+                "mountSemantics": {"root": "full-hierarchy", "memoryLocalevents": False},
+                "sampleWindowMonotonicNs": window,
+                "counters": {"memory.events": copy.deepcopy(events), "memory.events.local": copy.deepcopy(events)},
+            }
+            for window in ([1, 2], [5, 6])
+        ]
+
+    def observe(self, output: str | None = None, roots: list[dict] | None = None) -> dict:
+        return _leaf_witness_public(output or self.protocol(), self.association(), roots or self.roots(), [3, 4])
+
+    def test_actual_after_and_waitpid_sigkill_are_separate_observation_without_cause_authority(self) -> None:
+        result = self.observe()
+        self.assertEqual(result["availability"], "observed")
+        self.assertEqual(result["childTermination"], "waitpid-signaled-sigkill")
+        self.assertFalse(result["oomAccountingObserved"])
+        self.assertTrue(result["childReaped"])
+        self.assertNotIn("enforcementSatisfied", result)
+        self.assertNotIn("controller-stat", json.dumps(result))
+        self.assertNotIn("pid:[701]", json.dumps(result))
+        self.assertNotIn("scope-inode", json.dumps(result))
+
+    def test_missing_after_identity_policy_status_and_non_sigkill_fail_closed(self) -> None:
+        original = self.protocol()
+        for changed in (
+            "\n".join(line for line in original.splitlines() if not line.startswith("leaf-witness-after-")),
+            original.replace("leaf-witness-after-scope-identity=4:", "leaf-witness-after-scope-identity=5:"),
+            original.replace("leaf-witness-after-child-pid=2", "leaf-witness-after-child-pid=3"),
+            original.replace("leaf-witness-after-child-stat=2", "leaf-witness-after-child-stat=3"),
+            original.replace("memory.oom.group=0", "memory.oom.group=1"),
+            original.replace("memory.swap.max=0", "memory.swap.max=max"),
+            original.replace("child-reaped=yes", "child-reaped=no"),
+            original.replace("child-signal=9", "child-signal=15"),
+            original.replace("child-signaled=yes", "child-signaled=no"),
+            original + "\nleaf-witness-after-unknown=1",
+            original + "\n" + original.splitlines()[0],
+        ):
+            with self.subTest(change=changed[-80:]), self.assertRaises(ProbeError):
+                self.observe(changed)
+
+    def test_counter_sets_are_actual_optional_and_never_defaulted_to_zero(self) -> None:
+        original = self.protocol()
+        sock = original.replace("oom_group_kill 0", "oom_group_kill 0;sock_throttled 2")
+        result = self.observe(sock)
+        self.assertEqual(result["counters"]["memory.events.local"]["delta"]["sock_throttled"], 0)
+        for changed in (
+            "\n".join(
+                line.replace("sock_throttled 2", "sock_throttled 1") if line.startswith("leaf-witness-after-") else line
+                for line in sock.splitlines()
+            ),
+            original.replace("leaf-witness-before-memory.events=low 0", "leaf-witness-before-memory.events=low 1"),
+            sock.replace(";sock_throttled 2", "", 1),
+        ):
+            with self.subTest(change=changed[-80:]), self.assertRaises(ProbeError):
+                self.observe(changed)
+
+    def test_unknown_mount_or_root_ordering_is_unavailable(self) -> None:
+        for value in (None, True, "false"):
+            roots = self.roots()
+            roots[0]["mountSemantics"]["memoryLocalevents"] = value
+            with self.subTest(mount=value), self.assertRaises(ProbeError):
+                self.observe(roots=roots)
+        roots = self.roots()
+        roots[0]["sampleWindowMonotonicNs"] = [1, 4]
+        with self.assertRaises(ProbeError):
+            self.observe(roots=roots)
+        roots = self.roots()
+        roots[1]["bindings"]["scope"] = "changed"
+        with self.assertRaises(ProbeError):
+            self.observe(roots=roots)
+
+    def test_root_missing_counters_and_regression_are_unavailable(self) -> None:
+        roots = self.roots()
+        roots[0]["counters"]["memory.events"]["values"]["low"] = 1
+        with self.assertRaises(ProbeError):
+            self.observe(roots=roots)
+        roots = self.roots()
+        roots[1]["counters"]["memory.events.local"] = {"availability": "missing"}
+        with self.assertRaises(ProbeError):
+            self.observe(roots=roots)
+        roots = self.roots()
+        del roots[0]["bindingChecks"]["ownedSlice"]
+        with self.assertRaises(ProbeError):
+            self.observe(roots=roots)
+
+    def test_trigger_requires_existing_typed_outer_marker_and_keeps_other_backends_out(self) -> None:
+        for marker in (False, None, "true", 1, True):
+            ctx = MagicMock(
+                outer_engine="docker",
+                observations=[
+                    {
+                        "name": "owned systemd OOM diagnostic",
+                        "phase": "after-inner-memory",
+                        "schemaVersion": 1,
+                        "authority": "observation-only",
+                        "ociState": {"OOMKilled": marker},
+                    }
+                ],
+            )
+            self.assertEqual(_leaf_witness_needed(ctx, MagicMock()), marker is True)
+            ctx.outer_engine = "podman"
+            self.assertFalse(_leaf_witness_needed(ctx, MagicMock()))
+        self.assertFalse(_leaf_witness_needed(MagicMock(outer_engine="docker", observations=[]), MagicMock()))
+
+    def test_driver_preserves_original_deadline_private_checks_and_exact_cleanup(self) -> None:
+        ctx = MagicMock(runtime_deadline=time.monotonic() + 100, observations=[], checks=[], image_ref="private-image")
+        ctx.backend.command_timeout.return_value = 10
+        service = _hierarchy_evidence(hierarchy_fixture(), kind="service", mode="rootful", unit="docker.service")
+        ctx.checks.append(service)
+        original_checks = copy.deepcopy(ctx.checks)
+        deadline = ctx.runtime_deadline
+        outputs = {
+            "start diagnostic-only leaf memory witness": "a" * 64,
+            "read private leaf witness protocol": self.protocol(),
+            "rebind live diagnostic controller": memory_association_fixture(),
+            "wait diagnostic controller completion": "0",
+        }
+        ctx.exec.side_effect = lambda name, *_args: outputs.get(name, "")
+        with (
+            patch("scripts.runtime_docker_systemd._leaf_witness_bind", return_value=self.association()),
+            patch("scripts.runtime_docker_systemd._leaf_witness_retained_after"),
+            patch("scripts.runtime_docker_systemd._leaf_witness_snapshot_root", side_effect=self.roots()),
+            patch("scripts.runtime_docker_systemd.time.monotonic_ns", side_effect=[3, 4]),
+        ):
+            _collect_leaf_memory_witness(ctx, MagicMock(), "owned", "rootful")
+        self.assertEqual(ctx.runtime_deadline, deadline)
+        self.assertEqual(ctx.checks, original_checks)
+        result = ctx.observations[-1]
+        self.assertEqual(result["availability"], "observed")
+        self.assertEqual(result["authority"], "observation-only")
+        self.assertEqual(result["controllerCompletion"], "observation-complete")
+        self.assertEqual(result["cleanup"], "verified")
+        names = [call.args[0] for call in ctx.exec.call_args_list]
+        self.assertLess(names.index("rebind live diagnostic controller"), names.index("finish diagnostic leaf hold"))
+        cleanup = next(
+            call.args
+            for call in ctx.exec.call_args_list
+            if call.args[0] == "remove and read back exact diagnostic leaf"
+        )
+        self.assertIn("a" * 64, cleanup)
+        self.assertIn('docker rm --force "$cid"', cleanup[4])
+        self.assertNotIn("prune", cleanup[4])
+
+    def test_primary_result_only_triggers_extra_actor_for_already_known_outer_marker_true(self) -> None:
+        for marker in (False, None, True):
+            ctx = MagicMock(unsafe=True, outer_engine="docker", observations=[], checks=[], image_ref="private-image")
+            ctx.checks.append(
+                _hierarchy_evidence(hierarchy_fixture(), kind="service", mode="rootful", unit="docker.service")
+            )
+
+            def execute(name: str, *_args: str) -> str:
+                if name.startswith("start bounded inner"):
+                    return "a" * 64
+                if name.startswith("wait bounded inner"):
+                    return "137" if "memory" in name else "0"
+                return {
+                    "inspect inner memory enforcement state": '{"OOMKilled":true}',
+                    "inspect inner pids enforcement state": "{}",
+                    "verify inner memory scope placement and ownership": hierarchy_fixture(kind="scope"),
+                    "verify inner pids scope placement and ownership": hierarchy_fixture(kind="scope"),
+                    "read actual memory allocator swap and namespace association": memory_association_fixture(),
+                    "read actual memory allocator self telemetry": allocator_telemetry_fixture(),
+                    "read exact inner memory cgroup limits": f"{MEMORY_BYTES}\n16",
+                    "read exact inner pids cgroup limits": f"{MEMORY_BYTES}\n16",
+                    "read bounded inner PID refusal": "bounded-pid-refusal events-before=0 events-after=1",
+                }.get(name, "")
+
+            ctx.exec.side_effect = execute
+
+            def snapshot(
+                phase: str, *, _context: MagicMock = ctx, _marker: bool | None = marker, **_kwargs: object
+            ) -> None:
+                _context.observations.append(
+                    {
+                        "name": "owned systemd OOM diagnostic",
+                        "phase": phase,
+                        "schemaVersion": 1,
+                        "authority": "observation-only",
+                        "ociState": {"OOMKilled": _marker},
+                    }
+                )
+
+            diagnostics = MagicMock()
+            diagnostics.snapshot.side_effect = snapshot
+            with (
+                patch("scripts.runtime_docker_systemd._collect_leaf_memory_witness") as witness,
+                patch("scripts.runtime_docker_systemd.verify_outer_container_limits"),
+            ):
+                verify_inner_limits(ctx, MagicMock(), "owned", diagnostics=diagnostics)
+            self.assertEqual(witness.call_count, int(marker is True))
+            legacy = next(check for check in ctx.checks if check["name"] == "inner memory allocator diagnostic")
+            self.assertTrue(legacy["enforcementSatisfied"])
+            self.assertIsNone(legacy["telemetry"]["after"])
+
+    def test_deadline_shortage_launches_no_actor_and_private_exception_operands_do_not_escape(self) -> None:
+        ctx = MagicMock(runtime_deadline=time.monotonic() - 1, observations=[], checks=[])
+        _collect_leaf_memory_witness(ctx, MagicMock(), "owned", "rootful")
+        ctx.exec.assert_not_called()
+        self.assertEqual(ctx.observations[-1]["availability"], "unavailable")
+        self.assertEqual(ctx.observations[-1]["cleanup"], "not-created")
+        ctx.runtime_deadline = time.monotonic() + 100
+        ctx.backend.command_timeout.return_value = 10
+        ctx.exec.side_effect = ProbeError("PRIVATE-PROC-PATH-PID-OPERAND")
+        _collect_leaf_memory_witness(ctx, MagicMock(), "owned", "rootful")
+        self.assertNotIn("PRIVATE-PROC-PATH-PID-OPERAND", json.dumps(ctx.observations))
+        self.assertEqual(ctx.checks, [])
+        self.assertEqual(ctx.observations[-1]["cleanup"], "unavailable")
