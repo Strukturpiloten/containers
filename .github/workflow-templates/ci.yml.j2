@@ -6,9 +6,17 @@ on:
   merge_group:
     types: [checks_requested]
   workflow_dispatch:
+    inputs:
+      validation_profile:
+        description: Validation scope (diagnostics do not satisfy Required CI)
+        type: choice
+        default: full
+        options:
+          - full
+          - docker-rootless-diagnostic
 
 concurrency:
-  group: validate-containers-${{ github.ref }}
+  group: validate-containers-${{ github.event_name }}-${{ github.event_name != 'workflow_dispatch' && 'full' || inputs.validation_profile == 'docker-rootless-diagnostic' && 'diagnostic' || (inputs.validation_profile == '' || inputs.validation_profile == 'full') && 'full' || 'invalid' }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions: {}
@@ -535,6 +543,7 @@ jobs:
     permissions:
       contents: read
     outputs:
+      diag_only: ${{ steps.mode.outputs.diagnostic_only }}
       has_builds: ${{ steps.outputs.outputs.has_builds }}
       has_payloads: ${{ steps.outputs.outputs.has_payloads }}
       payload_matrix: ${{ steps.outputs.outputs.payload_matrix }}
@@ -550,12 +559,35 @@ jobs:
         uses: ./.github/actions/setup-uv
         with:
           version: ${{ env.UV_VERSION }}
+      - name: Select validation profile
+        id: mode
+        shell: bash
+        env:
+          VALIDATION_PROFILE: ${{ inputs.validation_profile || 'full' }}
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            case "${VALIDATION_PROFILE,,}" in
+              full) ;;
+              docker-rootless-diagnostic)
+                printf '%s\n' 'scope=image' 'target=docker-29-conformance-rootless' 'diagnostic_only=true' >> "$GITHUB_OUTPUT"
+                exit 0
+                ;;
+              *)
+                echo "Unknown manual validation profile." >&2
+                exit 1
+                ;;
+            esac
+          fi
+          printf '%s\n' 'scope=all' 'target=' 'diagnostic_only=false' >> "$GITHUB_OUTPUT"
       - name: Create build plan
         shell: bash
         env:
           BEFORE: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || '' }}
-          BUILD_SCOPE: all
-          BUILD_TARGET: ""
+          BUILD_SCOPE: ${{ steps.mode.outputs.scope }}
+          BUILD_TARGET: ${{ steps.mode.outputs.target }}
           REF_NAME: ${{ github.head_ref || github.ref_name }}
           SOURCE_SHA: ${{ github.sha }}
         run: |
@@ -583,9 +615,15 @@ jobs:
       - name: Summarize build plan
         if: always() && steps.outputs.outcome == 'success'
         shell: bash
+        env:
+          DIAGNOSTIC_ONLY: ${{ steps.mode.outputs.diagnostic_only }}
         run: |
           set -euo pipefail
 
+          if [ "${DIAGNOSTIC_ONLY}" = "true" ]; then
+            echo '## Nonqualifying Docker fixture diagnostic' >> "$GITHUB_STEP_SUMMARY"
+            echo 'Selected image only: docker-29-conformance-rootless on AMD64 and ARM64. This source-bound evidence does not satisfy Required CI, full validation, release, or publication gates.' >> "$GITHUB_STEP_SUMMARY"
+          fi
           uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine plan-summary build-plan.json >> "$GITHUB_STEP_SUMMARY"
       - name: Upload build plan
         if: always() && steps.outputs.outcome == 'success'
@@ -640,7 +678,7 @@ jobs:
           use-published-dependency-fallback: "true"
 
   required-ci:
-    name: Required CI
+    name: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_profile == 'docker-rootless-diagnostic' && 'Docker fixture diagnostic (not Required CI)' || 'Required CI' }}
     if: ${{ always() }}
     needs:
       - validate
@@ -655,6 +693,8 @@ jobs:
       - name: Require validation, planning, and selected builds
         shell: bash
         env:
+          DIAGNOSTIC_ONLY: ${{ needs.plan.outputs.diag_only }}
+          REQUESTED_DIAGNOSTIC_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_profile == 'docker-rootless-diagnostic' }}
           HAS_BUILDS: ${{ needs.plan.outputs.has_builds }}
           HAS_PAYLOADS: ${{ needs.plan.outputs.has_payloads }}
           PAYLOAD_RESULT: ${{ needs.payloads.result }}
@@ -668,6 +708,17 @@ jobs:
             echo "Validation or build planning did not succeed." >&2
             exit 1
           fi
+          if [ "${DIAGNOSTIC_ONLY}" != "${REQUESTED_DIAGNOSTIC_ONLY}" ]; then
+            echo "Build-plan validation profile does not match the request." >&2
+            exit 1
+          fi
+          case "${DIAGNOSTIC_ONLY}:${HAS_BUILDS}:${HAS_PAYLOADS}" in
+            true:true:true|true:true:false|false:true:true|false:true:false|false:false:true|false:false:false) ;;
+            *)
+              echo "Missing or invalid build-plan outputs." >&2
+              exit 1
+              ;;
+          esac
           if [ "${HAS_BUILDS}" = "true" ] && [ "${SMOKE_RESULT}" != "success" ]; then
             echo "One or more affected container builds did not succeed." >&2
             exit 1
@@ -680,4 +731,8 @@ jobs:
             echo "A required shared payload did not build successfully." >&2
             exit 1
           fi
-          echo "Required repository checks passed."
+          if [ "${DIAGNOSTIC_ONLY}" = "true" ]; then
+            echo "Nonqualifying Docker fixture diagnostic passed for the selected image only; this is not Required CI."
+          else
+            echo "Required repository checks passed."
+          fi
