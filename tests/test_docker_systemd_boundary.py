@@ -19,6 +19,7 @@ from unittest.mock import MagicMock, patch
 from scripts.runtime_docker_systemd import (
     HIERARCHY_READBACK_COMMAND,
     JOURNAL_BOUNDARY_COMMAND,
+    LEAF_WITNESS_STAGES,
     MEMORY_ASSOCIATION_COMMAND,
     MEMORY_BYTES,
     _allocator_records,
@@ -1536,10 +1537,6 @@ class JournalBoundaryTests(unittest.TestCase):
                     self.assertEqual(_journal_boundary_evidence(result.stdout)["socketInodes"], [100, 101, 102])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class LeafWitnessProtocolTests(unittest.TestCase):
     def association(self) -> dict:
         hierarchy = _hierarchy_evidence(
@@ -1860,3 +1857,173 @@ class LeafWitnessProtocolTests(unittest.TestCase):
         self.assertNotIn("PRIVATE-PROC-PATH-PID-OPERAND", json.dumps(ctx.observations))
         self.assertEqual(ctx.checks, [])
         self.assertEqual(ctx.observations[-1]["cleanup"], "unavailable")
+
+    def driver_context(self) -> MagicMock:
+        ctx = MagicMock(runtime_deadline=time.monotonic() + 100, observations=[], checks=[], image_ref="private-image")
+        ctx.backend.command_timeout.return_value = 10
+        ctx.checks.append(
+            _hierarchy_evidence(hierarchy_fixture(), kind="service", mode="rootful", unit="docker.service")
+        )
+        return ctx
+
+    def collect_driver(
+        self,
+        *,
+        fail_at: str | tuple[str, ...] | None = None,
+        completion: str = "0",
+        launch_output: str = "a" * 64,
+        ctx: MagicMock | None = None,
+        failure: BaseException | None = None,
+    ) -> MagicMock:
+        ctx = ctx if ctx is not None else self.driver_context()
+        private_failure = failure if failure is not None else ProbeError("PRIVATE /proc/4789/root/secret operand")
+
+        def operation(name: str, value: object = None) -> object:
+            if name == fail_at or (isinstance(fail_at, tuple) and name in fail_at):
+                raise private_failure
+            return value
+
+        commands = {
+            "start diagnostic-only leaf memory witness": ("launch", launch_output),
+            "release diagnostic leaf and await actual after": ("release-await-after", ""),
+            "read private leaf witness protocol": ("log-read", self.protocol()),
+            "rebind live diagnostic controller": ("controller-rebind", memory_association_fixture()),
+            "verify diagnostic leaf retained only controller": ("retained-hierarchy", "private-hierarchy"),
+            "finish diagnostic leaf hold": ("finish-hold", ""),
+            "wait diagnostic controller completion": ("wait-completion", completion),
+            "remove and read back exact diagnostic leaf": ("cleanup", ""),
+        }
+        ctx.exec.side_effect = lambda name, *_args: operation(*commands[name])
+        roots = iter(self.roots())
+
+        def project(*args: object) -> dict:
+            operation("projection-validation")
+            return _leaf_witness_public(*args)
+
+        with (
+            patch(
+                "scripts.runtime_docker_systemd._leaf_witness_room", side_effect=lambda _ctx: operation("room-check")
+            ),
+            patch(
+                "scripts.runtime_docker_systemd._leaf_witness_bind",
+                side_effect=lambda *_args: operation("bind", self.association()),
+            ),
+            patch(
+                "scripts.runtime_docker_systemd._leaf_witness_retained_after",
+                side_effect=lambda *_args: operation("retained-hierarchy-validation"),
+            ),
+            patch(
+                "scripts.runtime_docker_systemd._leaf_witness_snapshot_root",
+                side_effect=lambda _observer, role: operation(role, next(roots)),
+            ),
+            patch("scripts.runtime_docker_systemd._leaf_witness_public", side_effect=project),
+            patch("scripts.runtime_docker_systemd.time.monotonic_ns", side_effect=[3, 4]),
+        ):
+            _collect_leaf_memory_witness(ctx, MagicMock(), "owned", "rootful")
+        return ctx
+
+    def test_collection_failure_identifies_each_operation_without_cleanup_overwriting_it(self) -> None:
+        # Independently specified public protocol: no command-derived or exception-derived labels.
+        stages = (
+            "room-check",
+            "launch",
+            "bind",
+            "root-before",
+            "release-await-after",
+            "log-read",
+            "controller-rebind",
+            "retained-hierarchy",
+            "root-after",
+            "projection-validation",
+            "finish-hold",
+            "wait-completion",
+        )
+        self.assertEqual(LEAF_WITNESS_STAGES, frozenset(stages))
+        for index, stage in enumerate(stages):
+            with self.subTest(stage=stage):
+                ctx = self.collect_driver(fail_at=stage)
+                result = ctx.observations[-1]
+                self.assertEqual(result["enteredStage"], stage)
+                self.assertEqual(result["completedStage"], stages[index - 1] if index else None)
+                self.assertEqual(result["availability"], "unavailable")
+                self.assertEqual(result["controllerCompletion"], "unavailable")
+                self.assertEqual(result["cleanup"], "not-created" if index == 0 else "verified")
+                cleanup_stage = None if index == 0 else "exact-owned-leaf"
+                self.assertEqual(result["cleanupEnteredStage"], cleanup_stage)
+                self.assertEqual(result["cleanupCompletedStage"], cleanup_stage)
+                self.assertEqual(
+                    ctx.checks,
+                    [_hierarchy_evidence(hierarchy_fixture(), kind="service", mode="rootful", unit="docker.service")],
+                )
+                public = json.dumps(result)
+                for private in ("/proc/4789", "secret", "PRIVATE", "private-hierarchy", "private-image", "a" * 64):
+                    self.assertNotIn(private, public)
+
+    def test_success_and_controller_failure_have_completed_wait_without_invented_completion(self) -> None:
+        for completion, expected, availability in (
+            ("0", "observation-complete", "observed"),
+            ("1", "failed", "unavailable"),
+        ):
+            with self.subTest(completion=completion):
+                result = self.collect_driver(completion=completion).observations[-1]
+                self.assertEqual(result["enteredStage"], "wait-completion")
+                self.assertEqual(result["completedStage"], "wait-completion")
+                self.assertEqual(result["controllerCompletion"], expected)
+                self.assertEqual(result["availability"], availability)
+                self.assertEqual(result["cleanupEnteredStage"], "exact-owned-leaf")
+                self.assertEqual(result["cleanupCompletedStage"], "exact-owned-leaf")
+                self.assertEqual(result["cleanup"], "verified")
+
+    def test_cleanup_failure_keeps_collection_location_and_actual_controller_completion(self) -> None:
+        for fail_at, entered, completed, controller in (
+            ("release-await-after", "release-await-after", "root-before", "unavailable"),
+            (None, "wait-completion", "wait-completion", "observation-complete"),
+        ):
+            with self.subTest(fail_at=fail_at):
+                failures = (fail_at, "cleanup") if fail_at else "cleanup"
+                result = self.collect_driver(fail_at=failures).observations[-1]
+                self.assertEqual(result["enteredStage"], entered)
+                self.assertEqual(result["completedStage"], completed)
+                self.assertEqual(result["controllerCompletion"], controller)
+                self.assertEqual(result["cleanupEnteredStage"], "exact-owned-leaf")
+                self.assertIsNone(result["cleanupCompletedStage"])
+                self.assertEqual(result["cleanup"], "unavailable")
+                self.assertEqual(result["availability"], "unavailable")
+                self.assertNotIn("PRIVATE", json.dumps(result))
+
+    def test_invalid_launch_identity_is_not_forwarded_as_owned_cleanup_identity(self) -> None:
+        ctx = self.collect_driver(launch_output="PRIVATE invalid container identity")
+        result = ctx.observations[-1]
+        self.assertEqual(result["enteredStage"], "launch")
+        self.assertEqual(result["completedStage"], "room-check")
+        self.assertEqual(result["availability"], "unavailable")
+        self.assertEqual(result["cleanup"], "verified")
+        cleanup = ctx.exec.call_args_list[-1].args
+        self.assertEqual(cleanup[-2], "")
+        self.assertNotIn("PRIVATE", json.dumps(result))
+
+    def test_retained_hierarchy_validation_failure_is_not_a_completed_read(self) -> None:
+        result = self.collect_driver(fail_at="retained-hierarchy-validation").observations[-1]
+        self.assertEqual(result["enteredStage"], "retained-hierarchy")
+        self.assertEqual(result["completedStage"], "controller-rebind")
+        self.assertEqual(result["cleanup"], "verified")
+        self.assertEqual(result["availability"], "unavailable")
+
+    def test_cancellation_propagates_after_exact_cleanup_and_retains_interrupted_stage(self) -> None:
+        ctx = self.driver_context()
+        cancellation = KeyboardInterrupt("PRIVATE cancellation operand")
+        with self.assertRaises(KeyboardInterrupt) as caught:
+            self.collect_driver(ctx=ctx, fail_at="root-after", failure=cancellation)
+        self.assertIs(caught.exception, cancellation)
+        result = ctx.observations[-1]
+        self.assertEqual(result["enteredStage"], "root-after")
+        self.assertEqual(result["completedStage"], "retained-hierarchy")
+        self.assertEqual(result["cleanup"], "verified")
+        cleanup = ctx.exec.call_args_list[-1].args
+        self.assertEqual(cleanup[0], "remove and read back exact diagnostic leaf")
+        self.assertIn("a" * 64, cleanup)
+        self.assertNotIn("PRIVATE", json.dumps(result))
+
+
+if __name__ == "__main__":
+    unittest.main()

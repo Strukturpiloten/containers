@@ -13,6 +13,7 @@ import re
 import shutil
 import signal as signals
 import time
+from contextlib import contextmanager
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any
 
@@ -22,7 +23,7 @@ from scripts.runtime_oom_diagnostics import DOCKER_CHECKS, OomDiagnostics
 from scripts.runtime_resource_budgets import verify_outer_container_limits
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
     from scripts.runtime_resource_budgets import IsolatedStoreDiskBudget
     from scripts.runtime_tests import RuntimeContext
@@ -1519,6 +1520,22 @@ def _inner_enforcement_state(
 # Each mode has its own baseline. These fixed tags never grant admission authority.
 LEAF_WITNESS_PURPOSE = "leaf-memory-witness"
 LEAF_WITNESS_SECONDS = 10
+LEAF_WITNESS_STAGES = frozenset(
+    {
+        "room-check",
+        "launch",
+        "bind",
+        "root-before",
+        "release-await-after",
+        "log-read",
+        "controller-rebind",
+        "retained-hierarchy",
+        "root-after",
+        "projection-validation",
+        "finish-hold",
+        "wait-completion",
+    }
+)
 LEAF_WITNESS_NAME = "docker-native-limit-memory-witness"
 LEAF_WITNESS_CIDFILE = "/tmp/docker-native-limit-memory-witness.cid"  # noqa: S108 — private owned guest.
 LEAF_WITNESS_FIELDS = frozenset(
@@ -1940,6 +1957,58 @@ def _leaf_witness_cleanup(collection: RuntimeContext, container: str, workload: 
     )
 
 
+def _leaf_witness_launch(collection: RuntimeContext, budget: IsolatedStoreDiskBudget, container: str) -> str:
+    workload = _exec(
+        collection,
+        budget,
+        container,
+        "start diagnostic-only leaf memory witness",
+        "docker",
+        "run",
+        "--detach",
+        "--name",
+        LEAF_WITNESS_NAME,
+        "--cidfile",
+        LEAF_WITNESS_CIDFILE,
+        "--memory",
+        str(MEMORY_BYTES),
+        "--memory-swap",
+        str(MEMORY_BYTES),
+        "--pids-limit",
+        str(INNER_PIDS),
+        collection.image_ref,
+        "docker-resource-probe",
+        "memory-witness",
+        "--wait-for-start",
+        RESOURCE_START_FILE,
+    )
+    if not re.fullmatch(r"[a-f0-9]{64}", workload):
+        _leaf_witness_require("witness exact owned CID missing", condition=False)
+    return workload
+
+
+def _leaf_witness_cleanup_record(
+    collection: RuntimeContext, container: str, workload: str | None, record: dict[str, Any]
+) -> None:
+    try:
+        record["cleanupEnteredStage"] = "exact-owned-leaf"
+        _leaf_witness_cleanup(collection, container, workload)
+        record["cleanupCompletedStage"] = "exact-owned-leaf"
+        record["cleanup"] = "verified"
+    except Exception:  # noqa: BLE001 — preserve native failure; existing guest cleanup remains mandatory.
+        record["cleanup"] = "unavailable"
+        record["availability"] = "unavailable"
+
+
+@contextmanager
+def _leaf_witness_stage(record: dict[str, Any], stage: str) -> Iterator[None]:
+    if stage not in LEAF_WITNESS_STAGES:
+        raise ProbeError("unknown witness collection stage")
+    record["enteredStage"] = stage
+    yield
+    record["completedStage"] = stage
+
+
 def _collect_leaf_memory_witness(
     ctx: RuntimeContext, budget: IsolatedStoreDiskBudget, container: str, mode: str
 ) -> None:
@@ -1952,6 +2021,10 @@ def _collect_leaf_memory_witness(
         "attribution": "unresolved",
         "authority": "observation-only",
         "controllerCompletion": "unavailable",
+        "enteredStage": None,
+        "completedStage": None,
+        "cleanupEnteredStage": None,
+        "cleanupCompletedStage": None,
         "childTermination": "unavailable",
         "beforeStatus": "unavailable",
         "afterStatus": "unavailable",
@@ -1966,115 +2039,100 @@ def _collect_leaf_memory_witness(
     workload = None
     launched = False
     try:
-        _leaf_witness_room(ctx)
-        launched = True
-        workload = _exec(
-            collection,
-            budget,
-            container,
-            "start diagnostic-only leaf memory witness",
-            "docker",
-            "run",
-            "--detach",
-            "--name",
-            LEAF_WITNESS_NAME,
-            "--cidfile",
-            LEAF_WITNESS_CIDFILE,
-            "--memory",
-            str(MEMORY_BYTES),
-            "--memory-swap",
-            str(MEMORY_BYTES),
-            "--pids-limit",
-            str(INNER_PIDS),
-            ctx.image_ref,
-            "docker-resource-probe",
-            "memory-witness",
-            "--wait-for-start",
-            RESOURCE_START_FILE,
-        )
-        if not re.fullmatch(r"[a-f0-9]{64}", workload):
-            workload = None
-            _leaf_witness_require("witness exact owned CID missing", condition=False)
-        association = _leaf_witness_bind(collection, budget, container, (mode, workload), _retained_service(ctx, mode))
-        controller = str(association["allocator"]["pid"])
-        observer = OomDiagnostics(ctx, container)
-        roots = [_leaf_witness_snapshot_root(observer, "root-before")]
-        window = [time.monotonic_ns()]
-        _exec(
-            collection,
-            budget,
-            container,
-            "release diagnostic leaf and await actual after",
-            "sh",
-            "-euc",
-            'base=/proc/$1/root$2; touch "$base"; '
-            'for n in $(seq 1 80); do test ! -f "$base.after" || exit 0; sleep 0.1; done; exit 1',
-            "--",
-            controller,
-            RESOURCE_START_FILE,
-        )
-        output = _exec(collection, budget, container, "read private leaf witness protocol", "docker", "logs", workload)
-        after_raw = _exec(
-            collection,
-            budget,
-            container,
-            "rebind live diagnostic controller",
-            "sh",
-            "-euc",
-            MEMORY_ASSOCIATION_COMMAND,
-            "--",
-            association["allocator"]["group"],
-            controller,
-            workload,
-        )
-        after_association, _ = _association_records(after_raw)
-        if any(after_association[key] != association[key] for key in after_association):
-            _leaf_witness_require("witness controller or mount changed after child reap", condition=False)
-        after_hierarchy = _exec(
-            collection,
-            budget,
-            container,
-            "verify diagnostic leaf retained only controller",
-            "sh",
-            "-euc",
-            HIERARCHY_READBACK_COMMAND,
-            "--",
-            "scope",
-            mode,
-            "docker-" + workload + ".scope",
-        )
-        _leaf_witness_retained_after(after_hierarchy, association)
-        window.append(time.monotonic_ns())
-        roots.append(_leaf_witness_snapshot_root(observer, "root-after"))
-        record.update(_leaf_witness_public(output, association, roots, window))
-        _exec(
-            collection,
-            budget,
-            container,
-            "finish diagnostic leaf hold",
-            "sh",
-            "-euc",
-            "touch /proc/$1/root$2.finish",
-            "--",
-            controller,
-            RESOURCE_START_FILE,
-        )
-        completion = _exec(
-            collection, budget, container, "wait diagnostic controller completion", "docker", "wait", workload
-        )
-        record["controllerCompletion"] = "observation-complete" if completion == "0" else "failed"
-        if completion != "0":
-            record["availability"] = "unavailable"
+        with _leaf_witness_stage(record, "room-check"):
+            _leaf_witness_room(ctx)
+        with _leaf_witness_stage(record, "launch"):
+            launched = True
+            workload = _leaf_witness_launch(collection, budget, container)
+        with _leaf_witness_stage(record, "bind"):
+            association = _leaf_witness_bind(
+                collection, budget, container, (mode, workload), _retained_service(ctx, mode)
+            )
+            controller = str(association["allocator"]["pid"])
+        with _leaf_witness_stage(record, "root-before"):
+            observer = OomDiagnostics(ctx, container)
+            roots = [_leaf_witness_snapshot_root(observer, "root-before")]
+        with _leaf_witness_stage(record, "release-await-after"):
+            window = [time.monotonic_ns()]
+            _exec(
+                collection,
+                budget,
+                container,
+                "release diagnostic leaf and await actual after",
+                "sh",
+                "-euc",
+                'base=/proc/$1/root$2; touch "$base"; '
+                'for n in $(seq 1 80); do test ! -f "$base.after" || exit 0; sleep 0.1; done; exit 1',
+                "--",
+                controller,
+                RESOURCE_START_FILE,
+            )
+        with _leaf_witness_stage(record, "log-read"):
+            output = _exec(
+                collection, budget, container, "read private leaf witness protocol", "docker", "logs", workload
+            )
+        with _leaf_witness_stage(record, "controller-rebind"):
+            after_raw = _exec(
+                collection,
+                budget,
+                container,
+                "rebind live diagnostic controller",
+                "sh",
+                "-euc",
+                MEMORY_ASSOCIATION_COMMAND,
+                "--",
+                association["allocator"]["group"],
+                controller,
+                workload,
+            )
+            after_association, _ = _association_records(after_raw)
+            if any(after_association[key] != association[key] for key in after_association):
+                _leaf_witness_require("witness controller or mount changed after child reap", condition=False)
+        with _leaf_witness_stage(record, "retained-hierarchy"):
+            after_hierarchy = _exec(
+                collection,
+                budget,
+                container,
+                "verify diagnostic leaf retained only controller",
+                "sh",
+                "-euc",
+                HIERARCHY_READBACK_COMMAND,
+                "--",
+                "scope",
+                mode,
+                "docker-" + workload + ".scope",
+            )
+            _leaf_witness_retained_after(after_hierarchy, association)
+        with _leaf_witness_stage(record, "root-after"):
+            window.append(time.monotonic_ns())
+            roots.append(_leaf_witness_snapshot_root(observer, "root-after"))
+        with _leaf_witness_stage(record, "projection-validation"):
+            record.update(_leaf_witness_public(output, association, roots, window))
+        with _leaf_witness_stage(record, "finish-hold"):
+            _exec(
+                collection,
+                budget,
+                container,
+                "finish diagnostic leaf hold",
+                "sh",
+                "-euc",
+                "touch /proc/$1/root$2.finish",
+                "--",
+                controller,
+                RESOURCE_START_FILE,
+            )
+        with _leaf_witness_stage(record, "wait-completion"):
+            completion = _exec(
+                collection, budget, container, "wait diagnostic controller completion", "docker", "wait", workload
+            )
+            record["controllerCompletion"] = "observation-complete" if completion == "0" else "failed"
+            if completion != "0":
+                record["availability"] = "unavailable"
     except Exception:  # noqa: BLE001 — optional diagnostic errors never replace the original failure.
         record["availability"] = "unavailable"
     finally:
         if launched:
-            try:
-                _leaf_witness_cleanup(collection, container, workload)
-                record["cleanup"] = "verified"
-            except Exception:  # noqa: BLE001 — preserve native failure; existing guest cleanup remains mandatory.
-                record["cleanup"] = "unavailable"
-                record["availability"] = "unavailable"
+            _leaf_witness_cleanup_record(collection, container, workload, record)
         ctx.observations.append(record)
 
 

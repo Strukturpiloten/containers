@@ -910,3 +910,9 @@ the mandatory allocator's samples. Controller completion and private identity
 bindings provide diagnostic observations only; the strict outer OOM and orderly
 shutdown guards retain their existing refusal behavior. Unknown or incomplete
 witness evidence grants no native qualification or attribution authority.
+Closed last-entered and last-completed collection stages identify where an
+unavailable witness stopped without publishing operands or exception text.
+Cleanup progress is recorded separately and cannot replace that location;
+controller completion retains its independent unavailable/failed/completed
+meaning. A completed collection operation alone does not establish valid
+accounting or successful controller termination.

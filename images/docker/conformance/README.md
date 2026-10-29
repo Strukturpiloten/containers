@@ -183,6 +183,17 @@ reaps the child, then samples the same populated leaf and holds it for the root
 after sample. Separate bounded reads are not atomic. Raw identities, paths,
 collector output and error operands remain private; public observations retain
 hashes, counter sets, completed binding checks and monotonic window envelopes.
+Closed `enteredStage` and `completedStage` facts retain the last collection
+operation started and successfully returned, including unavailable observations.
+They cover room checking, launch, binding, root-before sampling, release and
+await-after, log reading, controller rebinding, retained hierarchy, root-after
+sampling, projection validation, finish hold and completion wait. Null means
+no operation completed yet. Separate `cleanupEnteredStage` and
+`cleanupCompletedStage` facts use only `exact-owned-leaf` or null, alongside
+the existing cleanup outcome; cleanup never overwrites the collection location.
+A returned completion wait is distinct from controller success, and completed
+sampling does not establish valid accounting until projection validation.
+No raw commands, paths, process identities or exception text enter these facts.
 
 One nonrenewable ten-second controller alarm covers all gates, allocation and
 after hold, within the existing original work deadline and cleanup reserve.
