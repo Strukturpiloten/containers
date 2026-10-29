@@ -10,6 +10,7 @@ from unittest.mock import patch
 import yaml
 
 from scripts import container_engine as engine
+from tests.test_ci_diagnostic_dispatch import render_workflow_value
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -29,7 +30,13 @@ class PullRequestSourceIdentityTests(unittest.TestCase):
                 if job == "plan":
                     self.assertEqual(step["env"]["SOURCE_SHA"], "${{ github.sha }}")
         required = workflow["jobs"]["required-ci"]
-        self.assertEqual(required["name"], "Required CI")
+        for profile in ("", "full", "docker-rootless-diagnostic", "DOCKER-ROOTLESS-DIAGNOSTIC", "unknown"):
+            with self.subTest(merge_group_profile=profile):
+                self.assertEqual(
+                    render_workflow_value(required["name"], event="merge_group", profile=profile), "Required CI"
+                )
+                requested = required["steps"][0]["env"]["REQUESTED_DIAGNOSTIC_ONLY"]
+                self.assertEqual(render_workflow_value(requested, event="merge_group", profile=profile), "false")
         self.assertEqual(required["if"], "${{ always() }}")
         self.assertEqual(set(required["needs"]), {"validate", "plan", "payloads", "smoke-build"})
         self.assertEqual(workflow["permissions"], {})

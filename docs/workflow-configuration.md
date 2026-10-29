@@ -21,6 +21,25 @@ The actionlint compatibility allowlist covers only those two labels until the
 linter's built-in inventory catches up; successful scheduling and builds are
 verified by GitHub CI.
 
+`ci.yml` offers a manual `validation_profile` choice: `full` (the default) or
+`docker-rootless-diagnostic`. Only `workflow_dispatch` can select the latter;
+other events ignore the input, and unknown manual values fail planning. Known
+profile names match without ASCII case sensitivity; whitespace and unknown
+values remain invalid. Concurrency uses closed `full`, `diagnostic`, and `invalid`
+components, so invalid manual inputs cannot cancel full validation.
+The diagnostic uses the existing planner and build action for one catalogue image
+on both native architectures. Its always-running aggregate is named
+`Docker fixture diagnostic (not Required CI)`, including when planning fails,
+so it never supplies a successful or skipped `Required CI` context. Event and
+manual profile are separate concurrency groups. See the
+[dispatch command and evidence limits](operations.md#test-a-change).
+
+The selected image name is a stable catalogue identity, not a software version
+pin. This profile introduces no dependency or operational version pin. Existing
+Renovate ownership for workflow templates, generated workflows, action pins, and
+image metadata remains applicable; their extraction paths and update policies
+are unchanged.
+
 Renovate updates canonical tool/runner values and the corresponding literals in
 generated workflow YAML in the same dependency update. Its custom template
 manager tracks major-only, minor and full action tags with their commit digests,

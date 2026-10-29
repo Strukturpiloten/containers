@@ -32,6 +32,29 @@ A push to `main` selects changed images and their reverse dependencies; the dail
 
 See [runtime backends](runtime-backends.md) for the explicit CI profile policy, local Podman default, private Docker prerequisites, evidence and publication boundary.
 
+For a manual, non-publishing diagnosis of the Docker rootless conformance fixture
+on a selected source branch, dispatch the existing CI workflow:
+
+```sh
+gh workflow run ci.yml --repo Strukturpiloten/containers --ref your-reviewed-branch -f validation_profile=docker-rootless-diagnostic
+gh run list --repo Strukturpiloten/containers --workflow ci.yml --branch your-reviewed-branch --limit 5
+```
+
+Substitute the reviewed candidate branch for `your-reviewed-branch`. The workflow
+must already be registered on the default branch; `--ref` selects
+the candidate branch to execute. This profile selects only the catalogue identity
+`docker-29-conformance-rootless`, on AMD64 and ARM64, through the normal planner
+and `build-arch-image` action. It retains repository validation, input preflight,
+payload handling, build/runtime checks, and failure propagation. Native Docker
+guests still use Docker outer; local development remains Podman-only.
+
+Its aggregate check is **Docker fixture diagnostic (not Required CI)**. The
+result and summary are nonqualifying, source-bound evidence for that image only;
+they cannot satisfy `Required CI`, full PR/main/merge-queue validation, release,
+or publication gates. There is no image publication. The default manual profile
+is `full`; PR and merge-queue runs always ignore this input and retain their
+ordinary selection. Use the full gates before merging or publishing.
+
 Run the non-publishing repository checks before a pull request:
 
 ```sh
