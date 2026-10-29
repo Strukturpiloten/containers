@@ -2368,22 +2368,171 @@ def observation_version(
             facts["parserVersion"] = version[1].decode("ascii")
 
 
+def observation_mapping(value: object, keys: set[str]) -> dict[str, Any]:
+    """Accept only purpose-specific plain dictionaries; never inspect arbitrary objects."""
+    require(type(value) is dict and all(type(key) is str for key in value) and set(value) <= keys)
+    return value
+
+
+def observation_uint(value: object, maximum: int = 2**64 - 1) -> None:
+    """Validate recorded numeric metadata without formatting it into an error."""
+    require(type(value) is int and 0 <= value <= maximum)
+
+
+def observation_file(value: object, limit: int) -> dict[str, Any]:
+    """Derive public trust facts only from already recorded private metadata."""
+    item = observation_mapping(value, {"sha256", "identity"})
+    require(set(item) == {"sha256", "identity"})
+    require(type(item["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", item["sha256"]))
+    keys = {"device", "inode", "owner", "mode", "links", "size", "mtime_ns", "ctime_ns"}
+    identity = observation_mapping(item["identity"], keys)
+    require(set(identity) == keys)
+    for key in ("device", "inode", "links"):
+        observation_uint(identity[key])
+    observation_uint(identity["owner"], 2**32 - 1)
+    observation_uint(identity["mode"], 0o177777)
+    observation_uint(identity["size"], limit)
+    for key in ("mtime_ns", "ctime_ns"):
+        require(type(identity[key]) is int and -(2**63) <= identity[key] < 2**63)
+    return {
+        "sha256": item["sha256"],
+        "metadataSize": identity["size"],
+        "rootOwned": identity["owner"] == 0,
+        "regular": stat.S_ISREG(identity["mode"]),
+        "singleLink": identity["links"] == 1,
+        "notGroupOrWorldWritable": not identity["mode"] & 0o022,
+    }
+
+
+def observation_python_version(value: object) -> tuple[Any, bool]:
+    """Validate and copy only the purpose-specific public pythonVersion fields."""
+    version = value
+    fields = ("major", "minor", "micro", "releaselevel", "serial")
+    require(type(version) is list and len(version) == len(fields))
+    for index in (0, 1, 2, 4):
+        observation_uint(version[index], 65535)
+    require(type(version[3]) is str and version[3] in {"alpha", "beta", "candidate", "final"})
+    return list(version), True
+
+
+def observation_control_facts(record: object) -> tuple[Any, bool]:
+    """Validate and copy only the purpose-specific public controls fields."""
+    control_keys = {"enabled", "restricted_userns", "maximum_userns", "legacy_clone"}
+    controls = observation_mapping(record, control_keys)
+    for key, value in controls.items():
+        if key == "enabled":
+            require(type(value) is bool)
+        elif key != "legacy_clone" or value is not None:
+            observation_uint(value, 2**63 - 1)
+    return dict(controls), set(controls) == control_keys
+
+
+def observation_file_facts(value: object) -> tuple[Any, bool]:
+    """Validate and copy only the purpose-specific public files fields."""
+    limits = {
+        "parserSha256": 16 * 1024 * 1024,
+        "abiSha256": 65536,
+        "namespaceMaskSha256": 4096,
+        "policyVersion9Sha256": 4096,
+        "interpreterSha256": 16 * 1024 * 1024,
+    }
+    files = observation_mapping(value, set(limits))
+    projected = {key: observation_file(item, limits[key]) for key, item in files.items()}
+    return projected, set(files) == set(limits)
+
+
+def observation_namespace_facts(record: object) -> tuple[Any, bool]:
+    """Validate and copy only the purpose-specific public namespace fields."""
+    hash_keys, private_keys = {"name", "level", "stacked"}, {"user", "mnt", "cgroup"}
+    namespace = observation_mapping(record, hash_keys | private_keys)
+    projected = {}
+    for key, value in namespace.items():
+        if key in private_keys:
+            observation_uint(value)
+            require(value > 0)
+        else:
+            require(type(value) is str and re.fullmatch(r"[0-9a-f]{64}", value))
+            projected[key] = value
+    return projected, set(namespace) == hash_keys | private_keys
+
+
+def observation_child_facts(value: object) -> tuple[Any, bool]:
+    """Validate and copy only the purpose-specific public versionChild fields."""
+    state = observation_mapping(value, {"lifetime", "custody"})
+    if "lifetime" in state:
+        require(type(state["lifetime"]) is str and state["lifetime"] in {"never-started", "unknown", "proven-dead"})
+    if "custody" in state:
+        require(type(state["custody"]) is str and state["custody"] in {"creation-uncertain", "retained", "retired"})
+    return dict(state), state == {"lifetime": "proven-dead", "custody": "retired"}
+
+
+def public_arm_observation(facts: object) -> tuple[dict[str, Any], bool]:
+    """Project closed public facts without altering private custody or granting admission."""
+    patterns = {
+        "reportedImageOS": r"[a-z][a-z0-9-]{0,31}",
+        "imageVersion": r"[0-9]{8}\.[0-9]{1,10}\.[0-9]{1,10}",
+        "osID": r"[a-z][a-z0-9_-]{0,31}",
+        "osVersion": r"[0-9][0-9.]{0,31}",
+        "machine": r"[A-Za-z0-9_.+-]{1,128}",
+        "kernel": r"[A-Za-z0-9_.+-]{1,128}",
+        "parserVersion": r"[0-9]{1,3}(?:\.[0-9]{1,3}){1,3}",
+        "pythonImplementation": r"[a-z][a-z0-9_]{0,31}",
+        "sourceFilesSha256": r"[0-9a-f]{64}",
+        "sourceManifestSha256": r"[0-9a-f]{64}",
+    }
+    constants = {
+        "imageVersionKind": "workflow-reported-provenance-not-vm-attestation",
+        "toolTrust": "same-job-root-owned-preinstalled-tool-exception-not-compatibility-admission",
+    }
+    keys = set(patterns) | set(constants) | {"pythonVersion", "controls", "files", "namespace", "versionChild"}
+    source = observation_mapping(facts, keys)
+    public: dict[str, Any] = {}
+    complete = set(source) == keys
+    for key, pattern in patterns.items():
+        if key in source:
+            require(type(source[key]) is str and re.fullmatch(pattern, source[key]))
+            public[key] = source[key]
+    for key, expected in constants.items():
+        if key in source:
+            require(type(source[key]) is str and source[key] == expected)
+            public[key] = source[key]
+    components = {
+        "pythonVersion": observation_python_version,
+        "controls": observation_control_facts,
+        "files": observation_file_facts,
+        "namespace": observation_namespace_facts,
+        "versionChild": observation_child_facts,
+    }
+    for key, project in components.items():
+        if key in source:
+            public[key], component_complete = project(source[key])
+            complete = complete and component_complete
+    return public, complete
+
+
 def arm_observation_receipt(
     progress: dict[str, Any], facts: dict[str, Any], error: BaseException | None = None
 ) -> dict[str, Any]:
-    """Report bounded observations without granting active, native, compatibility, or cleanup authority."""
+    """Export only schema-v2 public observations; raw identities stay in private custody."""
+    try:
+        public, complete = public_arm_observation(facts)
+    except Exception:  # noqa: BLE001 - malformed/private fields must never fall back to raw serialization.
+        public, complete = {}, False
+    if not complete and error is None:
+        error = RefusedError()
     return {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "consumer": CONSUMER,
         "kind": "arm-cohort-observation",
+        "purpose": "public-nonqualifying-cohort-observation",
         "qualification": "none",
         "disposition": "ARM_NOT_ADMITTED",
         "activeAuthority": False,
         "cleanupAuthority": False,
         "nativeQualification": False,
-        "complete": error is None,
+        "complete": complete and error is None,
         "context": failure_context(progress.get("context", {})),
-        "facts": facts,
+        "facts": public,
         "failure": failure_receipt(progress, error) if error is not None else None,
     }
 

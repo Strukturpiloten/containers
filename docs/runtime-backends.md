@@ -789,7 +789,7 @@ an already-read sealed source or previously visited stdio witness. A complete
 `STDIO_UNAVAILABLE`. These labels establish neither descriptor ownership nor a
 shared open file description, and add no descriptor probe or inventory call.
 Historical exit 112 and classification errors retain the generic refusal. The
-exact allowlist and inventory syscalls are unchanged. An unprivileged subprocess
+final builder allowlist and its existing inventory syscalls are unchanged. An unprivileged subprocess
 regression exercises the extracted production guard with real captured stdio and
 inherited descriptors; it does not qualify the root builder or native runtime.
 Producer ImageOS refusals distinguish missing/empty, explicit Ubuntu values and
@@ -801,6 +801,42 @@ claim of physical runner attestation or compatibility. The earlier unknown ARM
 value is superseded by run `40859477908`'s finite `ubuntu26-arm64` observation.
 These diagnostic changes introduce or change no dependency pin or Renovate
 extraction/ownership rule.
+
+Builder and version/write-denial children now use two fixed source-owned Python
+stages in the same already deprivileged process. Before importing FFI, the
+launcher binds the authored interpreter/receipt/source-or-tool identities,
+requires distinct valid roles and stdio, and rejects every extra inherited
+descriptor. It then establishes and reads back NNP using the trusted ctypes
+setup, rechecks authored identities, marks only descriptors created during that
+setup close-on-exec, and executes the same held interpreter with the existing
+isolated flags and cleared environment. Payloads contain no ctypes setup; they
+still check actual kernel UID/groups, zero capabilities and `NoNewPrivs: 1`.
+Both builder and probe payloads perform their own exact final descriptor census.
+This is not a general descriptor sanitizer, and setup success grants no authority.
+The builder additionally requires `seen == allowed` after inventory: stdio 0–2
+and both validated source descriptors must all remain present. Missing roles
+refuse with generic exit 112. Extras still refuse immediately, and EBADF still
+continues before the final completeness check. The SDK loader/output tail is
+unchanged; the completeness predicate is an explicit guard strengthening.
+
+The launcher arms the wall alarm once before FFI and sets the existing CPU/core/
+file limits for the same PID across subsequent execs. Payloads never rearm the
+alarm or renew a resource budget. The parent's original absolute deadline,
+capture, privilege receipt and proven process-group death remain mandatory.
+Owned ordinary-user tests cover two-stage mechanics and the combined delayed
+alarm boundary; their root ownership, interpreter-link, supplementary-group and
+unavailable-seal exceptions are explicit test limitations. They do not qualify
+the root builder/native runtime or establish the cause of a historical native
+failure. The internal unused-custody child hash is computed from the formatted
+source; external software pins and Renovate ownership remain unchanged.
+
+The ordinary fixture normalizes capability sets only in its owned child before
+entering the unchanged production launcher. It verifies four zero capability
+sets and unchanged NNP, preserves inherited descriptors including deliberate
+extras, and forwards the same held interpreter and original allowances. A
+bounded boolean audit and an exact private parent-state comparison verify the
+boundary. This handles test-provider capability inheritance without changing
+parent state or weakening production UID/capability/NNP checks.
 
 ARM dispatch now stops before native runtime tests after the separate
 `observe-arm` root operation. That operation authenticates the immutable stage,
@@ -829,6 +865,14 @@ authority, and only completed bounded facts plus finite failure metadata. It
 cannot satisfy the active client or native evidence gate. The root operation
 and ARM workflow step return non-success even after complete observation. ARM
 loading remains refused; historical unused admission and bootstrap are unchanged.
+
+Public observation receipts use schema v2's strict purpose-specific projection.
+Private collection and custody retain their binding facts; publication removes
+raw file identities and namespace IDs, retaining only bounded verified facts
+and genuinely derived metadata checks. Valid partial observations remain
+redacted and incomplete; malformed inputs produce empty facts and a finite
+failure. Historical schema-v1 artifacts remain untouched. Neither receipt
+version can satisfy the active client or grant qualification or cleanup authority.
 
 The evidence gate requires both original clean-control/enforcement phases and
 bound scoped evidence in this exact candidate context. It rejects absent or

@@ -443,53 +443,107 @@ class HostedTests(unittest.TestCase):
             ((0, 1001, 0), (), b"CapEff: 0\nCapPrm: 0\nCapInh: 0\nCapAmb: 0\nNoNewPrivs: 1\n"),
             ((1001, 1001, 1001), (0,), b"CapEff: 0\nCapPrm: 0\nCapInh: 0\nCapAmb: 0\nNoNewPrivs: 1\n"),
             ((1001, 1001, 1001), (), b"CapEff: 1\nCapPrm: 0\nCapInh: 0\nCapAmb: 0\nNoNewPrivs: 1\n"),
+            ((1001, 1001, 1001), (), b"CapEff: 0\nCapPrm: 0\nCapInh: 0\nCapAmb: 0\nNoNewPrivs: 0\n"),
         ):
             fake_os = SimpleNamespace(**vars(os))
             fake_os.getresuid, fake_os.getresgid = lambda current_uid=uid: current_uid, lambda: (1002, 1002, 1002)
             fake_os.getgroups = lambda current_groups=groups: list(current_groups)
             fake_os.execve = MagicMock()
+            fake_os.listdir = MagicMock()
             fake_ctypes = MagicMock()
             fake_ctypes.CDLL.return_value.prctl.side_effect = [0, 1]
             with (
                 patch.dict(
                     sys.modules, {"os": fake_os, "ctypes": fake_ctypes, "resource": MagicMock(), "signal": MagicMock()}
                 ),
-                patch.object(sys, "argv", ["probe", "1", "2", "3", "parser-version", "1001", "1002", "2"]),
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "probe",
+                        "11",
+                        "12",
+                        "13",
+                        "parser-version",
+                        "1001",
+                        "1002",
+                        "2",
+                        str(hosted.time.monotonic_ns() + 5 * hosted.NS),
+                    ],
+                ),
                 patch("builtins.open", return_value=io.BytesIO(status)),
                 self.subTest(uid=uid, groups=groups),
                 self.assertRaises(SystemExit),
             ):
                 exec(child.PROBE_CODE, {})  # noqa: S102 - fixed probe with entirely mocked privilege interfaces.
             fake_os.execve.assert_not_called()
+            fake_os.listdir.assert_not_called()
+            fake_ctypes.CDLL.assert_not_called()
 
     def test_fixed_version_probe_executes_only_version_argv_after_valid_privilege_receipt(self) -> None:
-        fake_os = SimpleNamespace(**vars(os))
-        fake_os.getresuid, fake_os.getresgid = lambda: (1001, 1001, 1001), lambda: (1002, 1002, 1002)
-        fake_os.getgroups, fake_os.close = list, MagicMock()
-        fake_os.execve, fake_os.set_inheritable = MagicMock(side_effect=SystemExit(0)), MagicMock()
-        fake_os.supports_fd = {fake_os.execve}
-        fake_os.write = MagicMock(side_effect=lambda _descriptor, raw: len(raw))
-        fake_ctypes = MagicMock()
-        fake_ctypes.CDLL.return_value.prctl.side_effect = [0, 1]
-        status = b"CapEff: 0\nCapPrm: 0\nCapInh: 0\nCapAmb: 0\nNoNewPrivs: 1\n"
-        with (
-            patch.dict(
-                sys.modules, {"os": fake_os, "ctypes": fake_ctypes, "resource": MagicMock(), "signal": MagicMock()}
-            ),
-            patch.object(sys, "argv", ["probe", "1", "2", "3", "parser-version", "1001", "1002", "2"]),
-            patch("builtins.open", return_value=io.BytesIO(status)),
-            self.assertRaises(SystemExit),
-        ):
-            exec(child.PROBE_CODE, {})  # noqa: S102 - fixed code, exclusively fake privilege/kernel functions.
-        descriptor, argv, environment = fake_os.execve.call_args.args
-        self.assertEqual(descriptor, 3)
-        self.assertEqual(argv, ["apparmor_parser", "--config-file=/dev/null", "--skip-cache", "--jobs=0", "--version"])
-        self.assertEqual(environment, hosted.ENV)
-        proof = json.loads(fake_os.write.call_args.args[1])
-        self.assertEqual(proof, {"schema": 1, "uid": 1001, "gid": 1002, "groups": [], "nnp": 1, "capabilities": "zero"})
+        for fault in (None, "unexpected-fd", "missing-target", "nnp-zero"):
+            fake_os = SimpleNamespace(**vars(os))
+            fake_os.getresuid, fake_os.getresgid = lambda: (1001, 1001, 1001), lambda: (1002, 1002, 1002)
+            fake_os.getgroups, fake_os.close = list, MagicMock()
+            fake_os.execve, fake_os.set_inheritable = MagicMock(side_effect=SystemExit(0)), MagicMock()
+            fake_os.supports_fd = {fake_os.execve}
+            fake_os.write = MagicMock(side_effect=lambda _descriptor, raw: len(raw))
+            entries = ["0", "1", "2"] if fault == "missing-target" else ["0", "1", "2", "13"]
+            if fault == "unexpected-fd":
+                entries.append("99")
+            fake_os.listdir = MagicMock(return_value=entries)
+            fake_os.fstat = MagicMock(return_value=object())
+            status = b"CapEff: 0\nCapPrm: 0\nCapInh: 0\nCapAmb: 0\nNoNewPrivs: 1\n"
+            if fault == "nnp-zero":
+                status = status.replace(b"NoNewPrivs: 1", b"NoNewPrivs: 0")
+            arguments = [
+                "probe",
+                "11",
+                "12",
+                "13",
+                "parser-version",
+                "1001",
+                "1002",
+                "2",
+                str(hosted.time.monotonic_ns() + 5 * hosted.NS),
+            ]
+            with (
+                self.subTest(fault=fault),
+                patch.dict(sys.modules, {"os": fake_os}),
+                patch.object(sys, "argv", arguments),
+                patch("builtins.open", return_value=io.BytesIO(status)),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                exec(child.PROBE_CODE, {})  # noqa: S102 - fixed payload with explicit fake kernel/inventory facts.
+            self.assertEqual(raised.exception.code, 0 if fault is None else 1 if fault == "nnp-zero" else 112)
+            if fault is not None:
+                fake_os.execve.assert_not_called()
+            else:
+                descriptor, argv, environment = fake_os.execve.call_args.args
+                self.assertEqual(descriptor, 13)
+                self.assertEqual(
+                    argv, ["apparmor_parser", "--config-file=/dev/null", "--skip-cache", "--jobs=0", "--version"]
+                )
+                self.assertEqual(environment, hosted.ENV)
+            if fault == "nnp-zero":
+                fake_os.write.assert_not_called()
+                fake_os.listdir.assert_not_called()
+            else:
+                fake_os.listdir.assert_called_once_with("/proc/self/fd")
+                proof = json.loads(fake_os.write.call_args.args[1])
+                self.assertEqual(
+                    proof, {"schema": 1, "uid": 1001, "gid": 1002, "groups": [], "nnp": 1, "capabilities": "zero"}
+                )
 
     def test_probe_parent_requires_dead_child_exact_receipt_and_original_completion_deadline(self) -> None:
-        interpreter = child.Interpreter(12345, "d" * 64)
+        # Real owned held identity, with mocked process/capture only; never an executable/native qualification.
+        interpreter_path = self.fixture.root / "probe-interpreter"
+        interpreter_raw = b"\x7fELFhermetic-interpreter"
+        interpreter_path.write_bytes(interpreter_raw)
+        interpreter_path.chmod(0o500)
+        interpreter_fd = os.open(interpreter_path, os.O_RDONLY | os.O_CLOEXEC)
+        self.addCleanup(os.close, interpreter_fd)
+        interpreter = child.Interpreter(interpreter_fd, hosted.digest(interpreter_raw))
         lease = child.Build(
             "probe", 1001, 1002, self.fixture.clock.time + 5 * hosted.NS, self.fixture.clock.time + 6 * hosted.NS
         )
@@ -499,7 +553,6 @@ class HostedTests(unittest.TestCase):
             {"schema": 1, "uid": 1001, "gid": 1002, "groups": [], "nnp": 1, "capabilities": "zero"}
         ).encode()
         with (
-            patch.object(child, "_interpreter", return_value=((), b"trusted")),
             patch.object(child.subprocess, "Popen", return_value=process) as popen,
             patch.object(child, "_capture", return_value=(b"write-denied\n", proof)) as capture,
             patch.object(child, "_stop", return_value=(0, True)),
@@ -512,6 +565,16 @@ class HostedTests(unittest.TestCase):
             self.assertEqual(popen.call_args.kwargs["group"], 1002)
             self.assertEqual(popen.call_args.kwargs["extra_groups"], ())
             self.assertTrue(popen.call_args.kwargs["start_new_session"])
+            arguments = popen.call_args.args[0]
+            self.assertEqual(arguments[5], child.PROBE_LAUNCHER)
+            self.assertEqual(arguments[-2], str(lease.deadline_ns))
+            binding = tuple(tuple(map(int, item.split(","))) for item in arguments[-1].split(";"))
+            self.assertEqual(binding[0], child.file_mark(os.fstat(interpreter_fd)))
+            self.assertEqual(binding[1][4] & 0o170000, 0o010000)
+            self.assertEqual(binding[2], child.file_mark(os.fstat(self.fixture.fds[0].descriptor)))
+            self.assertEqual(
+                popen.call_args.kwargs["pass_fds"], (interpreter_fd, int(arguments[7]), self.fixture.fds[0].descriptor)
+            )
 
             def late(*_arguments: object) -> tuple[bytes, bytes]:
                 self.fixture.clock.time = lease.deadline_ns

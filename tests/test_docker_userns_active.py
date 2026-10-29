@@ -2284,6 +2284,256 @@ class ARMReportedProvenance(unittest.TestCase):
                         literal["verify_bundle"](json.dumps(proof.value()).encode(), trusted)
 
 
+def arm_observation_fixture() -> dict[str, object]:
+    """Independently authored facts; private IDs are canaries, never observed host fixtures."""
+    return {
+        "reportedImageOS": "ubuntu26-arm64",
+        "imageVersion": "20261027.123.1",
+        "imageVersionKind": "workflow-reported-provenance-not-vm-attestation",
+        "sourceFilesSha256": "6" * 64,
+        "sourceManifestSha256": "7" * 64,
+        "pythonVersion": [3, 14, 4, "final", 0],
+        "pythonImplementation": "cpython",
+        "toolTrust": "same-job-root-owned-preinstalled-tool-exception-not-compatibility-admission",
+        "osID": "ubuntu",
+        "osVersion": "26.04",
+        "machine": "aarch64",
+        "kernel": "7.0.0-fixture-arm64",
+        "parserVersion": "5.0.2",
+        "controls": {"enabled": True, "restricted_userns": 1, "maximum_userns": 58304, "legacy_clone": None},
+        "files": {
+            key: {
+                "sha256": character * 64,
+                "identity": {
+                    "device": 8100000000000000211,
+                    "inode": 8100000000000000323 + index,
+                    "owner": 0,
+                    "mode": 0o100755 if key in {"parserSha256", "interpreterSha256"} else 0o100644,
+                    "links": 1,
+                    "size": size,
+                    "mtime_ns": 8100000000000000437,
+                    "ctime_ns": 8100000000000000549,
+                },
+            }
+            for index, (key, character, size) in enumerate(
+                (
+                    ("parserSha256", "a", 4096),
+                    ("abiSha256", "b", 256),
+                    ("namespaceMaskSha256", "c", 0),
+                    ("policyVersion9Sha256", "d", 0),
+                    ("interpreterSha256", "e", 8192),
+                )
+            )
+        },
+        "namespace": {
+            "name": "1" * 64,
+            "level": "2" * 64,
+            "stacked": "3" * 64,
+            "user": 8100000000000000651,
+            "mnt": 8100000000000000763,
+            "cgroup": 8100000000000000879,
+        },
+        "versionChild": {"lifetime": "proven-dead", "custody": "retired"},
+    }
+
+
+class ARMObservationProjection(unittest.TestCase):
+    def test_complete_public_shape_and_all_values_are_independently_expected(self) -> None:
+        facts = arm_observation_fixture()
+        before = copy.deepcopy(facts)
+        receipt = active.arm_observation_receipt({}, facts)
+        expected = {
+            "schemaVersion": 2,
+            "consumer": active.CONSUMER,
+            "kind": "arm-cohort-observation",
+            "purpose": "public-nonqualifying-cohort-observation",
+            "qualification": "none",
+            "disposition": "ARM_NOT_ADMITTED",
+            "activeAuthority": False,
+            "cleanupAuthority": False,
+            "nativeQualification": False,
+            "complete": True,
+            "context": None,
+            "failure": None,
+            "facts": {
+                "reportedImageOS": "ubuntu26-arm64",
+                "imageVersion": "20261027.123.1",
+                "imageVersionKind": "workflow-reported-provenance-not-vm-attestation",
+                "sourceFilesSha256": "6" * 64,
+                "sourceManifestSha256": "7" * 64,
+                "pythonVersion": [3, 14, 4, "final", 0],
+                "pythonImplementation": "cpython",
+                "toolTrust": "same-job-root-owned-preinstalled-tool-exception-not-compatibility-admission",
+                "osID": "ubuntu",
+                "osVersion": "26.04",
+                "machine": "aarch64",
+                "kernel": "7.0.0-fixture-arm64",
+                "parserVersion": "5.0.2",
+                "controls": {"enabled": True, "restricted_userns": 1, "maximum_userns": 58304, "legacy_clone": None},
+                "files": {
+                    key: {
+                        "sha256": character * 64,
+                        "metadataSize": size,
+                        "rootOwned": True,
+                        "regular": True,
+                        "singleLink": True,
+                        "notGroupOrWorldWritable": True,
+                    }
+                    for key, character, size in (
+                        ("parserSha256", "a", 4096),
+                        ("abiSha256", "b", 256),
+                        ("namespaceMaskSha256", "c", 0),
+                        ("policyVersion9Sha256", "d", 0),
+                        ("interpreterSha256", "e", 8192),
+                    )
+                },
+                "namespace": {"name": "1" * 64, "level": "2" * 64, "stacked": "3" * 64},
+                "versionChild": {"lifetime": "proven-dead", "custody": "retired"},
+            },
+        }
+        self.assertEqual(receipt, expected)
+        self.assertEqual(facts, before)
+        raw = active.encoded(receipt).decode()
+        for number in (
+            8100000000000000211,
+            *(8100000000000000323 + index for index in range(5)),
+            8100000000000000437,
+            8100000000000000549,
+            8100000000000000651,
+            8100000000000000763,
+            8100000000000000879,
+        ):
+            self.assertNotIn(str(number), raw)
+        for key in (
+            "identity",
+            "device",
+            "inode",
+            "owner",
+            "mtime_ns",
+            "ctime_ns",
+            "user",
+            "mnt",
+            "cgroup",
+            "uid",
+            "gid",
+        ):
+            self.assertNotIn('"' + key + '"', raw)
+        self.assertLessEqual(len(raw), active.MAX_STATE)
+        receipt["facts"]["pythonVersion"][0] = 99
+        receipt["facts"]["controls"]["enabled"] = False
+        receipt["facts"]["files"]["parserSha256"]["sha256"] = "0" * 64
+        self.assertEqual(facts, before)
+
+    def test_public_file_checks_are_metadata_derivations_not_assumed_admission(self) -> None:
+        facts = arm_observation_fixture()
+        facts["files"]["parserSha256"]["identity"].update(owner=42, mode=0o040777, links=2)
+        public, _ = active.public_arm_observation(facts)
+        self.assertEqual(
+            public["files"]["parserSha256"],
+            {
+                "sha256": "a" * 64,
+                "metadataSize": 4096,
+                "rootOwned": False,
+                "regular": False,
+                "singleLink": False,
+                "notGroupOrWorldWritable": False,
+            },
+        )
+
+    def test_partial_facts_and_retained_child_never_claim_complete(self) -> None:
+        full = arm_observation_fixture()
+        cases = [
+            {},
+            {"osID": "ubuntu"},
+            {"controls": {"enabled": False}},
+            {"files": {"parserSha256": full["files"]["parserSha256"]}},
+            {"namespace": {"name": "1" * 64}},
+            {**full, "versionChild": {"lifetime": "unknown", "custody": "retained"}},
+        ]
+        for facts in cases:
+            with self.subTest(fields=tuple(facts)):
+                before = copy.deepcopy(facts)
+                receipt = active.arm_observation_receipt({}, facts)
+                self.assertFalse(receipt["complete"])
+                self.assertIsNotNone(receipt["failure"])
+                self.assertEqual(facts, before)
+                self.assertFalse(
+                    any(receipt[key] for key in ("activeAuthority", "cleanupAuthority", "nativeQualification"))
+                )
+        receipt = active.arm_observation_receipt({}, full, PermissionError(13, PRIVATE))
+        self.assertFalse(receipt["complete"])
+        self.assertEqual(receipt["failure"]["reason"], "permission-denied")
+        self.assertNotIn(PRIVATE, active.encoded(receipt).decode())
+
+    def test_unknown_nested_fields_and_malformed_values_fail_closed_without_private_errors(self) -> None:
+        mutations = (
+            ((), PRIVATE, PRIVATE),
+            (("files",), PRIVATE, PRIVATE),
+            (("files", "parserSha256"), "raw", PRIVATE),
+            (("files", "parserSha256", "identity"), PRIVATE, PRIVATE),
+            (("controls",), PRIVATE, PRIVATE),
+            (("namespace",), PRIVATE, PRIVATE),
+            (("versionChild",), PRIVATE, PRIVATE),
+            (("namespace",), "user", True),
+            (("files", "parserSha256", "identity"), "owner", True),
+            (("files", "parserSha256", "identity"), "size", 16 * 1024 * 1024 + 1),
+            (("files", "parserSha256", "identity"), "ctime_ns", PRIVATE),
+            (("files", "parserSha256"), "sha256", PRIVATE),
+            ((), "pythonVersion", [3, True, 4, "final", 0]),
+            ((), "sourceFilesSha256", PRIVATE),
+            ((), "kernel", "/private/canary"),
+            ((), "toolTrust", PRIVATE),
+            (("controls",), "maximum_userns", -1),
+            (("versionChild",), "custody", PRIVATE),
+        )
+        for path, key, value in mutations:
+            facts = arm_observation_fixture()
+            target = facts
+            for part in path:
+                target = target[part]
+            target[key] = value
+            before = copy.deepcopy(facts)
+            with self.subTest(path=path, key=key):
+                with self.assertRaises(active.RefusedError):
+                    active.public_arm_observation(facts)
+                receipt = active.arm_observation_receipt({}, facts)
+                self.assertFalse(receipt["complete"])
+                self.assertEqual(receipt["facts"], {})
+                self.assertEqual(facts, before)
+                self.assertNotIn(PRIVATE, active.encoded(receipt).decode())
+
+    def test_arbitrary_objects_are_not_formatted_or_inspected(self) -> None:
+        class PrivateObject:
+            calls = 0
+
+            def __repr__(self) -> str:
+                self.calls += 1
+                raise AssertionError(PRIVATE)
+
+        canary = PrivateObject()
+        for facts in (canary, {"files": {"parserSha256": canary}}, {"namespace": canary}, {"pythonVersion": canary}):
+            receipt = active.arm_observation_receipt({}, facts)
+            self.assertFalse(receipt["complete"])
+            self.assertEqual(receipt["facts"], {})
+            self.assertNotIn(PRIVATE, active.encoded(receipt).decode())
+        self.assertEqual(canary.calls, 0)
+
+    def test_unchanged_active_client_rejects_both_observation_versions(self) -> None:
+        public = active.arm_observation_receipt({}, arm_observation_fixture())
+        historical = {**public, "schemaVersion": 1, "facts": arm_observation_fixture()}
+        historical.pop("purpose")
+        for receipt in (historical, public):
+            with self.subTest(schema=receipt["schemaVersion"]), tempfile.TemporaryDirectory() as directory:
+                client = client_fixture(Path(directory))
+                client.ctx.command = Mock(return_value=json.dumps(receipt))
+                with self.assertRaises(ValueError):
+                    client.rpc("prepare", {})
+                self.assertEqual(client.evidence["failures"][0]["reason"], "receipt-mismatch")
+                self.assertFalse(client.evidence["cleanupAuthority"])
+                self.assertEqual(client.name, "new")
+                self.assertNotIn(PRIVATE, json.dumps(client.evidence))
+
+
 class ARMObservationTests(unittest.TestCase):
     def bootstrap(self) -> dict[str, object]:
         context = {**SyntheticProof().context, "architecture": "arm64", "imageOS": "ubuntu26-arm64"}
@@ -2324,14 +2574,18 @@ class ARMObservationTests(unittest.TestCase):
                 if fault == "controls":
                     raise PermissionError(13, PRIVATE)
                 facts["maximum_userns"] = 0
+                facts["restricted_userns"] = 0
+                facts["legacy_clone"] = None
 
             def files(
                 _modules: object, progress: dict[str, object], facts: dict[str, object], _evaluate: object
             ) -> None:
                 progress["phase"] = "preflight-parser-hash"
-                facts["parserSha256"] = {"sha256": "b" * 64}
+                values = arm_observation_fixture()["files"]
+                facts["parserSha256"] = copy.deepcopy(values["parserSha256"])
                 if fault == "files":
                     raise PermissionError(13, PRIVATE)
+                facts.update(copy.deepcopy(values))
 
             def version(
                 _stage: object,
@@ -2348,7 +2602,9 @@ class ARMObservationTests(unittest.TestCase):
 
             stack.enter_context(patch.object(active, "observation_controls", side_effect=controls))
             stack.enter_context(patch.object(active, "collect_cohort_files", side_effect=files))
-            namespace = stack.enter_context(patch.object(active, "namespace_snapshot", return_value={"name": "c" * 64}))
+            namespace = stack.enter_context(
+                patch.object(active, "namespace_snapshot", return_value=arm_observation_fixture()["namespace"])
+            )
             if fault == "namespace":
                 namespace.side_effect = PermissionError(13, PRIVATE)
             stack.enter_context(patch.object(active, "observation_version", side_effect=version))
