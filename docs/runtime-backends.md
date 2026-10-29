@@ -335,6 +335,63 @@ alone does not bind a live process birth/identity through a proc read, and a uni
 property would describe configuration rather than the observed process state.
 No NNP override, security-policy change, service restart or startup wait is added.
 
+After freezing the complete host, service and startup-log diagnostic, one further
+optional root capture may read unit configuration. It repeats the private-daemon
+and exact owned-container inspection, then one guarded exec makes two fixed
+`systemctl show` calls: system `user@1000.service` and the existing UID1000 user-bus
+`docker.service` contract. Each requests only `NoNewPrivileges` and
+`RestrictNamespaces`. Missing user-bus data stays unobserved. These three extra
+host query groups and two guest commands use the same original five-second
+absolute diagnostic deadline and 60-second backend cleanup reserve. They are
+additional operations, with no retry or renewed time allowance, and may not fit
+the time remaining. Configuration stdout is capped at 2 KiB while reading, with
+an overflow sentinel and the existing query-group drain; all older capture limits
+and callers retain their original defaults.
+
+Only root memory holds property text. Optional `unitNoNewPrivileges` and
+`unitRestrictNamespaces` scalars enrich available baseline service objects without
+replacing their fields. NNP accepts exact `yes` or `no`, otherwise `unknown`.
+Namespace output accepts exact `yes`, exact `no`, or a distinct, single-space
+allow-list of `cgroup ipc net mnt pid user uts time`, in any order. Recognized
+lists become `user-allowed` or `user-excluded`; other bounded syntax is `unknown`.
+Raw unit-file tilde syntax, aliases and numeric masks are not interpreted.
+Duplicate or unknown properties, malformed sections, controls and non-ASCII
+refuse the whole optional observation. A service with only unknown values gets
+no enrichment. Unavailable, oversized, cancelled or late configuration preserves
+the frozen baseline. Both the 1 KiB guest and 4 KiB complete record are previewed:
+all new configuration is dropped before any old startup-log fallback, without
+trimming previous evidence. Uncertain teardown retains the pending-reader latch
+and exact-container cleanup responsibility.
+
+These are later unit-configuration observations, separate from the earlier
+service/startup snapshot. `yes` for namespace restriction reports all namespaces
+restricted by the formatter; `no` reports no restriction from that property.
+Neither means effective process permission. Neither NNP value establishes actual
+manager NNP, inherited or implicit restrictions, installed filters, failure-time
+state, container-incarnation continuity or the actor behind a child-start error.
+Namespace enforcement depends on the installed systemd version and architecture;
+reporting a setting does not prove that a filter was installed.
+`startupLog.managerNoNewPrivs=not-observed` remains unchanged. No live-manager proc
+inspection, security override, readiness success or new native acceptance follows from this
+metadata. Legacy records without these fields remain unobserved.
+
+The configuration contract was reviewed read-only on 2026-10-29 with Context7
+followed by official sources when its versioned query did not supply formatter
+details: systemd v257's
+[D-Bus properties](https://github.com/systemd/systemd/blob/v257/src/core/dbus-execute.c),
+[property formatter](https://github.com/systemd/systemd/blob/v257/src/shared/bus-print-properties.c),
+[namespace formatter](https://github.com/systemd/systemd/blob/v257/src/shared/nsflags.c)
+and [v257 namespace flags](https://github.com/systemd/systemd/blob/v257/src/shared/nsflags.h),
+plus the current [systemd.exec manual](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html).
+These LGPL-2.1-or-later sources were linked and paraphrased without copying an
+implementation or executing an oracle. The current manual identifies systemd 262
+and includes `time`; the v257 flag set has the seven earlier namespaces. These
+references and authored fixtures do not attest installed versions or native
+behavior. The bounded consumer audit found no change needed to the separate
+DockerLens/BoxFerry acceptance contracts; failed diagnostic status remains failed.
+Only already-installed systemctl and the existing guard are reused. No dependency,
+software pin, managed extraction path or Renovate ownership changes are introduced.
+
 Official JSON output in
 [systemd v257](https://github.com/systemd/systemd/blob/v257/src/shared/logs-show.c#L1133-L1138)
 and [v259](https://github.com/systemd/systemd/blob/v259/src/shared/logs-show.c#L1168-L1173)

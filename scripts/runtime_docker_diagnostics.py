@@ -43,6 +43,12 @@ GUEST_LOG_RECORD_LIMIT = 8
 GUEST_LOG_INPUT_LIMIT = BYTE_LIMIT
 DIAGNOSTIC_RECORD_LIMIT = 4096
 GUARD_SOURCE_LIMIT = 4096
+UNIT_CONFIGURATION_FIELDS = {
+    "unitNoNewPrivileges": frozenset({"yes", "no", "unknown"}),
+    "unitRestrictNamespaces": frozenset({"yes", "no", "user-excluded", "user-allowed", "unknown"}),
+}
+UNIT_CONFIGURATION_UNITS = {"user@1000.service": "userManager", "docker.service": "dockerService"}
+NAMESPACE_TYPES = frozenset({"cgroup", "ipc", "net", "mnt", "pid", "user", "uts", "time"})
 SERVICE_FIELDS = frozenset(
     {"LoadState", "ActiveState", "SubState", "Result", "ExecMainCode", "ExecMainStatus", "MainPID"}
 )
@@ -316,10 +322,10 @@ def _observe_exit(process: subprocess.Popen[bytes], deadline: float) -> None:
     raise _UnavailableError("timeout")
 
 
-def _read_query(process: subprocess.Popen[bytes], deadline: float) -> bytes:
+def _read_query(process: subprocess.Popen[bytes], deadline: float, limit: int = BYTE_LIMIT) -> bytes:
     if os.getpgid(process.pid) != process.pid:
         raise _UnavailableError("cleanup-unverified")
-    output = _read_stdout(process, deadline, BYTE_LIMIT)
+    output = _read_stdout(process, deadline, limit)
     _observe_exit(process, deadline)
     return output
 
@@ -344,7 +350,9 @@ def _spawn_query(
     )
 
 
-def _query_capture(arguments: list[str], deadline: float, timeout_executable: str | None = None) -> dict[str, Any]:
+def _query_capture(
+    arguments: list[str], deadline: float, timeout_executable: str | None = None, *, limit: int = BYTE_LIMIT
+) -> dict[str, Any]:
     remaining = deadline - time.monotonic()
     # Prepay cleanup and protocol transmission inside the one original budget.
     work_deadline = deadline - min(2.0, remaining * 0.6)
@@ -355,7 +363,7 @@ def _query_capture(arguments: list[str], deadline: float, timeout_executable: st
     raw = b""
     status = "query-unavailable"
     try:
-        raw = _read_query(process, work_deadline)
+        raw = _read_query(process, work_deadline) if limit == BYTE_LIMIT else _read_query(process, work_deadline, limit)
         status = "available"
     except _UnavailableError as error:
         status = str(error)
@@ -507,6 +515,23 @@ def _guest_log_arguments(directory: Path, container: str) -> list[str]:
     ]
 
 
+def _guest_configuration_arguments(directory: Path, container: str) -> list[str]:
+    contract = _guest_guard_contract()
+    properties = "--property=NoNewPrivileges --property=RestrictNamespaces"
+    script = (
+        'test "$(id -u)" = 0; test "$(cat /proc/1/comm)" = systemd; '
+        "LC_ALL=C; export LC_ALL; printf 'user@1000.service\\n'; "
+        f"systemctl show --no-pager user@1000.service {properties}; "
+        "printf 'docker.service\\n'; "
+        "if test -S /run/user/1000/bus; then "
+        + shlex.join(contract["USER_MANAGER"])
+        + f" show --no-pager docker.service {properties}; "
+        "else printf 'Unavailable=user-bus-absent\\n'; fi"
+    )
+    inspect = _worker_arguments(directory, ["inspect", container])
+    return [*inspect[:-4], "exec", container, *contract["guarded_command"]("sh", "-euc", script)]
+
+
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
@@ -581,6 +606,89 @@ def _guest_log_capture(arguments: list[str], deadline: float, timeout_executable
     }
 
 
+def _namespace_configuration(value: str) -> str:
+    if value in {"yes", "no"}:
+        return value
+    tokens = value.split(" ")
+    if len(tokens) != len(set(tokens)) or not set(tokens) <= NAMESPACE_TYPES:
+        return "unknown"
+    return "user-allowed" if "user" in tokens else "user-excluded"
+
+
+def _configuration_values(lines: list[str]) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in lines:
+        key, separator, value = line.partition("=")
+        if not separator or key not in {"NoNewPrivileges", "RestrictNamespaces"} or key in values:
+            raise _UnavailableError("invalid-fields")
+        values[key] = value
+    nnp = values.get("NoNewPrivileges", "")
+    return {
+        "unitNoNewPrivileges": nnp if nnp in {"yes", "no"} else "unknown",
+        "unitRestrictNamespaces": _namespace_configuration(values.get("RestrictNamespaces", "")),
+    }
+
+
+def _configuration_projection(raw: bytes) -> dict[str, Any]:
+    if len(raw) > GUEST_BYTE_LIMIT:
+        raise _UnavailableError("byte-limit")
+    if any(byte != 10 and not 32 <= byte <= 126 for byte in raw):
+        raise _UnavailableError("invalid-fields")
+    lines = raw.decode("ascii").splitlines()
+    if not lines or lines[0] != "user@1000.service" or lines.count("docker.service") != 1:
+        raise _UnavailableError("invalid-fields")
+    boundary = lines.index("docker.service")
+    manager = _configuration_values(lines[1:boundary])
+    service_lines = lines[boundary + 1 :]
+    service = _configuration_values([] if service_lines == ["Unavailable=user-bus-absent"] else service_lines)
+    return {"user@1000.service": manager, "docker.service": service}
+
+
+def _configuration_capture(arguments: list[str], deadline: float, timeout_executable: str) -> dict[str, Any]:
+    protocol = _query_capture(arguments, deadline, timeout_executable, limit=GUEST_BYTE_LIMIT)
+    if protocol.get("status") != "available" or protocol.get("teardownVerified") is not True:
+        return {
+            "status": protocol.get("status")
+            if protocol.get("status") in STARTUP_LOG_UNAVAILABLE
+            else "query-unavailable",
+            "teardownVerified": protocol.get("teardownVerified") is True,
+        }
+    try:
+        if time.monotonic() < deadline:
+            projection = _configuration_projection(base64.b64decode(protocol["data"], validate=True))
+            if time.monotonic() < deadline:
+                return {
+                    "status": "available",
+                    "teardownVerified": True,
+                    "data": base64.b64encode(json.dumps(projection).encode()).decode(),
+                }
+        reason = "timeout"
+    except _UnavailableError as error:
+        reason = str(error) if str(error) in STARTUP_LOG_UNAVAILABLE else "query-unavailable"
+    except KeyboardInterrupt:
+        reason = "interrupted"
+    except Exception:  # noqa: BLE001 - only closed configuration scalars leave the root worker.
+        reason = "invalid-fields"
+    return {"status": reason, "teardownVerified": True}
+
+
+def _configuration_wire(raw: bytes) -> dict[str, Any]:
+    if len(raw) > GUEST_BYTE_LIMIT:
+        raise _UnavailableError("byte-limit")
+    return _configuration_fields(json.loads(raw, object_pairs_hook=_unique_object))
+
+
+def _configuration_fields(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict) or value.keys() != UNIT_CONFIGURATION_UNITS.keys():
+        raise _UnavailableError("invalid-fields")
+    for fields in value.values():
+        if not isinstance(fields, dict) or fields.keys() != UNIT_CONFIGURATION_FIELDS.keys():
+            raise _UnavailableError("invalid-fields")
+        if any(not isinstance(item, str) or item not in UNIT_CONFIGURATION_FIELDS[key] for key, item in fields.items()):
+            raise _UnavailableError("invalid-fields")
+    return value
+
+
 def _verify_guest_container(raw: bytes, owner: str, container: str) -> None:
     projection = _inspect_projection(
         raw, SimpleNamespace(owner=owner, slice="strukturpiloten" + owner + ".slice"), container
@@ -629,7 +737,7 @@ def _guest_query_capture(
     """Root-side ownership readback precedes every fixed, guarded guest read."""
     if (
         len(request) != 3
-        or request[0] not in {"guest-systemd", "guest-startup-log"}
+        or request[0] not in {"guest-systemd", "guest-startup-log", "guest-unit-configuration"}
         or re.fullmatch(r"[0-9a-f]{64}", request[1]) is None
         or re.fullmatch(r"[0-9a-f]{32}", request[2]) is None
     ):
@@ -643,15 +751,21 @@ def _guest_query_capture(
     try:
         if deadline - time.monotonic() <= 0.05:
             return {"status": "budget-exhausted", "teardownVerified": True}
-        arguments = (
-            _guest_log_arguments(directory, container)
-            if request[0] == "guest-startup-log"
-            else _guest_worker_arguments(directory, container)
-        )
+        builders = {
+            "guest-systemd": _guest_worker_arguments,
+            "guest-startup-log": _guest_log_arguments,
+            "guest-unit-configuration": _guest_configuration_arguments,
+        }
+        arguments = builders[request[0]](directory, container)
     except Exception:  # noqa: BLE001 - refuse exec on any ownership/source-contract uncertainty.
         return {"status": "query-unavailable", "teardownVerified": True}
     # This ACK covers the host query group only. Guest processes remain owned by exact-container cleanup.
-    capture = _guest_log_capture if request[0] == "guest-startup-log" else _query_capture
+    captures = {
+        "guest-systemd": _query_capture,
+        "guest-startup-log": _guest_log_capture,
+        "guest-unit-configuration": _configuration_capture,
+    }
+    capture = captures[request[0]]
     return capture(arguments, deadline, timeout_executable)
 
 
@@ -855,7 +969,7 @@ def _record_size(record: dict[str, Any]) -> int:
     return len((json.dumps(record, indent=2) + "\n").encode("utf-8"))
 
 
-def _with_guest(record: dict[str, Any], guest: dict[str, Any]) -> dict[str, Any]:
+def _with_guest_baseline(record: dict[str, Any], guest: dict[str, Any]) -> dict[str, Any]:
     """Keep legacy evidence unchanged when the optional projection cannot fit."""
     try:
         baseline_guest = {key: value for key, value in guest.items() if key != "startupLog"}
@@ -873,6 +987,78 @@ def _with_guest(record: dict[str, Any], guest: dict[str, Any]) -> dict[str, Any]
     except Exception, KeyboardInterrupt:  # noqa: BLE001 - optional preview preserves valid baseline evidence.
         return baseline
     return baseline
+
+
+def _with_unit_configuration(record: dict[str, Any], configuration: dict[str, Any]) -> dict[str, Any]:
+    """Enrich a frozen diagnostic only when every old byte still fits unchanged."""
+    try:
+        configuration = _configuration_fields(configuration)
+        guest = record.get("guestSystemd")
+        if not isinstance(guest, dict):
+            return record
+        enriched = {**guest}
+        for unit, key in UNIT_CONFIGURATION_UNITS.items():
+            service = guest.get(key)
+            fields = configuration[unit]
+            if (
+                isinstance(service, dict)
+                and service.get("availability") == "available"
+                and any(value != "unknown" for value in fields.values())
+            ):
+                enriched[key] = {**service, **fields}
+        if enriched == guest or _record_size(enriched) > GUEST_RECORD_LIMIT:
+            return record
+        preview = {**record, "guestSystemd": enriched}
+        if _record_size(preview) <= DIAGNOSTIC_RECORD_LIMIT:
+            return preview
+    except Exception, KeyboardInterrupt:  # noqa: BLE001 - optional configuration never displaces frozen evidence.
+        return record
+    return record
+
+
+def _with_guest(record: dict[str, Any], guest: dict[str, Any]) -> dict[str, Any]:
+    # Even direct enriched callers must drop configuration before the old startup-log fallback.
+    stripped = {**guest}
+    configuration = {}
+    for unit, key in UNIT_CONFIGURATION_UNITS.items():
+        service = guest.get(key)
+        if isinstance(service, dict):
+            stripped[key] = {field: value for field, value in service.items() if field not in UNIT_CONFIGURATION_FIELDS}
+            configuration[unit] = {field: service.get(field, "unknown") for field in UNIT_CONFIGURATION_FIELDS}
+        else:
+            configuration[unit] = dict.fromkeys(UNIT_CONFIGURATION_FIELDS, "unknown")
+    baseline = _with_guest_baseline(record, stripped)
+    if stripped == guest or baseline.get("guestSystemd") != stripped:
+        return baseline
+    return _with_unit_configuration(baseline, configuration)
+
+
+def _unit_configuration(
+    record: dict[str, Any], backend: DockerBackend, container: str, deadline: float
+) -> dict[str, Any]:
+    try:
+        guest = record.get("guestSystemd", {})
+        if (
+            backend.diagnostic_reader_pending
+            or deadline - time.monotonic() <= 0.05
+            or not any(
+                isinstance(guest.get(key), dict) and guest[key].get("availability") == "available"
+                for key in UNIT_CONFIGURATION_UNITS.values()
+            )
+        ):
+            return record
+        raw = _capture(backend, ["guest-unit-configuration", container, backend.owner], deadline)
+        if time.monotonic() >= deadline:
+            return record
+        configuration = _configuration_wire(raw)
+        if time.monotonic() >= deadline:
+            return record
+        enriched = _with_unit_configuration(record, configuration)
+        if time.monotonic() < deadline:
+            return enriched
+    except Exception, KeyboardInterrupt:  # noqa: BLE001 - no optional failure changes baseline evidence or custody.
+        return record
+    return record
 
 
 def _startup_log_projection(raw: bytes) -> dict[str, Any]:
@@ -961,7 +1147,9 @@ def _guest(ctx: RuntimeContext, backend: DockerBackend, container: str, deadline
     return {"availability": reason, "guestProcessCleanup": "owned-container-cleanup-required"}
 
 
-def _collect(ctx: RuntimeContext, backend: DockerBackend, container: str, started: float) -> dict[str, Any]:
+def _collect(
+    ctx: RuntimeContext, backend: DockerBackend, container: str, started: float
+) -> tuple[dict[str, Any], float]:
     finished = time.time()
     if (
         not backend.ready
@@ -984,7 +1172,7 @@ def _collect(ctx: RuntimeContext, backend: DockerBackend, container: str, starte
     backend.check_deadline()
     record = {"availability": "collected", "container": projection, "kernelJournal": journal}
     record["guestSystemd"] = _guest(ctx, backend, container, deadline)
-    return record
+    return record, deadline
 
 
 def diagnose_rootless_failure(ctx: RuntimeContext, container: str, started: float) -> None:
@@ -1001,10 +1189,12 @@ def diagnose_rootless_failure(ctx: RuntimeContext, container: str, started: floa
         "acceptanceEvidence": False,
     }
     try:
-        collected = _collect(ctx, backend, container, started)
+        collected, deadline = _collect(ctx, backend, container, started)
         guest = collected.pop("guestSystemd")
         record.update(collected)
         record = _with_guest(record, guest)
+        with suppress(Exception, KeyboardInterrupt):
+            record = _unit_configuration(record, backend, container, deadline)
     except _UnavailableError as error:
         record["availability"] = str(error)
     except KeyboardInterrupt:
@@ -1041,7 +1231,7 @@ def main() -> None:
             or not 0 < deadline - time.monotonic() <= 5
         ):
             result = {"status": "query-unavailable", "teardownVerified": False}
-        elif args.request[0] in {"guest-systemd", "guest-startup-log"}:
+        elif args.request[0] in {"guest-systemd", "guest-startup-log", "guest-unit-configuration"}:
             result = _guest_query_capture(args.directory, args.request, deadline, str(args.timeout_executable))
         else:
             result = _query_capture(

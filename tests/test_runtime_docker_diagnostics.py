@@ -485,9 +485,16 @@ class GuestStartupProjection(unittest.TestCase):
             self.assertEqual(record["guestSystemd"]["availability"], expected)
             self.assertEqual(record["status"], "failed")
             self.assertFalse(record["acceptanceEvidence"])
-            expected_queries = 4 if expected == "collected" else 3
+            expected_queries = 5 if expected == "collected" else 3
             self.assertEqual([call.args[2] for call in capture.call_args_list], [1005] * expected_queries)
             self.assertEqual(capture.call_args_list[2].args[1], ["guest-systemd", CONTAINER, self.backend.owner])
+            if expected == "collected":
+                self.assertEqual(
+                    capture.call_args_list[3].args[1], ["guest-startup-log", CONTAINER, self.backend.owner]
+                )
+                self.assertEqual(
+                    capture.call_args_list[4].args[1], ["guest-unit-configuration", CONTAINER, self.backend.owner]
+                )
             self.assertEqual(self.backend.deadline, 2000)
             self.assertNotIn(PRIVATE_MARKER, json.dumps(record))
 
@@ -1274,6 +1281,565 @@ class GuestStartupProjection(unittest.TestCase):
                 self.assertEqual(record["guestSystemd"], guest)
                 self.assertTrue(self.backend.diagnostic_reader_pending)
                 self.assertNotIn(PRIVATE_MARKER, json.dumps(record))
+
+
+class GuestUnitConfiguration(unittest.TestCase):
+    def setUp(self) -> None:
+        self.fixture = GuestStartupProjection()
+        self.fixture.setUp()
+        self.backend = self.fixture.backend
+        self.ctx = self.fixture.ctx
+        guest = diagnostics._guest_projection(self.fixture.report(service="failed"))
+        guest["guestProcessCleanup"] = "owned-container-cleanup-required"
+        guest["startupLog"] = diagnostics._classify_startup_log(
+            self.fixture.log_records("[rootlesskit:parent] error: failed to start the child: private detail")
+        )
+        self.record = {"availability": "collected", "status": "failed", "guestSystemd": guest}
+        self.configuration = diagnostics._configuration_projection(self.raw())
+
+    @staticmethod
+    def raw(nnp: str = "yes", namespaces: str = "no") -> bytes:
+        return (
+            f"user@1000.service\nNoNewPrivileges={nnp}\nRestrictNamespaces={namespaces}\n"
+            "docker.service\nNoNewPrivileges=no\nRestrictNamespaces=net user\n"
+        ).encode()
+
+    def test_independent_unit_settings_and_namespace_vocabulary_stay_closed(self) -> None:
+        cases = [("yes", "yes"), ("no", "no"), ("user net", "user-allowed"), ("net ipc", "user-excluded")]
+        cases.extend(
+            (namespace, "user-allowed" if namespace == "user" else "user-excluded")
+            for namespace in ("cgroup", "ipc", "net", "mnt", "pid", "user", "uts", "time")
+        )
+        cases.extend(
+            (value, "user-allowed")
+            for value in ("cgroup ipc net mnt pid user uts time", "time uts user pid mnt net ipc cgroup")
+        )
+        for nnp in ("yes", "no"):
+            for namespaces, expected in cases:
+                with self.subTest(nnp=nnp, namespaces=namespaces):
+                    projected = diagnostics._configuration_projection(self.raw(nnp, namespaces))
+                    self.assertEqual(
+                        projected,
+                        {
+                            "user@1000.service": {"unitNoNewPrivileges": nnp, "unitRestrictNamespaces": expected},
+                            "docker.service": {"unitNoNewPrivileges": "no", "unitRestrictNamespaces": "user-allowed"},
+                        },
+                    )
+                    self.assertEqual(diagnostics._configuration_wire(json.dumps(projected).encode()), projected)
+
+    def test_unknown_optional_values_and_missing_properties_never_become_no(self) -> None:
+        for value in ("", "1", "0", "true", "false", "on", "off", "YES", " no", PRIVATE_MARKER):
+            with self.subTest(value=value):
+                projected = diagnostics._configuration_projection(self.raw(value, "~user"))
+                self.assertEqual(
+                    projected["user@1000.service"],
+                    {"unitNoNewPrivileges": "unknown", "unitRestrictNamespaces": "unknown"},
+                )
+                self.assertNotIn(PRIVATE_MARKER, json.dumps(projected))
+        for value in ("", "~user", "42", "user user", "user  net", " user", "user ", PRIVATE_MARKER):
+            with self.subTest(value=value):
+                projected = diagnostics._configuration_projection(self.raw("yes", value))
+                self.assertEqual(projected["user@1000.service"]["unitRestrictNamespaces"], "unknown")
+        missing = diagnostics._configuration_projection(
+            b"user@1000.service\nNoNewPrivileges=yes\ndocker.service\nRestrictNamespaces=net\n"
+        )
+        self.assertEqual(missing["user@1000.service"]["unitRestrictNamespaces"], "unknown")
+        self.assertEqual(missing["docker.service"]["unitNoNewPrivileges"], "unknown")
+        self.assertEqual(missing["docker.service"]["unitRestrictNamespaces"], "user-excluded")
+        unknown = diagnostics._configuration_projection(b"user@1000.service\ndocker.service\n")
+        self.assertIs(diagnostics._with_unit_configuration(self.record, unknown), self.record)
+
+    def test_malformed_sections_duplicates_unknown_keys_and_controls_refuse_whole_observation(self) -> None:
+        raw = self.raw()
+        for invalid in (
+            b"",
+            b"NoNewPrivileges=yes\n",
+            raw.replace(b"user@1000.service", b"user@1001.service"),
+            raw.replace(b"docker.service", b"user@1000.service"),
+            raw + b"docker.service\n",
+            raw.replace(b"NoNewPrivileges=yes", b"NoNewPrivileges=yes\nNoNewPrivileges=no"),
+            raw.replace(b"RestrictNamespaces=no", b"RestrictNamespaces=no\nRestrictNamespaces=user"),
+            raw.replace(b"NoNewPrivileges=yes", b"Environment=" + PRIVATE_MARKER.encode()),
+            raw.replace(b"NoNewPrivileges=yes", b"Unavailable=user-bus-absent"),
+            raw + b"Unknown=yes\n",
+            raw.replace(b"NoNewPrivileges=yes", b"NoNewPrivileges=yes\n\n"),
+            raw.replace(b"RestrictNamespaces=no", b"RestrictNamespaces=user\tnet"),
+            raw.replace(b"NoNewPrivileges=yes", b"NoNewPrivileges=\x00"),
+            raw.replace(b"\n", b"\r\n"),
+            raw + b"\x7f",
+            raw + b"\x1b",
+            raw + b"\xff",
+            raw + "\u00e9".encode(),
+        ):
+            with self.subTest(raw=invalid), self.assertRaisesRegex(diagnostics._UnavailableError, "invalid-fields"):
+                diagnostics._configuration_projection(invalid)
+            with (
+                self.subTest(root_projection=invalid),
+                patch.object(diagnostics, "_query_capture", return_value=self.fixture.protocol(invalid)),
+                patch.object(diagnostics.time, "monotonic", return_value=1000),
+            ):
+                self.assertEqual(
+                    diagnostics._configuration_capture([], 1005, "/fixed/timeout"),
+                    {"status": "invalid-fields", "teardownVerified": True},
+                )
+
+    def test_root_cap_boundaries_and_private_values_never_enter_wire(self) -> None:
+        for size in (2047, 2048, 2049):
+            raw = self.raw(PRIVATE_MARKER)
+            raw = raw.replace(PRIVATE_MARKER.encode(), PRIVATE_MARKER.encode() + b"x" * (size - len(raw)))
+            with (
+                self.subTest(size=size),
+                patch.object(diagnostics, "_query_capture", return_value=self.fixture.protocol(raw)) as capture,
+                patch.object(diagnostics.time, "monotonic", return_value=1000),
+            ):
+                result = diagnostics._configuration_capture(["fixed-query"], 1005, "/fixed/timeout")
+                capture.assert_called_once_with(["fixed-query"], 1005, "/fixed/timeout", limit=2048)
+                self.assertTrue(result["teardownVerified"])
+                if size > diagnostics.GUEST_BYTE_LIMIT:
+                    self.assertEqual(result, {"status": "byte-limit", "teardownVerified": True})
+                else:
+                    projected = diagnostics.base64.b64decode(result["data"])
+                    self.assertNotIn(PRIVATE_MARKER.encode(), projected)
+                    self.assertEqual(
+                        diagnostics._configuration_wire(projected)["user@1000.service"],
+                        {"unitNoNewPrivileges": "unknown", "unitRestrictNamespaces": "no"},
+                    )
+
+    def test_only_available_services_are_enriched_and_the_original_record_is_immutable(self) -> None:
+        before = json.dumps(self.record, sort_keys=True)
+        result = diagnostics._with_unit_configuration(self.record, self.configuration)
+        self.assertEqual(json.dumps(self.record, sort_keys=True), before)
+        self.assertEqual(result["guestSystemd"]["userManager"]["unitNoNewPrivileges"], "yes")
+        self.assertEqual(result["guestSystemd"]["dockerService"]["unitNoNewPrivileges"], "no")
+        self.assertEqual(result["guestSystemd"]["startupLog"], self.record["guestSystemd"]["startupLog"])
+        self.assertEqual(result["guestSystemd"]["startupLog"]["managerNoNewPrivs"], "not-observed")
+        absent = self.record | {
+            "guestSystemd": self.record["guestSystemd"] | {"dockerService": {"availability": "user-bus-absent"}}
+        }
+        result = diagnostics._with_unit_configuration(absent, self.configuration)
+        self.assertEqual(result["guestSystemd"]["dockerService"], {"availability": "user-bus-absent"})
+        bus_absent = diagnostics._configuration_projection(
+            b"user@1000.service\nNoNewPrivileges=yes\ndocker.service\nUnavailable=user-bus-absent\n"
+        )
+        result = diagnostics._with_unit_configuration(self.record, bus_absent)
+        self.assertNotIn("unitNoNewPrivileges", result["guestSystemd"]["dockerService"])
+
+    def test_exact_guest_and_outer_caps_drop_configuration_before_startup_or_host_fields(self) -> None:
+        record = json.loads(json.dumps(self.record))
+        guest = record["guestSystemd"]
+        guest["startupLog"]["classes"] = ["child-start-message", "daemon-network-message"]
+        guest["startupLog"]["records"] = 2
+        guest["userManager"].update(SubState="auto-restart-queued", Result="start-limit-hit", MainPID=2147483647)
+        guest["dockerService"].update(SubState="running", Result="success", MainPID=10000000)
+        configuration = json.loads(json.dumps(self.configuration))
+        configuration["user@1000.service"]["unitRestrictNamespaces"] = "user-excluded"
+        result = diagnostics._with_unit_configuration(record, configuration)
+        self.assertEqual(diagnostics._record_size(result["guestSystemd"]), 1024)
+        guest["dockerService"]["MainPID"] = 100000000
+        self.assertIs(diagnostics._with_unit_configuration(record, configuration), record)
+        self.assertEqual(guest["startupLog"]["classes"], ["child-start-message", "daemon-network-message"])
+        outer = self.record | {"existingEvidence": ""}
+        result = diagnostics._with_unit_configuration(outer, self.configuration)
+        outer["existingEvidence"] = "x" * (4096 - diagnostics._record_size(result))
+        result = diagnostics._with_unit_configuration(outer, self.configuration)
+        self.assertEqual(diagnostics._record_size(result), 4096)
+        outer["existingEvidence"] += "x"
+        self.assertIs(diagnostics._with_unit_configuration(outer, self.configuration), outer)
+        host = {key: value for key, value in outer.items() if key != "guestSystemd"}
+        enriched_guest = result["guestSystemd"]
+        self.assertEqual(diagnostics._with_guest(host, enriched_guest), outer)
+        for failure in (ValueError(PRIVATE_MARKER), KeyboardInterrupt()):
+            for sizes in ([failure], [1, failure]):
+                with self.subTest(sizes=sizes), patch.object(diagnostics, "_record_size", side_effect=sizes):
+                    self.assertIs(diagnostics._with_unit_configuration(self.record, self.configuration), self.record)
+
+    def test_configuration_is_the_single_last_query_under_the_original_deadline(self) -> None:
+        requests = []
+        frozen = []
+        original = diagnostics._unit_configuration
+
+        def observe(record: dict[str, Any], backend: DockerBackend, container: str, deadline: float) -> dict[str, Any]:
+            frozen.append(json.dumps(record, sort_keys=True))
+            return original(record, backend, container, deadline)
+
+        def capture(_backend: DockerBackend, request: list[str], deadline: float) -> bytes:
+            self.assertEqual(deadline, 1005)
+            requests.append(request)
+            match request[0]:
+                case "inspect":
+                    return json.dumps(self.fixture.observed).encode()
+                case "journal":
+                    return b""
+                case "guest-systemd":
+                    return self.fixture.report(service="failed")
+                case "guest-startup-log":
+                    return json.dumps(self.record["guestSystemd"]["startupLog"]).encode()
+                case "guest-unit-configuration":
+                    self.assertEqual(len(frozen), 1)
+                    return json.dumps(self.configuration).encode()
+                case _:
+                    return self.fail("unexpected query")
+
+        with (
+            patch.object(diagnostics, "_capture", side_effect=capture),
+            patch.object(diagnostics, "_unit_configuration", side_effect=observe),
+            patch.object(diagnostics.time, "monotonic", return_value=1000),
+            patch.object(diagnostics.time, "time", return_value=110),
+            patch.object(diagnostics.shutil, "which", return_value="/usr/bin/journalctl"),
+        ):
+            diagnostics.diagnose_rootless_failure(self.ctx, CONTAINER, 100)
+        self.assertEqual(
+            [request[0] for request in requests],
+            ["inspect", "journal", "guest-systemd", "guest-startup-log", "guest-unit-configuration"],
+        )
+        self.assertEqual(requests[-1], ["guest-unit-configuration", CONTAINER, self.backend.owner])
+        result = json.loads(json.dumps(self.ctx.checks[-1]))
+        for key in ("userManager", "dockerService"):
+            result["guestSystemd"][key].pop("unitNoNewPrivileges")
+            result["guestSystemd"][key].pop("unitRestrictNamespaces")
+        self.assertEqual(json.dumps(result, sort_keys=True), frozen[0])
+        self.assertEqual(self.backend.deadline, 2000)
+
+    def test_budget_pending_reader_and_late_parse_or_attachment_preserve_frozen_record(self) -> None:
+        for now, pending in ((1005, False), (1000, True)):
+            self.backend.diagnostic_reader_pending = pending
+            with (
+                self.subTest(now=now, pending=pending),
+                patch.object(diagnostics.time, "monotonic", return_value=now),
+                patch.object(diagnostics, "_capture") as capture,
+            ):
+                self.assertIs(diagnostics._unit_configuration(self.record, self.backend, CONTAINER, 1005), self.record)
+                capture.assert_not_called()
+                self.assertEqual(self.backend.diagnostic_reader_pending, pending)
+        self.backend.diagnostic_reader_pending = False
+        for stage in ("capture", "parse", "attachment"):
+            clock = [1000]
+            original = getattr(
+                diagnostics,
+                {"capture": "_capture", "parse": "_configuration_wire", "attachment": "_with_unit_configuration"}[
+                    stage
+                ],
+            )
+
+            def expire(
+                *args: object,
+                original: Callable[..., bytes | dict[str, Any]] = original,
+                stage: str = stage,
+                clock: list[int] = clock,
+            ) -> bytes | dict[str, Any]:
+                clock[0] = 1005
+                return json.dumps(self.configuration).encode() if stage == "capture" else original(*args)
+
+            with (
+                self.subTest(stage=stage),
+                patch.object(diagnostics, "_capture", return_value=json.dumps(self.configuration).encode()),
+                patch.object(
+                    diagnostics,
+                    {"capture": "_capture", "parse": "_configuration_wire", "attachment": "_with_unit_configuration"}[
+                        stage
+                    ],
+                    side_effect=expire,
+                ),
+                patch.object(diagnostics.time, "monotonic", side_effect=lambda clock=clock: clock[0]),
+            ):
+                self.assertIs(diagnostics._unit_configuration(self.record, self.backend, CONTAINER, 1005), self.record)
+
+    def test_optional_call_boundary_preserves_startup_when_cancelled_or_unexpectedly_failing(self) -> None:
+        for failure in (KeyboardInterrupt(), ValueError(PRIVATE_MARKER)):
+            with (
+                self.subTest(failure=type(failure).__name__),
+                patch.object(diagnostics, "_unit_configuration", side_effect=failure),
+                patch.object(
+                    diagnostics,
+                    "_capture",
+                    side_effect=[
+                        json.dumps(self.fixture.observed).encode(),
+                        b"",
+                        self.fixture.report(service="failed"),
+                        json.dumps(self.record["guestSystemd"]["startupLog"]).encode(),
+                    ],
+                ),
+                patch.object(diagnostics.time, "monotonic", return_value=1000),
+                patch.object(diagnostics.time, "time", return_value=110),
+                patch.object(diagnostics.shutil, "which", return_value="/fixed/journalctl"),
+            ):
+                diagnostics.diagnose_rootless_failure(self.ctx, CONTAINER, 100)
+                record = self.ctx.checks[-1]
+                self.assertEqual(record["availability"], "collected")
+                self.assertEqual(record["guestSystemd"], self.record["guestSystemd"])
+                self.assertNotIn(PRIVATE_MARKER, json.dumps(record))
+
+    def test_optional_refusals_and_cancellation_do_not_erase_original_evidence_or_pending_custody(self) -> None:
+        for failure, pending in (
+            (diagnostics._UnavailableError("timeout"), False),
+            (diagnostics._UnavailableError("cleanup-unverified"), True),
+            (KeyboardInterrupt(), True),
+            (ValueError(PRIVATE_MARKER), False),
+        ):
+            self.backend.diagnostic_reader_pending = False
+
+            def capture(*_args: object, failure: BaseException = failure, pending: bool = pending) -> bytes:
+                self.backend.diagnostic_reader_pending = pending
+                raise failure
+
+            with (
+                self.subTest(failure=type(failure).__name__, pending=pending),
+                patch.object(diagnostics, "_capture", side_effect=capture) as query,
+                patch.object(diagnostics.time, "monotonic", return_value=1000),
+            ):
+                self.assertIs(diagnostics._unit_configuration(self.record, self.backend, CONTAINER, 1005), self.record)
+                query.assert_called_once()
+                self.assertEqual(self.backend.diagnostic_reader_pending, pending)
+        self.backend.diagnostic_reader_pending = False
+        for raw in (b"x" * 2049, b'{"MESSAGE":"private"}'):
+            with (
+                self.subTest(raw=raw),
+                patch.object(diagnostics, "_capture", return_value=raw),
+                patch.object(diagnostics.time, "monotonic", return_value=1000),
+            ):
+                self.assertIs(diagnostics._unit_configuration(self.record, self.backend, CONTAINER, 1005), self.record)
+
+    def test_parent_wire_rejects_raw_unknown_duplicate_or_nonstring_fields(self) -> None:
+        valid = self.configuration
+        for invalid in (
+            valid | {"MESSAGE": PRIVATE_MARKER},
+            {"user@1000.service": valid["user@1000.service"]},
+            valid | {"docker.service": valid["docker.service"] | {"Environment": PRIVATE_MARKER}},
+            valid | {"docker.service": valid["docker.service"] | {"unitNoNewPrivileges": True}},
+            valid | {"docker.service": valid["docker.service"] | {"unitNoNewPrivileges": PRIVATE_MARKER}},
+            valid | {"docker.service": valid["docker.service"] | {"unitRestrictNamespaces": ["user"]}},
+        ):
+            with self.subTest(value=invalid), self.assertRaises(diagnostics._UnavailableError):
+                diagnostics._configuration_wire(json.dumps(invalid).encode())
+            self.assertIs(diagnostics._with_unit_configuration(self.record, invalid), self.record)
+        duplicate = json.dumps(valid).replace(
+            '"unitNoNewPrivileges": "no"', '"unitNoNewPrivileges":"yes","unitNoNewPrivileges":"no"'
+        )
+        for raw in (duplicate.encode(), b"x" * 2049):
+            with self.subTest(raw=raw), self.assertRaises(diagnostics._UnavailableError):
+                diagnostics._configuration_wire(raw)
+
+    def test_root_rechecks_ownership_before_two_fixed_guarded_configuration_shows(self) -> None:
+        replies = [
+            self.fixture.daemon_protocol(),
+            self.fixture.protocol(json.dumps(self.fixture.observed).encode()),
+            self.fixture.protocol(self.raw()),
+        ]
+        with (
+            patch.object(diagnostics, "_query_capture", side_effect=replies) as capture,
+            patch.object(diagnostics.time, "monotonic", return_value=1000),
+            patch.object(diagnostics.shutil, "which", return_value="/fixed/docker"),
+        ):
+            result = diagnostics._guest_query_capture(
+                self.backend.directory,
+                ["guest-unit-configuration", CONTAINER, self.backend.owner],
+                1005,
+                "/fixed/timeout",
+            )
+        self.assertEqual(
+            diagnostics._configuration_wire(diagnostics.base64.b64decode(result["data"])), self.configuration
+        )
+        self.assertEqual(len(capture.call_args_list), 3)
+        self.assertIn("info", capture.call_args_list[0].args[0])
+        self.assertIn("inspect", capture.call_args_list[1].args[0])
+        command = capture.call_args_list[2].args[0]
+        self.assertEqual(command[: command.index("exec")], capture.call_args_list[1].args[0][:-4])
+        self.assertIn(CONTAINER, command)
+        self.assertEqual(sum(part.count(PLACEMENT_GUARD) for part in command), 2)
+        script = command[-1]
+        for literal in (
+            'test "$(id -u)" = 0',
+            'test "$(cat /proc/1/comm)" = systemd',
+            "test -S /run/user/1000/bus",
+            shlex.join(USER_MANAGER),
+        ):
+            self.assertIn(literal, script)
+        self.assertEqual(script.count("show --no-pager"), 2)
+        for field in ("NoNewPrivileges", "RestrictNamespaces"):
+            self.assertEqual(script.count("--property=" + field), 2)
+        for field in diagnostics.SERVICE_FIELDS:
+            self.assertNotIn("--property=" + field, script)
+        self.assertEqual([call.args[1:] for call in capture.call_args_list], [(1005, "/fixed/timeout")] * 3)
+        self.assertEqual([call.kwargs for call in capture.call_args_list], [{}, {}, {"limit": 2048}])
+
+    def test_refused_owner_selector_source_or_stage_budget_never_executes_configuration(self) -> None:
+        for observed in (
+            self.fixture.observed | {"id": "b" * 64},
+            self.fixture.observed | {"owner": "b" * 32},
+            self.fixture.observed | {"state": "exited"},
+        ):
+            with (
+                self.subTest(observed=observed),
+                patch.object(diagnostics.time, "monotonic", return_value=1000),
+                patch.object(diagnostics.shutil, "which", return_value="/fixed/docker"),
+                patch.object(
+                    diagnostics,
+                    "_query_capture",
+                    side_effect=[self.fixture.daemon_protocol(), self.fixture.protocol(json.dumps(observed).encode())],
+                ),
+                patch.object(diagnostics, "_guest_configuration_arguments") as builder,
+            ):
+                result = diagnostics._guest_query_capture(
+                    self.backend.directory,
+                    ["guest-unit-configuration", CONTAINER, self.backend.owner],
+                    1005,
+                    "/fixed/timeout",
+                )
+                self.assertEqual(result["status"], "query-unavailable")
+                builder.assert_not_called()
+        request = ["guest-unit-configuration", CONTAINER, self.backend.owner, "NoNewPrivileges"]
+        with patch.object(diagnostics, "_query_capture") as capture:
+            self.assertEqual(
+                diagnostics._guest_query_capture(self.backend.directory, request, 1005, "/fixed/timeout"),
+                {"status": "invalid-fields", "teardownVerified": True},
+            )
+            capture.assert_not_called()
+        for stage in ("info", "inspect", "source"):
+            clock = [1000]
+            calls = []
+
+            def query(
+                arguments: list[str],
+                deadline: float,
+                _timeout: str,
+                *,
+                clock: list[int] = clock,
+                calls: list[str] = calls,
+                stage: str = stage,
+            ) -> dict[str, Any]:
+                self.assertEqual(deadline, 1005)
+                current = "info" if "info" in arguments else "inspect"
+                calls.append(current)
+                if time.monotonic() >= deadline:
+                    return {"status": "budget-exhausted", "teardownVerified": True}
+                if current == stage:
+                    clock[0] = 1005
+                return (
+                    self.fixture.daemon_protocol()
+                    if current == "info"
+                    else self.fixture.protocol(json.dumps(self.fixture.observed).encode())
+                )
+
+            with (
+                self.subTest(stage=stage),
+                patch.object(diagnostics.time, "monotonic", side_effect=lambda clock=clock: clock[0]),
+                patch.object(diagnostics.shutil, "which", return_value="/fixed/docker"),
+                patch.object(diagnostics, "_query_capture", side_effect=query),
+                patch.object(diagnostics, "_guest_configuration_arguments", side_effect=OSError(PRIVATE_MARKER)),
+                patch.object(diagnostics, "_configuration_capture") as capture,
+            ):
+                result = diagnostics._guest_query_capture(
+                    self.backend.directory,
+                    ["guest-unit-configuration", CONTAINER, self.backend.owner],
+                    1005,
+                    "/fixed/timeout",
+                )
+                capture.assert_not_called()
+                self.assertNotIn(PRIVATE_MARKER, json.dumps(result))
+                self.assertIn(result["status"], {"budget-exhausted", "query-unavailable"})
+
+    def test_configuration_stream_limit_is_enforced_while_reading_then_drained(self) -> None:
+        provider = qualified_local_timeout()[0]
+        for size in (2047, 2048):
+            raw = self.raw(PRIVATE_MARKER)
+            raw = raw.replace(PRIVATE_MARKER.encode(), PRIVATE_MARKER.encode() + b"x" * (size - len(raw)))
+            arguments = [sys.executable, "-c", f"import os;os.write(1,{raw!r})"]
+            with self.subTest(size=size):
+                result = diagnostics._configuration_capture(arguments, time.monotonic() + 2, provider)
+                self.assertEqual(result["status"], "available")
+                self.assertTrue(result["teardownVerified"])
+                self.assertNotIn(PRIVATE_MARKER.encode(), diagnostics.base64.b64decode(result["data"]))
+        arguments = [sys.executable, "-c", "import os\nwhile True: os.write(1,b'x'*4096)"]
+        with patch.object(diagnostics, "_read_stdout", wraps=diagnostics._read_stdout) as reader:
+            result = diagnostics._configuration_capture(arguments, time.monotonic() + 2, provider)
+        self.assertEqual(result, {"status": "byte-limit", "teardownVerified": True})
+        self.assertEqual(reader.call_args.args[2], 2048)
+        process = reader.call_args.args[0]
+        self.assertIsNotNone(process.returncode)
+        self.assertTrue(process.stdout.closed)
+        for status, verified in (
+            ("timeout", True),
+            ("interrupted", True),
+            ("query-unavailable", True),
+            ("available", False),
+        ):
+            with (
+                self.subTest(status=status),
+                patch.object(
+                    diagnostics,
+                    "_query_capture",
+                    return_value={"status": status, "teardownVerified": verified, "data": PRIVATE_MARKER},
+                ),
+            ):
+                result = diagnostics._configuration_capture([], 1005, provider)
+                self.assertEqual(
+                    result, {"status": "query-unavailable" if not verified else status, "teardownVerified": verified}
+                )
+
+    def test_root_late_parse_and_real_parent_cancellation_or_bad_ack_preserve_custody(self) -> None:
+        with (
+            patch.object(diagnostics, "_query_capture", return_value=self.fixture.protocol(self.raw())),
+            patch.object(diagnostics.time, "monotonic", return_value=1005),
+        ):
+            self.assertEqual(
+                diagnostics._configuration_capture([], 1005, "/fixed/timeout"),
+                {"status": "timeout", "teardownVerified": True},
+            )
+        for cancel in (False, True):
+            self.backend.diagnostic_reader_pending = False
+            process = MagicMock()
+            with (
+                self.subTest(cancel=cancel),
+                patch.object(self.backend, "privileged", return_value=["fixed-owner"]),
+                patch.object(self.backend, "timeout_executable", return_value="/fixed/timeout"),
+                patch.object(diagnostics.subprocess, "Popen", return_value=process),
+                patch.object(
+                    diagnostics,
+                    "_read_stdout",
+                    return_value=b'{"status":"available","teardownVerified":false}',
+                    side_effect=KeyboardInterrupt if cancel else None,
+                ),
+                patch.object(diagnostics, "_wait_wrapper", return_value=0),
+                patch.object(diagnostics.time, "monotonic", return_value=1000),
+            ):
+                self.assertIs(diagnostics._unit_configuration(self.record, self.backend, CONTAINER, 1005), self.record)
+                self.assertTrue(self.backend.diagnostic_reader_pending)
+                process.stdout.close.assert_called_once()
+
+    def test_verified_parent_ack_clears_only_host_reader_and_keeps_guest_cleanup_required(self) -> None:
+        for cancel in (False, True):
+            self.backend.diagnostic_reader_pending = False
+            process = MagicMock()
+
+            def read(
+                _process: object, _deadline: float, _limit: int, interrupted: list[bool], *, cancel: bool = cancel
+            ) -> bytes:
+                interrupted[0] = cancel
+                return json.dumps(
+                    {
+                        "status": "available",
+                        "teardownVerified": True,
+                        "data": diagnostics.base64.b64encode(json.dumps(self.configuration).encode()).decode(),
+                    }
+                ).encode()
+
+            with (
+                self.subTest(cancel=cancel),
+                patch.object(self.backend, "privileged", return_value=["fixed-owner"]),
+                patch.object(self.backend, "timeout_executable", return_value="/fixed/timeout"),
+                patch.object(diagnostics.subprocess, "Popen", return_value=process),
+                patch.object(diagnostics, "_read_stdout", side_effect=read),
+                patch.object(diagnostics, "_wait_wrapper", return_value=0),
+                patch.object(diagnostics.time, "monotonic", return_value=1000),
+            ):
+                result = diagnostics._unit_configuration(self.record, self.backend, CONTAINER, 1005)
+                self.assertFalse(self.backend.diagnostic_reader_pending)
+                if cancel:
+                    self.assertIs(result, self.record)
+                else:
+                    self.assertEqual(result["guestSystemd"]["userManager"]["unitNoNewPrivileges"], "yes")
+                self.assertEqual(result["guestSystemd"]["guestProcessCleanup"], "owned-container-cleanup-required")
+                process.stdout.close.assert_called_once()
 
 
 class RootlessFailureDiagnostics(unittest.TestCase):
