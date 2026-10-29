@@ -2091,6 +2091,48 @@ class ExistingChildBuildObservation(unittest.TestCase):
 
 
 class ProducerValidationPhases(unittest.TestCase):
+    def test_image_os_refusals_classify_only_explicit_values_and_read_once(self) -> None:
+        class Environment(dict):
+            def get(self, key: str, default: str | None = None) -> str | None:
+                if key == "ImageOS":
+                    self.reads += 1
+                return super().get(key, default)
+
+            reads = 0
+
+        cases = (
+            (None, "producer-image-os-missing"),
+            ("", "producer-image-os-empty"),
+            ("ubuntu20", "producer-image-os-ubuntu20"),
+            ("ubuntu22", "producer-image-os-ubuntu22"),
+            ("ubuntu24", "producer-image-os-ubuntu24"),
+            ("ubuntu20-arm", "producer-image-os-ubuntu20-arm"),
+            ("ubuntu22-arm", "producer-image-os-ubuntu22-arm"),
+            ("ubuntu24-arm", "producer-image-os-ubuntu24-arm"),
+            ("ubuntu26-arm", "producer-image-os-ubuntu26-arm"),
+            ("ubuntu20-arm64", "producer-image-os-ubuntu20-arm64"),
+            ("ubuntu22-arm64", "producer-image-os-ubuntu22-arm64"),
+            ("ubuntu24-arm64", "producer-image-os-ubuntu24-arm64"),
+            ("ubuntu26-arm64", "producer-image-os-ubuntu26-arm64"),
+            (PRIVATE, "producer-image-os-other"),
+            ("ubuntu260", "producer-image-os-other"),
+        )
+        for actual, expected_phase in cases:
+            with self.subTest(phase=expected_phase):
+                environment = Environment(candidate_environment())
+                if actual is None:
+                    del environment["ImageOS"]
+                else:
+                    environment["ImageOS"] = actual
+                progress = {"actor": "producer", "operation": "producer"}
+                with self.assertRaises(ValueError) as raised:
+                    producer.context(environment, "arm64", progress=progress)
+                value = active.failure_receipt(progress, raised.exception)
+                self.assertTrue(active.valid_failure(value))
+                self.assertEqual(value["phase"], expected_phase)
+                self.assertEqual(environment.reads, 1)
+                self.assertNotIn(PRIVATE, active.encoded(value).decode())
+
     def test_each_existing_environment_refusal_has_a_finite_phase_without_values(self) -> None:
         cases = {
             "GITHUB_ACTIONS": "producer-runner-identity",
@@ -2100,7 +2142,7 @@ class ProducerValidationPhases(unittest.TestCase):
             "GITHUB_EVENT_NAME": "producer-workflow",
             "GITHUB_REF": "producer-workflow",
             "GITHUB_JOB": "producer-workflow",
-            "ImageOS": "producer-image-os",
+            "ImageOS": "producer-image-os-other",
             "GITHUB_WORKFLOW_REF": "producer-workflow-ref",
             "RUNNER_ARCH": "producer-architecture",
             "GITHUB_SHA": "producer-candidate",

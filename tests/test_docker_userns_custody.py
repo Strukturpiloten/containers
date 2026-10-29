@@ -1137,14 +1137,20 @@ class ChildTests(unittest.TestCase):
                 self.test_descriptor_loader_executes_complete_source_without_workspace_paths()
             self.assertEqual(raised.exception.code, 113)
 
-    def test_code_changes_only_three_negative_integer_operands_and_probe_is_exact(self) -> None:
+    def test_classifier_preserves_historical_guard_code_and_probe_is_exact(self) -> None:
         original = child.CODE
+        self.assertEqual(original.count("witness = os.fstat(descriptor)"), 1)
+        original = original.replace("witness = os.fstat(descriptor)", "os.fstat(descriptor)", 1)
+        start = original.index("        code = 112\n")
+        stop = original.index("        raise SystemExit(code)", start) + len("        raise SystemExit(code)")
+        original = original[:start] + "        raise SystemExit(112)" + original[stop:]
+        historical = original
         for code in (111, 112, 113):
             self.assertEqual(original.count(f"raise SystemExit({code})"), 1)
             original = original.replace(f"raise SystemExit({code})", "raise SystemExit(1)")
-        self.assertEqual(len(child.CODE.encode()), 3944)
+        self.assertEqual(len(historical.encode()), 3944)
         self.assertEqual(digest(original.encode()), "c056502a4646634447d7c1806f2d75ab96de0071db930c9f308c604d5efa37fb")
-        before, after = list(ast.walk(ast.parse(original))), list(ast.walk(ast.parse(child.CODE)))
+        before, after = list(ast.walk(ast.parse(original))), list(ast.walk(ast.parse(historical)))
         self.assertEqual(len(before), len(after))
         differences = []
         for old, new in zip(before, after, strict=True):
@@ -2576,6 +2582,85 @@ finally:
                 self.assertEqual(result.stdout, b"")
 
 
+class ChildGuardPopenTests(unittest.TestCase):
+    def test_actual_inventory_guard_with_real_inherited_and_reused_slots(self) -> None:
+        statements = ast.parse(child.CODE).body
+        start = next(
+            index
+            for index, node in enumerate(statements)
+            if isinstance(node, ast.Assign)
+            and any(isinstance(name, ast.Name) and name.id == "allowed" for name in node.targets)
+        )
+        stop = next(
+            index
+            for index, node in enumerate(statements)
+            if isinstance(node, ast.ClassDef) and node.name == "SourceLoader"
+        )
+        guard = "\n".join(ast.get_source_segment(child.CODE, node) for node in statements[start:stop])
+        script = (
+            """
+import errno, fcntl, os, sys
+interpreter, receipt, first, second, case = sys.argv[1:]
+os.close(int(interpreter))
+os.close(int(receipt))
+if case == 'interpreter-reuse':
+    os.dup2(int(first), int(interpreter))
+elif case == 'receipt-reuse':
+    os.dup2(int(first), int(receipt))
+elif case == 'source-duplicate':
+    fcntl.fcntl(int(first), fcntl.F_DUPFD, max(map(int, (interpreter, receipt, first, second))) + 1)
+"""
+            + guard
+        )
+        cases = (
+            ("authored", 0, None),
+            ("unrelated-pipe", 138, "FD_NOT_ALLOWLISTED_OTHER_SLOT_PIPE"),
+            ("interpreter-reuse", 120, "FD_NOT_ALLOWLISTED_INTERPRETER_SLOT_REUSED_REGULAR"),
+            ("receipt-reuse", 128, "FD_NOT_ALLOWLISTED_RECEIPT_SLOT_REUSED_REGULAR"),
+            ("source-duplicate", 136, "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR"),
+        )
+        with ExitStack() as stack:
+            authored = tuple(stack.enter_context(tempfile.TemporaryFile()).fileno() for _ in range(4))
+            read_fd, write_fd = os.pipe()
+            stack.callback(os.close, read_fd)
+            stack.callback(os.close, write_fd)
+            for case, expected_status, expected_category in cases:
+                with self.subTest(case=case):
+                    inherited = (*authored, read_fd) if case == "unrelated-pipe" else authored
+                    # Execute only repository-extracted statements and authored numeric FDs.
+                    with subprocess.Popen(  # noqa: S603
+                        [sys.executable, "-I", "-B", "-S", "-c", script, *map(str, authored), case],
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        close_fds=True,
+                        pass_fds=inherited,
+                    ) as process:
+                        stdout, stderr = process.communicate(timeout=10)
+                    self.assertEqual(process.returncode, expected_status)
+                    self.assertEqual(stdout, b"")
+                    self.assertEqual(stderr, b"")
+                    self.assertEqual(
+                        child._declared_guard(process.returncode, guard_source_fixture()), expected_category
+                    )
+
+    def test_classification_errors_keep_historical_generic_refusal(self) -> None:
+        inventory = next(
+            node
+            for node in ast.parse(child.CODE).body
+            if isinstance(node, ast.For) and isinstance(node.target, ast.Name) and node.target.id == "entry"
+        )
+        rejected = inventory.body[-1]
+        statement = ast.get_source_segment(child.CODE, rejected)
+        for witness in (object(), SimpleNamespace(st_mode=object())):
+            with self.subTest(witness=type(witness).__name__), self.assertRaises(SystemExit) as raised:
+                exec(  # noqa: S102 - execute only the production classification statement
+                    statement,
+                    {"descriptor": 7, "allowed": {0, 1, 2}, "witness": witness, "interpreter": "7", "receipt": "8"},
+                )
+            self.assertEqual(raised.exception.code, 112)
+
+
 class ChildGuardObservationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.fixture = BuildStatusObservationTests(methodName="runTest")
@@ -2588,6 +2673,10 @@ class ChildGuardObservationTests(unittest.TestCase):
             (111, "FD_FSTAT_NON_EBADF"),
             (112, "FD_NOT_ALLOWLISTED"),
             (113, "RESULT_TYPE_OR_SIZE"),
+            (120, "FD_NOT_ALLOWLISTED_INTERPRETER_SLOT_REUSED_REGULAR"),
+            (128, "FD_NOT_ALLOWLISTED_RECEIPT_SLOT_REUSED_REGULAR"),
+            (136, "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR"),
+            (138, "FD_NOT_ALLOWLISTED_OTHER_SLOT_PIPE"),
         ):
             for proof, receipt in ((self.fixture.proof, "MATCH"), (b"", "EMPTY"), (b"{", "MISMATCH")):
                 observer = child.WorkObserver()

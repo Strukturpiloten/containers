@@ -779,6 +779,20 @@ identity checks name the current finite validation group before each existing
 comparison, without exporting raw values or changing any expected values; a
 phase alone does not establish the cause of a previous ARM refusal.
 
+Rejected descriptor diagnostics reuse the existing successful `fstat` witness to
+report only file type bits and whether the current numeric slot matches the
+retired interpreter slot, retired receipt slot, or another slot. Reuse does not
+identify the descriptor's original owner or establish an allowlist defect.
+Historical exit 112 and classification errors retain the generic refusal. The
+exact allowlist and inventory syscalls are unchanged. An unprivileged subprocess
+regression exercises the extracted production guard with real captured stdio and
+inherited descriptors; it does not qualify the root builder or native runtime.
+Producer ImageOS refusals distinguish missing/empty, explicit Ubuntu values and
+other values through finite phases. The expected value remains `ubuntu26`; the
+previous ARM failure's raw value remains unknown, and ARM loading stays refused.
+These diagnostic changes introduce or change no dependency pin or Renovate
+extraction/ownership rule.
+
 The evidence gate requires both original clean-control/enforcement phases and
 bound scoped evidence in this exact candidate context. It rejects absent or
 mismatched receipts, host fingerprints, effective-profile evidence, task/scope

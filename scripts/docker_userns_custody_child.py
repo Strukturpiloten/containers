@@ -34,9 +34,17 @@ _RECEIPT_CHECKS = ("MATCH", "EMPTY", "MISMATCH")
 BUILD_STATUS_LIMIT = 128
 BUILD_STATUS_FIELDS = ("terminationForm", "receiptCheck")
 _QUALIFIED_VERSION = (3, 14, 4, "final", 0)
-GUARD_CATEGORIES = ("FD_FSTAT_NON_EBADF", "FD_NOT_ALLOWLISTED", "RESULT_TYPE_OR_SIZE")
+_FD_SLOT_RELATIONS = ("INTERPRETER_SLOT_REUSED", "RECEIPT_SLOT_REUSED", "OTHER_SLOT")
+_FD_TYPES = ("REGULAR", "DIRECTORY", "PIPE", "SOCKET", "CHARACTER", "BLOCK", "SYMLINK", "OTHER")
+GUARD_CATEGORIES = (
+    "FD_FSTAT_NON_EBADF",
+    "FD_NOT_ALLOWLISTED",
+    "RESULT_TYPE_OR_SIZE",
+    *(f"FD_NOT_ALLOWLISTED_{relation}_{kind}" for relation in _FD_SLOT_RELATIONS for kind in _FD_TYPES),
+)
 GUARD_DECLARATION_LIMIT = 96
 _GUARD_CODES = {111: GUARD_CATEGORIES[0], 112: GUARD_CATEGORIES[1], 113: GUARD_CATEGORIES[2]}
+_GUARD_CODES.update(enumerate(GUARD_CATEGORIES[3:], start=120))
 _GUARD_SOURCES = (
     ("canonical_policy", 31133, "17cc280b593466f143ba848183485b796d1e87a60b41d74ca25d49dc86241abe"),
     ("native_outer_diagnostic_capture", 13870, "23202211ec3b58a70c1120b0395f43663e3cacff1948609a8fb0fe2dac012962"),
@@ -101,13 +109,23 @@ allowed = {0, 1, 2, int(first.split(":")[0]), int(second.split(":")[0])}
 for entry in os.listdir("/proc/self/fd"):
     descriptor = int(entry)
     try:
-        os.fstat(descriptor)
+        witness = os.fstat(descriptor)
     except OSError as error:
         if error.errno != errno.EBADF:
             raise SystemExit(111)
         continue
     if descriptor not in allowed:
-        raise SystemExit(112)
+        code = 112
+        try:
+            # Only current type bits and numeric-slot relationships: no ownership claim.
+            kinds = (0o100000, 0o040000, 0o010000, 0o140000, 0o020000, 0o060000, 0o120000)
+            kind = witness.st_mode & 0o170000
+            kind_index = kinds.index(kind) if kind in kinds else 7
+            relation = 0 if descriptor == int(interpreter) else 1 if descriptor == int(receipt) else 2
+            code = 120 + relation * 8 + kind_index
+        except Exception:
+            pass
+        raise SystemExit(code)
 class SourceLoader(importlib.abc.MetaPathFinder, importlib.abc.SourceLoader):
     def find_spec(self, fullname, path=None, target=None):
         return importlib.util.spec_from_loader(fullname, self) if fullname in records else None
@@ -445,7 +463,7 @@ def guard_declaration(value: object, fault: object, observation: object) -> dict
     category = value["category"]
     if type(category) is not str or category not in GUARD_CATEGORIES:
         return None
-    # These three exact ASCII constants have a statically tested <=96-byte wire
+    # These exact ASCII constants have a statically tested <=96-byte wire
     # form. No additional classifier encoding or numeric formatting is needed.
     return {"schema": 1, "category": category}
 

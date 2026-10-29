@@ -84,7 +84,29 @@ def context(
     )
     for name, keys in groups:
         phase(name)
-        require(all(environment.get(key) == expected[key] for key in keys))
+        if name == "producer-image-os":
+            image_os = environment.get("ImageOS")
+            phase(
+                {
+                    None: "producer-image-os-missing",
+                    "": "producer-image-os-empty",
+                    "ubuntu20": "producer-image-os-ubuntu20",
+                    "ubuntu22": "producer-image-os-ubuntu22",
+                    "ubuntu24": "producer-image-os-ubuntu24",
+                    "ubuntu26": "producer-image-os-ubuntu26",
+                    "ubuntu20-arm": "producer-image-os-ubuntu20-arm",
+                    "ubuntu22-arm": "producer-image-os-ubuntu22-arm",
+                    "ubuntu24-arm": "producer-image-os-ubuntu24-arm",
+                    "ubuntu26-arm": "producer-image-os-ubuntu26-arm",
+                    "ubuntu20-arm64": "producer-image-os-ubuntu20-arm64",
+                    "ubuntu22-arm64": "producer-image-os-ubuntu22-arm64",
+                    "ubuntu24-arm64": "producer-image-os-ubuntu24-arm64",
+                    "ubuntu26-arm64": "producer-image-os-ubuntu26-arm64",
+                }.get(image_os, "producer-image-os-other")
+            )
+            require(image_os == expected["ImageOS"])
+        else:
+            require(all(environment.get(key) == expected[key] for key in keys))
     phase("producer-architecture")
     require(architecture in {"amd64", "arm64"})
     require(environment.get("RUNNER_ARCH") == {"amd64": "X64", "arm64": "ARM64"}[architecture])
