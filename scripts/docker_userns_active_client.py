@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
 
 from scripts import docker_userns_active as protocol
+from scripts import docker_userns_custody_child as child
 from scripts.docker_userns_active_bootstrap_bundle import context
 from scripts.docker_userns_qualification import NativeBinding
 
@@ -120,7 +121,11 @@ class ActiveClient:
 
     def matches_failure(self, value: dict[str, Any], operation: str) -> bool:
         """Accept diagnostics only when their claimed verification matches this exact request."""
-        if not protocol.valid_failure(value) or value["actor"] != "root" or value["operation"] != operation:
+        if (
+            not protocol.valid_failure(value, child=child)
+            or value["actor"] != "root"
+            or value["operation"] != operation
+        ):
             return False
         expected = protocol.failure_context(asdict(self.binding), self.binding.phase)
         if value["bindingVerified"]:

@@ -1953,5 +1953,200 @@ class InitialJournalDurability(unittest.TestCase):
             self.assertNotIn(PRIVATE, active.encoded(value).decode())
 
 
+class ExistingChildBuildObservation(unittest.TestCase):
+    def test_existing_build_exports_exact_lifetimes_and_sealed_finite_failures_without_cleanup(self) -> None:
+        from scripts import docker_userns_custody_child as child  # noqa: PLC0415
+
+        for lifetime in (child.Lifetime.NEVER_STARTED, child.Lifetime.UNKNOWN, child.Lifetime.DEAD):
+            with self.subTest(lifetime=lifetime):
+                self._build_case(child, lifetime)
+
+    def _build_case(self, child: object, lifetime: object) -> None:
+        import time  # noqa: PLC0415
+        from dataclasses import replace  # noqa: PLC0415
+
+        port = failure_port()
+        port.modules = SimpleNamespace(child=child)
+        port.record.update(profileName="dockerlens-127-upstream-rootless-1-2-" + "e" * 32, childPending=True)
+        port.bootstrap, port.admission = {"uid": 1001, "gid": 1001}, {"cohort": {"interpreterSha256": "a" * 64}}
+        port.binding = replace(binding(), deadline_ns=time.monotonic_ns() + 90_000_000_000)
+        port.work_until = port.binding.deadline_ns - 60_000_000_000
+        observers: list[object] = []
+
+        def preflight(
+            _interpreter: object, _sources: object, _lease: object, _clock: object, *, observer: object
+        ) -> object:
+            self.assertIs(type(observer), child.WorkObserver)
+            self.assertIsNone(observer.snapshot())
+            observers.append(observer)
+            if lifetime is child.Lifetime.NEVER_STARTED:
+                with child.work(observer, "CHILD_PARENT", "B_PREFLIGHT_G01", (child.ChildError,)):
+                    raise child.ChildError
+            return (), 1
+
+        def execute(_arguments: object, observer: object) -> object:
+            if lifetime is child.Lifetime.UNKNOWN:
+                with child.work(observer, "CHILD_PARENT", "B_CAPTURE_W01", (child.ChildError,)):
+                    raise child.ChildError(lifetime=lifetime) from ValueError(PRIVATE)
+            return PRIVATE.encode(), PRIVATE.encode(), 111, child.Lifetime.DEAD
+
+        with (
+            patch.object(child, "_preflight", side_effect=preflight),
+            patch.object(child, "_execute_observed", side_effect=execute) as capture,
+            patch.object(child, "_build_status_pair", return_value=("EXIT_NONZERO", "MATCH")),
+            patch.object(child, "_declared_guard", return_value="FD_FSTAT_NON_EBADF"),
+            self.assertRaises(child.ChildError) as raised,
+        ):
+            port.build_policy(91, (), port.binding)
+        self.assertIs(raised.exception.lifetime, lifetime)
+        self.assertEqual(len(observers), 1)
+        self.assertIsNotNone(observers[0].snapshot())
+        self.assertEqual(capture.call_count, 0 if lifetime is child.Lifetime.NEVER_STARTED else 1)
+        port.retain()
+        value = active.failure_receipt(
+            {
+                "actor": "root",
+                "operation": "prepare",
+                "binding": port.binding,
+                "sourceVerified": True,
+                "sourceManifestSha256": active.SOURCE_MANIFEST_SHA256,
+                "record": port.record,
+            },
+            raised.exception,
+        )
+        self.assertTrue(active.valid_failure(value, child=child))
+        self.assertEqual(value["childBuild"]["lifetime"], lifetime.value)
+        self.assertTrue(value["childPending"])
+        self.assertTrue(value["retained"])
+        self.assertFalse(value["cleanupAuthority"])
+        from scripts.docker_userns_qualification import State  # noqa: PLC0415
+
+        with self.assertRaises(active.RefusedError):
+            port.persist(State.LOADED, None)
+        self.assertNotIn(PRIVATE, active.encoded(value).decode())
+        if lifetime is child.Lifetime.DEAD:
+            self.assertEqual(
+                value["childBuild"]["status"], {"schema": 1, "terminationForm": "EXIT_NONZERO", "receiptCheck": "MATCH"}
+            )
+            self.assertEqual(value["childBuild"]["guard"], {"schema": 1, "category": "FD_FSTAT_NON_EBADF"})
+        else:
+            self.assertIsNone(value["childBuild"]["status"])
+            self.assertIsNone(value["childBuild"]["guard"])
+
+    def test_untrusted_or_malformed_observer_fields_are_never_exported(self) -> None:
+        from scripts import docker_userns_custody_child as child  # noqa: PLC0415
+
+        error = child.ChildError(lifetime=child.Lifetime.UNKNOWN)
+        authored = SimpleNamespace(
+            snapshot=lambda: PRIVATE, status_snapshot=lambda: (PRIVATE, PRIVATE), guard_snapshot=lambda: PRIVATE
+        )
+        self.assertEqual(
+            active.sealed_child_build(child, authored, error),
+            {"lifetime": "unknown", "work": None, "status": None, "guard": None},
+        )
+        observer = child.WorkObserver()
+        self.assertEqual(
+            active.sealed_child_build(child, observer, error),
+            {"lifetime": "unknown", "work": None, "status": None, "guard": None},
+        )
+        with (
+            patch.object(
+                child.WorkObserver,
+                "snapshot",
+                return_value={"schema": 1, "context": PRIVATE, "site": PRIVATE, "failure": PRIVATE},
+            ),
+            patch.object(child.WorkObserver, "status_snapshot", return_value=(PRIVATE, PRIVATE)),
+            patch.object(child.WorkObserver, "guard_snapshot", return_value=PRIVATE),
+        ):
+            self.assertEqual(
+                active.sealed_child_build(child, observer, error),
+                {"lifetime": "unknown", "work": None, "status": None, "guard": None},
+            )
+        error.lifetime = PRIVATE
+        self.assertIsNone(active.sealed_child_build(child, authored, error))
+        for key in ("lifetime", "work", "status", "guard"):
+            value = bound_root_failure()
+            value["childBuild"] = {"lifetime": "unknown", "work": None, "status": None, "guard": None}
+            value["childBuild"][key] = PRIVATE
+            self.assertFalse(active.valid_failure(value, child=child))
+            record = {"diagnostic": {"phase": "builder"}, "childBuild": value["childBuild"]}
+            self.assertNotIn("childBuild", active.failure_receipt({"record": record}, error))
+
+    def test_valid_child_detail_survives_client_capture_but_still_denies_cleanup(self) -> None:
+        from scripts import docker_userns_custody_child as child  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory() as temporary:
+            client = client_fixture(Path(temporary))
+            value = bound_root_failure()
+            value["childBuild"] = {"lifetime": child.Lifetime.DEAD.value, "work": None, "status": None, "guard": None}
+            client.ctx.command = Mock(return_value=json.dumps(value))
+            with self.assertRaises(ValueError):
+                client.rpc("prepare", {})
+            self.assertEqual(client.evidence["failures"][0]["childBuild"], value["childBuild"])
+            self.assertEqual(client.name, "new")
+            self.assertFalse(client.evidence["cleanupAuthority"])
+            with self.assertRaises(ValueError):
+                client.close()
+            client.ctx.command.assert_called_once()
+
+
+class ProducerValidationPhases(unittest.TestCase):
+    def test_each_existing_environment_refusal_has_a_finite_phase_without_values(self) -> None:
+        cases = {
+            "GITHUB_ACTIONS": "producer-runner-identity",
+            "RUNNER_ENVIRONMENT": "producer-runner-identity",
+            "RUNNER_OS": "producer-runner-identity",
+            "GITHUB_REPOSITORY": "producer-repository",
+            "GITHUB_EVENT_NAME": "producer-workflow",
+            "GITHUB_REF": "producer-workflow",
+            "GITHUB_JOB": "producer-workflow",
+            "ImageOS": "producer-image-os",
+            "GITHUB_WORKFLOW_REF": "producer-workflow-ref",
+            "RUNNER_ARCH": "producer-architecture",
+            "GITHUB_SHA": "producer-candidate",
+            "GITHUB_WORKFLOW_SHA": "producer-candidate",
+            "GITHUB_RUN_ID": "producer-run-attempt",
+            "GITHUB_RUN_ATTEMPT": "producer-run-attempt",
+            "ImageVersion": "producer-image-version",
+            "GITHUB_EVENT_PATH": "producer-event-path",
+        }
+        for key, phase in cases.items():
+            with self.subTest(key=key):
+                environment = {**candidate_environment(), key: PRIVATE}
+                progress = {"actor": "producer", "operation": "producer"}
+                with self.assertRaises(ValueError) as raised:
+                    producer.context(environment, "amd64", progress=progress)
+                value = active.failure_receipt(progress, raised.exception)
+                self.assertTrue(active.valid_failure(value))
+                self.assertEqual(value["phase"], phase)
+                self.assertNotIn(PRIVATE, active.encoded(value).decode())
+        progress = {"actor": "producer", "operation": "producer"}
+        with self.assertRaises(ValueError):
+            producer.context(candidate_environment(), "invalid", progress=progress)
+        self.assertEqual(progress["phase"], "producer-architecture")
+
+    def test_event_read_and_choice_failures_remain_distinct_and_arm_expected_values_unchanged(self) -> None:
+        import io  # noqa: PLC0415
+
+        progress = {"actor": "producer", "operation": "producer"}
+        with patch.object(Path, "open", side_effect=PermissionError(13, PRIVATE)), self.assertRaises(PermissionError):
+            producer.context(candidate_environment(), "amd64", progress=progress)
+        self.assertEqual(progress["phase"], "producer-event-read")
+        raw = json.dumps({"inputs": {"validation_profile": PRIVATE}}).encode()
+        with (
+            patch.object(Path, "open", side_effect=lambda *_args, **_kwargs: io.BytesIO(raw)),
+            self.assertRaises(producer.QualificationError),
+        ):
+            producer.context(candidate_environment(), "amd64", progress=progress)
+        self.assertEqual(progress["phase"], "producer-choice")
+        environment = {**candidate_environment(), "RUNNER_ARCH": "ARM64"}
+        raw = json.dumps({"inputs": {"validation_profile": "docker-rootless-diagnostic"}}).encode()
+        with patch.object(Path, "open", side_effect=lambda *_args, **_kwargs: io.BytesIO(raw)):
+            accepted = producer.context(environment, "arm64", progress=progress)
+        self.assertEqual(accepted["architecture"], "arm64")
+        self.assertEqual(accepted["imageOS"], "ubuntu26")
+        self.assertNotIn(PRIVATE, json.dumps(progress))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -22,15 +22,16 @@ import signal
 import stat
 import sys
 import time
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import asdict
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    from scripts.docker_userns_custody_child import Outcome
     from scripts.docker_userns_qualification import NativeBinding, State
 
 CONSUMER = "containers-ubuntu26-userns-active"
@@ -111,6 +112,18 @@ FAILURE_PHASES = frozenset(
         "profile-absence",
         "dispose",
         "producer-context",
+        "producer-runner-identity",
+        "producer-repository",
+        "producer-workflow",
+        "producer-image-os",
+        "producer-workflow-ref",
+        "producer-architecture",
+        "producer-candidate",
+        "producer-run-attempt",
+        "producer-image-version",
+        "producer-event-path",
+        "producer-event-read",
+        "producer-choice",
         "producer-source",
         "producer-proof",
         "producer-output",
@@ -170,6 +183,50 @@ FAILURE_STATES = frozenset(
 )
 SOURCE_MANIFEST_SHA256 = "7f6693f40311617e4854f8c6a35cbe13b3afdd3d7a8bef58978397ba1178dbd8"
 MAX_FAILURE = 8192
+
+
+def child_build_detail(value: object, child: ModuleType | None) -> dict[str, Any] | None:
+    """Accept only the existing child's finite normalized diagnostics, never authored payloads."""
+    if child is None or type(value) is not dict or set(value) != {"lifetime", "work", "status", "guard"}:
+        return None
+    lifetime = value["lifetime"]
+    if lifetime is not None and (
+        type(lifetime) is not str or lifetime not in tuple(item.value for item in child.Lifetime)
+    ):
+        return None
+    work = child.work_failure(value["work"]) if value["work"] is not None else None
+    status = child.build_status_observation(value["status"], work) if value["status"] is not None else None
+    guard = child.guard_declaration(value["guard"], work, status) if value["guard"] is not None else None
+    if (work, status, guard) != (value["work"], value["status"], value["guard"]):
+        return None
+    if lifetime is None and work is None and status is None and guard is None:
+        return None
+    return {"lifetime": lifetime, "work": work, "status": status, "guard": guard}
+
+
+def sealed_child_build(child: ModuleType, observer: object, error: BaseException | None) -> dict[str, Any] | None:
+    """Read sealed exact-type observations using the unchanged hosted validation pattern."""
+    value: dict[str, Any] = {"lifetime": None, "work": None, "status": None, "guard": None}
+    if type(error) is child.ChildError:
+        with suppress(Exception):
+            if type(error.lifetime) is child.Lifetime:
+                value["lifetime"] = error.lifetime.value
+    if type(observer) is child.WorkObserver:
+        with suppress(Exception):
+            value["work"] = child.work_failure(observer.snapshot())
+        with suppress(Exception):
+            pair = observer.status_snapshot()
+            if type(pair) is tuple and len(pair) == len(child.BUILD_STATUS_FIELDS):
+                value["status"] = child.build_status_observation(
+                    {"schema": 1, "terminationForm": pair[0], "receiptCheck": pair[1]}, value["work"]
+                )
+        with suppress(Exception):
+            category = observer.guard_snapshot()
+            if type(category) is str and category in child.GUARD_CATEGORIES:
+                value["guard"] = child.guard_declaration(
+                    {"schema": 1, "category": category}, value["work"], value["status"]
+                )
+    return child_build_detail(value, child)
 
 
 def failure_reason(error: BaseException) -> str:
@@ -245,7 +302,7 @@ def _failure_receipt(progress: dict[str, Any], error: BaseException) -> dict[str
             else "not-recorded"
         )
     )
-    return {
+    result = {
         "schemaVersion": 1,
         "consumer": CONSUMER,
         "kind": "active-qualification-failure",
@@ -278,6 +335,10 @@ def _failure_receipt(progress: dict[str, Any], error: BaseException) -> dict[str
         "retained": record.get("retained") if type(record.get("retained")) is bool else None,
         "cleanupAuthority": False,
     }
+    detail = child_build_detail(record.get("childBuild"), sys.modules.get("scripts.docker_userns_custody_child"))
+    if detail is not None:
+        result["childBuild"] = detail
+    return result
 
 
 def failure_receipt(progress: dict[str, Any], error: BaseException) -> dict[str, Any]:
@@ -288,13 +349,17 @@ def failure_receipt(progress: dict[str, Any], error: BaseException) -> dict[str,
         return _failure_receipt({"actor": "root", "phase": "unknown"}, error)
 
 
-def _valid_failure(value: object) -> bool:
+def _valid_failure(value: object, child: ModuleType | None = None) -> bool:
     """Reject malformed/oversized diagnostic envelopes; they never grant admission or cleanup."""
     if type(value) is not dict or len(encoded(value)) > MAX_FAILURE:
         return False
     template = failure_receipt({}, RefusedError())
-    if set(value) != set(template):
+    if set(value) not in (set(template), set(template) | {"childBuild"}):
         return False
+    if "childBuild" in value:
+        detail = child_build_detail(value["childBuild"], child)
+        if detail is None or detail != value["childBuild"]:
+            return False
     context = value["context"]
     return (
         type(value["schemaVersion"]) is int
@@ -340,10 +405,12 @@ def _valid_failure(value: object) -> bool:
     )
 
 
-def valid_failure(value: object) -> bool:
+def valid_failure(value: object, *, child: ModuleType | None = None) -> bool:
     """Keep every malformed protocol refusal closed, including wrong nested types."""
     try:
-        return _valid_failure(value)
+        return _valid_failure(
+            value, child if child is not None else sys.modules.get("scripts.docker_userns_custody_child")
+        )
     except TypeError, ValueError, KeyError, RefusedError:
         return False
 
@@ -1066,18 +1133,7 @@ class RootPort:
                 sealed.append(source)
             self.record["childPending"] = True
             self.commit()
-            outcome = self.modules.child.build(
-                self.modules.child.Interpreter(interpreter, self.admission["cohort"]["interpreterSha256"]),
-                tuple(sealed),
-                self.modules.child.Build(
-                    self.record["profileName"],
-                    self.bootstrap["uid"],
-                    self.bootstrap["gid"],
-                    min(self.work_until, time.monotonic_ns() + 5_000_000_000),
-                    binding.deadline_ns,
-                ),
-                Clock(),
-            )
+            outcome = self.build_policy(interpreter, tuple(sealed), binding)
             require(outcome.dead is True)
             self.record["childPending"] = False
             self.record["policySha256"] = digest(outcome.policy)
@@ -1105,6 +1161,37 @@ class RootPort:
         self.record["childPending"] = False
         self.record["compiled"] = True
         self.commit()
+
+    def build_policy(self, interpreter: int, sources: tuple[Any, ...], binding: NativeBinding) -> Outcome:
+        """Observe the existing single build; diagnostics never alter error or lifetime authority."""
+        child = self.modules.child
+        observer = child.new_observer()
+        failure: BaseException | None = None
+        try:
+            with child.observing(observer):
+                outcome = child.build(
+                    child.Interpreter(interpreter, self.admission["cohort"]["interpreterSha256"]),
+                    sources,
+                    child.Build(
+                        self.record["profileName"],
+                        self.bootstrap["uid"],
+                        self.bootstrap["gid"],
+                        min(self.work_until, time.monotonic_ns() + 5_000_000_000),
+                        binding.deadline_ns,
+                    ),
+                    Clock(),
+                    **child.observer_args(observer),
+                )
+        except BaseException as error:
+            failure = error
+            raise
+        else:
+            return outcome
+        finally:
+            with suppress(Exception):
+                detail = sealed_child_build(child, observer, failure)
+                if detail is not None:
+                    self.record["childBuild"] = detail
 
     def guard(self, binding: NativeBinding) -> None:
         """Recheck immutable source, kernel controls, namespace and independent finalizer."""

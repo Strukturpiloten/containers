@@ -70,13 +70,31 @@ def context(
         "ImageOS": "ubuntu26",
         "GITHUB_WORKFLOW_REF": "Strukturpiloten/containers/.github/workflows/ci.yml@refs/heads/TheRealBecks/issue527",
     }
-    require(all(environment.get(key) == value for key, value in expected.items()))
+
+    def phase(name: str) -> None:
+        if progress is not None:
+            progress["phase"] = name
+
+    groups = (
+        ("producer-runner-identity", ("GITHUB_ACTIONS", "RUNNER_ENVIRONMENT", "RUNNER_OS")),
+        ("producer-repository", ("GITHUB_REPOSITORY",)),
+        ("producer-workflow", ("GITHUB_EVENT_NAME", "GITHUB_REF", "GITHUB_JOB")),
+        ("producer-image-os", ("ImageOS",)),
+        ("producer-workflow-ref", ("GITHUB_WORKFLOW_REF",)),
+    )
+    for name, keys in groups:
+        phase(name)
+        require(all(environment.get(key) == expected[key] for key in keys))
+    phase("producer-architecture")
     require(architecture in {"amd64", "arm64"})
     require(environment.get("RUNNER_ARCH") == {"amd64": "X64", "arm64": "ARM64"}[architecture])
+    phase("producer-candidate")
     selected = environment.get("GITHUB_SHA", "")
     require(re.fullmatch(r"[0-9a-f]{40}", selected) and environment.get("GITHUB_WORKFLOW_SHA") == selected)
+    phase("producer-run-attempt")
     for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"):
         require(re.fullmatch(r"[1-9][0-9]{0,19}", environment.get(key, "")))
+    phase("producer-image-version")
     version = environment.get("ImageVersion", "")
     require(re.fullmatch(r"[0-9]{8}\.[0-9]+\.[0-9]+", version))
     if progress is not None:
@@ -88,13 +106,16 @@ def context(
             "image": "docker-29-conformance-rootless",
             "architecture": architecture,
         }
+    phase("producer-event-path")
     event_path = Path("/home/runner/work/_temp/_github_workflow/event.json")
     require(environment.get("GITHUB_EVENT_PATH") == str(event_path))
+    phase("producer-event-read")
     with event_path.open("rb") as stream:
         raw = stream.read(MAX_EVENT + 1)
     require(len(raw) <= MAX_EVENT)
     event = json.loads(raw, object_pairs_hook=source.unique_object)
     require(type(event) is dict and type(event.get("inputs", {})) is dict)
+    phase("producer-choice")
     requested = event.get("inputs", {}).get("validation_profile", "full")
     canonical = validation_profile(requested)
     require(canonical == "docker-rootless-diagnostic")

@@ -771,6 +771,14 @@ preflight category can automatically justify absence, unload or disposal.
 Retention preserves the prior phase/intent and any uncertain durable write
 rather than replacing that history with only `retained`.
 
+The existing pure-builder call now has one scoped `WorkObserver`. Only its sealed,
+validated worksite/status/guard enumerations and the exact finite `ChildError`
+lifetime may accompany a failure. Never-started, unknown and proven-dead failures
+all keep pending/retained state and grant no cleanup or retry authority. Producer
+identity checks name the current finite validation group before each existing
+comparison, without exporting raw values or changing any expected values; a
+phase alone does not establish the cause of a previous ARM refusal.
+
 The evidence gate requires both original clean-control/enforcement phases and
 bound scoped evidence in this exact candidate context. It rejects absent or
 mismatched receipts, host fingerprints, effective-profile evidence, task/scope
