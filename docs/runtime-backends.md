@@ -216,8 +216,19 @@ still removes exact resources after an abnormal strict orderly shutdown; that
 shutdown remains a failure even when removal succeeds.
 
 Podman retains its complete existing conmon marker/PID custody observer. Docker
-state is retained with explicit backend-not-applicable conmon sources and
-unresolved attribution; no conmon identity or marker is synthesized. Strict OOM, clean-control,
+only the exact before/after inner-memory hooks read the owned outer cgroup
+`memory.events` and `memory.events.local` through held host descriptors. Private
+Docker incarnation, process birth, owned slice, cgroup2 mount/root and scope
+bindings are checked around the reads; public evidence contains hashes, bounded
+counters, finite availability and monotonic windows. Missing or malformed files,
+changed identities and regressing counters cannot become zero or comparable
+deltas. Known optional counters (including `sock_throttled`) are retained when
+present, without defaulting absent fields to zero. `memory_localevents` semantics
+are retained. Other Docker hooks retain only finite OCI fields, including stopped
+state and exit code, and allocate no host counter reader. These observations remain
+unresolved and grant no lifecycle or OOM acceptance; they do not attribute inner,
+ancestor or kernel events. Raw host operands and collector output remain private.
+Conmon sources remain explicitly not applicable; no conmon identity or marker is synthesized. Strict OOM, clean-control,
 lifecycle and cleanup assertions remain. DockerLens/BoxFerry's historically
 shared outer stores have a different contract; this Python private-store adapter
 is not copied from or imposed on those callers.
