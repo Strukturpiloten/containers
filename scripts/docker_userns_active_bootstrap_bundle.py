@@ -67,7 +67,7 @@ def context(
         "GITHUB_EVENT_NAME": "workflow_dispatch",
         "GITHUB_REF": "refs/heads/TheRealBecks/issue527",
         "GITHUB_JOB": "smoke-build",
-        "ImageOS": "ubuntu26",
+        "ImageOS": diagnostic.REPORTED_IMAGE_OS.get(architecture, "ubuntu26"),
         "GITHUB_WORKFLOW_REF": "Strukturpiloten/containers/.github/workflows/ci.yml@refs/heads/TheRealBecks/issue527",
     }
 
@@ -153,7 +153,7 @@ def context(
         "attempt": environment["GITHUB_RUN_ATTEMPT"],
         "architecture": architecture,
         "image": "docker-29-conformance-rootless",
-        "imageOS": "ubuntu26",
+        "imageOS": expected["ImageOS"],
         "imageVersion": version,
         "imageVersionKind": "workflow-reported-provenance-not-vm-attestation",
         "validationProfile": canonical,

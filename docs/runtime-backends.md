@@ -783,15 +783,52 @@ Rejected descriptor diagnostics reuse the existing successful `fstat` witness to
 report only file type bits and whether the current numeric slot matches the
 retired interpreter slot, retired receipt slot, or another slot. Reuse does not
 identify the descriptor's original owner or establish an allowlist defect.
+An other-slot regular witness may additionally match the same file identity as
+an already-read sealed source or previously visited stdio witness. A complete
+`NO_MATCH` requires all three stdio witnesses; otherwise it reports
+`STDIO_UNAVAILABLE`. These labels establish neither descriptor ownership nor a
+shared open file description, and add no descriptor probe or inventory call.
 Historical exit 112 and classification errors retain the generic refusal. The
 exact allowlist and inventory syscalls are unchanged. An unprivileged subprocess
 regression exercises the extracted production guard with real captured stdio and
 inherited descriptors; it does not qualify the root builder or native runtime.
 Producer ImageOS refusals distinguish missing/empty, explicit Ubuntu values and
-other values through finite phases. The expected value remains `ubuntu26`; the
-previous ARM failure's raw value remains unknown, and ARM loading stays refused.
+other values through finite phases. Reported provenance binds AMD64 to
+`ubuntu26` and ARM64 to `ubuntu26-arm64`; crossed pairs, whitespace and aliases
+refuse. The producer, independent fixed active bootstrap and root context checks
+agree on these exact pairs. This is reported workflow provenance, without a
+claim of physical runner attestation or compatibility. The earlier unknown ARM
+value is superseded by run `40859477908`'s finite `ubuntu26-arm64` observation.
 These diagnostic changes introduce or change no dependency pin or Renovate
 extraction/ownership rule.
+
+ARM dispatch now stops before native runtime tests after the separate
+`observe-arm` root operation. That operation authenticates the immutable stage,
+imports its verified dependencies and holds the stage lock. It collects bounded
+structured OS/kernel/machine, fixed tool/ABI/feature digests and identities,
+CPython version, fixed control values, source bindings and strict root namespace
+facts. Collection does not evaluate them as an AMD64 compatibility cohort.
+Parser version uses only the existing bounded dropped-credential version probe,
+with an interpreter digest calculated from the same job's held trusted OS file
+under the documented preinstalled-tool integrity exception. No AMD64 interpreter
+digest is borrowed for ARM, and observed values never grant admission.
+
+Before that version child can start, an exclusive root-private
+`observation-<nonce>` custody directory and pending marker are fsynced in the
+existing stage lease area. Its binding records the authenticated bootstrap,
+context, exact tools and original deadline bounds. Proven child death permits
+retiring only the exact marker after tool and marker identity rechecks. Unknown
+completion, interruption, replacement, durability failure or root crash keeps
+custody; existing stage disposal refuses any remaining lease entry. These names
+cannot address active RPC leases. No observation route constructs an active
+profile lease, compiles/builds policy, loads/unloads profiles or creates guests.
+
+The always-uploaded observation artifact has its own receipt kind, qualification
+`none`, disposition `ARM_NOT_ADMITTED`, explicit false active/native/cleanup
+authority, and only completed bounded facts plus finite failure metadata. It
+cannot satisfy the active client or native evidence gate. The root operation
+and ARM workflow step return non-success even after complete observation. ARM
+loading remains refused; historical unused admission and bootstrap are unchanged.
 
 The evidence gate requires both original clean-control/enforcement phases and
 bound scoped evidence in this exact candidate context. It rejects absent or

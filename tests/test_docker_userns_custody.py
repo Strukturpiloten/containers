@@ -1139,6 +1139,20 @@ class ChildTests(unittest.TestCase):
 
     def test_classifier_preserves_historical_guard_code_and_probe_is_exact(self) -> None:
         original = child.CODE
+        original = original.replace("source_files = {}\n", "", 1)
+        original = original.replace(
+            "    source_files[module] = (before.st_dev, before.st_ino, before.st_mode & 0o170000)\n", "", 1
+        )
+        original = original.replace("stdio_files = {}\n", "", 1)
+        original = original.replace(
+            "    if descriptor in (0, 1, 2):\n"
+            "        try:\n"
+            "            stdio_files[descriptor] = (witness.st_dev, witness.st_ino, witness.st_mode & 0o170000)\n"
+            "        except Exception:\n"
+            "            pass\n",
+            "",
+            1,
+        )
         self.assertEqual(original.count("witness = os.fstat(descriptor)"), 1)
         original = original.replace("witness = os.fstat(descriptor)", "os.fstat(descriptor)", 1)
         start = original.index("        code = 112\n")
@@ -2607,8 +2621,16 @@ if case == 'interpreter-reuse':
     os.dup2(int(first), int(interpreter))
 elif case == 'receipt-reuse':
     os.dup2(int(first), int(receipt))
-elif case == 'source-duplicate':
-    fcntl.fcntl(int(first), fcntl.F_DUPFD, max(map(int, (interpreter, receipt, first, second))) + 1)
+elif case in ('source-duplicate', 'source-second-duplicate'):
+    source = first if case == 'source-duplicate' else second
+    fcntl.fcntl(int(source), fcntl.F_DUPFD, max(map(int, (interpreter, receipt, first, second))) + 1)
+elif case.startswith('stdio-'):
+    descriptor = {'stdio-input': 0, 'stdio-output': 1, 'stdio-error': 2}[case]
+    fcntl.fcntl(descriptor, fcntl.F_DUPFD, max(map(int, (interpreter, receipt, first, second))) + 1)
+source_files = {}
+for module, descriptor in (('canonical_policy', int(first)), ('native_outer_diagnostic_capture', int(second))):
+    info = os.fstat(descriptor)
+    source_files[module] = (info.st_dev, info.st_ino, info.st_mode & 0o170000)
 """
             + guard
         )
@@ -2617,32 +2639,147 @@ elif case == 'source-duplicate':
             ("unrelated-pipe", 138, "FD_NOT_ALLOWLISTED_OTHER_SLOT_PIPE"),
             ("interpreter-reuse", 120, "FD_NOT_ALLOWLISTED_INTERPRETER_SLOT_REUSED_REGULAR"),
             ("receipt-reuse", 128, "FD_NOT_ALLOWLISTED_RECEIPT_SLOT_REUSED_REGULAR"),
-            ("source-duplicate", 136, "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR"),
+            ("source-duplicate", 144, "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_SOURCE_FIRST"),
+            ("source-second-duplicate", 145, "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_SOURCE_SECOND"),
+            ("stdio-input", 146, "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_STDIO_INPUT"),
+            ("stdio-output", 147, "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_STDIO_OUTPUT"),
+            ("stdio-error", 148, "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_STDIO_ERROR"),
+            ("unrelated-regular", 149, "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_NO_MATCH"),
         )
         with ExitStack() as stack:
             authored = tuple(stack.enter_context(tempfile.TemporaryFile()).fileno() for _ in range(4))
+            unrelated = stack.enter_context(tempfile.TemporaryFile()).fileno()
+            stdio = tuple(stack.enter_context(tempfile.TemporaryFile()) for _ in range(3))
             read_fd, write_fd = os.pipe()
             stack.callback(os.close, read_fd)
             stack.callback(os.close, write_fd)
             for case, expected_status, expected_category in cases:
                 with self.subTest(case=case):
                     inherited = (*authored, read_fd) if case == "unrelated-pipe" else authored
+                    if case == "unrelated-regular":
+                        inherited = (*authored, unrelated)
                     # Execute only repository-extracted statements and authored numeric FDs.
                     with subprocess.Popen(  # noqa: S603
                         [sys.executable, "-I", "-B", "-S", "-c", script, *map(str, authored), case],
-                        stdin=subprocess.PIPE,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
+                        stdin=stdio[0] if case.startswith("stdio-") else subprocess.PIPE,
+                        stdout=stdio[1] if case.startswith("stdio-") else subprocess.PIPE,
+                        stderr=stdio[2] if case.startswith("stdio-") else subprocess.PIPE,
                         close_fds=True,
                         pass_fds=inherited,
                     ) as process:
                         stdout, stderr = process.communicate(timeout=10)
+                    if case.startswith("stdio-"):
+                        stdio[1].seek(0)
+                        stdio[2].seek(0)
+                        stdout, stderr = stdio[1].read(), stdio[2].read()
                     self.assertEqual(process.returncode, expected_status)
                     self.assertEqual(stdout, b"")
                     self.assertEqual(stderr, b"")
                     self.assertEqual(
                         child._declared_guard(process.returncode, guard_source_fixture()), expected_category
                     )
+
+    def test_regular_partial_comparison_never_claims_complete_absence_and_known_match_has_priority(self) -> None:
+        inventory = next(
+            node
+            for node in ast.parse(child.CODE).body
+            if isinstance(node, ast.For) and isinstance(node.target, ast.Name) and node.target.id == "entry"
+        )
+        statement = ast.get_source_segment(child.CODE, inventory.body[-1])
+        identity = (5, 7, stat.S_IFREG)
+        sources = {"canonical_policy": (1, 2, stat.S_IFREG), "native_outer_diagnostic_capture": (3, 4, stat.S_IFREG)}
+        cases = (
+            ({}, sources, 150, "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_STDIO_UNAVAILABLE"),
+            ({0: (8, 9, stat.S_IFREG)}, sources, 150, "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_STDIO_UNAVAILABLE"),
+            (
+                {0: (8, 9, stat.S_IFREG), 1: (8, 10, stat.S_IFREG), 2: (8, 11, stat.S_IFREG)},
+                sources,
+                149,
+                "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_NO_MATCH",
+            ),
+            ({0: identity}, sources, 146, "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_STDIO_INPUT"),
+            (
+                {0: identity},
+                {**sources, "native_outer_diagnostic_capture": identity},
+                145,
+                "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_SOURCE_SECOND",
+            ),
+            (
+                {0: identity},
+                dict.fromkeys(sources, identity),
+                144,
+                "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_SOURCE_FIRST",
+            ),
+        )
+        for stdio_files, source_files, code, category in cases:
+            with self.subTest(code=code, visited=len(stdio_files)), self.assertRaises(SystemExit) as raised:
+                exec(  # noqa: S102 - Only the production rejection statement with explicit metadata facts.
+                    statement,
+                    {
+                        "descriptor": 9,
+                        "allowed": {0, 1, 2},
+                        "witness": SimpleNamespace(st_dev=5, st_ino=7, st_mode=stat.S_IFREG | 0o600),
+                        "interpreter": "7",
+                        "receipt": "8",
+                        "source_files": source_files,
+                        "stdio_files": stdio_files,
+                    },
+                )
+            self.assertEqual(raised.exception.code, code)
+            self.assertEqual(child._declared_guard(code, guard_source_fixture()), category)
+
+    def test_finite_codes_keep_every_historical_mapping_and_fit_existing_wire_limit(self) -> None:
+        expected = {
+            111: "FD_FSTAT_NON_EBADF",
+            112: "FD_NOT_ALLOWLISTED",
+            113: "RESULT_TYPE_OR_SIZE",
+            144: "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_SOURCE_FIRST",
+            145: "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_SOURCE_SECOND",
+            146: "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_STDIO_INPUT",
+            147: "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_STDIO_OUTPUT",
+            148: "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_STDIO_ERROR",
+            149: "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_NO_MATCH",
+            150: "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_STDIO_UNAVAILABLE",
+        }
+        kinds = ("REGULAR", "DIRECTORY", "PIPE", "SOCKET", "CHARACTER", "BLOCK", "SYMLINK", "OTHER")
+        for start, relation in ((120, "INTERPRETER_SLOT_REUSED"), (128, "RECEIPT_SLOT_REUSED"), (136, "OTHER_SLOT")):
+            expected.update(
+                (start + offset, f"FD_NOT_ALLOWLISTED_{relation}_{kind}") for offset, kind in enumerate(kinds)
+            )
+        self.assertEqual(child._GUARD_CODES, expected)
+        self.assertLess(max(expected), 255)
+        for code, category in expected.items():
+            with self.subTest(code=code):
+                declaration = {"schema": 1, "category": category}
+                self.assertLessEqual(len(json.dumps(declaration).encode("ascii")), 96)
+                self.assertEqual(child._declared_guard(code, guard_source_fixture()), category)
+
+    def test_metadata_refinement_adds_no_os_calls_or_reordered_source_reads(self) -> None:
+        tree = ast.parse(child.CODE)
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+        os_calls = [
+            ast.unparse(node.func)
+            for node in calls
+            if isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "os"
+        ]
+        self.assertEqual(os_calls.count("os.fstat"), 3)
+        self.assertEqual(os_calls.count("os.pread"), 1)
+        self.assertEqual(os_calls.count("os.listdir"), 1)
+        self.assertNotIn("os.readlink", os_calls)
+        source_loop = next(
+            node for node in tree.body if isinstance(node, ast.For) and isinstance(node.target, ast.Tuple)
+        )
+        reads = [
+            ast.unparse(node.value.func)
+            for node in source_loop.body
+            if isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Attribute)
+            and ast.unparse(node.value.func).startswith("os.")
+        ]
+        self.assertEqual(reads, ["os.fstat", "os.pread", "os.fstat"])
 
     def test_classification_errors_keep_historical_generic_refusal(self) -> None:
         inventory = next(
@@ -2677,6 +2814,13 @@ class ChildGuardObservationTests(unittest.TestCase):
             (128, "FD_NOT_ALLOWLISTED_RECEIPT_SLOT_REUSED_REGULAR"),
             (136, "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR"),
             (138, "FD_NOT_ALLOWLISTED_OTHER_SLOT_PIPE"),
+            (144, "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_SOURCE_FIRST"),
+            (145, "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_SOURCE_SECOND"),
+            (146, "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_STDIO_INPUT"),
+            (147, "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_STDIO_OUTPUT"),
+            (148, "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_STDIO_ERROR"),
+            (149, "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_NO_MATCH"),
+            (150, "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_STDIO_UNAVAILABLE"),
         ):
             for proof, receipt in ((self.fixture.proof, "MATCH"), (b"", "EMPTY"), (b"{", "MISMATCH")):
                 observer = child.WorkObserver()

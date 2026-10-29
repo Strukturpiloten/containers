@@ -41,6 +41,12 @@ GUARD_CATEGORIES = (
     "FD_NOT_ALLOWLISTED",
     "RESULT_TYPE_OR_SIZE",
     *(f"FD_NOT_ALLOWLISTED_{relation}_{kind}" for relation in _FD_SLOT_RELATIONS for kind in _FD_TYPES),
+    *(
+        f"FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_{role}"
+        for role in ("SOURCE_FIRST", "SOURCE_SECOND", "STDIO_INPUT", "STDIO_OUTPUT", "STDIO_ERROR")
+    ),
+    "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_NO_MATCH",
+    "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_STDIO_UNAVAILABLE",
 )
 GUARD_DECLARATION_LIMIT = 96
 _GUARD_CODES = {111: GUARD_CATEGORIES[0], 112: GUARD_CATEGORIES[1], 113: GUARD_CATEGORIES[2]}
@@ -83,6 +89,7 @@ signal.signal(signal.SIGALRM, signal.SIG_DFL)
 signal.alarm(int(seconds))
 os.close(int(interpreter))
 records = {}
+source_files = {}
 for module, encoded in zip(("canonical_policy", "native_outer_diagnostic_capture"), (first, second), strict=True):
     descriptor, size, digest = encoded.split(":")
     descriptor, size = int(descriptor), int(size)
@@ -100,12 +107,14 @@ for module, encoded in zip(("canonical_policy", "native_outer_diagnostic_capture
             or len(raw) != size or hashlib.sha256(raw).hexdigest() != digest):
         raise SystemExit(1)
     records[module] = raw
+    source_files[module] = (before.st_dev, before.st_ino, before.st_mode & 0o170000)
 proof = {"schema": 1, "uid": uid, "gid": gid, "groups": [], "nnp": 1, "capabilities": "zero"}
 raw = json.dumps(proof, sort_keys=True).encode("ascii")
 if os.write(int(receipt), raw) != len(raw):
     raise SystemExit(1)
 os.close(int(receipt))
 allowed = {0, 1, 2, int(first.split(":")[0]), int(second.split(":")[0])}
+stdio_files = {}
 for entry in os.listdir("/proc/self/fd"):
     descriptor = int(entry)
     try:
@@ -114,6 +123,11 @@ for entry in os.listdir("/proc/self/fd"):
         if error.errno != errno.EBADF:
             raise SystemExit(111)
         continue
+    if descriptor in (0, 1, 2):
+        try:
+            stdio_files[descriptor] = (witness.st_dev, witness.st_ino, witness.st_mode & 0o170000)
+        except Exception:
+            pass
     if descriptor not in allowed:
         code = 112
         try:
@@ -123,6 +137,16 @@ for entry in os.listdir("/proc/self/fd"):
             kind_index = kinds.index(kind) if kind in kinds else 7
             relation = 0 if descriptor == int(interpreter) else 1 if descriptor == int(receipt) else 2
             code = 120 + relation * 8 + kind_index
+            if relation == 2 and kind_index == 0:
+                # File identity only; not ownership or the same open file description.
+                identity = (witness.st_dev, witness.st_ino, kind)
+                candidates = (source_files["canonical_policy"], source_files["native_outer_diagnostic_capture"],
+                              stdio_files.get(0), stdio_files.get(1), stdio_files.get(2))
+                code = 149 if len(stdio_files) == 3 else 150
+                for index, candidate in enumerate(candidates):
+                    if identity == candidate:
+                        code = 144 + index
+                        break
         except Exception:
             pass
         raise SystemExit(code)

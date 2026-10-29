@@ -256,7 +256,8 @@ runs:
               trusted = {'candidate': candidate, 'workflow': workflow, 'checkout': checkout,
                   'repository': 'Strukturpiloten/containers', 'event': 'workflow_dispatch', 'ref': 'refs/heads/TheRealBecks/issue527',
                   'job': 'smoke-build', 'run': run, 'attempt': attempt, 'architecture': architecture,
-                  'image': 'docker-29-conformance-rootless', 'imageOS': 'ubuntu26', 'imageVersion': image_version,
+                  'image': 'docker-29-conformance-rootless',
+                  'imageOS': {'amd64': 'ubuntu26', 'arm64': 'ubuntu26-arm64'}[architecture], 'imageVersion': image_version,
                   'imageVersionKind': 'workflow-reported-provenance-not-vm-attestation',
                   'validationProfile': canonical, 'validationProfileRequested': requested}
               DIAGNOSTIC['context'] = {key: trusted[key] for key in ('candidate', 'run', 'attempt', 'job', 'image', 'architecture')}
@@ -340,6 +341,16 @@ runs:
             exit "${active_status}"
           }
           trap finish_active_stage EXIT
+          if [ "${IMAGE_ARCH}" = "arm64" ]; then
+            # Observation cannot qualify native tests or admit ARM policy loading.
+            if sudo -n /usr/bin/timeout --signal=TERM --kill-after=1s 20s \
+              /usr/bin/python3.14 -I -B -S "${active_stage}/scripts/docker_userns_active.py" \
+              observe-arm "${active_stage}" \
+              > "${RUNNER_TEMP}/runtime-evidence/${IMAGE_NAME}-${IMAGE_ARCH}-userns-observation.json"; then
+              :
+            fi
+            exit 1
+          fi
         fi
         uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.runtime_tests \
           --image-name "${IMAGE_NAME}" \
@@ -357,6 +368,7 @@ runs:
         path: |
           ${{ runner.temp }}/runtime-evidence/${{ steps.build.outputs.image_name }}-${{ steps.build.outputs.arch }}.json
           ${{ runner.temp }}/runtime-evidence/${{ steps.build.outputs.image_name }}-${{ steps.build.outputs.arch }}-userns-failure.json
+          ${{ runner.temp }}/runtime-evidence/${{ steps.build.outputs.image_name }}-${{ steps.build.outputs.arch }}-userns-observation.json
         if-no-files-found: error
         retention-days: 7
 

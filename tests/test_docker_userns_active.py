@@ -10,6 +10,8 @@ import json
 import os
 import tempfile
 import unittest
+from contextlib import ExitStack, contextmanager, nullcontext
+from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Self
@@ -19,6 +21,9 @@ import yaml
 
 from scripts import docker_userns_active as active
 from scripts import docker_userns_active_bootstrap_bundle as producer
+from scripts import docker_userns_custody_child as child
+from scripts import docker_userns_hosted as host
+from scripts import docker_userns_qualification as qualification
 from tests.test_docker_userns_qualification import PRIVATE, binding
 
 if TYPE_CHECKING:
@@ -2126,7 +2131,7 @@ class ProducerValidationPhases(unittest.TestCase):
                     environment["ImageOS"] = actual
                 progress = {"actor": "producer", "operation": "producer"}
                 with self.assertRaises(ValueError) as raised:
-                    producer.context(environment, "arm64", progress=progress)
+                    producer.context(environment, "amd64", progress=progress)
                 value = active.failure_receipt(progress, raised.exception)
                 self.assertTrue(active.valid_failure(value))
                 self.assertEqual(value["phase"], expected_phase)
@@ -2181,13 +2186,488 @@ class ProducerValidationPhases(unittest.TestCase):
         ):
             producer.context(candidate_environment(), "amd64", progress=progress)
         self.assertEqual(progress["phase"], "producer-choice")
-        environment = {**candidate_environment(), "RUNNER_ARCH": "ARM64"}
+        environment = {**candidate_environment(), "RUNNER_ARCH": "ARM64", "ImageOS": "ubuntu26-arm64"}
         raw = json.dumps({"inputs": {"validation_profile": "docker-rootless-diagnostic"}}).encode()
         with patch.object(Path, "open", side_effect=lambda *_args, **_kwargs: io.BytesIO(raw)):
             accepted = producer.context(environment, "arm64", progress=progress)
         self.assertEqual(accepted["architecture"], "arm64")
-        self.assertEqual(accepted["imageOS"], "ubuntu26")
+        self.assertEqual(accepted["imageOS"], "ubuntu26-arm64")
         self.assertNotIn(PRIVATE, json.dumps(progress))
+
+
+class ARMReportedProvenance(unittest.TestCase):
+    def test_producer_fixed_bootstrap_and_shared_root_agree_on_both_exact_pairs(self) -> None:
+        import io  # noqa: PLC0415
+
+        for architecture, image_os, runner_arch in (("amd64", "ubuntu26", "X64"), ("arm64", "ubuntu26-arm64", "ARM64")):
+            with self.subTest(architecture=architecture):
+                environment = {**candidate_environment(), "ImageOS": image_os, "RUNNER_ARCH": runner_arch}
+                event = json.dumps({"inputs": {"validation_profile": "docker-rootless-diagnostic"}}).encode()
+                with patch.object(Path, "open", side_effect=lambda *_args, event=event, **_kwargs: io.BytesIO(event)):
+                    produced = producer.context(environment, architecture)
+                self.assertEqual(produced["imageOS"], image_os)
+                literal = literal_namespace()
+                literal["sys"] = SimpleNamespace(
+                    argv=[
+                        "bootstrap",
+                        "handoff",
+                        *(environment["GITHUB_SHA"] for _ in range(3)),
+                        "1",
+                        "2",
+                        architecture,
+                        environment["ImageVersion"],
+                        "1000",
+                        "1000",
+                        "1000000000",
+                    ],
+                    implementation=SimpleNamespace(name="cpython"),
+                    version_info=(3, 14, 4, "final", 0),
+                    flags=SimpleNamespace(isolated=1, no_site=1),
+                    dont_write_bytecode=True,
+                )
+                literal["os"] = SimpleNamespace(getuid=lambda: 0, geteuid=lambda: 0)
+                literal["time"] = SimpleNamespace(monotonic_ns=lambda: 1)
+                literal["read_input"] = Mock(return_value=event)
+                stop = RuntimeError("stop before root stage creation")
+                literal["verify_bundle"] = Mock(side_effect=stop)
+                with self.assertRaises(RuntimeError) as raised:
+                    literal["main"]()
+                self.assertIs(raised.exception, stop)
+                self.assertEqual(literal["verify_bundle"].call_args.args[1], produced)
+                admission = (ROOT / ".github/docker-userns-active-admission.json").read_bytes()
+                manifest = (ROOT / producer.MANIFEST).read_bytes()
+                with patch.object(
+                    active,
+                    "root_bytes",
+                    side_effect=lambda path, admission=admission, manifest=manifest: (
+                        admission if path.name.endswith("active-admission.json") else manifest
+                    ),
+                ):
+                    self.assertEqual(
+                        active.preflight_authority(
+                            ROOT, {"context": produced}, SimpleNamespace(qualification=qualification)
+                        ),
+                        json.loads(admission),
+                    )
+                    crossed = {**produced, "imageOS": "ubuntu26" if architecture == "arm64" else "ubuntu26-arm64"}
+                    with self.assertRaises(active.RefusedError):
+                        active.preflight_authority(
+                            ROOT, {"context": crossed}, SimpleNamespace(qualification=qualification)
+                        )
+
+    def test_crossed_missing_whitespace_and_unknown_aliases_refuse(self) -> None:
+        for architecture, runner_arch, wrong_values in (
+            ("amd64", "X64", (None, "", "ubuntu26-arm64", " ubuntu26", "ubuntu26 ", "ubuntu-26.04")),
+            (
+                "arm64",
+                "ARM64",
+                (None, "", "ubuntu26", "ubuntu26-arm", " ubuntu26-arm64", "ubuntu26-arm64 ", "ubuntu-26.04-arm64"),
+            ),
+        ):
+            for wrong in wrong_values:
+                with self.subTest(architecture=architecture, missing=wrong is None):
+                    environment = {**candidate_environment(), "RUNNER_ARCH": runner_arch}
+                    if wrong is None:
+                        del environment["ImageOS"]
+                    else:
+                        environment["ImageOS"] = wrong
+                    with self.assertRaises(ValueError):
+                        producer.context(environment, architecture)
+                    proof, literal = SyntheticProof(), literal_namespace()
+                    trusted = {
+                        **proof.context,
+                        "architecture": architecture,
+                        "imageOS": active.REPORTED_IMAGE_OS[architecture],
+                    }
+                    proof.context = {**trusted, "imageOS": wrong}
+                    with self.assertRaises(ValueError):
+                        literal["verify_bundle"](json.dumps(proof.value()).encode(), trusted)
+
+
+class ARMObservationTests(unittest.TestCase):
+    def bootstrap(self) -> dict[str, object]:
+        context = {**SyntheticProof().context, "architecture": "arm64", "imageOS": "ubuntu26-arm64"}
+        return {
+            "context": context,
+            "files": dict.fromkeys(active.FILES, "a" * 64),
+            "stageIdentity": [1, 2],
+            "uid": 1000,
+            "gid": 1000,
+            "deadlineNs": 10**18,
+        }
+
+    def observation_case(self, fault: str | None) -> dict[str, object]:
+        admission = json.loads((ROOT / ".github/docker-userns-active-admission.json").read_bytes())
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(active.Path, "iterdir", return_value=iter(())))
+            bootstrap = self.bootstrap()
+            progress = {
+                "actor": "root",
+                "operation": "observe-arm",
+                "context": bootstrap["context"],
+                "sourceVerified": True,
+            }
+            stack.enter_context(patch.object(active, "preflight_authority", return_value=admission))
+            os_release = stack.enter_context(
+                patch.object(active, "os_release", return_value=(b'ID=ubuntu\nVERSION_ID="26.10"\n', None))
+            )
+            if fault == "os":
+                os_release.side_effect = PermissionError(13, PRIVATE)
+            stack.enter_context(
+                patch.object(
+                    active.os, "uname", return_value=SimpleNamespace(machine="aarch64", release="7.1.9-arm-actual")
+                )
+            )
+
+            def controls(_modules: object, _deadline: int, facts: dict[str, object]) -> None:
+                facts["enabled"] = False
+                if fault == "controls":
+                    raise PermissionError(13, PRIVATE)
+                facts["maximum_userns"] = 0
+
+            def files(
+                _modules: object, progress: dict[str, object], facts: dict[str, object], _evaluate: object
+            ) -> None:
+                progress["phase"] = "preflight-parser-hash"
+                facts["parserSha256"] = {"sha256": "b" * 64}
+                if fault == "files":
+                    raise PermissionError(13, PRIVATE)
+
+            def version(
+                _stage: object,
+                _bootstrap: object,
+                _modules: object,
+                facts: dict[str, object],
+                progress: dict[str, object],
+            ) -> None:
+                progress["phase"] = "observation-parser-version"
+                facts["versionChild"] = {"lifetime": "unknown", "custody": "retained"}
+                if fault == "version":
+                    raise KeyboardInterrupt
+                facts.update(parserVersion="5.9.1", versionChild={"lifetime": "proven-dead", "custody": "retired"})
+
+            stack.enter_context(patch.object(active, "observation_controls", side_effect=controls))
+            stack.enter_context(patch.object(active, "collect_cohort_files", side_effect=files))
+            namespace = stack.enter_context(patch.object(active, "namespace_snapshot", return_value={"name": "c" * 64}))
+            if fault == "namespace":
+                namespace.side_effect = PermissionError(13, PRIVATE)
+            stack.enter_context(patch.object(active, "observation_version", side_effect=version))
+            stack.enter_context(patch.object(active, "check"))
+            active_operations = [
+                stack.enter_context(patch.object(active, name)) for name in ("root_rpc", "compile_worker", "RootPort")
+            ]
+            lease = stack.enter_context(patch.object(qualification, "ProfileLease"))
+            result = active.observe_arm(ROOT, bootstrap, SimpleNamespace(), progress)
+            for operation in (*active_operations, lease):
+                operation.assert_not_called()
+            return result
+
+    def test_observation_collects_different_facts_without_admission_and_keeps_partial_errors(self) -> None:
+        for fault in (None, "os", "controls", "files", "namespace", "version"):
+            with self.subTest(fault=fault):
+                result = self.observation_case(fault)
+                self.assertEqual(result["complete"], fault is None)
+                self.assertEqual(result["disposition"], "ARM_NOT_ADMITTED")
+                self.assertEqual(result["qualification"], "none")
+                self.assertFalse(
+                    any(result[key] for key in ("activeAuthority", "cleanupAuthority", "nativeQualification"))
+                )
+                self.assertFalse(active.valid_failure(result))
+                self.assertLessEqual(len(active.encoded(result)), active.MAX_STATE)
+                self.assertNotIn(PRIVATE, active.encoded(result).decode())
+                facts = result["facts"]
+                if fault == "os":
+                    self.assertNotIn("osID", facts)
+                else:
+                    self.assertEqual((facts["osVersion"], facts["kernel"]), ("26.10", "7.1.9-arm-actual"))
+                if fault == "controls":
+                    self.assertEqual(facts["controls"], {"enabled": False})
+                    self.assertNotIn("files", facts)
+                elif fault == "files":
+                    self.assertEqual(set(facts["files"]), {"parserSha256"})
+                    self.assertNotIn("namespace", facts)
+                if fault is None:
+                    self.assertEqual(facts["parserVersion"], "5.9.1")
+
+    def test_control_observation_uses_same_fixed_reads_without_compatibility_admission(self) -> None:
+        facts = {}
+        with (
+            patch.object(active, "check"),
+            patch.object(
+                qualification, "_fixed_read", side_effect=[b"N", b"0", b"0", FileNotFoundError(2, PRIVATE)]
+            ) as read,
+        ):
+            active.observation_controls(SimpleNamespace(qualification=qualification), 100, facts)
+        self.assertEqual(facts, {"enabled": False, "restricted_userns": 0, "maximum_userns": 0, "legacy_clone": None})
+        self.assertEqual(
+            [call.args[0] for call in read.call_args_list],
+            [
+                qualification.reader.ENABLED,
+                qualification.reader.RESTRICT,
+                qualification.reader.USERNS,
+                qualification.LEGACY_CLONE,
+            ],
+        )
+        facts = {}
+        with (
+            patch.object(active, "check"),
+            patch.object(qualification, "_fixed_read", side_effect=[b"Y", PRIVATE.encode()]),
+            self.assertRaises(qualification.QualificationError),
+        ):
+            active.observation_controls(SimpleNamespace(qualification=qualification), 100, facts)
+        self.assertEqual(facts, {"enabled": True})
+
+    def test_closed_observation_dispatch_cannot_replay_active_arguments(self) -> None:
+        import io  # noqa: PLC0415
+
+        for extra in ([], ["a" * 32], ["new", "owner"], ["--request", "eyJvcGVyYXRpb24iOiJwcmVwYXJlIn0="]):
+            bootstrap = self.bootstrap()
+            progress = {"context": bootstrap["context"]}
+            observed = active.arm_observation_receipt(progress, {})
+            stdout = SimpleNamespace(buffer=io.BytesIO())
+            with (
+                self.subTest(extra=extra),
+                patch.object(active.sys, "argv", ["root", "observe-arm", "/run/unused-stage", *extra]),
+                patch.object(active.sys, "stdout", stdout),
+                patch.object(active, "verify_stage", return_value=bootstrap),
+                patch.object(active, "dependencies", return_value=SimpleNamespace()),
+                patch.object(active, "stage_lock", return_value=nullcontext()) as lock,
+                patch.object(active, "observe_arm", return_value=observed) as observe,
+                patch.object(active, "root_rpc") as rpc,
+            ):
+                self.assertEqual(active.main(), 1)
+            lock.assert_called_once()
+            self.assertEqual(observe.call_count, int(not extra))
+            rpc.assert_not_called()
+            result = json.loads(stdout.buffer.getvalue())
+            self.assertEqual(result["kind"], "arm-cohort-observation")
+            self.assertFalse(active.valid_failure(result))
+            self.assertFalse(result["nativeQualification"])
+        bootstrap["context"]["architecture"] = "amd64"
+        with patch.object(active, "preflight_authority") as authority:
+            self.assertFalse(active.observe_arm(ROOT, bootstrap, SimpleNamespace(), progress)["complete"])
+        authority.assert_not_called()
+
+    def test_action_observation_precedes_runtime_and_preserves_non_success_and_artifact(self) -> None:
+        action = yaml.safe_load((ROOT / ".github/actions/build-arch-image/action.yml").read_text())
+        runtime = next(step for step in action["runs"]["steps"] if step.get("name") == "Verify image runtime")
+        upload = next(step for step in action["runs"]["steps"] if step.get("name") == "Upload runtime evidence")
+        script = runtime["run"]
+        start = script.index('if [ "${IMAGE_ARCH}" = "arm64" ]; then')
+        stop = script.index('uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.runtime_tests', start)
+        self.assertIn('observe-arm "${active_stage}"', script[start:stop])
+        self.assertIn("exit 1", script[start:stop])
+        self.assertIn("-userns-observation.json", upload["with"]["path"])
+        self.assertIn("always()", upload["if"])
+
+    def test_arm_prepare_still_refuses_before_builder_owner_or_load(self) -> None:
+        port = failure_port()
+        port.binding = replace(port.binding, architecture="arm64")
+        port.record["bindingSha256"] = port.binding.digest()
+        port.bootstrap = {
+            "context": {
+                key: getattr(port.binding, key)
+                for key in ("candidate", "run", "attempt", "job", "architecture", "image")
+            },
+            "deadlineNs": port.binding.deadline_ns,
+        }
+        port.admission = json.loads((ROOT / ".github/docker-userns-active-admission.json").read_bytes())
+        port.preflight = Mock(return_value={})
+        port.arm, port.build_policy = Mock(), Mock()
+        with self.assertRaises(active.RefusedError):
+            qualification.ProfileLease(port.binding, port).prepare()
+        for effect in (port.arm, port.build_policy, port.load):
+            effect.assert_not_called()
+        self.assertFalse(port.record["diagnostic"]["comparisons"]["admission"])
+
+
+class ARMObservationCustody(unittest.TestCase):
+    @contextmanager
+    def fixture(self, fault: str | None) -> Iterator[SimpleNamespace]:
+        """Use real private files/fsync/markers with explicit fake root ownership and no child execution."""
+        with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
+            stage = Path(temporary)
+            leases = stage / "leases"
+            leases.mkdir(mode=0o700)
+            bootstrap_path = stage / "bootstrap.json"
+            bootstrap_path.write_bytes(b"{}\n")
+            bootstrap_path.chmod(0o400)
+            interpreter, parser = stage / "python", stage / "parser"
+            for path in (interpreter, parser):
+                path.write_bytes(b"\x7fELF" + path.name.encode())
+                path.chmod(0o500)
+            original_fstat, original_lstat, original_open = os.fstat, Path.lstat, os.open
+
+            def trusted(info: os.stat_result) -> SimpleNamespace:
+                fields = {name: getattr(info, name) for name in dir(info) if name.startswith("st_")}
+                fields["st_uid"] = 0
+                return SimpleNamespace(**fields)
+
+            def mapped(path: object) -> object:
+                return parser if path == Path("/usr/sbin/apparmor_parser") else path
+
+            def open_file(path: object, flags: int, *args: object, **kwargs: object) -> int:
+                return original_open(mapped(path), flags, *args, **kwargs)
+
+            stack.enter_context(patch.object(active, "PYTHON", str(interpreter)))
+            stack.enter_context(
+                patch.object(active.os, "fstat", side_effect=lambda descriptor: trusted(original_fstat(descriptor)))
+            )
+            stack.enter_context(
+                patch.object(
+                    active.Path, "lstat", autospec=True, side_effect=lambda path: trusted(original_lstat(mapped(path)))
+                )
+            )
+            stack.enter_context(patch.object(active.os, "open", side_effect=open_file))
+            sync = stack.enter_context(patch.object(active.os, "fsync", wraps=os.fsync))
+            files = {
+                key: {
+                    "sha256": active.digest(path.read_bytes()),
+                    "identity": asdict(host.identity(trusted(original_lstat(path)))),
+                }
+                for key, path in (("interpreterSha256", interpreter), ("parserSha256", parser))
+            }
+            facts = {"files": files}
+            bootstrap = ARMObservationTests().bootstrap()
+            bootstrap["stageIdentity"] = [stage.lstat().st_dev, stage.lstat().st_ino]
+            progress = {}
+
+            fixture = SimpleNamespace(
+                leases=leases,
+                files=files,
+                interpreter=interpreter,
+                parser=parser,
+                bootstrap=bootstrap,
+                sync=sync,
+                stage=stage,
+                fault=fault,
+            )
+
+            fake_child = SimpleNamespace(
+                Interpreter=child.Interpreter,
+                Build=child.Build,
+                Outcome=child.Outcome,
+                ChildError=child.ChildError,
+                Lifetime=child.Lifetime,
+                bytes_at=child.bytes_at,
+                probe=Mock(side_effect=lambda *args: self.version_probe(fixture, *args)),
+            )
+            modules = SimpleNamespace(
+                child=fake_child, host=SimpleNamespace(safe_path=lambda path: path, identity=host.identity)
+            )
+            if fault == "custody-write":
+                original_write = active.write_leaf
+
+                def failed_write(*args: object, **kwargs: object) -> None:
+                    original_write(*args, **kwargs)
+                    raise OSError(5, PRIVATE)
+
+                stack.enter_context(patch.object(active, "write_leaf", side_effect=failed_write))
+            yield SimpleNamespace(
+                stage=stage,
+                leases=leases,
+                bootstrap=bootstrap,
+                modules=modules,
+                facts=facts,
+                progress=progress,
+                probe=fake_child.probe,
+            )
+
+    def version_probe(
+        self,
+        fixture: SimpleNamespace,
+        authority: child.Interpreter,
+        _target: int,
+        kind: str,
+        lease: child.Build,
+        _clock: object,
+    ) -> child.Outcome:
+        leases, files = fixture.leases, fixture.files
+        interpreter, parser = fixture.interpreter, fixture.parser
+        bootstrap, sync, stage, fault = fixture.bootstrap, fixture.sync, fixture.stage, fixture.fault
+        marker = next(leases.iterdir())
+        pending = marker / "pending.json"
+        record = json.loads(pending.read_bytes())
+        self.assertEqual(record["kind"], "arm-observation-pending")
+        self.assertEqual(record["qualification"], "none")
+        self.assertEqual(record["context"]["architecture"], "arm64")
+        self.assertEqual(record["tools"], files)
+        self.assertEqual(authority.sha256, active.digest(interpreter.read_bytes()))
+        self.assertNotEqual(
+            authority.sha256,
+            json.loads((ROOT / ".github/docker-userns-active-admission.json").read_bytes())["cohort"][
+                "interpreterSha256"
+            ],
+        )
+        self.assertEqual(kind, "parser-version")
+        self.assertLess(lease.deadline_ns, lease.cleanup_deadline_ns)
+        self.assertLessEqual(lease.cleanup_deadline_ns, bootstrap["deadlineNs"] - active.RESERVE_NS)
+        self.assertGreaterEqual(sync.call_count, 3)
+        with self.assertRaises(active.RefusedError):
+            active.Store(stage, marker.name)
+        if fault == "timeout":
+            raise child.ChildError(lifetime=child.Lifetime.UNKNOWN)
+        if fault == "never-started":
+            raise child.ChildError(lifetime=child.Lifetime.NEVER_STARTED)
+        if fault == "cancelled":
+            raise KeyboardInterrupt
+        if fault == "dead-error":
+            raise child.ChildError(lifetime=child.Lifetime.DEAD)
+        replacements = {
+            "parser-replaced": parser,
+            "interpreter-replaced": interpreter,
+            "marker-replaced": pending,
+            "bootstrap-replaced": stage / "bootstrap.json",
+        }
+        if fault in replacements:
+            changed = replacements[fault]
+            mode = changed.stat().st_mode & 0o777
+            changed.chmod(0o600)
+            changed.write_bytes(b"replacement")
+            changed.chmod(mode)
+        return child.Outcome(b"AppArmor parser version 5.9.1\n", dead=True)
+
+    def test_proven_death_retires_only_bound_marker_and_reports_actual_version(self) -> None:
+        with self.fixture(None) as fixture:
+            active.observation_version(
+                fixture.stage, fixture.bootstrap, fixture.modules, fixture.facts, fixture.progress
+            )
+            self.assertEqual(list(fixture.leases.iterdir()), [])
+            self.assertEqual(fixture.facts["versionChild"], {"lifetime": "proven-dead", "custody": "retired"})
+            self.assertEqual(fixture.facts["parserVersion"], "5.9.1")
+            fixture.probe.assert_called_once()
+        with self.fixture("dead-error") as fixture, self.assertRaises(child.ChildError):
+            active.observation_version(
+                fixture.stage, fixture.bootstrap, fixture.modules, fixture.facts, fixture.progress
+            )
+        self.assertEqual(fixture.facts["versionChild"], {"lifetime": "proven-dead", "custody": "retired"})
+
+    def test_unknown_cancellation_replacement_and_durability_failure_keep_disposal_blocked(self) -> None:
+        for fault in (
+            "timeout",
+            "cancelled",
+            "never-started",
+            "parser-replaced",
+            "interpreter-replaced",
+            "marker-replaced",
+            "bootstrap-replaced",
+            "custody-write",
+        ):
+            with self.subTest(fault=fault), self.fixture(fault) as fixture:
+                with self.assertRaises((child.ChildError, active.RefusedError, OSError, KeyboardInterrupt)):
+                    active.observation_version(
+                        fixture.stage, fixture.bootstrap, fixture.modules, fixture.facts, fixture.progress
+                    )
+                self.assertEqual(len(list(fixture.leases.iterdir())), 1)
+                self.assertNotEqual(fixture.facts["versionChild"]["custody"], "retired")
+                self.assertNotIn("parserVersion", fixture.facts)
+                with self.assertRaises(active.RefusedError):
+                    active.dispose_stage(fixture.stage, fixture.bootstrap)
+                with patch.object(active, "preflight_authority") as authority:
+                    replay = active.observe_arm(fixture.stage, fixture.bootstrap, fixture.modules, fixture.progress)
+                self.assertFalse(replay["complete"])
+                authority.assert_not_called()
+                self.assertEqual(fixture.probe.call_count, int(fault != "custody-write"))
 
 
 if __name__ == "__main__":

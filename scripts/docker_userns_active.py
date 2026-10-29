@@ -29,7 +29,7 @@ from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
     from scripts.docker_userns_custody_child import Outcome
     from scripts.docker_userns_qualification import NativeBinding, State
@@ -40,6 +40,7 @@ PREFIX = "containers-userns-active."
 MAX_STATE = 32768
 MAX_SOURCE = 262144
 MAX_OUTPUT = 65536
+MAX_VERSION_OUTPUT = 1024
 RESERVE_NS = 60_000_000_000
 FINALIZER_HEADSTART_NS = 15_000_000_000
 PRIVATE_DIRECTORY = 0o700
@@ -51,6 +52,7 @@ MAX_NAMESPACE = 256
 MICROSECONDS = 1_000_000
 PRIVATE_RUNTIME_PREFIX = "/tmp/strukturpiloten-runtime-"  # noqa: S108 - exact existing invocation-owned runtime stores.
 PYTHON = "/usr/bin/python3.14"
+REPORTED_IMAGE_OS = {"amd64": "ubuntu26", "arm64": "ubuntu26-arm64"}
 FILES = (
     "scripts/__init__.py",
     "scripts/docker_userns_active.py",
@@ -142,6 +144,12 @@ FAILURE_PHASES = frozenset(
         "producer-source",
         "producer-proof",
         "producer-output",
+        "observation-entry",
+        "observation-controls",
+        "observation-namespace",
+        "observation-custody",
+        "observation-parser-version",
+        "observation-complete",
         "client-response",
         "prepared",
         "arm-intent",
@@ -177,7 +185,18 @@ FAILURE_REASONS = frozenset(
     }
 )
 FAILURE_OPERATIONS = frozenset(
-    {"prepare", "create-intent", "bind", "close", "compile", "owner", "dispose-stage", "producer", "bootstrap"}
+    {
+        "prepare",
+        "create-intent",
+        "bind",
+        "close",
+        "compile",
+        "owner",
+        "dispose-stage",
+        "producer",
+        "bootstrap",
+        "observe-arm",
+    }
 )
 FAILURE_CONTEXT = ("candidate", "run", "attempt", "job", "image", "architecture", "phase")
 FAILURE_STATES = frozenset(
@@ -651,10 +670,10 @@ class Clock:
         return time.monotonic_ns()
 
 
-def root_preflight(
+def preflight_authority(
     stage: Path, bootstrap: dict[str, Any], modules: SimpleNamespace, *, progress: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    """Check actual fixed OS/tool/content facts, separate from workflow provenance."""
+    """Check the immutable source and strict reported workflow provenance only."""
     progress = {} if progress is None else progress
     progress["phase"] = "preflight-source"
     context = bootstrap["context"]
@@ -694,7 +713,9 @@ def root_preflight(
         and context["ref"] == expected["ref"] == "refs/heads/TheRealBecks/issue527"
         and context["job"] == expected["job"] == "smoke-build"
         and context["image"] == expected["image"] == "docker-29-conformance-rootless"
-        and context["imageOS"] == expected["imageOS"] == "ubuntu26"
+        and expected["imageOS"] == "ubuntu26"
+        and context["architecture"] in REPORTED_IMAGE_OS
+        and context["imageOS"] == REPORTED_IMAGE_OS[context["architecture"]]
         and context["validationProfile"] == expected["validationProfile"] == "docker-rootless-diagnostic"
         and modules.qualification.validation_profile(context["validationProfileRequested"])
         == context["validationProfile"]
@@ -702,7 +723,16 @@ def root_preflight(
         and re.fullmatch(r"[0-9a-f]{40}", context["candidate"])
         and re.fullmatch(r"[0-9]{8}\.[0-9]+\.[0-9]+", context["imageVersion"])
     )
-    cohort = admission["cohort"]
+    return admission
+
+
+def collect_host_facts(
+    modules: SimpleNamespace,
+    progress: dict[str, Any],
+    facts: dict[str, Any],
+    evaluate: Callable[[str, dict[str, Any]], None],
+) -> None:
+    """Collect the same bounded fixed OS/host facts; the caller owns compatibility evaluation."""
     progress["phase"] = "preflight-os-release"
     distro_raw, _ = os_release(modules)
     comparison(progress, "preflight-os-release", matched=True)
@@ -711,19 +741,43 @@ def root_preflight(
         for line in distro_raw.decode("ascii").splitlines()
         if "=" in line and not line.startswith("#")
     )
-    comparison(
-        progress,
-        "preflight-os-values",
-        distro.get("ID", "").strip('"') == cohort["osID"] == "ubuntu"
-        and distro.get("VERSION_ID", "").strip('"') == cohort["osVersion"] == "26.04",
-    )
+    os_facts = {"osID": distro.get("ID", "").strip('"'), "osVersion": distro.get("VERSION_ID", "").strip('"')}
+    require(re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", os_facts["osID"]))
+    require(re.fullmatch(r"[0-9][0-9.]{0,31}", os_facts["osVersion"]))
+    evaluate("os", os_facts)
+    facts.update(os_facts)
     progress["phase"] = "preflight-host"
     actual = os.uname()
-    machine = {"amd64": "x86_64", "arm64": "aarch64"}.get(context["architecture"])
-    require(actual.machine == machine)
-    if context["architecture"] == "amd64":
-        require(actual.machine == cohort["machine"] and actual.release == cohort["kernel"])
-    comparison(progress, "preflight-host", matched=True)
+    require(re.fullmatch(r"[A-Za-z0-9_.+-]{1,128}", actual.machine))
+    require(re.fullmatch(r"[A-Za-z0-9_.+-]{1,128}", actual.release))
+    host_facts = {"machine": actual.machine, "kernel": actual.release}
+    evaluate("host", host_facts)
+    facts.update(host_facts)
+
+
+def root_preflight(
+    stage: Path, bootstrap: dict[str, Any], modules: SimpleNamespace, *, progress: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Evaluate the collected facts against the reviewed compatibility contract."""
+    progress = {} if progress is None else progress
+    admission = preflight_authority(stage, bootstrap, modules, progress=progress)
+    context, cohort = bootstrap["context"], admission["cohort"]
+
+    def evaluate(kind: str, facts: dict[str, Any]) -> None:
+        if kind == "os":
+            comparison(
+                progress,
+                "preflight-os-values",
+                facts["osID"] == cohort["osID"] == "ubuntu" and facts["osVersion"] == cohort["osVersion"] == "26.04",
+            )
+        else:
+            require(facts["machine"] == {"amd64": "x86_64", "arm64": "aarch64"}[context["architecture"]])
+            if context["architecture"] == "amd64":
+                require(facts["machine"] == cohort["machine"] and facts["kernel"] == cohort["kernel"])
+            comparison(progress, "preflight-host", matched=True)
+
+    facts: dict[str, Any] = {}
+    collect_host_facts(modules, progress, facts, evaluate)
     progress["phase"] = "preflight-controls"
     check(bootstrap["deadlineNs"] - RESERVE_NS)
     controls = modules.qualification.observe_controls(bootstrap["deadlineNs"] - RESERVE_NS)
@@ -733,10 +787,7 @@ def root_preflight(
     return {
         "controls": asdict(controls),
         "files": files,
-        "osID": distro["ID"].strip('"'),
-        "osVersion": distro["VERSION_ID"].strip('"'),
-        "machine": actual.machine,
-        "kernel": actual.release,
+        **facts,
         "imageVersion": context["imageVersion"],
         "imageVersionKind": "workflow-reported-provenance-not-vm-attestation",
         "validationProfile": context["validationProfile"],
@@ -748,6 +799,23 @@ def cohort_files(
     modules: SimpleNamespace, context: dict[str, Any], cohort: dict[str, Any], progress: dict[str, Any]
 ) -> dict[str, Any]:
     """Read the same fixed cohort leaves and retain only completed comparison booleans on failure."""
+
+    def evaluate(key: str, raw: bytes, phase: str) -> None:
+        if context["architecture"] == "amd64" or key not in {"parserSha256", "interpreterSha256"}:
+            comparison(progress, phase, digest(raw) == cohort[key])
+
+    files: dict[str, Any] = {}
+    collect_cohort_files(modules, progress, files, evaluate)
+    return files
+
+
+def collect_cohort_files(
+    modules: SimpleNamespace,
+    progress: dict[str, Any],
+    files: dict[str, Any],
+    evaluate: Callable[[str, bytes, str], None],
+) -> None:
+    """Read only the fixed trusted leaves, independently of expected compatibility hashes."""
     paths = {
         "parserSha256": (Path("/usr/sbin/apparmor_parser"), 16 * 1024 * 1024),
         "abiSha256": (Path("/etc/apparmor.d/abi/4.0"), 65536),
@@ -755,7 +823,6 @@ def cohort_files(
         "policyVersion9Sha256": (Path("/sys/kernel/security/apparmor/features/policy/versions/v9"), 4096),
         "interpreterSha256": (Path(PYTHON), 16 * 1024 * 1024),
     }
-    files = {}
     phases = {
         "parserSha256": "preflight-parser-hash",
         "abiSha256": "preflight-abi-hash",
@@ -766,8 +833,7 @@ def cohort_files(
     for key, (path, limit) in paths.items():
         progress["phase"] = phases[key]
         raw, identity = modules.host.read_root(path, limit)
-        if context["architecture"] == "amd64" or key not in {"parserSha256", "interpreterSha256"}:
-            comparison(progress, phases[key], digest(raw) == cohort[key])
+        evaluate(key, raw, phases[key])
         if key in {"parserSha256", "interpreterSha256"}:
             progress["phase"] = "preflight-capabilities"
             require(raw.startswith(b"\x7fELF") and identity.mode & 0o111 and not identity.mode & 0o7022)
@@ -782,7 +848,6 @@ def cohort_files(
             finally:
                 os.close(descriptor)
         files[key] = {"sha256": digest(raw), "identity": asdict(identity)}
-    return files
 
 
 def compile_worker(bootstrap: dict[str, Any], modules: SimpleNamespace, directory: Path) -> dict[str, Any]:
@@ -2157,11 +2222,214 @@ def dispose_stage(stage: Path, bootstrap: dict[str, Any]) -> None:
     stage.rmdir()
 
 
+def observation_controls(modules: SimpleNamespace, deadline_ns: int, facts: dict[str, Any]) -> None:
+    """Collect the existing fixed control leaves without turning their values into admission."""
+    qualification = modules.qualification
+    for key, path in (
+        ("enabled", qualification.reader.ENABLED),
+        ("restricted_userns", qualification.reader.RESTRICT),
+        ("maximum_userns", qualification.reader.USERNS),
+        ("legacy_clone", qualification.LEGACY_CLONE),
+    ):
+        check(deadline_ns)
+        try:
+            raw = qualification._fixed_read(path)  # noqa: SLF001 - reuse the same bounded fixed-leaf reader only.
+        except OSError as error:
+            require(key == "legacy_clone" and error.errno == errno.ENOENT)
+            facts[key] = None
+        else:
+            if key == "enabled":
+                require(raw in {b"Y", b"N"})
+                facts[key] = raw == b"Y"
+            else:
+                facts[key] = qualification._scalar(raw)  # noqa: SLF001 - preserve the existing scalar bounds.
+    check(deadline_ns)
+
+
+class ObservationMarker:
+    """Durable observation-only pending custody; its name cannot address an active RPC lease."""
+
+    def __init__(self, stage: Path, binding: dict[str, Any], stack: ExitStack) -> None:
+        """Persist an exclusive marker and its parent before any version child can start."""
+        self.parent = stage / "leases"
+        info = self.parent.lstat()
+        require(stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and stat.S_IMODE(info.st_mode) == PRIVATE_DIRECTORY)
+        self.parent_identity = (info.st_dev, info.st_ino)
+        self.parent_fd = os.open(self.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        stack.callback(os.close, self.parent_fd)
+        require((os.fstat(self.parent_fd).st_dev, os.fstat(self.parent_fd).st_ino) == self.parent_identity)
+        self.name = "observation-" + secrets.token_hex(16)
+        os.mkdir(self.name, mode=PRIVATE_DIRECTORY, dir_fd=self.parent_fd)
+        os.fsync(self.parent_fd)
+        self.path = self.parent / self.name
+        self.descriptor = os.open(
+            self.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=self.parent_fd
+        )
+        stack.callback(os.close, self.descriptor)
+        self.raw = encoded({"schemaVersion": 1, "kind": "arm-observation-pending", "qualification": "none", **binding})
+        write_leaf(self.path, "pending.json", self.raw)
+        info = os.fstat(self.descriptor)
+        require(stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and stat.S_IMODE(info.st_mode) == PRIVATE_DIRECTORY)
+        self.identity = mark(info)
+        require(mark(self.path.lstat()) == self.identity)
+
+    def retire(self) -> None:
+        """Remove only the held marker after the caller independently proves child death and tool binding."""
+        parent = self.parent.lstat()
+        require((parent.st_dev, parent.st_ino) == self.parent_identity)
+        require(
+            stat.S_ISDIR(parent.st_mode) and parent.st_uid == 0 and stat.S_IMODE(parent.st_mode) == PRIVATE_DIRECTORY
+        )
+        require(mark(self.path.lstat()) == mark(os.fstat(self.descriptor)) == self.identity)
+        require({path.name for path in self.path.iterdir()} == {"pending.json"})
+        require(root_bytes(self.path / "pending.json") == self.raw)
+        os.unlink("pending.json", dir_fd=self.descriptor)
+        os.fsync(self.descriptor)
+        os.rmdir(self.name, dir_fd=self.parent_fd)
+        os.fsync(self.parent_fd)
+
+
+def observation_version(
+    stage: Path, bootstrap: dict[str, Any], modules: SimpleNamespace, facts: dict[str, Any], progress: dict[str, Any]
+) -> None:
+    """Use only the existing dropped-ID version probe with same-job held tool identities."""
+    end = min(bootstrap["deadlineNs"] - RESERVE_NS, time.monotonic_ns() + 10_000_000_000)
+    cutoff = min(end - 1_000_000_000, time.monotonic_ns() + 5_000_000_000)
+    check(cutoff)
+    with ExitStack() as stack:
+        held = {}
+        for key, path in (("interpreterSha256", Path(PYTHON)), ("parserSha256", Path("/usr/sbin/apparmor_parser"))):
+            require(modules.host.safe_path(path) == path)
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            stack.callback(os.close, descriptor)
+            held[key] = (path, descriptor)
+
+        def recheck() -> None:
+            for key, (path, descriptor) in held.items():
+                expected = facts["files"][key]
+                require(asdict(modules.host.identity(os.fstat(descriptor))) == expected["identity"])
+                require(digest(modules.child.bytes_at(descriptor, 16 * 1024 * 1024)) == expected["sha256"])
+                require(asdict(modules.host.identity(os.fstat(descriptor))) == expected["identity"])
+                require(asdict(modules.host.identity(path.lstat())) == expected["identity"])
+
+        recheck()
+        progress["phase"] = "observation-custody"
+        state = facts["versionChild"] = {"lifetime": "never-started", "custody": "creation-uncertain"}
+        bootstrap_hash = digest(root_bytes(stage / "bootstrap.json"))
+        marker = ObservationMarker(
+            stage,
+            {
+                "bootstrapSha256": bootstrap_hash,
+                "stageIdentity": bootstrap["stageIdentity"],
+                "context": bootstrap["context"],
+                "tools": {key: facts["files"][key] for key in held},
+                "uid": bootstrap["uid"],
+                "gid": bootstrap["gid"],
+                "deadlineNs": cutoff,
+                "cleanupDeadlineNs": end,
+            },
+            stack,
+        )
+        state.update(lifetime="unknown", custody="retained")
+
+        def retire() -> None:
+            require(bootstrap["stageIdentity"] == [stage.lstat().st_dev, stage.lstat().st_ino])
+            require(digest(root_bytes(stage / "bootstrap.json")) == bootstrap_hash)
+            recheck()
+            marker.retire()
+            state["custody"] = "retired"
+
+        progress["phase"] = "observation-parser-version"
+        try:
+            outcome = modules.child.probe(
+                modules.child.Interpreter(held["interpreterSha256"][1], facts["files"]["interpreterSha256"]["sha256"]),
+                held["parserSha256"][1],
+                "parser-version",
+                modules.child.Build("version", bootstrap["uid"], bootstrap["gid"], cutoff, end),
+                Clock(),
+            )
+        except BaseException as error:
+            if type(error) is modules.child.ChildError:
+                if error.lifetime is modules.child.Lifetime.DEAD:
+                    state["lifetime"] = "proven-dead"
+                    retire()
+                elif error.lifetime is modules.child.Lifetime.NEVER_STARTED:
+                    state["lifetime"] = "never-started"
+            raise
+        else:
+            require(type(outcome) is modules.child.Outcome and outcome.dead is True)
+            state["lifetime"] = "proven-dead"
+            retire()
+            require(type(outcome.policy) is bytes and len(outcome.policy) <= MAX_VERSION_OUTPUT)
+            version = re.fullmatch(
+                rb"AppArmor parser version ([0-9]{1,3}(?:\.[0-9]{1,3}){1,3})\n[^\x00]{0,900}", outcome.policy
+            )
+            require(version is not None)
+            facts["parserVersion"] = version[1].decode("ascii")
+
+
+def arm_observation_receipt(
+    progress: dict[str, Any], facts: dict[str, Any], error: BaseException | None = None
+) -> dict[str, Any]:
+    """Report bounded observations without granting active, native, compatibility, or cleanup authority."""
+    return {
+        "schemaVersion": 1,
+        "consumer": CONSUMER,
+        "kind": "arm-cohort-observation",
+        "qualification": "none",
+        "disposition": "ARM_NOT_ADMITTED",
+        "activeAuthority": False,
+        "cleanupAuthority": False,
+        "nativeQualification": False,
+        "complete": error is None,
+        "context": failure_context(progress.get("context", {})),
+        "facts": facts,
+        "failure": failure_receipt(progress, error) if error is not None else None,
+    }
+
+
+def observe_arm(
+    stage: Path, bootstrap: dict[str, Any], modules: SimpleNamespace, progress: dict[str, Any]
+) -> dict[str, Any]:
+    """Observe ARM only; never construct a ProfileLease, invoke root RPC, compile, load, or create guests."""
+    facts: dict[str, Any] = {}
+    try:
+        progress["phase"] = "observation-entry"
+        require(bootstrap["context"]["architecture"] == "arm64")
+        require(not list((stage / "leases").iterdir()))
+        admission = preflight_authority(stage, bootstrap, modules, progress=progress)
+        facts.update(
+            reportedImageOS=bootstrap["context"]["imageOS"],
+            imageVersion=bootstrap["context"]["imageVersion"],
+            imageVersionKind="workflow-reported-provenance-not-vm-attestation",
+            sourceFilesSha256=digest(encoded(bootstrap["files"])),
+            sourceManifestSha256=admission["sourceManifestSha256"],
+            pythonVersion=list(sys.version_info),
+            pythonImplementation=sys.implementation.name,
+            toolTrust="same-job-root-owned-preinstalled-tool-exception-not-compatibility-admission",
+        )
+        collect_host_facts(modules, progress, facts, lambda _kind, _facts: None)
+        progress["phase"] = "observation-controls"
+        facts["controls"] = {}
+        observation_controls(modules, bootstrap["deadlineNs"] - RESERVE_NS, facts["controls"])
+        facts["files"] = {}
+        collect_cohort_files(modules, progress, facts["files"], lambda _key, _raw, _phase: None)
+        progress["phase"] = "observation-namespace"
+        facts["namespace"] = namespace_snapshot(modules, admission)
+        observation_version(stage, bootstrap, modules, facts, progress)
+        check(bootstrap["deadlineNs"] - RESERVE_NS)
+        progress["phase"] = "observation-complete"
+    except (Exception, KeyboardInterrupt) as error:  # noqa: BLE001 - keep only bounded completed facts and finite failure.
+        return arm_observation_receipt(progress, facts, error)
+    return arm_observation_receipt(progress, facts)
+
+
 def main() -> int:
     """Dispatch only authenticated staged root routes with bounded closed output."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "operation", choices=("prepare", "create-intent", "bind", "close", "compile", "owner", "dispose-stage")
+        "operation",
+        choices=("prepare", "create-intent", "bind", "close", "compile", "owner", "dispose-stage", "observe-arm"),
     )
     parser.add_argument("stage", type=Path)
     parser.add_argument("name", nargs="?", default="new")
@@ -2187,6 +2455,12 @@ def main() -> int:
                 store.close()
         elif args.operation == "owner":
             return owner_main(args.stage, bootstrap, modules, args.name, args.kind)
+        elif args.operation == "observe-arm":
+            with stage_lock(args.stage):
+                require(args.name == "new" and args.kind is None and args.request == "e30=")
+                result = observe_arm(args.stage, bootstrap, modules, progress)
+            sys.stdout.buffer.write(encoded(result))
+            return 1
         elif args.operation == "dispose-stage":
             with stage_lock(args.stage):
                 dispose_stage(args.stage, bootstrap)
@@ -2196,7 +2470,12 @@ def main() -> int:
                 result = root_rpc(args.stage, bootstrap, modules, args)
         sys.stdout.buffer.write(encoded(result))
     except (Exception, KeyboardInterrupt) as error:  # noqa: BLE001 - serialize only the closed journal, never raw failures.
-        sys.stdout.buffer.write(encoded(failure_receipt(progress, error)))
+        result = (
+            arm_observation_receipt(progress, {}, error)
+            if args.operation == "observe-arm"
+            else failure_receipt(progress, error)
+        )
+        sys.stdout.buffer.write(encoded(result))
         return 1
     else:
         return 0
