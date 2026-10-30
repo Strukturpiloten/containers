@@ -15,6 +15,7 @@ from scripts.runtime_resource_budgets import (
     CPU_LIMIT,
     MEMORY_LIMIT_BYTES,
     PIDS_LIMIT,
+    STORE_SAMPLE_ATTEMPTS,
     IsolatedStoreDiskBudget,
     outer_container_limits,
     verify_outer_container_limits,
@@ -137,6 +138,38 @@ class DockerResourceBudgetTests(unittest.TestCase):
             budget._measure()
         kill_group.assert_called_once_with(process.pid, signal.SIGKILL)
         self.assertEqual(process.communicate.call_count, 2)
+
+    def test_disk_sampler_recovers_after_repeated_journal_disappearance(self) -> None:
+        ctx = SimpleNamespace(directory=Path("task-owned-store"), _sudo=[], checks=[])
+        budget = IsolatedStoreDiskBudget(ctx)
+        vanished = (1, "1024\ttask-owned-store", "du: cannot access 'db.sql-journal': No such file or directory")
+        budget._du_once = MagicMock(side_effect=[vanished, vanished, vanished, (0, "4096\ttask-owned-store", "")])
+        with patch("scripts.runtime_resource_budgets.time.sleep") as sleep:
+            budget._measure()
+        self.assertEqual(budget.samples, 1)
+        self.assertEqual(budget.peak_bytes, 4096)  # Only the successful scan counts.
+        self.assertEqual(budget.transient_retries, 3)
+        self.assertEqual(sleep.call_count, 3)
+        self.assertLessEqual(sum(call.args[0] for call in sleep.call_args_list), 0.35 + 1e-9)
+        self.assertTrue(all(call.args[0] > 0 for call in sleep.call_args_list))
+
+    def test_disk_sampler_exhaustion_and_nontransient_errors_fail_closed(self) -> None:
+        for status, diagnostic, attempts in (
+            (1, "du: cannot access 'db.sql-journal': No such file or directory", STORE_SAMPLE_ATTEMPTS),
+            (1, "du: cannot read 'secret': Permission denied", 1),
+            (1, "du: No such file or directory\ndu: Permission denied", 1),
+            (124, "du: cannot access 'db.sql-journal': No such file or directory", 1),
+            (137, "du: cannot access 'db.sql-journal': No such file or directory", 1),
+        ):
+            with self.subTest(status=status, diagnostic=diagnostic):
+                ctx = SimpleNamespace(directory=Path("task-owned-store"), _sudo=[], checks=[])
+                budget = IsolatedStoreDiskBudget(ctx)
+                budget._du_once = MagicMock(return_value=(status, "1024\ttask-owned-store", diagnostic))
+                with patch("scripts.runtime_resource_budgets.time.sleep"), self.assertRaises(ProbeError):
+                    budget._measure()
+                self.assertEqual(budget._du_once.call_count, attempts)
+                self.assertEqual(budget.samples, 0)
+                self.assertEqual(budget.peak_bytes, 0)
 
 
 if __name__ == "__main__":

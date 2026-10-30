@@ -9,6 +9,7 @@ import os
 import signal
 import subprocess
 import threading
+import time
 from typing import TYPE_CHECKING, Self
 
 from scripts.runtime_tests import ProbeError
@@ -24,6 +25,8 @@ PIDS_LIMIT = 512
 STORE_LIMIT_BYTES = 12 * 1024**3
 STORE_POLL_SECONDS = 2.0
 STORE_SAMPLE_TIMEOUT_SECONDS = 5
+STORE_SAMPLE_ATTEMPTS = 4
+STORE_SAMPLE_RETRY_DELAY_SECONDS = 0.05
 
 
 def outer_container_limits() -> tuple[str, ...]:
@@ -156,13 +159,19 @@ class IsolatedStoreDiskBudget:
         return process.returncode, stdout, stderr
 
     def _measure(self) -> None:
-        for attempt in range(2):
+        for attempt in range(STORE_SAMPLE_ATTEMPTS):
             status, stdout, stderr = self._du_once()
             if status == 0:
                 break
             diagnostics = [line for line in stderr.splitlines() if line.strip()]
-            if attempt == 0 and diagnostics and all("No such file or directory" in line for line in diagnostics):
+            if (
+                status == 1
+                and attempt < STORE_SAMPLE_ATTEMPTS - 1
+                and diagnostics
+                and all("No such file or directory" in line for line in diagnostics)
+            ):
                 self.transient_retries += 1
+                time.sleep(STORE_SAMPLE_RETRY_DELAY_SECONDS * 2**attempt)
                 continue
             raise ProbeError(f"isolated Docker store disk measurement failed (exit {status}): {stderr.strip()}")
         try:
@@ -193,6 +202,8 @@ class IsolatedStoreDiskBudget:
                 "overshootBytes": max(0, self.peak_bytes - self.limit_bytes),
                 "pollIntervalSeconds": self.poll_seconds,
                 "sampleTimeoutSeconds": STORE_SAMPLE_TIMEOUT_SECONDS,
+                "sampleMaxAttempts": STORE_SAMPLE_ATTEMPTS,
+                "sampleInitialRetryDelaySeconds": STORE_SAMPLE_RETRY_DELAY_SECONDS,
                 "samples": self.samples,
                 "transientRetries": self.transient_retries,
                 "error": self._error,
