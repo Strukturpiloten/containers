@@ -328,7 +328,7 @@ class BoundedAdmissionTests(unittest.TestCase):
     def test_exact_allowset_schema_and_revision_cannot_be_replayed(self) -> None:
         path = Path(__file__).resolve().parents[1] / ".github/docker-userns-active-admission.json"
         document = json.loads(path.read_bytes())
-        self.assertEqual(document["schemaVersion"], 3)
+        self.assertEqual(document["schemaVersion"], 4)
         self.assertEqual(document["maintainedContext"]["validationProfiles"], ["full", PROFILE])
         for values in (
             ["full"],

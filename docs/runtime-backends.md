@@ -666,19 +666,52 @@ timed-out validation attempts remain nonpasses.
 
 ## Scoped issue527 prerequisite and experimental candidate
 
-The `containers-ubuntu26-userns-active` contract admits a maintained AMD64 or ARM64
-prerequisite attempt only through the existing `ci.yml` `workflow_dispatch`
-with `full` or `docker-rootless-qualification`, `smoke-build`, the declared
-`docker-29-conformance-rootless` fixture, and its private outer Docker backend.
-The runner must be repository-owned GitHub-hosted Linux with the complete reviewed cohort
-selected for that architecture. Candidate, workflow source and checkout must be identical. The fixed
-root bootstrap derives the purpose and exact branch/tag ref from the dispatch
-event and verifies the corresponding workflow ref and connected admission blob;
-unprivileged labels cannot select authority. Both ordinary selectors keep
-`focused_runtime=none` and workload mode `qualification`, even though the raw
-workflow input defaults to `witness-diagnostic`. The bounded profile selects exactly this fixture and both architectures; it has
-its own check/concurrency class and cannot satisfy full `Required CI`. The full
-matrix, original workload and budgets are unchanged.
+The `containers-ubuntu26-userns-active` source contract admits a maintained
+prerequisite attempt for the declared `docker-29-conformance-rootless` fixture
+and private outer Docker backend through these finite original caller tuples:
+
+| Workflow | Original event | Native leaf job | Source/ref |
+| --- | --- | --- | --- |
+| `ci.yml` | Same-repository `pull_request` | `smoke-build` | Synthetic merge SHA and `refs/pull/<number>/merge` |
+| `ci.yml` | `merge_group` / `checks_requested` | `smoke-build` | Actual queue candidate SHA/ref |
+| `ci.yml` | `workflow_dispatch` | `smoke-build` | Selected branch/tag, `full` or `docker-rootless-qualification` |
+| `publish-images.yml` | Nondeleted main `push` | `build` | Main pushed SHA/ref |
+| `publish-images.yml` | `schedule` | `build` | Main/default-branch SHA/ref and actual schedule |
+| `publish-images.yml` | `workflow_dispatch` | `build` | Selected branch/tag and `all`, `image` or `family` scope |
+
+The runner must be repository-owned GitHub-hosted Linux with the complete
+reviewed cohort for its architecture. Candidate, workflow source, actual
+checkout, build plan and OCI revision must agree. The producer and fixed root
+bootstrap independently classify the original event, workflow path, leaf job,
+ref and bounded payload facts before staging source. Same-repository PRs require
+both repository identities, head/base metadata and a matching PR number/merge
+ref; the PR head cannot replace the synthetic merge candidate. Before any tree
+traversal or stage write, producer and fixed root independently verify that the
+hash-authenticated candidate commit has exactly two ordered parents: event base,
+then event head. The webhook's cached `merge_commit_sha` is advisory: absent,
+null or a well-formed nonnull SHA is accepted even when stale, while malformed
+values refuse. It cannot select or approve a source. Only actual commit-header
+parents count; message text and signed-header continuations do not. Queue identity
+comes from the queue event rather than a constituent PR. Local reusable
+publication retains the caller workflow/event and actual leaf job `build`;
+`workflow_call`, the callee path and stage display labels cannot substitute.
+
+The existing `TRUSTED_RUNTIME` model is preserved: same-repository PRs and
+non-PR routes retain their existing runtime trust, while fork or missing PR
+metadata cannot gain this admission. There is no actor lookup, permission API,
+token service or new approval flow. Activation and trust Booleans alone do not
+grant root authority. Unknown workflows/events/jobs, unrelated sources and local
+or self-hosted contexts refuse.
+
+Automatic CI and publication contexts use effective profile `full` with an
+empty raw selector. Injected CI profile inputs cannot select bounded or
+diagnostic work there. Publication's `full` records describe ordinary per-image
+work, without asserting repository-wide full-check coverage; publication has no
+CI validation-profile input. All ordinary routes retain `focused_runtime=none`
+and workload mode `qualification`. The manual bounded profile selects exactly
+this fixture and both architectures, has its own check/concurrency class and
+cannot satisfy full `Required CI`. The full matrix, original workload and
+budgets are unchanged.
 
 The existing diagnostic route remains restricted to
 `validation_profile=docker-rootless-diagnostic` on
@@ -692,10 +725,12 @@ unchanged. Admission itself records `qualification: none`; it permits an attempt
 not native qualification, release or publication permission.
 
 Bootstrap transport/stage, native lease records, scoped receipts and disposal
-acknowledgments use schema 2. Admission uses schema 3: its maintained policy
+acknowledgments use schema 3. Admission uses schema 4: its maintained policy
 contains the exact `validationProfiles` allowset `full` and
 `docker-rootless-qualification`, while each actual context/receipt retains one
-canonical profile and the exact raw request. Unknown, duplicate, delimited or
+canonical profile and the exact raw request. The exact maintained-caller table
+and all 34 workflow-context fields are independently checked by producer and
+root; unused caller-fact fields must be empty. Unknown, duplicate, delimited or
 contradictory allowsets refuse in both helper and fixed root bootstrap. Prior
 revision artifacts cannot be relabelled or replayed into this admission.
 The existing closed helper-file list stays at
@@ -726,7 +761,7 @@ Actual actor preflight reads the fixed AppArmor-enabled, restricted-userns and
 maximum-userns scalar files. The legacy `unprivileged_userns_clone` control must
 be `1` or explicitly absent with ENOENT; unreadable, malformed, disabled, or
 changed controls refuse. Diagnostic ARM remains observation-only and refuses
-load; maintained manual ARM uses its own complete finite cohort.
+load; maintained ARM uses its own complete finite cohort.
 
 `ImageVersion` is the workflow-reported per-job provenance value. It is frozen
 once and compared exactly across bootstrap, phase custody, receipts and evidence
@@ -1019,13 +1054,24 @@ until the runtime command and ordinary authority guard both succeed. A failed
 producing command or failed/uncertain evidence retirement cannot be rescued by a
 detached passing record.
 
-PR, push, merge-group, schedule, publication-build and arbitrary local callers
-remain outside maintained activation. Their required private Docker route
-refuses without the admitted prerequisite. Diagnostic ARM observation and load
-refusal remain unchanged. Source admission for both architectures does not make
-the full matrix pass; each real native phase and aggregate must succeed. Fresh exact-source independent review, complete
-gates and native acceptance are separate requirements; this source change
-claims no new passing native run or publication eligibility.
+Arbitrary local callers remain outside maintained activation. The required
+private Docker route refuses without an admitted prerequisite. Diagnostic ARM
+observation and load refusal remain unchanged. Source admission for both
+architectures does not make the full matrix pass; each real native phase and
+aggregate must succeed. Archived maintained facts are validated intrinsically,
+so a current `publish` or `finalize` consumer does not replace the producing
+`build` identity. Valid earlier attempts in the same run remain acceptable to
+publisher/release validators; future attempts, cross-run/source/archive/config
+records, forged disposal and missing scan/publication records refuse.
+
+The earlier bounded native [run 41135616739, attempt 1](https://github.com/Strukturpiloten/containers/actions/runs/41135616739)
+validated source `d8e4a5864b45577dfe4d0152b43d888ab3c970ef`: each architecture
+passed 163 control and 194 enforcement checks, reconciled exactly one original
+allocator OOM death with zero unexplained kills, and passed profile, custody,
+disposal and scan checks. This is historical bounded fixture evidence. It does
+not validate the changed caller source, full Required CI, BoxFerry/Lens
+compatibility, or publication. Fresh exact-source independent review, complete
+gates and native acceptance remain separate requirements.
 
 The shared Action's ordinary post-runtime check, architecture publisher gate,
 release evidence verifier and catalogue all use the same trusted-metadata

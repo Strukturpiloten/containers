@@ -79,17 +79,25 @@ or publication gates. There is no image publication. The default manual profile
 is `full`; PR and merge-queue runs always ignore this input and retain their
 ordinary selection. Use the full gates before merging or publishing.
 
-The full and bounded qualification manual profiles admit a maintained scoped
-prerequisite attempt for the Docker rootless conformance fixture on reviewed
-AMD64 or ARM64 GitHub-hosted Linux, with its complete reviewed cohort. It binds the exact selected branch/tag ref and source,
-run, attempt and producing job; both native phases, original accounting, cleanup
-and stage disposal must complete before ordinary native authority is recorded.
-The raw default focused input does not select a diagnostic workload in full mode.
-This does not enable PR/push/merge/schedule/publication/local callers. Diagnostic
-ARM still observes/refuses; maintained manual ARM may attempt the same
-strict lifecycle after its per-architecture preflight. Full still selects the
-complete matrix, and source support alone cannot make that matrix pass. No native success or publication permission follows from
-admission or offline checks. See the [scoped prerequisite contract](runtime-backends.md#scoped-issue527-prerequisite-and-experimental-candidate).
+The maintained scoped prerequisite source contract also recognizes ordinary
+same-repository PR and merge-queue CI, plus main push, scheduled and manual
+publication builds. CI records use native leaf job `smoke-build`; reusable
+publication records retain original `publish-images.yml` caller/event and leaf
+job `build`. PR candidates remain synthetic merges, and queue candidates remain
+the actual queue SHA/ref. Fork or missing PR metadata, unknown callers, source
+mismatches and local/self-hosted contexts refuse. The existing runtime trust
+model is unchanged and no actor-permission service or approval step is added.
+
+Both AMD64 and ARM64 require their complete reviewed hosted cohort, both native
+phases, original accounting, cleanup and authenticated stage disposal before
+ordinary per-image native authority exists. Automatic contexts ignore injected
+CI profile inputs and record ordinary `full` with an empty raw selector;
+publication scope is separate from CI profile selection and does not claim
+repository-wide full-check coverage. Diagnostic ARM still observes/refuses.
+Admission and offline checks do not prove a successful native run, full matrix,
+BoxFerry/Lens compatibility, or publication eligibility. The prior bounded d8
+run qualifies only that historical source. See the [scoped prerequisite contract](runtime-backends.md#scoped-issue527-prerequisite-and-experimental-candidate)
+for exact caller, source and archived-consumer rules.
 
 Run the non-publishing repository checks before a pull request:
 

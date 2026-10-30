@@ -64,8 +64,17 @@ def literal_namespace() -> dict[str, object]:
 class SyntheticProof:
     """Construct an independently framed finite Git object DAG without Git writes."""
 
-    def __init__(self, admission_raw: bytes | None = None) -> None:
-        """Use inert SDK sources and explicit fixture manifest authority."""
+    def __init__(
+        self,
+        admission_raw: bytes | None = None,
+        *,
+        parents: tuple[str, ...] = (),
+        commit_suffix: bytes = (
+            b"author Fixture <fixture@example.invalid> 1 +0000\n"
+            b"committer Fixture <fixture@example.invalid> 1 +0000\n\nfixture\n"
+        ),
+    ) -> None:
+        """Use independently authored commit parents, inert SDK and fixture manifest."""
         self.objects: dict[str, dict[str, str]] = {}
         self.files = {name: (ROOT / name).read_bytes() for name in producer.FILES}
         if admission_raw is not None:
@@ -93,9 +102,8 @@ class SyntheticProof:
             identifier = self.add("tree", b"".join(leaves))
             root_entries.append(b"40000 " + directory.encode() + b"\0" + bytes.fromhex(identifier))
         tree = self.add("tree", b"".join(root_entries))
-        self.candidate = self.add(
-            "commit", f"tree {tree}\nauthor Fixture <fixture@example.invalid> 1 +0000\n\nfixture\n".encode()
-        )
+        parent_headers = b"".join(f"parent {identifier}\n".encode() for identifier in parents)
+        self.candidate = self.add("commit", f"tree {tree}\n".encode() + parent_headers + commit_suffix)
         self.context = workflow_context(candidate=self.candidate)
         self.context["admissionSha256"] = active.digest(self.files[producer.ADMISSION])
 
@@ -108,7 +116,7 @@ class SyntheticProof:
 
     def value(self) -> dict[str, object]:
         return {
-            "schemaVersion": 2,
+            "schemaVersion": 3,
             "consumer": active.CONSUMER,
             "context": self.context,
             "objects": list(self.objects.values()),
@@ -2181,6 +2189,11 @@ class ARMReportedProvenance(unittest.TestCase):
                         "1000",
                         "1000",
                         "1000000000",
+                        environment["GITHUB_REPOSITORY"],
+                        environment["GITHUB_EVENT_NAME"],
+                        environment["GITHUB_REF"],
+                        environment["GITHUB_WORKFLOW_REF"],
+                        environment["GITHUB_JOB"],
                     ],
                     implementation=SimpleNamespace(name="cpython"),
                     version_info=(3, 14, 4, "final", 0),
@@ -2913,7 +2926,9 @@ class MaintainedBootstrapContract(unittest.TestCase):
             "ref": context["ref"],
         }
 
-    def root(self, proof: SyntheticProof, event: dict, *, architecture: str = "amd64") -> tuple[dict, Mock]:
+    def root(
+        self, proof: SyntheticProof, event: dict, *, architecture: str = "amd64", environment: dict | None = None
+    ) -> tuple[dict, Mock]:
         """Run the fixed literal through genuine proof validation, stopping before writes."""
         literal = literal_namespace()
         literal["SOURCE_MANIFEST_SHA256"] = active.digest(proof.files[producer.MANIFEST])
@@ -2929,12 +2944,31 @@ class MaintainedBootstrapContract(unittest.TestCase):
                 "1000",
                 "1000",
                 "1000000000",
+                proof.context["repository"],
+                proof.context["event"],
+                proof.context["ref"],
+                proof.context["workflowRef"],
+                proof.context["job"],
             ],
             implementation=SimpleNamespace(name="cpython"),
             version_info=(3, 14, 4, "final", 0),
             flags=SimpleNamespace(isolated=1, no_site=1),
             dont_write_bytecode=True,
         )
+        if environment is not None:
+            for position, key in {
+                2: "GITHUB_SHA",
+                3: "GITHUB_WORKFLOW_SHA",
+                5: "GITHUB_RUN_ID",
+                6: "GITHUB_RUN_ATTEMPT",
+                8: "ImageVersion",
+                12: "GITHUB_REPOSITORY",
+                13: "GITHUB_EVENT_NAME",
+                14: "GITHUB_REF",
+                15: "GITHUB_WORKFLOW_REF",
+                16: "GITHUB_JOB",
+            }.items():
+                literal["sys"].argv[position] = environment[key]
         literal["os"] = SimpleNamespace(getuid=lambda: 0, geteuid=lambda: 0, urandom=lambda _: b"x" * 16)
         literal["time"] = SimpleNamespace(monotonic_ns=lambda: 1)
         literal["read_input"] = Mock(side_effect=[json.dumps(event).encode(), json.dumps(proof.value()).encode()])
@@ -3117,7 +3151,7 @@ class MaintainedRootBindingContract(unittest.TestCase):
         )
         for fault, native in mutations:
             record = {
-                "schemaVersion": 2,
+                "schemaVersion": 3,
                 "binding": asdict(native),
                 "bindingSha256": native.digest(),
                 "bootstrapSha256": active.digest(b"bootstrap"),

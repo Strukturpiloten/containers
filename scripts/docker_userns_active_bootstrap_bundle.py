@@ -22,12 +22,16 @@ from scripts import docker_userns_active as diagnostic
 from scripts import docker_userns_bootstrap_bundle as git
 from scripts import docker_userns_policy_source as source
 from scripts.docker_userns_qualification import (
+    MAINTAINED_CALLERS,
+    NATIVE_JOBS,
+    PREREQUISITE_SCHEMA,
     QualificationError,
     admission_document,
-    event_scope,
-    selected_manual_ref,
+    caller_context,
+    caller_identity,
+    event_ref,
+    validate_pr_commit,
     validate_workflow_context,
-    validation_profile,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -62,30 +66,48 @@ def require(value: object) -> None:
         raise ValueError(reason)
 
 
-def _selected_environment_ref(environment: dict[str, str], progress: dict[str, Any] | None) -> None:
+def _environment_caller(environment: dict[str, str], progress: dict[str, Any] | None) -> dict[str, str]:
     if progress is not None:
         progress["phase"] = "producer-workflow"
+    identity = {
+        key: environment.get(name, "")
+        for key, name in {
+            "repository": "GITHUB_REPOSITORY",
+            "event": "GITHUB_EVENT_NAME",
+            "ref": "GITHUB_REF",
+            "workflowRef": "GITHUB_WORKFLOW_REF",
+            "job": "GITHUB_JOB",
+            "candidate": "GITHUB_SHA",
+        }.items()
+    }
+    require(
+        identity["event"] in {policy["event"] for policy in MAINTAINED_CALLERS.values()}
+        and identity["job"] in NATIVE_JOBS
+    )
     try:
-        selected = selected_manual_ref(environment.get("GITHUB_REF"))
-    except QualificationError as error:
+        event_ref(identity["ref"])
+    except QualificationError:
         reason = "active-bootstrap-producer-refused"
-        raise ValueError(reason) from error
+        raise ValueError(reason) from None
     if progress is not None:
         progress["phase"] = "producer-workflow-ref"
-    require(environment.get("GITHUB_WORKFLOW_REF") == "Strukturpiloten/containers/.github/workflows/ci.yml@" + selected)
+    try:
+        caller_identity(identity)
+    except QualificationError:
+        reason = "active-bootstrap-producer-refused"
+        raise ValueError(reason) from None
+    return identity
 
 
 def context(
     environment: dict[str, str], architecture: str, *, progress: dict[str, Any] | None = None
 ) -> dict[str, str]:
-    """Bind only the finite reviewed manual contexts, never a publication caller."""
+    """Bind only the reviewed original-event/caller/leaf-job source tuples."""
     expected = {
         "GITHUB_ACTIONS": "true",
         "RUNNER_ENVIRONMENT": "github-hosted",
         "RUNNER_OS": "Linux",
         "GITHUB_REPOSITORY": "Strukturpiloten/containers",
-        "GITHUB_EVENT_NAME": "workflow_dispatch",
-        "GITHUB_JOB": "smoke-build",
         "ImageOS": diagnostic.REPORTED_IMAGE_OS.get(architecture, "ubuntu26"),
     }
 
@@ -96,7 +118,6 @@ def context(
     groups = (
         ("producer-runner-identity", ("GITHUB_ACTIONS", "RUNNER_ENVIRONMENT", "RUNNER_OS")),
         ("producer-repository", ("GITHUB_REPOSITORY",)),
-        ("producer-workflow", ("GITHUB_EVENT_NAME", "GITHUB_JOB")),
         ("producer-image-os", ("ImageOS",)),
     )
     for name, keys in groups:
@@ -124,7 +145,7 @@ def context(
             require(image_os == expected["ImageOS"])
         else:
             require(all(environment.get(key) == expected[key] for key in keys))
-    _selected_environment_ref(environment, progress)
+    identity = _environment_caller(environment, progress)
     phase("producer-architecture")
     require(architecture in {"amd64", "arm64"})
     require(environment.get("RUNNER_ARCH") == {"amd64": "X64", "arm64": "ARM64"}[architecture])
@@ -142,7 +163,7 @@ def context(
             "candidate": selected,
             "run": environment["GITHUB_RUN_ID"],
             "attempt": environment["GITHUB_RUN_ATTEMPT"],
-            "job": expected["GITHUB_JOB"],
+            "job": identity["job"],
             "image": "docker-29-conformance-rootless",
             "architecture": architecture,
         }
@@ -154,28 +175,16 @@ def context(
         raw = stream.read(MAX_EVENT + 1)
     require(len(raw) <= MAX_EVENT)
     event = json.loads(raw, object_pairs_hook=source.unique_object)
-    require(type(event) is dict and type(event.get("inputs", {})) is dict)
+    require(type(event) is dict)
     phase("producer-choice")
-    requested = event.get("inputs", {}).get("validation_profile", "full")
-    canonical = validation_profile(requested)
-    purpose, selected_ref = event_scope(event)
-    phase("producer-workflow")
-    require(environment.get("GITHUB_REF") == selected_ref)
-    phase("producer-workflow-ref")
-    workflow_ref = "Strukturpiloten/containers/.github/workflows/ci.yml@" + selected_ref
-    require(environment.get("GITHUB_WORKFLOW_REF") == workflow_ref)
-    phase("producer-choice")
+    caller = caller_context(event, identity)
     admission_raw = (ROOT / ADMISSION).read_bytes()
     admission = admission_document(admission_raw)
     result = {
         "candidate": selected,
         "workflow": selected,
         "checkout": selected,
-        "repository": expected["GITHUB_REPOSITORY"],
-        "event": "workflow_dispatch",
-        "ref": selected_ref,
-        "workflowRef": workflow_ref,
-        "job": expected["GITHUB_JOB"],
+        **caller,
         "run": environment["GITHUB_RUN_ID"],
         "attempt": environment["GITHUB_RUN_ATTEMPT"],
         "architecture": architecture,
@@ -183,9 +192,6 @@ def context(
         "imageOS": expected["ImageOS"],
         "imageVersion": version,
         "imageVersionKind": "workflow-reported-provenance-not-vm-attestation",
-        "validationProfile": canonical,
-        "validationProfileRequested": requested,
-        "purpose": purpose,
         "admissionRevision": admission["revision"],
         "admissionSha256": hashlib.sha256(admission_raw).hexdigest(),
     }
@@ -193,7 +199,7 @@ def context(
     return result
 
 
-def proof(candidate: str) -> list[dict[str, str]]:
+def proof(candidate: str, context: dict[str, str]) -> list[dict[str, str]]:
     """Reuse only finite raw Git readers; connect the new exact closure independently."""
     objects: dict[str, tuple[str, bytes]] = {}
 
@@ -204,6 +210,7 @@ def proof(candidate: str) -> list[dict[str, str]]:
         return objects[identifier][1]
 
     commit = get("commit", candidate)
+    validate_pr_commit(commit, context)
     header = commit.split(b"\n", 1)[0]
     require(re.fullmatch(rb"tree [0-9a-f]{40}", header))
     for path in FILES:
@@ -235,10 +242,10 @@ def bundle(architecture: str, *, progress: dict[str, Any] | None = None) -> dict
         sdk[item["path"]] = base64.b64encode(raw).decode()
     diagnostic.comparison(progress, "producer-source", matched=True)
     progress["phase"] = "producer-proof"
-    objects = proof(binding["candidate"])
+    objects = proof(binding["candidate"], binding)
     diagnostic.comparison(progress, "producer-proof", matched=True)
     return {
-        "schemaVersion": 2,
+        "schemaVersion": PREREQUISITE_SCHEMA,
         "consumer": CONSUMER,
         "context": binding,
         "objects": objects,

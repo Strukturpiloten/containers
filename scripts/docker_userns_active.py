@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from scripts.docker_userns_qualification import NativeBinding, State
 
 CONSUMER = "containers-ubuntu26-userns-active"
-PREREQUISITE_SCHEMA = 2
+PREREQUISITE_SCHEMA = 3
 ROOT = Path("/run")
 PREFIX = "containers-userns-active."
 MAX_STATE = 32768
@@ -299,7 +299,7 @@ def failure_context(value: dict[str, Any], phase: str | None = None) -> dict[str
         and all(
             type(context[key]) is str and re.fullmatch(r"[1-9][0-9]{0,19}", context[key]) for key in ("run", "attempt")
         )
-        and context["job"] == "smoke-build"
+        and context["job"] in {"smoke-build", "build"}
         and context["image"] == "docker-29-conformance-rootless"
         and context["architecture"] in {"amd64", "arm64"}
         and phase in {None, "clean-control", "enforcement"}
@@ -2063,7 +2063,7 @@ def new_record(
         os.close(pidfd)
         os.close(descriptor)
     return {
-        "schemaVersion": 2,
+        "schemaVersion": PREREQUISITE_SCHEMA,
         "binding": asdict(binding),
         "bindingSha256": binding.digest(),
         "bootstrapSha256": digest(root_bytes(Path(bootstrap["stage"]) / "bootstrap.json")),
@@ -2091,7 +2091,7 @@ def receipt(port: RootPort) -> dict[str, Any]:
     """Export finite qualification evidence without root records or protected values."""
     record = port.record
     return {
-        "schemaVersion": 2,
+        "schemaVersion": PREREQUISITE_SCHEMA,
         "consumer": CONSUMER,
         "qualification": (
             "maintained-prerequisite"
@@ -2636,7 +2636,7 @@ def main() -> int:
                 dispose_stage(args.stage, bootstrap)
             # No positive ack until source removal and the original lock's close.
             result = {
-                "schemaVersion": 2,
+                "schemaVersion": PREREQUISITE_SCHEMA,
                 "consumer": CONSUMER,
                 "stageDisposed": True,
                 "purpose": context["purpose"],

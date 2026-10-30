@@ -889,18 +889,26 @@ class PhaseExecutionTests(unittest.TestCase):
             cancellation=runtime_tests._PairCancellation(),
             expected_identity=expected,
         )
+        fixture_context = (case.scoped_receipt or {}).get("workflowContext")
+        if fixture_context is None:
+            fixture_context = scoped_receipt(phase=case.phase.value, architecture=case.architecture)["workflowContext"]
         with (
             patch.dict(
                 os.environ,
                 {
-                    "GITHUB_EVENT_NAME": "workflow_dispatch",
-                    "GITHUB_REF": "refs/heads/TheRealBecks/issue527",
-                    "GITHUB_JOB": "smoke-build",
-                    "GITHUB_RUN_ID": "1",
-                    "GITHUB_RUN_ATTEMPT": "2",
-                    "GITHUB_SHA": "a" * 40,
-                    "ImageVersion": "20261026.180.1" if case.architecture == "amd64" else "20261026.168.1",
+                    "GITHUB_REPOSITORY": fixture_context["repository"],
+                    "GITHUB_EVENT_NAME": fixture_context["event"],
+                    "GITHUB_REF": fixture_context["ref"],
+                    "GITHUB_WORKFLOW_REF": fixture_context["workflowRef"],
+                    "GITHUB_WORKFLOW_SHA": fixture_context["workflow"],
+                    "GITHUB_JOB": fixture_context["job"],
+                    "GITHUB_RUN_ID": fixture_context["run"],
+                    "GITHUB_RUN_ATTEMPT": fixture_context["attempt"],
+                    "GITHUB_SHA": fixture_context["candidate"],
+                    "ImageOS": fixture_context["imageOS"],
+                    "ImageVersion": fixture_context["imageVersion"],
                 },
+                clear=True,
             ),
             patch("scripts.runtime_tests.time.monotonic", side_effect=lambda: clock[0]),
             patch("scripts.evidence_gate._active_validation_request", return_value="docker-rootless-diagnostic"),
@@ -1275,7 +1283,7 @@ class PairAuthorityTests(unittest.TestCase):
                 "image": "docker-29-conformance-rootless",
                 "runId": "1",
                 "runAttempt": "2",
-                "producingJob": "smoke-build",
+                "producingJob": actual[0]["producingJob"],
                 "status": "failed",
                 "checks": [],
                 "host": {"outerEngineSelection": "profile"},

@@ -26,13 +26,79 @@ if TYPE_CHECKING:
 LEGACY_CLONE = Path("/proc/sys/kernel/unprivileged_userns_clone")
 MAX_NAMESPACES = 2**63 - 1
 CONSUMER = "containers-ubuntu26-userns-active"
-PREREQUISITE_SCHEMA = 2
-ADMISSION_SCHEMA = 3
-ADMISSION_REVISION = "containers527-maintained-bounded-v1"
+PREREQUISITE_SCHEMA = 3
+ADMISSION_SCHEMA = 4
+ADMISSION_REVISION = "containers527-maintained-callers-v1"
 MAINTAINED_PROFILES = ("full", "docker-rootless-qualification")
 EXPERIMENTAL_PURPOSE = "experimental-candidate"
 MAINTAINED_PURPOSE = "maintained-prerequisite"
 WORKFLOW = "Strukturpiloten/containers/.github/workflows/ci.yml"
+REPOSITORY = "Strukturpiloten/containers"
+CI_WORKFLOW = ".github/workflows/ci.yml"
+PUBLICATION_WORKFLOW = ".github/workflows/publish-images.yml"
+MAX_CALLER_FIELD = 512
+CRON_FIELDS = 5
+NATIVE_JOBS = frozenset(("smoke-build", "build"))
+CALLER_FACT_KEYS = (
+    "caller",
+    "workflowPath",
+    "eventAction",
+    "pullRequestNumber",
+    "eventHeadSha",
+    "eventBaseSha",
+    "eventHeadRef",
+    "eventBaseRef",
+    "headRepository",
+    "baseRepository",
+    "defaultBranch",
+    "eventSchedule",
+    "publicationScope",
+    "publicationTarget",
+)
+MAINTAINED_CALLERS = {
+    "ci-pr": {
+        "workflow": ".github/workflows/ci.yml",
+        "event": "pull_request",
+        "job": "smoke-build",
+        "refPolicy": "pr-merge",
+        "selector": "automatic-full",
+    },
+    "ci-merge-group": {
+        "workflow": ".github/workflows/ci.yml",
+        "event": "merge_group",
+        "job": "smoke-build",
+        "refPolicy": "queue-head",
+        "selector": "automatic-full",
+    },
+    "ci-manual": {
+        "workflow": ".github/workflows/ci.yml",
+        "event": "workflow_dispatch",
+        "job": "smoke-build",
+        "refPolicy": "event-selected-manual-ref",
+        "selector": "manual-ci",
+    },
+    "publication-push": {
+        "workflow": ".github/workflows/publish-images.yml",
+        "event": "push",
+        "job": "build",
+        "refPolicy": "main-push",
+        "selector": "publication-default",
+    },
+    "publication-schedule": {
+        "workflow": ".github/workflows/publish-images.yml",
+        "event": "schedule",
+        "job": "build",
+        "refPolicy": "main-schedule",
+        "selector": "publication-default",
+    },
+    "publication-manual": {
+        "workflow": ".github/workflows/publish-images.yml",
+        "event": "workflow_dispatch",
+        "job": "build",
+        "refPolicy": "event-selected-manual-ref",
+        "selector": "publication-default",
+    },
+}
 WORKFLOW_CONTEXT_KEYS = frozenset(
     (
         "candidate",
@@ -55,6 +121,7 @@ WORKFLOW_CONTEXT_KEYS = frozenset(
         "purpose",
         "admissionRevision",
         "admissionSha256",
+        *CALLER_FACT_KEYS,
     )
 )
 SCOPED_RECEIPT_KEYS = frozenset(
@@ -210,6 +277,259 @@ def event_scope(event: object) -> tuple[str, str]:
     return EXPERIMENTAL_PURPOSE, "refs/heads/TheRealBecks/issue527"
 
 
+def caller_identity(identity: dict[str, str]) -> str:
+    """Check only the finite runner-provided caller tuple before reading event data."""
+    if (
+        type(identity) is not dict
+        or set(identity) != {"repository", "event", "ref", "workflowRef", "job", "candidate"}
+        or any(type(value) is not str or len(value) > MAX_CALLER_FIELD for value in identity.values())
+        or identity["repository"] != REPOSITORY
+    ):
+        _refuse("context")
+    event_ref(identity["ref"])
+    prefix, separator, suffix = identity["workflowRef"].partition("@")
+    if not separator or suffix != identity["ref"] or not prefix.startswith(REPOSITORY + "/"):
+        _refuse("context")
+    workflow = prefix.removeprefix(REPOSITORY + "/")
+    if not any(
+        (workflow, identity["event"], identity["job"]) == (policy["workflow"], policy["event"], policy["job"])
+        for policy in MAINTAINED_CALLERS.values()
+    ):
+        _refuse("context")
+    return workflow
+
+
+def event_ref(value: object) -> str:
+    """Accept a finite PR merge ref or the existing validated branch/tag refs."""
+    if type(value) is str and re.fullmatch(r"refs/pull/[1-9][0-9]{0,19}/merge", value):
+        return value
+    return selected_manual_ref(value)
+
+
+def _event_oid(value: object) -> str:
+    if type(value) is not str or re.fullmatch(r"[0-9a-f]{40}", value) is None or value == "0" * 40:
+        _refuse("context")
+    return value
+
+
+def _event_repository(value: object) -> None:
+    if type(value) is not dict or value.get("full_name") != REPOSITORY:
+        _refuse("context")
+
+
+def _head_ref(value: object) -> str:
+    result = selected_manual_ref(value)
+    if not result.startswith("refs/heads/"):
+        _refuse("context")
+    return result
+
+
+def _branch_ref(value: object) -> str:
+    if type(value) is not str:
+        _refuse("context")
+    return _head_ref("refs/heads/" + value)
+
+
+def _pr_caller(event: dict, identity: dict, facts: dict) -> None:
+    request = event.get("pull_request")
+    number = event.get("number")
+    if (
+        event.get("action") not in ("opened", "synchronize", "reopened")
+        or type(request) is not dict
+        or type(number) is not int
+        or not 0 < number < 10**20
+        or type(request.get("number")) is not int
+        or request["number"] != number
+        or identity["ref"] != f"refs/pull/{number}/merge"
+    ):
+        _refuse("context")
+    for role in ("head", "base"):
+        part = request.get(role)
+        if type(part) is not dict:
+            _refuse("context")
+        _event_repository(part.get("repo"))
+        facts["event" + role.title() + "Sha"] = _event_oid(part.get("sha"))
+        facts["event" + role.title() + "Ref"] = _branch_ref(part.get("ref"))
+        facts[role + "Repository"] = REPOSITORY
+    if request.get("merge_commit_sha") is not None:
+        _event_oid(request["merge_commit_sha"])
+    if identity["candidate"] in {facts["eventHeadSha"], facts["eventBaseSha"]}:
+        _refuse("context")
+    facts.update(caller="ci-pr", eventAction=event["action"], pullRequestNumber=str(number))
+
+
+def _queue_caller(event: dict, identity: dict, facts: dict) -> None:
+    group = event.get("merge_group")
+    if event.get("action") != "checks_requested" or type(group) is not dict:
+        _refuse("context")
+    head = _head_ref(group.get("head_ref"))
+    base = _head_ref(group.get("base_ref"))
+    head_sha, base_sha = _event_oid(group.get("head_sha")), _event_oid(group.get("base_sha"))
+    if (
+        not head.startswith("refs/heads/gh-readonly-queue/")
+        or head != identity["ref"]
+        or head_sha != identity["candidate"]
+        or base_sha == head_sha
+        or base == head
+    ):
+        _refuse("context")
+    facts.update(
+        caller="ci-merge-group",
+        eventAction="checks_requested",
+        eventHeadRef=head,
+        eventBaseRef=base,
+        eventHeadSha=head_sha,
+        eventBaseSha=base_sha,
+    )
+
+
+def _publication_caller(event: dict, identity: dict, facts: dict) -> None:
+    if event["repository"].get("default_branch") != "main":
+        _refuse("context")
+    facts.update(defaultBranch="main", publicationScope="all")
+    kind = identity["event"]
+    if kind == "push":
+        if (
+            event.get("deleted") is not False
+            or event.get("ref") != "refs/heads/main"
+            or identity["ref"] != "refs/heads/main"
+        ):
+            _refuse("context")
+        after = _event_oid(event.get("after"))
+        if after != identity["candidate"]:
+            _refuse("context")
+        facts.update(caller="publication-push", eventHeadSha=after)
+    elif kind == "schedule":
+        schedule = event.get("schedule")
+        if (
+            identity["ref"] != "refs/heads/main"
+            or event.get("ref", identity["ref"]) != identity["ref"]
+            or type(schedule) is not str
+            or re.fullmatch(r"[A-Za-z0-9*/ ,\-]{1,96}", schedule) is None
+            or len(schedule.split()) != CRON_FIELDS
+        ):
+            _refuse("context")
+        facts.update(caller="publication-schedule", eventSchedule=schedule)
+    else:
+        _publication_dispatch(event, identity, facts)
+
+
+def _publication_dispatch(event: dict, identity: dict, facts: dict) -> None:
+    inputs = event.get("inputs", {})
+    if (
+        event.get("workflow") != PUBLICATION_WORKFLOW
+        or selected_manual_ref(event.get("ref")) != identity["ref"]
+        or type(inputs) is not dict
+        or set(inputs) - {"scope", "target"}
+    ):
+        _refuse("context")
+    scope, target = inputs.get("scope", "all"), inputs.get("target", "")
+    if (
+        type(scope) is not str
+        or scope not in {"all", "image", "family"}
+        or type(target) is not str
+        or (scope == "all" and target != "")
+        or (scope != "all" and re.fullmatch(r"[a-z0-9][a-z0-9.-]{0,127}", target) is None)
+    ):
+        _refuse("context")
+    facts.update(caller="publication-manual", publicationScope=scope, publicationTarget=target)
+
+
+def caller_context(event: object, identity: dict[str, str]) -> dict[str, str]:
+    """Derive purpose and source/caller facts; a routing Boolean grants no authority."""
+    workflow = caller_identity(identity)
+    _event_oid(identity["candidate"])
+    if type(event) is not dict or ("workflow" in event and event["workflow"] != workflow):
+        _refuse("context")
+    facts = dict.fromkeys(CALLER_FACT_KEYS, "")
+    facts["workflowPath"] = workflow
+    purpose, profile, requested = MAINTAINED_PURPOSE, "full", ""
+    if workflow == CI_WORKFLOW and identity["event"] == "workflow_dispatch":
+        purpose, ref = event_scope(event)
+        if ref != identity["ref"]:
+            _refuse("context")
+        requested = event.get("inputs", {}).get("validation_profile", "full")
+        profile = validation_profile(requested)
+        facts["caller"] = "ci-manual"
+    else:
+        _event_repository(event.get("repository"))
+        if workflow == PUBLICATION_WORKFLOW:
+            _publication_caller(event, identity, facts)
+        elif identity["event"] == "pull_request":
+            _pr_caller(event, identity, facts)
+        else:
+            _queue_caller(event, identity, facts)
+    return {
+        **facts,
+        **{key: identity[key] for key in ("repository", "event", "ref", "workflowRef", "job")},
+        "purpose": purpose,
+        "validationProfile": profile,
+        "validationProfileRequested": requested,
+    }
+
+
+def validate_pr_commit(commit: bytes, context: dict[str, str]) -> None:
+    """Bind only PR candidates to ordered event base/head parents before tree reads."""
+    if context["caller"] != "ci-pr":
+        return
+    header, delimiter, _message = commit.partition(b"\n\n")
+    lines = header.split(b"\n")
+    expected = [b"parent " + context[key].encode("ascii") for key in ("eventBaseSha", "eventHeadSha")]
+    prefix_length = len(expected) + 1
+    if (
+        not delimiter
+        or len(lines) < prefix_length
+        or re.fullmatch(rb"tree [0-9a-f]{40}", lines[0]) is None
+        or lines[1:prefix_length] != expected
+        or any(line.startswith(b"parent") for line in lines[prefix_length:])
+    ):
+        _refuse("context")
+
+
+def _archived_event(context: dict[str, str]) -> dict:
+    """Reconstruct only normalized root-bound facts for intrinsic archived validation."""
+    event = {"repository": {"full_name": context["repository"]}, "workflow": context["workflowPath"]}
+    caller = context["caller"]
+    if caller == "ci-manual":
+        event.update(ref=context["ref"], inputs={"validation_profile": context["validationProfileRequested"]})
+    elif caller == "ci-pr":
+        number = context["pullRequestNumber"]
+        if re.fullmatch(r"[1-9][0-9]{0,19}", number) is None:
+            _refuse("context")
+        request = {"number": int(number)}
+        for role in ("head", "base"):
+            request[role] = {
+                "repo": {"full_name": context[role + "Repository"]},
+                "sha": context["event" + role.title() + "Sha"],
+                "ref": context["event" + role.title() + "Ref"].removeprefix("refs/heads/"),
+            }
+        event.update(action=context["eventAction"], number=int(number), pull_request=request)
+    elif caller == "ci-merge-group":
+        event.update(
+            action=context["eventAction"],
+            merge_group={
+                "head_sha": context["eventHeadSha"],
+                "base_sha": context["eventBaseSha"],
+                "head_ref": context["eventHeadRef"],
+                "base_ref": context["eventBaseRef"],
+            },
+        )
+    elif caller in {"publication-push", "publication-schedule", "publication-manual"}:
+        event["repository"]["default_branch"] = context["defaultBranch"]
+        if caller == "publication-push":
+            event.update(ref=context["ref"], after=context["eventHeadSha"], deleted=False)
+        elif caller == "publication-schedule":
+            event["schedule"] = context["eventSchedule"]
+        else:
+            event.update(
+                ref=context["ref"],
+                inputs={"scope": context["publicationScope"], "target": context["publicationTarget"]},
+            )
+    else:
+        _refuse("context")
+    return event
+
+
 def context_digest(value: dict[str, str]) -> str:
     """Bind the complete staged workflow context, including purpose/admission/ref."""
     if (
@@ -251,6 +571,7 @@ def admission_document(raw: bytes) -> dict:
             "revision",
             "maintainedContext",
             "maintainedArchitectures",
+            "maintainedCallers",
         }
         or type(value["schemaVersion"]) is not int
         or value["schemaVersion"] != ADMISSION_SCHEMA
@@ -260,6 +581,7 @@ def admission_document(raw: bytes) -> dict:
         or value["revision"] != ADMISSION_REVISION
         or value["architectures"] != {"amd64": "experimental-load-candidate", "arm64": "compile-only-refuse-load"}
         or value["maintainedArchitectures"] != {"amd64": "maintained-prerequisite", "arm64": "maintained-prerequisite"}
+        or value["maintainedCallers"] != MAINTAINED_CALLERS
     ):
         _refuse("admission")
     context_keys = {
@@ -275,7 +597,9 @@ def admission_document(raw: bytes) -> dict:
     }
     for name in ("context", "maintainedContext"):
         expected_keys = (
-            context_keys if name == "context" else (context_keys - {"validationProfile"}) | {"validationProfiles"}
+            context_keys
+            if name == "context"
+            else {"repository", "image", "imageOS", "imageVersion", "validationProfiles"}
         )
         if (
             type(value[name]) is not dict
@@ -286,7 +610,6 @@ def admission_document(raw: bytes) -> dict:
     if (
         value["context"]["ref"] != "refs/heads/TheRealBecks/issue527"
         or value["context"]["validationProfile"] != "docker-rootless-diagnostic"
-        or value["maintainedContext"]["ref"] != "event-selected-manual-ref"
         or value["maintainedContext"]["validationProfiles"] != list(MAINTAINED_PROFILES)
     ):
         _refuse("admission")
@@ -351,53 +674,51 @@ def active_cohort(admission: dict, context: dict) -> dict:
 
 
 def validate_workflow_context(context: dict[str, str], admission: dict, admission_sha256: str) -> None:
-    """Validate archived purpose intrinsically; no consumer environment supplies authority."""
+    """Validate root-bound caller facts intrinsically, without current consumer environment."""
     context_digest(context)
     purpose = context["purpose"]
+    if purpose not in {EXPERIMENTAL_PURPOSE, MAINTAINED_PURPOSE}:
+        _refuse("context")
     expected = admission["maintainedContext"] if purpose == MAINTAINED_PURPOSE else admission["context"]
-    canonical = validation_profile(context["validationProfileRequested"])
+    identity = {key: context[key] for key in ("repository", "event", "ref", "workflowRef", "job", "candidate")}
+    derived = caller_context(_archived_event(context), identity)
     if (
-        purpose not in {EXPERIMENTAL_PURPOSE, MAINTAINED_PURPOSE}
+        any(context[key] != value for key, value in derived.items())
         or context["admissionRevision"] != admission["revision"]
         or context["admissionRevision"] != ADMISSION_REVISION
         or context["admissionSha256"] != admission_sha256
         or re.fullmatch(r"[0-9a-f]{64}", admission_sha256) is None
         or context["candidate"] != context["workflow"]
         or context["candidate"] != context["checkout"]
-        or re.fullmatch(r"[0-9a-f]{40}", context["candidate"]) is None
         or any(re.fullmatch(r"[1-9][0-9]{0,19}", context[key]) is None for key in ("run", "attempt"))
         or context["repository"] != expected["repository"]
-        or context["repository"] != "Strukturpiloten/containers"
-        or context["event"] != expected["event"]
-        or context["event"] != "workflow_dispatch"
-        or expected["workflow"] != ".github/workflows/ci.yml"
-        or context["workflowRef"] != WORKFLOW + "@" + selected_manual_ref(context["ref"])
-        or context["job"] != expected["job"]
-        or context["job"] != "smoke-build"
+        or context["repository"] != REPOSITORY
         or context["image"] != expected["image"]
         or context["image"] != "docker-29-conformance-rootless"
         or expected["imageOS"] != "ubuntu26"
         or context["architecture"] not in {"amd64", "arm64"}
-        or context["imageOS"] != {"amd64": "ubuntu26", "arm64": "ubuntu26-arm64"}.get(context["architecture"])
+        or context["imageOS"] != {"amd64": "ubuntu26", "arm64": "ubuntu26-arm64"}[context["architecture"]]
         or context["imageVersionKind"] != "workflow-reported-provenance-not-vm-attestation"
         or re.fullmatch(r"[0-9]{8}\.[0-9]+\.[0-9]+", context["imageVersion"]) is None
-        or canonical != context["validationProfile"]
-        or (purpose == EXPERIMENTAL_PURPOSE and canonical != expected["validationProfile"])
     ):
         _refuse("context")
-
     if purpose == MAINTAINED_PURPOSE:
+        policy = admission["maintainedCallers"].get(context["caller"])
         if (
-            canonical not in MAINTAINED_PROFILES
-            or canonical not in expected["validationProfiles"]
-            or expected["ref"] != "event-selected-manual-ref"
+            policy is None
+            or context["validationProfile"] not in expected["validationProfiles"]
             or admission["maintainedArchitectures"].get(context["architecture"]) != MAINTAINED_PURPOSE
+            or (context["workflowPath"], context["event"], context["job"])
+            != (policy["workflow"], policy["event"], policy["job"])
         ):
             _refuse("admission")
     elif (
-        canonical != "docker-rootless-diagnostic"
+        context["caller"] != "ci-manual"
+        or context["workflowPath"] != expected["workflow"]
+        or context["event"] != expected["event"]
+        or context["job"] != expected["job"]
         or context["ref"] != expected["ref"]
-        or context["ref"] != "refs/heads/TheRealBecks/issue527"
+        or context["validationProfile"] != expected["validationProfile"]
     ):
         _refuse("context")
 
@@ -513,7 +834,7 @@ class NativeBinding:
             or not self.config_digest.startswith("sha256:")
             or any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in hashes)
             or any(not re.fullmatch(r"[1-9][0-9]{0,19}", value) for value in (self.run, self.attempt))
-            or self.job != "smoke-build"
+            or self.job not in NATIVE_JOBS
             or self.architecture not in {"amd64", "arm64"}
             or self.phase not in {"clean-control", "enforcement"}
             or self.image != "docker-29-conformance-rootless"
