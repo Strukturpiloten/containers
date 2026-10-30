@@ -42,7 +42,7 @@ build:
       value: 6.3.0
       type: static
     PHP_EXTENSION_INSTALLER_IMAGE:
-      value: ghcr.io/mlocati/php-extension-installer:2.12.6@sha256:e772f8d2c1b88ab5872611b400410b4ab1839a6a0ff5ce460eb2105a35d62953
+      value: ghcr.io/mlocati/php-extension-installer:2.13.1@sha256:35821db0661308f64aa18483bb3af56bedc3b40090ff441ed961327d1ccbceb8
       type: external-image
     PODMAN_TYPO3_DATA_DIR_CONTAINER:
       value: /var/www/typo3
