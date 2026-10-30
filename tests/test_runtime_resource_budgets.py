@@ -20,9 +20,14 @@ from scripts.runtime_resource_budgets import (
     verify_outer_container_limits,
 )
 from scripts.runtime_tests import ProbeError
+from tests.test_runtime_docker_diagnostics import qualified_local_timeout
 
 
 class DockerResourceBudgetTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.gnu_timeout_provider = qualified_local_timeout()
+
     def test_outer_runs_have_limits_before_daemon_start(self) -> None:
         ctx = MagicMock()
         ctx.image_ref = "localhost/docker:test"
@@ -79,6 +84,7 @@ class DockerResourceBudgetTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="strukturpiloten-budget-test-") as directory:
             root = Path(directory)
             ctx = SimpleNamespace(directory=root, _sudo=[], checks=[])
+            ctx._gnu_timeout_provider = self.gnu_timeout_provider
             limit = 1024**2
             with (
                 self.assertRaisesRegex(ProbeError, "exceeded"),
@@ -124,6 +130,7 @@ class DockerResourceBudgetTests(unittest.TestCase):
 
     def test_disk_sampler_timeout_kills_its_process_group(self) -> None:
         ctx = SimpleNamespace(directory=Path("task-owned-store"), _sudo=[], checks=[])
+        ctx._gnu_timeout_provider = ("/qualified/gnu-timeout", "9.7", "prefixed")
         budget = IsolatedStoreDiskBudget(ctx)
         process = MagicMock()
         process.pid = 12345
@@ -137,6 +144,31 @@ class DockerResourceBudgetTests(unittest.TestCase):
             budget._measure()
         kill_group.assert_called_once_with(process.pid, signal.SIGKILL)
         self.assertEqual(process.communicate.call_count, 2)
+
+    def test_sampler_reuses_admitted_absolute_provider_after_sudo(self) -> None:
+        ctx = SimpleNamespace(directory=Path("task-owned-store"), _sudo=["sudo", "-n"], checks=[])
+        ctx._gnu_timeout_provider = ("/qualified/gnu-timeout", "9.7", "prefixed")
+        process = MagicMock()
+        process.communicate.return_value = ("4096\ttask-owned-store", "")
+        process.returncode = 0
+        with patch("scripts.runtime_resource_budgets.subprocess.Popen", return_value=process) as spawn:
+            budget = IsolatedStoreDiskBudget(ctx)
+            spawn.assert_not_called()
+            budget._du_once()
+            budget._du_once()
+        self.assertEqual(budget._gnu_timeout_provider, ctx._gnu_timeout_provider)
+        for call in spawn.call_args_list:
+            self.assertEqual(call.args[0][:5], ["sudo", "-n", "/qualified/gnu-timeout", "--signal=KILL", "5s"])
+
+    def test_sampler_never_starts_when_provider_admission_fails(self) -> None:
+        ctx = SimpleNamespace(directory=Path("task-owned-store"), _sudo=[], checks=[])
+        with (
+            patch("scripts.runtime_resource_budgets.qualify_gnu_timeout", side_effect=ValueError("unverified")),
+            patch("scripts.runtime_resource_budgets.subprocess.Popen") as spawn,
+            self.assertRaisesRegex(ProbeError, "GNU timeout prerequisite admission failed"),
+        ):
+            IsolatedStoreDiskBudget(ctx)._du_once()
+        spawn.assert_not_called()
 
 
 if __name__ == "__main__":

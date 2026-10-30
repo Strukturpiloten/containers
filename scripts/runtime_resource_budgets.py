@@ -11,6 +11,7 @@ import subprocess
 import threading
 from typing import TYPE_CHECKING, Self
 
+from scripts.runtime_docker_diagnostics import qualify_gnu_timeout, redact_timeout_provider
 from scripts.runtime_tests import ProbeError
 
 if TYPE_CHECKING:
@@ -100,13 +101,19 @@ class IsolatedStoreDiskBudget:
         self.samples = 0
         self.transient_retries = 0
         self._error: str | None = None
+        self._gnu_timeout_provider: tuple[str, str, str] | None = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._poll, name="isolated-docker-disk-budget", daemon=True)
 
     def _du_once(self) -> tuple[int, str, str]:
+        if self._gnu_timeout_provider is None:
+            try:
+                self._gnu_timeout_provider = qualify_gnu_timeout(self.ctx)
+            except ValueError:
+                raise ProbeError("GNU timeout prerequisite admission failed") from None
         command = [
             *self.ctx._sudo,
-            "timeout",
+            self._gnu_timeout_provider[0],
             "--signal=KILL",
             f"{STORE_SAMPLE_TIMEOUT_SECONDS}s",
             "du",
@@ -126,13 +133,14 @@ class IsolatedStoreDiskBudget:
                 env={**os.environ, "LC_ALL": "C"},
             )
         except OSError as error:
-            raise ProbeError(f"isolated Docker store disk measurement failed: {error}") from error
+            detail = redact_timeout_provider(self.ctx, str(error))
+            raise ProbeError(f"isolated Docker store disk measurement failed: {detail}") from None
         try:
             stdout, stderr = process.communicate(timeout=STORE_SAMPLE_TIMEOUT_SECONDS + 3)
-        except subprocess.TimeoutExpired as error:
+        except subprocess.TimeoutExpired:
             raise ProbeError(
                 f"isolated Docker store disk measurement timed out after {STORE_SAMPLE_TIMEOUT_SECONDS}s"
-            ) from error
+            ) from None
         finally:
             if process.poll() is None:
                 try:
@@ -146,13 +154,14 @@ class IsolatedStoreDiskBudget:
                             timeout=3,
                         )
                     except (OSError, subprocess.TimeoutExpired) as error:
-                        raise ProbeError(f"could not stop isolated disk sampler process group: {error}") from error
+                        detail = redact_timeout_provider(self.ctx, str(error))
+                        raise ProbeError(f"could not stop isolated disk sampler process group: {detail}") from None
                 except ProcessLookupError:
                     pass
                 try:
                     process.communicate(timeout=3)
-                except subprocess.TimeoutExpired as error:
-                    raise ProbeError("could not reap isolated disk sampler process group") from error
+                except subprocess.TimeoutExpired:
+                    raise ProbeError("could not reap isolated disk sampler process group") from None
         return process.returncode, stdout, stderr
 
     def _measure(self) -> None:
@@ -164,11 +173,12 @@ class IsolatedStoreDiskBudget:
             if attempt == 0 and diagnostics and all("No such file or directory" in line for line in diagnostics):
                 self.transient_retries += 1
                 continue
-            raise ProbeError(f"isolated Docker store disk measurement failed (exit {status}): {stderr.strip()}")
+            detail = redact_timeout_provider(self.ctx, stderr.strip())
+            raise ProbeError(f"isolated Docker store disk measurement failed (exit {status}): {detail}")
         try:
             size = int(stdout.split(maxsplit=1)[0])
-        except (IndexError, ValueError) as error:
-            raise ProbeError("isolated Docker store disk measurement returned no byte count") from error
+        except IndexError, ValueError:
+            raise ProbeError("isolated Docker store disk measurement returned no byte count") from None
         self.samples += 1
         self.peak_bytes = max(self.peak_bytes, size)
 
@@ -177,7 +187,7 @@ class IsolatedStoreDiskBudget:
             try:
                 self._measure()
             except Exception as error:  # noqa: BLE001 - report unexpected sampler failures in runtime evidence.
-                self._error = f"{type(error).__name__}: {error}"
+                self._error = redact_timeout_provider(self.ctx, f"{type(error).__name__}: {error}")
                 return
             if self.peak_bytes > self.limit_bytes:
                 return
@@ -195,13 +205,13 @@ class IsolatedStoreDiskBudget:
                 "sampleTimeoutSeconds": STORE_SAMPLE_TIMEOUT_SECONDS,
                 "samples": self.samples,
                 "transientRetries": self.transient_retries,
-                "error": self._error,
+                "error": redact_timeout_provider(self.ctx, self._error) if self._error is not None else None,
             }
         )
 
     def _failure(self) -> ProbeError | None:
         if self._error:
-            return ProbeError(self._error)
+            return ProbeError(redact_timeout_provider(self.ctx, self._error))
         if self.peak_bytes > self.limit_bytes:
             return ProbeError(
                 f"isolated Docker store exceeded {self.limit_bytes} byte budget "
@@ -220,7 +230,7 @@ class IsolatedStoreDiskBudget:
         try:
             self._measure()  # Admission before saving the offline fixture or starting the daemon.
         except ProbeError as error:
-            self._error = str(error)
+            self._error = redact_timeout_provider(self.ctx, str(error))
             self._record()
             raise
         failure = self._failure()
@@ -239,7 +249,7 @@ class IsolatedStoreDiskBudget:
         try:
             self._measure()
         except ProbeError as error:
-            self._error = str(error)
+            self._error = redact_timeout_provider(self.ctx, str(error))
         self._record()
         failure = self._failure()
         if failure is not None and error_type is None:

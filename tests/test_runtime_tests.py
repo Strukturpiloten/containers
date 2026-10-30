@@ -115,6 +115,7 @@ class RuntimeCommandTests(unittest.TestCase):
             context.checks = []
             context._owned_mounts = MagicMock(return_value=[])
             context.load_archive = MagicMock(return_value={})
+            context.prepare = MagicMock(return_value={"engine": "podman", "clientVersion": "podman version 5.4.2"})
             container = "b" * 64
             commands: list[list[str]] = []
 
@@ -312,6 +313,7 @@ class RuntimeCommandTests(unittest.TestCase):
             context = MagicMock()
             context.checks = []
             context.load_archive.return_value = {}
+            context.prepare.return_value = {"engine": "podman", "clientVersion": "podman version 5.4.2"}
             context.podman.return_value = "podman fixture"
             context.cleanup.side_effect = ProbeError("isolated store retained")
             evidence_path = Path(directory) / "evidence.json"

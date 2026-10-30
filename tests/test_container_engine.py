@@ -128,6 +128,10 @@ class PlanningTests(unittest.TestCase):
         with patch.object(engine, "_changed_files", return_value=["scripts/container_engine.py"]):
             self.assertEqual(engine._selected_image_names(self.images, _options()), {"base", "app"})
 
+    def test_rootless_diagnostic_helper_only_change_selects_every_native_image(self) -> None:
+        with patch.object(engine, "_changed_files", return_value=["scripts/runtime_docker_diagnostics.py"]):
+            self.assertEqual(engine._selected_image_names(self.images, _options()), {"base", "app"})
+
     def test_validation_only_change_selects_no_images(self) -> None:
         for changed_file in (".github/renovate.json", "container.schema.json", "pyproject.toml", "uv.lock"):
             with (
