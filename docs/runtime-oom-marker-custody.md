@@ -1,8 +1,18 @@
 # Rootless fixture OOM marker custody
 
-The systemd Docker fixture retains its strict native success predicates, including
-outer `OOMKilled=false` and a verified orderly zero exit. Diagnostic observations
-cannot excuse failures or qualify an image.
+Podman outer runs retain strict native success predicates, including outer
+`OOMKilled=false` and a verified orderly zero exit. The selected private Docker
+systemd backend implements [mandatory parent lifetime accounting](runtime-backends.md#mandatory-docker-parent-oom-lifecycle-accounting):
+typed zero-exit lifecycle states remain pending until independent original-probe
+kill authority, quiescent whole-parent reconciliation and exact cleanup succeed.
+The actual sticky Docker flag is retained; marker observations cannot provide
+ledger authority or qualify an image. This implemented source contract still
+can report accounting complete while native qualification remains none: no
+maintained normal prerequisite exists for that private route yet. The focused
+mandatory-accounting dispatch remains experimental and separate from the
+witness-diagnostic choice. Ordinary evidence consumers reject that authority,
+including status/exit-zero records. No earlier receipt gains admission; normal
+prerequisite rollout and independent native qualification remain outstanding.
 
 The marker observer applies to Podman outer runs. Docker outer runs retain actual
 Docker state while reporting conmon sources as backend-not-applicable with

@@ -10,10 +10,12 @@ import io
 import json
 import os
 import signal
+import socket
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, replace
@@ -976,6 +978,8 @@ class ChildTests(unittest.TestCase):
             )
         )
         self.interpreter = child.Interpreter(12345, "d" * 64)
+        # This legacy parent-boundary fixture intentionally has no real interpreter FD.
+        self.stack.enter_context(patch.object(child, "_launch_binding", return_value="hermetic-role-identities"))
 
     def proof(self) -> bytes:
         return json.dumps(
@@ -1067,6 +1071,7 @@ class ChildTests(unittest.TestCase):
             "1001",
             "1002",
             "2",
+            str(10**30),
         ]
         with (
             patch.dict(sys.modules, {"os": fake_os, "ctypes": ctypes, "resource": MagicMock(), "signal": MagicMock()}),
@@ -1088,7 +1093,7 @@ class ChildTests(unittest.TestCase):
         self.assertEqual(proof["gid"], 1002)
         self.assertEqual(proof["groups"], [])
         self.assertEqual(proof["nnp"], 1)
-        self.assertEqual(context.libc.prctl.argtypes, [context.ctypes.c_int, *([context.ctypes.c_ulong] * 4)])
+        context.ctypes.CDLL.assert_not_called()
 
     def test_declared_fd_guards_keep_ebadf_continuation_and_all_existing_calls(self) -> None:
         original = self.executing
@@ -1137,27 +1142,31 @@ class ChildTests(unittest.TestCase):
                 self.test_descriptor_loader_executes_complete_source_without_workspace_paths()
             self.assertEqual(raised.exception.code, 113)
 
-    def test_code_changes_only_three_negative_integer_operands_and_probe_is_exact(self) -> None:
-        original = child.CODE
-        for code in (111, 112, 113):
-            self.assertEqual(original.count(f"raise SystemExit({code})"), 1)
-            original = original.replace(f"raise SystemExit({code})", "raise SystemExit(1)")
-        self.assertEqual(len(child.CODE.encode()), 3944)
-        self.assertEqual(digest(original.encode()), "c056502a4646634447d7c1806f2d75ab96de0071db930c9f308c604d5efa37fb")
-        before, after = list(ast.walk(ast.parse(original))), list(ast.walk(ast.parse(child.CODE)))
-        self.assertEqual(len(before), len(after))
-        differences = []
-        for old, new in zip(before, after, strict=True):
-            self.assertIs(type(new), type(old))
-            if isinstance(old, ast.Constant) and old.value != new.value:
-                differences.append((old.value, new.value))
-                new.value = old.value
-        self.assertEqual(sorted(differences), [(1, 111), (1, 112), (1, 113)])
-        self.assertEqual(ast.dump(after[0]), ast.dump(before[0]))
-        self.assertEqual(len(child.PROBE_CODE.encode()), 2258)
-        self.assertEqual(
-            digest(child.PROBE_CODE.encode()), "c7bbd0da2b38cea2b9d933f76554b2b5199c8e872af21187c559b1ca808f602f"
-        )
+    def test_payload_preserves_historical_strict_guard_tail_and_does_not_renew_setup(self) -> None:
+        tail = child.CODE[child.CODE.index("os.close(int(interpreter))") :]
+        # Invert only the newly required completeness bookkeeping; every prior guard byte stays pinned.
+        for addition in (
+            "seen = set()\n",
+            "    seen.add(descriptor)\n",
+            "if seen != allowed:\n    raise SystemExit(112)\n",
+        ):
+            self.assertEqual(tail.count(addition), 1)
+            tail = tail.replace(addition, "", 1)
+        self.assertEqual(digest(tail.encode()), "64dbdaaf1b7abead9b0b649fd13ca2fee52246ca21cc35bfec0669af2c20d3d5")
+        sdk_tail = child.CODE[child.CODE.index("class SourceLoader") :]
+        self.assertEqual(digest(sdk_tail.encode()), "0473078a61fc6f5e986e2e04c886bd229b15ad42c37694e6a730db8cc81fdc62")
+        for payload in (child.CODE, child.PROBE_CODE):
+            imports = [node for node in ast.walk(ast.parse(payload)) if isinstance(node, ast.Import)]
+            self.assertNotIn("ctypes", {alias.name for node in imports for alias in node.names})
+            self.assertNotIn("prctl", payload)
+            self.assertNotIn("signal.alarm", payload)
+            self.assertNotIn("setrlimit", payload)
+            self.assertIn('b"NoNewPrivs"', payload)
+            self.assertIn("allowed = {0, 1, 2,", payload)
+        self.assertEqual(child._LAUNCHER.count("signal.alarm("), 1)
+        self.assertEqual(child._LAUNCHER.count("resource.setrlimit("), 3)
+        self.assertIn("time.monotonic_ns() >= deadline", child._LAUNCHER)
+        self.assertIn("time.monotonic_ns() >= int(deadline)", child.CODE)
 
     def test_saved_ids_groups_capabilities_and_nnp_fail_before_first_source_import(self) -> None:
         clean = b"CapEff: 0\nCapPrm: 0\nCapInh: 0\nCapAmb: 0\nNoNewPrivs: 1\n"
@@ -1206,7 +1215,8 @@ class ChildTests(unittest.TestCase):
         arguments = start.call_args.args[0]
         options = start.call_args.kwargs
         self.assertEqual(arguments[:5], ["/proc/self/fd/12345", "-I", "-B", "-S", "-c"])
-        self.assertEqual(arguments[5], child.CODE)
+        self.assertEqual(arguments[5], child.BUILD_LAUNCHER)
+        self.assertEqual(arguments[-2:], [str(self.lease.deadline_ns), "hermetic-role-identities"])
         self.assertEqual((options["user"], options["group"], options["extra_groups"]), (1001, 1002, ()))
         self.assertTrue(options["close_fds"])
         self.assertTrue(options["start_new_session"])
@@ -2576,6 +2586,208 @@ finally:
                 self.assertEqual(result.stdout, b"")
 
 
+class ChildGuardPopenTests(unittest.TestCase):
+    def test_actual_inventory_guard_with_real_inherited_and_reused_slots(self) -> None:
+        statements = ast.parse(child.CODE).body
+        start = next(
+            index
+            for index, node in enumerate(statements)
+            if isinstance(node, ast.Assign)
+            and any(isinstance(name, ast.Name) and name.id == "allowed" for name in node.targets)
+        )
+        stop = next(
+            index
+            for index, node in enumerate(statements)
+            if isinstance(node, ast.ClassDef) and node.name == "SourceLoader"
+        )
+        guard = "\n".join(ast.get_source_segment(child.CODE, node) for node in statements[start:stop])
+        script = (
+            """
+import errno, fcntl, os, sys
+interpreter, receipt, first, second, case = sys.argv[1:]
+os.close(int(interpreter))
+os.close(int(receipt))
+if case == 'interpreter-reuse':
+    os.dup2(int(first), int(interpreter))
+elif case == 'receipt-reuse':
+    os.dup2(int(first), int(receipt))
+elif case in ('source-duplicate', 'source-second-duplicate'):
+    source = first if case == 'source-duplicate' else second
+    fcntl.fcntl(int(source), fcntl.F_DUPFD, max(map(int, (interpreter, receipt, first, second))) + 1)
+elif case.startswith('stdio-'):
+    descriptor = {'stdio-input': 0, 'stdio-output': 1, 'stdio-error': 2}[case]
+    fcntl.fcntl(descriptor, fcntl.F_DUPFD, max(map(int, (interpreter, receipt, first, second))) + 1)
+source_files = {}
+for module, descriptor in (('canonical_policy', int(first)), ('native_outer_diagnostic_capture', int(second))):
+    info = os.fstat(descriptor)
+    source_files[module] = (info.st_dev, info.st_ino, info.st_mode & 0o170000)
+"""
+            + guard
+        )
+        cases = (
+            ("authored", 0, None),
+            ("unrelated-pipe", 138, "FD_NOT_ALLOWLISTED_OTHER_SLOT_PIPE"),
+            ("interpreter-reuse", 120, "FD_NOT_ALLOWLISTED_INTERPRETER_SLOT_REUSED_REGULAR"),
+            ("receipt-reuse", 128, "FD_NOT_ALLOWLISTED_RECEIPT_SLOT_REUSED_REGULAR"),
+            ("source-duplicate", 144, "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_SOURCE_FIRST"),
+            ("source-second-duplicate", 145, "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_SOURCE_SECOND"),
+            ("stdio-input", 146, "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_STDIO_INPUT"),
+            ("stdio-output", 147, "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_STDIO_OUTPUT"),
+            ("stdio-error", 148, "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_STDIO_ERROR"),
+            ("unrelated-regular", 149, "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_NO_MATCH"),
+        )
+        with ExitStack() as stack:
+            authored = tuple(stack.enter_context(tempfile.TemporaryFile()).fileno() for _ in range(4))
+            unrelated = stack.enter_context(tempfile.TemporaryFile()).fileno()
+            stdio = tuple(stack.enter_context(tempfile.TemporaryFile()) for _ in range(3))
+            read_fd, write_fd = os.pipe()
+            stack.callback(os.close, read_fd)
+            stack.callback(os.close, write_fd)
+            for case, expected_status, expected_category in cases:
+                with self.subTest(case=case):
+                    inherited = (*authored, read_fd) if case == "unrelated-pipe" else authored
+                    if case == "unrelated-regular":
+                        inherited = (*authored, unrelated)
+                    # Execute only repository-extracted statements and authored numeric FDs.
+                    with subprocess.Popen(  # noqa: S603
+                        [sys.executable, "-I", "-B", "-S", "-c", script, *map(str, authored), case],
+                        stdin=stdio[0] if case.startswith("stdio-") else subprocess.PIPE,
+                        stdout=stdio[1] if case.startswith("stdio-") else subprocess.PIPE,
+                        stderr=stdio[2] if case.startswith("stdio-") else subprocess.PIPE,
+                        close_fds=True,
+                        pass_fds=inherited,
+                    ) as process:
+                        stdout, stderr = process.communicate(timeout=10)
+                    if case.startswith("stdio-"):
+                        stdio[1].seek(0)
+                        stdio[2].seek(0)
+                        stdout, stderr = stdio[1].read(), stdio[2].read()
+                    self.assertEqual(process.returncode, expected_status)
+                    self.assertEqual(stdout, b"")
+                    self.assertEqual(stderr, b"")
+                    self.assertEqual(
+                        child._declared_guard(process.returncode, guard_source_fixture()), expected_category
+                    )
+
+    def test_regular_partial_comparison_never_claims_complete_absence_and_known_match_has_priority(self) -> None:
+        inventory = next(
+            node
+            for node in ast.parse(child.CODE).body
+            if isinstance(node, ast.For) and isinstance(node.target, ast.Name) and node.target.id == "entry"
+        )
+        statement = ast.get_source_segment(child.CODE, inventory.body[-1])
+        identity = (5, 7, stat.S_IFREG)
+        sources = {"canonical_policy": (1, 2, stat.S_IFREG), "native_outer_diagnostic_capture": (3, 4, stat.S_IFREG)}
+        cases = (
+            ({}, sources, 150, "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_STDIO_UNAVAILABLE"),
+            ({0: (8, 9, stat.S_IFREG)}, sources, 150, "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_STDIO_UNAVAILABLE"),
+            (
+                {0: (8, 9, stat.S_IFREG), 1: (8, 10, stat.S_IFREG), 2: (8, 11, stat.S_IFREG)},
+                sources,
+                149,
+                "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_NO_MATCH",
+            ),
+            ({0: identity}, sources, 146, "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_STDIO_INPUT"),
+            (
+                {0: identity},
+                {**sources, "native_outer_diagnostic_capture": identity},
+                145,
+                "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_SOURCE_SECOND",
+            ),
+            (
+                {0: identity},
+                dict.fromkeys(sources, identity),
+                144,
+                "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_SOURCE_FIRST",
+            ),
+        )
+        for stdio_files, source_files, code, category in cases:
+            with self.subTest(code=code, visited=len(stdio_files)), self.assertRaises(SystemExit) as raised:
+                exec(  # noqa: S102 - Only the production rejection statement with explicit metadata facts.
+                    statement,
+                    {
+                        "descriptor": 9,
+                        "allowed": {0, 1, 2},
+                        "witness": SimpleNamespace(st_dev=5, st_ino=7, st_mode=stat.S_IFREG | 0o600),
+                        "interpreter": "7",
+                        "receipt": "8",
+                        "source_files": source_files,
+                        "stdio_files": stdio_files,
+                    },
+                )
+            self.assertEqual(raised.exception.code, code)
+            self.assertEqual(child._declared_guard(code, guard_source_fixture()), category)
+
+    def test_finite_codes_keep_every_historical_mapping_and_fit_existing_wire_limit(self) -> None:
+        expected = {
+            111: "FD_FSTAT_NON_EBADF",
+            112: "FD_NOT_ALLOWLISTED",
+            113: "RESULT_TYPE_OR_SIZE",
+            144: "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_SOURCE_FIRST",
+            145: "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_SOURCE_SECOND",
+            146: "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_STDIO_INPUT",
+            147: "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_STDIO_OUTPUT",
+            148: "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_STDIO_ERROR",
+            149: "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_NO_MATCH",
+            150: "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_STDIO_UNAVAILABLE",
+        }
+        kinds = ("REGULAR", "DIRECTORY", "PIPE", "SOCKET", "CHARACTER", "BLOCK", "SYMLINK", "OTHER")
+        for start, relation in ((120, "INTERPRETER_SLOT_REUSED"), (128, "RECEIPT_SLOT_REUSED"), (136, "OTHER_SLOT")):
+            expected.update(
+                (start + offset, f"FD_NOT_ALLOWLISTED_{relation}_{kind}") for offset, kind in enumerate(kinds)
+            )
+        self.assertEqual(child._GUARD_CODES, expected)
+        self.assertLess(max(expected), 255)
+        for code, category in expected.items():
+            with self.subTest(code=code):
+                declaration = {"schema": 1, "category": category}
+                self.assertLessEqual(len(json.dumps(declaration).encode("ascii")), 96)
+                self.assertEqual(child._declared_guard(code, guard_source_fixture()), category)
+
+    def test_metadata_refinement_adds_no_os_calls_or_reordered_source_reads(self) -> None:
+        tree = ast.parse(child.CODE)
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+        os_calls = [
+            ast.unparse(node.func)
+            for node in calls
+            if isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "os"
+        ]
+        self.assertEqual(os_calls.count("os.fstat"), 3)
+        self.assertEqual(os_calls.count("os.pread"), 1)
+        self.assertEqual(os_calls.count("os.listdir"), 1)
+        self.assertNotIn("os.readlink", os_calls)
+        source_loop = next(
+            node for node in tree.body if isinstance(node, ast.For) and isinstance(node.target, ast.Tuple)
+        )
+        reads = [
+            ast.unparse(node.value.func)
+            for node in source_loop.body
+            if isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Attribute)
+            and ast.unparse(node.value.func).startswith("os.")
+        ]
+        self.assertEqual(reads, ["os.fstat", "os.pread", "os.fstat"])
+
+    def test_classification_errors_keep_historical_generic_refusal(self) -> None:
+        inventory = next(
+            node
+            for node in ast.parse(child.CODE).body
+            if isinstance(node, ast.For) and isinstance(node.target, ast.Name) and node.target.id == "entry"
+        )
+        rejected = inventory.body[-1]
+        statement = ast.get_source_segment(child.CODE, rejected)
+        for witness in (object(), SimpleNamespace(st_mode=object())):
+            with self.subTest(witness=type(witness).__name__), self.assertRaises(SystemExit) as raised:
+                exec(  # noqa: S102 - execute only the production classification statement
+                    statement,
+                    {"descriptor": 7, "allowed": {0, 1, 2}, "witness": witness, "interpreter": "7", "receipt": "8"},
+                )
+            self.assertEqual(raised.exception.code, 112)
+
+
 class ChildGuardObservationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.fixture = BuildStatusObservationTests(methodName="runTest")
@@ -2588,6 +2800,17 @@ class ChildGuardObservationTests(unittest.TestCase):
             (111, "FD_FSTAT_NON_EBADF"),
             (112, "FD_NOT_ALLOWLISTED"),
             (113, "RESULT_TYPE_OR_SIZE"),
+            (120, "FD_NOT_ALLOWLISTED_INTERPRETER_SLOT_REUSED_REGULAR"),
+            (128, "FD_NOT_ALLOWLISTED_RECEIPT_SLOT_REUSED_REGULAR"),
+            (136, "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR"),
+            (138, "FD_NOT_ALLOWLISTED_OTHER_SLOT_PIPE"),
+            (144, "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_SOURCE_FIRST"),
+            (145, "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_SOURCE_SECOND"),
+            (146, "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_STDIO_INPUT"),
+            (147, "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_STDIO_OUTPUT"),
+            (148, "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_STDIO_ERROR"),
+            (149, "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_NO_MATCH"),
+            (150, "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_STDIO_UNAVAILABLE"),
         ):
             for proof, receipt in ((self.fixture.proof, "MATCH"), (b"", "EMPTY"), (b"{", "MISMATCH")):
                 observer = child.WorkObserver()
@@ -2710,6 +2933,413 @@ class ChildGuardObservationTests(unittest.TestCase):
         self.assertIsNone(observer.guard_snapshot())
         self.assertEqual(observer.status_snapshot(), ("EXIT_NONZERO", "MATCH"))
         self.assertEqual(observer.snapshot(), self.fixture.fault)
+
+
+_ORDINARY_CAPABILITY_BASELINE = r"""
+import errno, os, sys
+
+def census():
+    result = {}
+    for entry in os.listdir("/proc/self/fd"):
+        descriptor = int(entry)
+        try:
+            info = os.fstat(descriptor)
+        except OSError as error:
+            if error.errno == errno.EBADF:
+                continue
+            raise
+        result[descriptor] = (info.st_dev, info.st_ino, info.st_mode, os.get_inheritable(descriptor))
+    return result
+
+def state():
+    with open("/proc/self/status", "rb") as stream:
+        raw = stream.read(8193)
+    if len(raw) > 8192:
+        raise SystemExit(170)
+    rows = dict(row.split(b":", 1) for row in raw.splitlines() if b":" in row)
+    return tuple(int(rows[key].strip(), 16) for key in (b"CapEff", b"CapPrm", b"CapInh", b"CapAmb", b"NoNewPrivs"))
+
+# Fixture setup only: normalize this owned child's capabilities, never the parent or production checks.
+inherited = census()
+entry = state()
+import ctypes
+class Header(ctypes.Structure):
+    _fields_ = [("version", ctypes.c_uint32), ("pid", ctypes.c_int)]
+class Data(ctypes.Structure):
+    _fields_ = [("effective", ctypes.c_uint32), ("permitted", ctypes.c_uint32), ("inheritable", ctypes.c_uint32)]
+libc = ctypes.CDLL(None, use_errno=True)
+libc.capset.argtypes = [ctypes.POINTER(Header), ctypes.POINTER(Data)]
+libc.capset.restype = ctypes.c_int
+header, data = Header(0x20080522, 0), (Data * 2)()
+if libc.capset(ctypes.byref(header), data) != 0:
+    raise SystemExit(170)
+normalized = state()
+if normalized[:4] != (0, 0, 0, 0) or normalized[4] != entry[4] or entry[4] not in (0, 1):
+    raise SystemExit(170)
+# Preserve every inherited descriptor, including deliberate unexpected-descriptor negatives.
+after = census()
+if any(after.get(descriptor) != identity for descriptor, identity in inherited.items()):
+    raise SystemExit(170)
+for descriptor in after:
+    if descriptor not in inherited:
+        os.set_inheritable(descriptor, False)
+audit = b"FIXTURE_CAPS_ZERO_NNP_" + str(entry[4]).encode("ascii") + b"\n"
+if os.write(2, audit) != len(audit):
+    raise SystemExit(170)
+# No alarm, rlimit, NNP setter, UID/group change, or fresh absolute allowance is introduced here.
+os.execve(int(sys.argv[1]), ["held-python", "-I", "-B", "-S", "-c", FIXTURE_LAUNCH, *sys.argv[1:]],
+          {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C", "LC_ALL": "C"})
+raise SystemExit(170)
+"""
+
+
+class OrdinaryLauncherTests(unittest.TestCase):
+    """Exercise real owned exec/census/NNP/alarm mechanics, never root ownership, seals or ID-drop qualification."""
+
+    def ordinary_payload(self, role: str, *, seals: bool = False) -> str:
+        class FileFixture(ast.NodeTransformer):
+            def visit_If(self, node: ast.If) -> ast.AST | None:
+                if not seals and "fcntl.F_GET_SEALS" in ast.unparse(node.test):
+                    return None
+                return self.generic_visit(node)
+
+            def visit_Assign(self, node: ast.Assign) -> ast.AST | None:
+                if not seals and "fcntl.F_SEAL_WRITE" in ast.unparse(node.value):
+                    return None
+                return self.generic_visit(node)
+
+            def visit_BoolOp(self, node: ast.BoolOp) -> ast.AST:
+                node.values = [
+                    value for value in node.values if ast.unparse(value) not in {"os.getgroups()", "before.st_uid != 0"}
+                ]
+                return self.generic_visit(node)
+
+        # Unavailable ordinary-file root/group/seal assertions are explicitly waived in this fixture.
+        # Actual role identities/types, UID/GID, hashes, kernel NNP/caps, census and limits remain exercised.
+        tree = ast.parse(child.CODE if role == "builder" else child.PROBE_CODE)
+        return ast.unparse(ast.fix_missing_locations(FileFixture().visit(tree)))
+
+    @contextmanager
+    def fixture(self, role: str = "builder", *, seconds: int = 5) -> Iterator[SimpleNamespace]:
+        if os.getuid() <= 0 or os.getgid() <= 0:
+            self.skipTest("ordinary-user launcher mechanism fixture")
+        with ExitStack() as stack:
+            root = Path(stack.enter_context(tempfile.TemporaryDirectory()))
+            interpreter = os.open("/proc/self/exe", os.O_RDONLY | os.O_CLOEXEC)
+            stack.callback(os.close, interpreter)
+            read, write = os.pipe()
+            receipt = stack.enter_context(os.fdopen(read, "rb"))
+            writer = stack.enter_context(os.fdopen(write, "wb"))
+            raw_sources = (
+                (
+                    b'import os,json,resource\ndef profile_bytes(name): return json.dumps({"pid":os.getpid(),'
+                    b'"cpu":resource.getrlimit(resource.RLIMIT_CPU),"core":resource.getrlimit(resource.RLIMIT_CORE),'
+                    b'"fsize":resource.getrlimit(resource.RLIMIT_FSIZE)}).encode()\n'
+                ),
+                b"value = 1\n",
+            )
+            sources = []
+            for index, raw in enumerate(raw_sources):
+                path = root / f"source-{index}"
+                path.write_bytes(raw)
+                path.chmod(0o400)
+                descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+                stack.callback(os.close, descriptor)
+                sources.append((descriptor, raw))
+            if role == "builder":
+                roles = (interpreter, write, *(descriptor for descriptor, _raw in sources))
+                args = [
+                    str(interpreter),
+                    str(write),
+                    *(f"{descriptor}:{len(raw)}:{digest(raw)}" for descriptor, raw in sources),
+                    "fixture",
+                ]
+            else:
+                target = sources[0][0]
+                if role == "parser-version":
+                    target = os.open("/usr/bin/true", os.O_RDONLY | os.O_CLOEXEC)
+                    stack.callback(os.close, target)
+                roles = (interpreter, write, target)
+                args = [str(interpreter), str(write), str(target), role]
+            args.extend([str(os.getuid()), str(os.getgid()), str(seconds), str(time.monotonic_ns() + 10_000_000_000)])
+            # The downloaded ordinary-user Python has multiple hard links; root qualification still requires one.
+            launcher = child._LAUNCHER.replace("or os.getgroups() or", "or").replace("info[2] != 0 or ", "")
+            launcher = launcher.replace(" or authored[roles[0]][5] != 1", "")
+            script = (
+                f"ROLE = {'builder' if role == 'builder' else 'probe'!r}\nPAYLOAD = {self.ordinary_payload(role)!r}\n"
+                + launcher
+            )
+            yield SimpleNamespace(
+                root=root,
+                interpreter=interpreter,
+                receipt=receipt,
+                writer=writer,
+                roles=roles,
+                args=args,
+                script=script,
+                binding=child._launch_binding(roles),
+                stack=stack,
+            )
+
+    def execute(
+        self,
+        fixture: SimpleNamespace,
+        *,
+        extras: tuple[int, ...] = (),
+        omitted: tuple[int, ...] = (),
+        cancel: bool = False,
+    ) -> SimpleNamespace:
+        inherited = tuple(descriptor for descriptor in (*fixture.roles, *extras) if descriptor not in omitted)
+        parent_capabilities = self.capability_state()
+        # One fixture-preparation exec precedes the unchanged two production stages, in the same owned PID.
+        script = "FIXTURE_LAUNCH = " + repr(fixture.script) + "\n" + _ORDINARY_CAPABILITY_BASELINE
+        started = time.monotonic()
+        with subprocess.Popen(  # noqa: S603 - only fixed repository statements and owned fixture descriptors.
+            [
+                f"/proc/self/fd/{fixture.interpreter}",
+                "-I",
+                "-B",
+                "-S",
+                "-c",
+                script,
+                *fixture.args,
+                fixture.binding,
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            close_fds=True,
+            pass_fds=inherited,
+            start_new_session=True,
+            env=child.ENV,
+        ) as process:
+            fixture.writer.close()
+            if cancel:
+                self.assertEqual(fixture.receipt.read(8), b"BOUNDARY")
+                os.killpg(process.pid, signal.SIGTERM)
+            stdout, stderr = process.communicate(timeout=8)
+        audit, separator, stderr = stderr.partition(b"\n")
+        self.assertEqual(separator, b"\n", "fixture capability baseline did not acknowledge")
+        self.assertIn(audit, (b"FIXTURE_CAPS_ZERO_NNP_0", b"FIXTURE_CAPS_ZERO_NNP_1"))
+        self.assertTrue(
+            self.capability_state() == parent_capabilities, "owned fixture changed parent capability/NNP state"
+        )
+        with self.assertRaises(ProcessLookupError):
+            os.killpg(process.pid, 0)
+        return SimpleNamespace(
+            status=process.returncode,
+            pid=process.pid,
+            stdout=stdout,
+            stderr=stderr,
+            proof=fixture.receipt.read(8193),
+            elapsed=time.monotonic() - started,
+            fixture_capabilities_zero=True,
+            fixture_nnp_unchanged=True,
+            fixture_entry_nnp=int(audit[-1:]),
+            parent_capabilities_unchanged=True,
+        )
+
+    def capability_state(self) -> tuple[int, ...]:
+        """Compare private parent state exactly; never log masks or environment values."""
+        with Path("/proc/self/status").open("rb") as stream:
+            raw = stream.read(8193)
+        self.assertLessEqual(len(raw), 8192)
+        rows = dict(row.split(b":", 1) for row in raw.splitlines() if b":" in row)
+        return tuple(int(rows[key].strip(), 16) for key in (b"CapEff", b"CapPrm", b"CapInh", b"CapAmb", b"NoNewPrivs"))
+
+    def test_fixture_establishes_zero_child_capabilities_without_changing_parent(self) -> None:
+        with self.fixture() as fixture:
+            result = self.execute(fixture)
+        self.assertEqual(result.status, 0, result.stderr)
+        self.assertTrue(result.fixture_capabilities_zero)
+        self.assertTrue(result.fixture_nnp_unchanged)
+        self.assertTrue(result.parent_capabilities_unchanged)
+        calls = {
+            ast.unparse(node.func)
+            for node in ast.walk(ast.parse(_ORDINARY_CAPABILITY_BASELINE))
+            if isinstance(node, ast.Call)
+        }
+        self.assertIn("libc.capset", calls)
+        self.assertTrue(
+            calls.isdisjoint(
+                {"libc.prctl", "resource.setrlimit", "signal.alarm", "os.setgroups", "os.setresuid", "os.setresgid"}
+            )
+        )
+
+    def test_real_builder_reexec_keeps_pid_kernel_checks_limits_and_receipt(self) -> None:
+        with self.fixture() as fixture:
+            result = self.execute(fixture)
+        self.assertEqual(result.status, 0, result.stderr)
+        self.assertEqual(
+            json.loads(result.stdout), {"pid": result.pid, "cpu": [2, 2], "core": [0, 0], "fsize": [65536, 65536]}
+        )
+        self.assertEqual(
+            json.loads(result.proof),
+            {"schema": 1, "uid": os.getuid(), "gid": os.getgid(), "groups": [], "nnp": 1, "capabilities": "zero"},
+        )
+
+    def test_real_both_fixed_probe_roles_reexec_with_strict_census(self) -> None:
+        for role, expected in (("parser-version", b""), ("write-denial", b"write-denied\n")):
+            with self.subTest(role=role), self.fixture(role) as fixture:
+                result = self.execute(fixture)
+            self.assertEqual(result.status, 0, result.stderr)
+            self.assertEqual(result.stdout, expected)
+            self.assertEqual(json.loads(result.proof)["nnp"], 1)
+
+    def extra_fd(self, fixture: SimpleNamespace, kind: str) -> int:
+        if kind == "socket":
+            first, second = socket.socketpair()
+            fixture.stack.enter_context(first)
+            fixture.stack.enter_context(second)
+            return first.fileno()
+        if kind == "pipe":
+            first, second = os.pipe()
+            fixture.stack.callback(os.close, first)
+            fixture.stack.callback(os.close, second)
+            return first
+        descriptor = os.open(
+            fixture.root if kind == "directory" else fixture.root / "source-0", os.O_RDONLY | os.O_CLOEXEC
+        )
+        fixture.stack.callback(os.close, descriptor)
+        return descriptor
+
+    def test_unexpected_inheritance_of_every_kind_refuses_before_ffi(self) -> None:
+        for role in ("builder", "parser-version", "write-denial"):
+            for kind in ("regular", "pipe", "socket", "directory"):
+                with self.subTest(role=role, kind=kind), self.fixture(role) as fixture:
+                    descriptor = self.extra_fd(fixture, kind)
+                    fixture.script = fixture.script.replace(
+                        "    import ctypes\n", "    os.write(roles[1], b'FFI-REACHED')\n    import ctypes\n"
+                    )
+                    result = self.execute(fixture, extras=(descriptor,))
+                self.assertEqual((result.status, result.stdout, result.proof), (112, b"", b""))
+
+    def test_missing_replaced_and_aliased_roles_refuse_before_ffi(self) -> None:
+        for fault in ("missing", "slot-alias", "file-alias", "wrong-type", "source-replaced", "interpreter-replaced"):
+            with self.subTest(fault=fault), self.fixture() as fixture:
+                fixture.script = fixture.script.replace(
+                    "    import ctypes\n", "    os.write(roles[1], b'FFI-REACHED')\n    import ctypes\n"
+                )
+                omitted = (fixture.roles[-1],) if fault == "missing" else ()
+                if fault == "slot-alias":
+                    fixture.args[3] = fixture.args[2]
+                elif fault == "file-alias":
+                    os.dup2(fixture.roles[-2], fixture.roles[-1])
+                    fixture.binding = child._launch_binding(fixture.roles)
+                elif fault == "wrong-type":
+                    os.dup2(self.extra_fd(fixture, "directory"), fixture.roles[-1])
+                    fixture.binding = child._launch_binding(fixture.roles)
+                elif fault in {"source-replaced", "interpreter-replaced"}:
+                    changed = fixture.roles[-1] if fault == "source-replaced" else fixture.roles[0]
+                    fixture.script = f"import os\nos.dup2({fixture.roles[-2]}, {changed})\n" + fixture.script
+                result = self.execute(fixture, omitted=omitted)
+            self.assertNotEqual(result.status, 0)
+            self.assertEqual(result.proof, b"")
+
+    def test_unsealed_ordinary_sources_still_refuse_in_payload(self) -> None:
+        with self.fixture() as fixture:
+            fixture.script = fixture.script.replace(
+                repr(self.ordinary_payload("builder")), repr(self.ordinary_payload("builder", seals=True)), 1
+            )
+            result = self.execute(fixture)
+        self.assertNotEqual(result.status, 0)
+        self.assertEqual(result.proof, b"")
+
+    def test_nnp_cloexec_and_reexec_failure_never_emit_payload_receipt(self) -> None:
+        mutations = (
+            ("libc.prctl(38, 1, 0, 0, 0) != 0", "True"),
+            ("libc.prctl(39, 0, 0, 0, 0) != 1", "True"),
+            ("os.set_inheritable(descriptor, False)", "raise OSError('fixture-CLOEXEC-refused')"),
+            ("    os.execve(roles[0],", "    raise OSError('fixture-reexec-refused')\n    os.execve(roles[0],"),
+        )
+        for original, replacement in mutations:
+            with self.subTest(boundary=original), self.fixture() as fixture:
+                self.assertIn(original, fixture.script)
+                if original.startswith("os.set_inheritable"):
+                    fixture.script = fixture.script.replace(
+                        "    import ctypes\n",
+                        "    import ctypes\n    owned_setup = os.open('/proc/self/exe', os.O_RDONLY)\n",
+                    )
+                fixture.script = fixture.script.replace(original, replacement, 1)
+                result = self.execute(fixture)
+            self.assertEqual(result.status, 1)
+            self.assertEqual(result.proof, b"")
+
+    def test_alarm_is_not_renewed_between_two_delayed_stages(self) -> None:
+        with self.fixture(seconds=2) as fixture:
+            fixture.script = fixture.script.replace("    import ctypes\n", "    time.sleep(1.2)\n    import ctypes\n")
+            payload = self.ordinary_payload("builder")
+            fixture.script = fixture.script.replace(repr(payload), repr("import time\ntime.sleep(1.2)\n" + payload), 1)
+            result = self.execute(fixture)
+        self.assertEqual(result.status, -signal.SIGALRM)
+        self.assertEqual(result.proof, b"")
+        self.assertGreater(result.elapsed, 1.7)
+        self.assertLess(result.elapsed, 3.2)
+
+    def test_post_reexec_extras_are_still_rejected_by_all_payload_guards(self) -> None:
+        for role in ("builder", "parser-version", "write-denial"):
+            with self.subTest(role=role), self.fixture(role) as fixture:
+                payload = self.ordinary_payload(role)
+                fixture.script = fixture.script.replace(
+                    repr(payload), repr("import os\nleak = os.open('/proc/self/exe', os.O_RDONLY)\n" + payload), 1
+                )
+                result = self.execute(fixture)
+            self.assertNotEqual(result.status, 0)
+            self.assertEqual(json.loads(result.proof)["nnp"], 1)
+            self.assertEqual(result.stdout, b"")
+
+    def test_post_reexec_lost_stdio_refuses_for_every_fixed_role(self) -> None:
+        for role in ("builder", "parser-version", "write-denial"):
+            for lost in (0, 1, 2):
+                with self.subTest(role=role, stdio=lost), self.fixture(role) as fixture:
+                    payload = self.ordinary_payload(role)
+                    self.assertIn("allowed = ", payload)
+                    incomplete = payload.replace("allowed = ", f"os.close({lost})\nallowed = ", 1)
+                    fixture.script = fixture.script.replace(repr(payload), repr(incomplete), 1)
+                    result = self.execute(fixture)
+                self.assertEqual(result.status, 112)
+                self.assertEqual(json.loads(result.proof)["nnp"], 1)
+                self.assertEqual(result.stdout, b"")
+
+    def test_cancellation_before_and_after_reexec_stops_the_same_owned_group(self) -> None:
+        for phase in ("before", "after"):
+            with self.subTest(phase=phase), self.fixture() as fixture:
+                if phase == "before":
+                    fixture.script = fixture.script.replace(
+                        "    import ctypes\n",
+                        "    os.write(roles[1], b'BOUNDARY')\n    time.sleep(5)\n    import ctypes\n",
+                    )
+                else:
+                    payload = self.ordinary_payload("builder")
+                    delayed = payload.replace(
+                        "os.close(int(interpreter))",
+                        "os.write(int(receipt), b'BOUNDARY')\ntime.sleep(5)\nos.close(int(interpreter))",
+                        1,
+                    )
+                    fixture.script = fixture.script.replace(repr(payload), repr(delayed), 1)
+                result = self.execute(fixture, cancel=True)
+            self.assertEqual(result.status, -signal.SIGTERM)
+            self.assertEqual(result.proof, b"")
+
+    def test_fixed_payload_selection_and_original_absolute_deadline_refuse_overrides(self) -> None:
+        self.assertTrue(child.BUILD_LAUNCHER.startswith("ROLE = 'builder'\nPAYLOAD = " + repr(child.CODE)))
+        self.assertTrue(child.PROBE_LAUNCHER.startswith("ROLE = 'probe'\nPAYLOAD = " + repr(child.PROBE_CODE)))
+        for fault in ("expired", "extra-payload", "unknown-probe"):
+            with (
+                self.subTest(fault=fault),
+                self.fixture("parser-version" if fault == "unknown-probe" else "builder") as fixture,
+            ):
+                fixture.script = fixture.script.replace(
+                    "    import ctypes\n", "    os.write(roles[1], b'FFI-REACHED')\n    import ctypes\n"
+                )
+                if fault == "expired":
+                    fixture.args[-1] = "0"
+                elif fault == "extra-payload":
+                    fixture.args.append("arbitrary-payload")
+                else:
+                    fixture.args[3] = "other"
+                result = self.execute(fixture)
+            self.assertEqual((result.status, result.proof), (1, b""))
 
 
 if __name__ == "__main__":

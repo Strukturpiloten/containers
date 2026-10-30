@@ -204,7 +204,178 @@ static int wait_for_start(const char *path) {
     }
 }
 
+/* Separate, diagnostic-only protocol. One alarm encloses every gate and hold. */
+static volatile sig_atomic_t witness_child;
+static volatile sig_atomic_t witness_cancelled;
+static void witness_cancel(int sig) {
+    witness_cancelled = sig;
+    if (witness_child > 0) kill((pid_t)witness_child, SIGKILL);
+}
+static int witness_field(const char *phase, const char *key, const char *value) {
+    if (strchr(value, '\r')) return 0;
+    char bounded[4096];
+    size_t length = strlen(value);
+    if (!length || length >= sizeof(bounded)) return 0;
+    memcpy(bounded, value, length + 1);
+    for (size_t n = 0; n < length; ++n) if (bounded[n] == '\n') bounded[n] = ';';
+    return printf("leaf-witness-%s-%s=%s\n", phase, key, bounded) >= 0;
+}
+static int witness_snapshot(const char *phase, pid_t child, const char *child_stat) {
+    char value[4096], path[128];
+    struct stat scope;
+    struct statfs filesystem;
+    if (stat("/sys/fs/cgroup", &scope) != 0 || statfs("/sys/fs/cgroup", &filesystem) != 0 ||
+        filesystem.f_type != CGROUP2_SUPER_MAGIC) return 0;
+    snprintf(value, sizeof(value), "%llu:%llu", (unsigned long long)scope.st_dev,
+        (unsigned long long)scope.st_ino);
+    if (!witness_field(phase, "scope-identity", value)) return 0;
+    snprintf(value, sizeof(value), "%ld", (long)getpid());
+    if (!witness_field(phase, "controller-pid", value) ||
+        !read_text("/proc/self/stat", value, sizeof(value)) ||
+        !witness_field(phase, "controller-stat", value) ||
+        !read_text("/proc/self/cgroup", value, sizeof(value)) ||
+        !witness_field(phase, "controller-cgroup", value)) return 0;
+    const char *names[] = {"pid", "cgroup", "user"};
+    for (size_t n = 0; n < sizeof(names) / sizeof(names[0]); ++n) {
+        snprintf(path, sizeof(path), "/proc/self/ns/%s", names[n]);
+        ssize_t count = readlink(path, value, sizeof(value) - 1);
+        if (count <= 0 || count >= (ssize_t)sizeof(value) - 1) return 0;
+        value[count] = '\0';
+        char key[32]; snprintf(key, sizeof(key), "controller-%sns", names[n]);
+        if (!witness_field(phase, key, value)) return 0;
+    }
+    snprintf(value, sizeof(value), "%ld", (long)child);
+    if (!witness_field(phase, "child-pid", value) || !witness_field(phase, "child-stat", child_stat)) return 0;
+    const char *files[] = {"memory.max", "memory.current", "memory.swap.max", "memory.swap.current",
+        "memory.events", "memory.events.local", "memory.oom.group", "pids.max"};
+    for (size_t n = 0; n < sizeof(files) / sizeof(files[0]); ++n) {
+        snprintf(path, sizeof(path), "/sys/fs/cgroup/%s", files[n]);
+        if (!read_text(path, value, sizeof(value)) || !witness_field(phase, files[n], value)) return 0;
+        if ((strcmp(files[n], "memory.oom.group") == 0 && strcmp(value, "0") != 0) ||
+            (strcmp(files[n], "memory.max") == 0 && strcmp(value, "33554432") != 0) ||
+            (strcmp(files[n], "memory.swap.max") == 0 && strcmp(value, "0") != 0) ||
+            (strcmp(files[n], "pids.max") == 0 && strcmp(value, "16") != 0)) return 0;
+    }
+    return witness_field(phase, "complete", "yes") && fflush(stdout) == 0;
+}
+static int witness_gate(const char *path) {
+    struct stat status;
+    const struct timespec interval = {.tv_sec = 0, .tv_nsec = 10000000};
+    while (!witness_cancelled) {
+        if (stat(path, &status) == 0) return S_ISREG(status.st_mode);
+        if (errno != ENOENT) return 0;
+        if (nanosleep(&interval, NULL) != 0 && errno != EINTR) return 0;
+    }
+    return 0;
+}
+static int memory_witness(const char *start) {
+    if (getpid() != 1) return 12; /* Namespace PID1 death must not orphan an allocator. */
+    if (start[0] != '/' || strlen(start) > 4000) return 2;
+    char after[4096], finish[4096], child_stat[4096], path[128];
+    snprintf(after, sizeof(after), "%s.after", start);
+    snprintf(finish, sizeof(finish), "%s.finish", start);
+    int pipefd[2], status = 0, result = 12, reaped = 0;
+    sigset_t blocked, previous;
+    sigemptyset(&blocked); sigaddset(&blocked, SIGTERM); sigaddset(&blocked, SIGINT); sigaddset(&blocked, SIGALRM);
+    struct sigaction action; memset(&action, 0, sizeof(action));
+    action.sa_handler = SIG_DFL;
+    if (sigaction(SIGCHLD, &action, NULL) != 0) return 12; /* Always own a waitable child. */
+    action.sa_handler = witness_cancel; action.sa_mask = blocked;
+    if (sigprocmask(SIG_BLOCK, &blocked, &previous) != 0) return 12;
+    /* The owned cancellation/alarm handlers must not inherit a blocked delivery mask. */
+    sigdelset(&previous, SIGTERM); sigdelset(&previous, SIGINT); sigdelset(&previous, SIGALRM);
+    if (sigaction(SIGTERM, &action, NULL) != 0 || sigaction(SIGINT, &action, NULL) != 0 ||
+        sigaction(SIGALRM, &action, NULL) != 0 || pipe(pipefd) != 0) {
+        sigprocmask(SIG_SETMASK, &previous, NULL); return 12;
+    }
+    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
+        close(pipefd[0]); close(pipefd[1]); sigprocmask(SIG_SETMASK, &previous, NULL); return 12;
+    }
+    alarm(10);
+    pid_t child = fork();
+    if (child == 0) {
+        close(pipefd[1]);
+        signal(SIGTERM, SIG_DFL); signal(SIGINT, SIG_DFL); signal(SIGALRM, SIG_DFL); signal(SIGPIPE, SIG_DFL);
+        sigprocmask(SIG_SETMASK, &previous, NULL);
+        char release;
+        if (read(pipefd[0], &release, 1) != 1 || release != 'x') _exit(12);
+        close(pipefd[0]);
+        volatile unsigned char *blocks[128];
+        for (int n = 0; n < 128; ++n) {
+            blocks[n] = malloc(1024 * 1024);
+            if (!blocks[n]) _exit(3);
+            for (int offset = 0; offset < 1024 * 1024; offset += 4096) blocks[n][offset] = 1;
+        }
+        for (int n = 0; n < 128; ++n) free((void *)blocks[n]);
+        _exit(4);
+    }
+    witness_child = child > 0 ? child : 0;
+    sigprocmask(SIG_SETMASK, &previous, NULL);
+    close(pipefd[0]);
+    if (child < 0) { close(pipefd[1]); return 12; }
+    const char *stage = "child-identity";
+    snprintf(path, sizeof(path), "/proc/%ld/stat", (long)child);
+    if (!read_text(path, child_stat, sizeof(child_stat))) goto done;
+    stage = "start-gate";
+    if (!witness_gate(start)) goto done;
+    stage = "before-snapshot";
+    if (!witness_snapshot("before", child, child_stat)) goto done;
+    stage = "release-child";
+    if (write(pipefd[1], "x", 1) != 1) goto done;
+    close(pipefd[1]); pipefd[1] = -1;
+    stage = "wait-child";
+    while (!reaped) {
+        /* Signals cannot observe a stale PID between waitpid and ownership retirement. */
+        if (sigprocmask(SIG_BLOCK, &blocked, &previous) != 0) goto done;
+        pid_t waited = waitpid(child, &status, WNOHANG);
+        int wait_error = errno;
+        if (waited == child || (waited < 0 && wait_error == ECHILD)) { witness_child = 0; reaped = 1; }
+        sigprocmask(SIG_SETMASK, &previous, NULL);
+        if (waited < 0 && wait_error != EINTR) goto done;
+        if (!reaped) { const struct timespec interval = {.tv_sec = 0, .tv_nsec = 10000000}; nanosleep(&interval, NULL); }
+    }
+    if (witness_cancelled) goto done;
+    stage = "result-write";
+    if (!witness_field("result", "child-reaped", "yes")) goto done;
+    char termination[32];
+    snprintf(termination, sizeof(termination), "%d", WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+    if (!witness_field("result", "child-signal", termination) ||
+        !witness_field("result", "child-signaled", WIFSIGNALED(status) ? "yes" : "no")) goto done;
+    stage = "after-snapshot";
+    if (!witness_snapshot("after", child, child_stat)) goto done;
+    stage = "after-sentinel";
+    int ready = open(after, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (ready < 0) goto done;
+    close(ready);
+    stage = "finish-gate";
+    if (witness_gate(finish) && !witness_cancelled) result = 0; /* Observation completion only. */
+done:
+    if (pipefd[1] >= 0) close(pipefd[1]);
+    if (!reaped) {
+        sigprocmask(SIG_BLOCK, &blocked, &previous);
+        if (witness_child > 0) kill(child, SIGKILL);
+        while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+        witness_child = 0; /* Includes ECHILD: numeric kill authority is retired while blocked. */
+        sigprocmask(SIG_SETMASK, &previous, NULL);
+    }
+    alarm(0);
+    if (result != 0 || witness_cancelled) {
+        /* Keep both explicit output and main-exit stdio flushing nonblocking, including an expired alarm. */
+        int output_flags = fcntl(STDOUT_FILENO, F_GETFL);
+        if (output_flags < 0 || fcntl(STDOUT_FILENO, F_SETFL, output_flags | O_NONBLOCK) != 0)
+            _exit(witness_cancelled ? 12 : result);
+        sig_atomic_t reported_signal = witness_cancelled;
+        const char *received = reported_signal == SIGALRM ? "sigalrm" :
+            reported_signal == SIGTERM ? "sigterm" : reported_signal == SIGINT ? "sigint" : "none";
+        /* Normal cleanup only, after owned child custody is retired. Sampled receipt is not signal history or timer proof. */
+        if (witness_field("failure", "stage", stage) && witness_field("failure", "signal", received)) fflush(stdout);
+    }
+    return witness_cancelled ? 12 : result;
+}
+
 int main(int argc, char **argv) {
+    if (argc == 4 && strcmp(argv[1], "memory-witness") == 0 && strcmp(argv[2], "--wait-for-start") == 0)
+        return memory_witness(argv[3]);
     if (argc == 4 && strcmp(argv[1], "--pid-ancestry") == 0) {
         alarm(2);
         return pid_ancestry(argv[2], argv[3]);

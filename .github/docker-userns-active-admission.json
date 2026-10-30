@@ -1,0 +1,141 @@
+{
+  "schemaVersion": 4,
+  "consumer": "containers-ubuntu26-userns-active",
+  "purpose": "scoped-prerequisite-attempt",
+  "qualification": "none",
+  "sourceManifestSha256": "7f6693f40311617e4854f8c6a35cbe13b3afdd3d7a8bef58978397ba1178dbd8",
+  "context": {
+    "repository": "Strukturpiloten/containers",
+    "workflow": ".github/workflows/ci.yml",
+    "event": "workflow_dispatch",
+    "ref": "refs/heads/TheRealBecks/issue527",
+    "validationProfile": "docker-rootless-diagnostic",
+    "job": "smoke-build",
+    "image": "docker-29-conformance-rootless",
+    "imageOS": "ubuntu26",
+    "imageVersion": "same-job-bound-provenance-not-vm-attestation"
+  },
+  "architectures": {
+    "amd64": "experimental-load-candidate",
+    "arm64": "compile-only-refuse-load"
+  },
+  "review": {
+    "kind": "reviewed-active-source-predicate-not-observation-created-authority",
+    "date": "2026-10-30",
+    "evidenceRun": "41102914835",
+    "limits": "Maintained attempts use only the finite reviewed CI/manual/PR/queue or original publication caller tuples, actual native producing job and complete per-architecture cohort. Each candidate still needs genuine native completion; previous bounded proof is historical, not changed-source or publication approval. Diagnostic ARM observation/refusal and historical captures remain unchanged.",
+    "renovate": "Managed pins remain in docker-userns-policy-source.json; source/parser/helper changes require coordinated manual re-admission; no automatic runner fingerprints",
+    "armCohort": "Deliberately selected bounded ARM compatibility hypothesis after source/ABI review; exact root-owned preinstalled tools use the existing OS-tool trust exception, not vendor checksums or VM attestation. Historical ImageVersion 20261026.168.1 and startup header 20261025.167.1 differ; no independent image/package manifest was established. Native owner/load/attachment/C/OOM/cleanup acceptance remains required."
+  },
+  "policyNamespace": {
+    "name": "root\n",
+    "level": "0\n",
+    "stacked": "no\n"
+  },
+  "parserExecutionNamespace": {
+    "kind": "reviewed-trusted-fixed-os-no-parser-exec-transition-assumption",
+    "measuredPostExec": false,
+    "requirement": "Fresh actor namespace opens before invoking the held reviewed parser; no claim of post-exec parser namespace measurement"
+  },
+  "revision": "containers527-maintained-callers-v1",
+  "maintainedContext": {
+    "repository": "Strukturpiloten/containers",
+    "image": "docker-29-conformance-rootless",
+    "imageOS": "ubuntu26",
+    "imageVersion": "same-job-bound-provenance-not-vm-attestation",
+    "validationProfiles": [
+      "full",
+      "docker-rootless-qualification"
+    ]
+  },
+  "maintainedArchitectures": {
+    "amd64": "maintained-prerequisite",
+    "arm64": "maintained-prerequisite"
+  },
+  "cohorts": {
+    "amd64": {
+      "osID": "ubuntu",
+      "osVersion": "26.04",
+      "machine": "x86_64",
+      "kernel": "7.0.0-1017-azure",
+      "parserVersion": "5.0.2",
+      "parserSha256": "955e4cd5f092604fe75131b264e26924108371a8764d02f395f7493f6bcd691a",
+      "abiSha256": "e510bb8f6788b45e48de2f859a6f94a7b8416cbac5a1051814cfce925fa911bd",
+      "namespaceMaskSha256": "9513df1bb68dc257a9a12db6b9ff4bd46b379113ca37438a2426577e362318d8",
+      "policyVersion9Sha256": "5040625b1fb6fa4af07226683f6e6003b29e5e70b16f8cfb24be7a752393f0ee",
+      "interpreter": "/usr/bin/python3.14",
+      "interpreterSha256": "be9a2a5eada8c89c1c399fdfb8397179e877c20d8db0739c802f726d4d0e69fd",
+      "pythonVersion": [
+        3,
+        14,
+        4,
+        "final",
+        0
+      ]
+    },
+    "arm64": {
+      "osID": "ubuntu",
+      "osVersion": "26.04",
+      "machine": "aarch64",
+      "kernel": "7.0.0-1017-azure",
+      "parserVersion": "5.0.2",
+      "parserSha256": "51d0cac5d322d688892e5bfd9283262bab55fdced1c85a107cb2a92bc71e0e36",
+      "abiSha256": "e510bb8f6788b45e48de2f859a6f94a7b8416cbac5a1051814cfce925fa911bd",
+      "namespaceMaskSha256": "9513df1bb68dc257a9a12db6b9ff4bd46b379113ca37438a2426577e362318d8",
+      "policyVersion9Sha256": "5040625b1fb6fa4af07226683f6e6003b29e5e70b16f8cfb24be7a752393f0ee",
+      "interpreter": "/usr/bin/python3.14",
+      "interpreterSha256": "d1b87c365d0cf5a985cfedfc227ff613a5bc6ff56e841202eb9330d263bbeee9",
+      "pythonVersion": [
+        3,
+        14,
+        4,
+        "final",
+        0
+      ]
+    }
+  },
+  "maintainedCallers": {
+    "ci-pr": {
+      "workflow": ".github/workflows/ci.yml",
+      "event": "pull_request",
+      "job": "smoke-build",
+      "refPolicy": "pr-merge",
+      "selector": "automatic-full"
+    },
+    "ci-merge-group": {
+      "workflow": ".github/workflows/ci.yml",
+      "event": "merge_group",
+      "job": "smoke-build",
+      "refPolicy": "queue-head",
+      "selector": "automatic-full"
+    },
+    "ci-manual": {
+      "workflow": ".github/workflows/ci.yml",
+      "event": "workflow_dispatch",
+      "job": "smoke-build",
+      "refPolicy": "event-selected-manual-ref",
+      "selector": "manual-ci"
+    },
+    "publication-push": {
+      "workflow": ".github/workflows/publish-images.yml",
+      "event": "push",
+      "job": "build",
+      "refPolicy": "main-push",
+      "selector": "publication-default"
+    },
+    "publication-schedule": {
+      "workflow": ".github/workflows/publish-images.yml",
+      "event": "schedule",
+      "job": "build",
+      "refPolicy": "main-schedule",
+      "selector": "publication-default"
+    },
+    "publication-manual": {
+      "workflow": ".github/workflows/publish-images.yml",
+      "event": "workflow_dispatch",
+      "job": "build",
+      "refPolicy": "event-selected-manual-ref",
+      "selector": "publication-default"
+    }
+  }
+}

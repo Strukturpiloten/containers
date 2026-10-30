@@ -9,7 +9,16 @@ import unittest
 import urllib.error
 from unittest.mock import patch
 
-from scripts.release_evidence import ReleaseEvidenceError, _github_request, asset_name, publish, record, upload
+from scripts.release_evidence import (
+    ReleaseEvidenceError,
+    _github_request,
+    _require_complete,
+    asset_name,
+    publish,
+    record,
+    upload,
+)
+from tests.test_evidence_gate import maintained_mutations, maintained_runtime
 
 BUILD = {
     "imageName": "example",
@@ -222,9 +231,15 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 "archiveSha256": f"sha256:{'a' * 64}",
             },
         }
-        with patch(
-            "scripts.release_evidence.image_policy",
-            return_value={"requiredRuntimeProfile": "docker", "admission": "isolated-test"},
+        with (
+            patch(
+                "scripts.release_evidence.container_engine._load_images",
+                return_value=[{"name": "example", "tests": {"docker": {"launcher": "direct"}}}],
+            ),
+            patch(
+                "scripts.release_evidence.image_policy",
+                return_value={"requiredRuntimeProfile": "docker", "admission": "isolated-test"},
+            ),
         ):
             result = record(
                 BUILD,
@@ -236,6 +251,39 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 execution_attempt=2,
             )
             self.assertEqual(len(result["runtimeEvidence"]), 1)
+            for facts in (
+                {"qualification": "none", "oomAccountingStatus": "complete"},
+                {"qualification": "complete", "scopedProfileRequired": True},
+                {"qualification": "complete", "focusedRuntime": "mandatory-accounting"},
+            ):
+                with self.subTest(facts=facts), self.assertRaises(ReleaseEvidenceError):
+                    record(
+                        BUILD,
+                        release_origin_revision="d" * 40,
+                        runtime_evidence=[{**runtime, **facts}],
+                        scan_reports=[scan],
+                        published_configs=published,
+                        require_complete=True,
+                        execution_attempt=2,
+                    )
+            with (
+                patch(
+                    "scripts.release_evidence.container_engine._load_images",
+                    return_value=[
+                        {"name": "example", "tests": {"docker": {"launcher": "systemd", "mode": "rootless"}}}
+                    ],
+                ),
+                self.assertRaises(ReleaseEvidenceError),
+            ):
+                record(
+                    BUILD,
+                    release_origin_revision="d" * 40,
+                    runtime_evidence=[{**runtime, "qualification": "complete"}],
+                    scan_reports=[scan],
+                    published_configs=published,
+                    require_complete=True,
+                    execution_attempt=2,
+                )
             with self.assertRaisesRegex(ReleaseEvidenceError, "Scan evidence"):
                 record(
                     BUILD,
@@ -460,3 +508,74 @@ class ReleaseEvidenceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MaintainedPrerequisiteReleaseConsumerTests(unittest.TestCase):
+    def validate(self, runtime: dict, architecture: str = "amd64", missing: str | None = None) -> None:
+        identity = maintained_runtime(architecture)["imageIdentity"]
+        scan = {
+            "image": "ghcr.io/strukturpiloten/docker-29-conformance-rootless",
+            "architecture": architecture,
+            "admission": "isolated-test",
+            "decision": "passed",
+            "sourceRevision": "a" * 40,
+            "runId": "1",
+            "runAttempt": "2",
+            "candidateDigest": identity["manifestDigest"],
+            "candidateSource": {**identity, "archiveSha256": "sha256:" + identity["archiveSha256"]},
+            "baselineStatus": "absent",
+            "baselineDigest": None,
+            "baselineSource": {"status": "absent"},
+        }
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch(
+                "scripts.release_evidence.image_policy",
+                return_value={"requiredRuntimeProfile": "docker", "admission": "isolated-test"},
+            ),
+            patch(
+                "scripts.release_evidence.container_engine._load_images",
+                return_value=[
+                    {
+                        "name": "docker-29-conformance-rootless",
+                        "tests": {"docker": {"launcher": "systemd", "mode": "rootless"}},
+                    }
+                ],
+            ),
+        ):
+            _require_complete(
+                name="docker-29-conformance-rootless",
+                image=scan["image"],
+                version="1.0.0",
+                source="a" * 40,
+                run_id="1",
+                execution_attempt=2,
+                architecture_digests={architecture: identity["manifestDigest"]},
+                published={}
+                if missing == "publication"
+                else {architecture: {"configDigest": identity["configDigest"]}},
+                runtime=[runtime],
+                scans=[] if missing == "scan" else [scan],
+            )
+
+    def test_native_facts_are_recognized_without_publishing(self) -> None:
+        self.validate(maintained_runtime())
+
+    def test_all_hostile_native_records_refuse_release_evidence(self) -> None:
+        for fault, runtime in maintained_mutations():
+            with self.subTest(fault=fault), self.assertRaises(ReleaseEvidenceError):
+                self.validate(runtime)
+
+    def test_arm_native_facts_and_same_hostile_records_obey_release_consumer(self) -> None:
+        self.validate(maintained_runtime("arm64"), "arm64")
+        for fault, runtime in maintained_mutations("arm64"):
+            with self.subTest(fault=fault), self.assertRaises(ReleaseEvidenceError):
+                self.validate(runtime, "arm64")
+
+    def test_bounded_native_facts_do_not_replace_separate_publication_and_scan_evidence(self) -> None:
+        for architecture in ("amd64", "arm64"):
+            runtime = maintained_runtime(architecture, "docker-rootless-qualification")
+            self.validate(runtime, architecture)
+            for missing in ("publication", "scan"):
+                with self.subTest(architecture=architecture, missing=missing), self.assertRaises(ReleaseEvidenceError):
+                    self.validate(runtime, architecture, missing)

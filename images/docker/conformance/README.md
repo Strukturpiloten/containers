@@ -163,3 +163,205 @@ package names; the new Debian base pin uses the existing metadata regex manager,
 OS-release freeze rule, shared Debian 13 digest group, and digest approval policy.
 The probe compiler is confined to a build stage; installed package and compiler
 provenance are retained in the final image.
+
+### Diagnostic leaf-after witness
+
+The mandatory single-PID1 allocator, its genuine `137`/Docker OOM predicate,
+and its valid possibly unavailable after sample remain unchanged. The qualification
+workload uses mandatory pre-daemon-through-quiescent-parent accounting,
+not a sticky-flag waiver; see the [lifetime contract](../../../docs/runtime-backends.md#mandatory-docker-parent-oom-lifecycle-accounting).
+Only explicit `--oom-accounting-mode diagnostic` may run a separate witness
+after the primary probe exposes a typed outer Docker OOM marker. The default
+qualification mode and Podman never start this optional actor. Diagnostic
+witness kills cannot enter the mandatory ledger or qualify any run.
+
+The focused dispatch retains `validation_profile=docker-rootless-diagnostic`.
+Its orthogonal `focused_runtime` choice defaults to `witness-diagnostic`;
+`mandatory-accounting` selects the original allocator/ledger workload without
+that optional witness. Both choices are nonqualifying and require the exact
+existing issue527 context. An experimental AMD64 result may report operation
+passed and accounting complete while phase and aggregate qualification stay
+none. ARM still observes/refuses load.
+
+The existing `ci.yml` full and bounded qualification manual profiles admit a maintained AMD64 or ARM64 prerequisite
+attempt on repository-owned GitHub-hosted Linux for this fixture and its private
+outer Docker backend. Root derives the purpose and selected manual ref from the
+fixed event and connected candidate source proof, with candidate/workflow/checkout
+source equality and the complete reviewed cohort for the selected architecture. Full selection keeps
+`focused_runtime=none` and the original qualification workload. Each phase must
+supply genuine, context/admission-bound host/profile and cleanup evidence; both
+original ledgers must finalize. Existing root stage disposal must succeed and
+acknowledge the same immutable stage before aggregate authority is published.
+Late failures and failed producing steps retain no native authority. Ordinary
+Action/publisher/release/catalogue consumers share this decision independently
+of the consumer environment. PR/push/merge/schedule/publication/local activation
+remain unadmitted. Diagnostic ARM still observes/refuses; maintained ARM uses
+its own held parser/interpreter, ABI/features and namespace predicate under the
+existing preinstalled-tool trust exception. Reported ImageVersion is same-job
+provenance, not VM/vendor binary attestation. The full matrix is unchanged. The bounded
+`docker-rootless-qualification` profile selects only this fixture, both
+architectures and their payloads, with a distinct aggregate check that cannot
+satisfy full `Required CI`. Actual selected profile is bound in the root/native
+context. Source admission claims no native success or publication permission.
+
+The opt-in repository-owned `memory-witness` mode runs as inner PID1 with one
+bounded allocator child in the same 32 MiB, zero-swap, 16-PID leaf. It reads and
+requires actual `memory.oom.group=0`; it never writes group policy or lowers an
+OOM score. The child waits on a pipe while the driver binds both exact process
+identities and the complete leaf membership. A fresh purpose-tagged root sample
+precedes the start gate. The controller samples hierarchical and local memory
+events before releasing its child, records direct `waitpid` signal status and
+reaps the child, then samples the same populated leaf and holds it for the root
+after sample. Separate bounded reads are not atomic. Raw identities, paths,
+collector output and error operands remain private; public observations retain
+hashes, counter sets, completed binding checks and monotonic window envelopes.
+Closed `enteredStage` and `completedStage` facts retain the last collection
+operation started and successfully returned, including unavailable observations.
+They cover room checking, launch, binding, root-before sampling, release and
+await-after, log reading, controller rebinding, retained hierarchy, root-after
+sampling, projection validation, finish hold and completion wait. Null means
+no operation completed yet. Separate `cleanupEnteredStage` and
+`cleanupCompletedStage` facts use only `exact-owned-leaf` or null, alongside
+the existing cleanup outcome; cleanup never overwrites the collection location.
+A returned completion wait is distinct from controller success, and completed
+sampling does not establish valid accounting until projection validation.
+No raw commands, paths, process identities or exception text enter these facts.
+On release/await failure, `awaitResult` retains only an actual closed guest
+result: release failed, after sentinel observed, or polling exhausted. Guard,
+transport and malformed-result failures remain unavailable; polling exhaustion
+does not prove controller death or why the sentinel was not observed.
+A separate `failureCapture` may retain exact-CID/name-bound typed OCI state
+and fixed controller failure-stage/received-signal tokens from private logs.
+C emits these tokens only on failure, in normal cleanup after retiring child
+custody. Failure output and process-exit stdio flushing use nonblocking stdout;
+if that mode cannot be enabled, the controller exits without a stdio fallback. Signal receipt is sampled once; it is not complete signal history. A SIGALRM
+receipt is not timer-expiry or cause proof.
+Capture has one nonrenewed cap of at most two seconds, clipped to the existing
+command timeout, original work deadline and backend cleanup reserve. Both reads
+share that allowance; expired, failed, oversized, truncated or malformed reads
+remain unavailable. Capture progress never replaces the original collection
+stages or establishes controller completion. Raw logs and OCI operands remain
+private; existing success and mandatory allocator protocols are unchanged.
+
+The witness alone uses rootfs markers `/boxferry-leaf-witness-start`, `.after`
+and `.finish`; the mandatory allocator retains its legacy `/tmp` barrier.
+The driver creates one stopped, nonce-labelled container from the actual loaded
+image ID, then verifies its exact CID, name, command, mode, writable-rootfs
+configuration and absence of covering mounts or tmpfs. All three marker entries
+must be absent, using actual archive HEAD HTTP status with the same stopped
+container bound before and after the reads. Any entry, including a dangling
+symlink, refuses startup. Preflight finishes before starting the C controller.
+
+Start and finish are single uncompressed archive PUTs containing one canonical
+empty regular file. HEAD of the C-produced after marker acknowledges visibility
+only when its exact name, zero size, Go regular-file mode and empty link target
+are observed. Complete C telemetry, retained process/cgroup identity, counters,
+root sampling and controller wait remain mandatory. An uncertain PUT may already
+have changed the filesystem; it aborts without retry. No barrier operation execs
+another process inside the bounded inner leaf. Archive workers and filesystem
+writes can still perturb accounting; this is not a zero-perturbation claim.
+
+The existing Docker CLI bridges raw HTTP only through the guarded outer guest
+and the explicit mode-specific Unix endpoint. This deliberately uses the hidden
+`system dial-stdio` command reviewed at CLI 29.9.2 revision
+`a82e528901260c8df6073311379eac65f92db204`; Engine archive filesystem-view and
+HEAD lstat behavior were reviewed at
+`0367cbeb49b9d98cb0b4f51e95f7b54b4803e76c`. Both upstream sources are Apache-2.0;
+no source was copied or redistributed. Future payload updates must review this
+consumer under the existing manual payload-update policy. No new download,
+software pin or Renovate manager is introduced.
+
+The archive bridge preloads one validated request of at most 4096 bytes into
+an identity-bound FIFO in its private `0700` scratch directory before launching
+the CLI. On the selected Linux AMD64/ARM64 profile, a fresh FIFO has at least
+one 4096-byte page of capacity; this bound does not rely on `PIPE_BUF`. Only the
+supervisor retains the read/write keeper. The CLI receives a separately opened
+read-only FIFO descriptor and can exit when the response completes while stdin
+remains open, as supported by the reviewed CLI's response-first path. Actual
+preload and CLI status, separate bounded empty stderr, outside-producer completion
+proof, inode custody and verified cleanup remain required before a trusted
+receipt. Setup, transfer and cleanup share the original absolute deadline and
+reserve; no input writer runs in the background.
+
+After CLI completion, the supervisor closes its keeper and requires a bounded
+FIFO residual read to reach EOF with actual success and no remaining request
+bytes, including NUL bytes. A complete HTTP response alone cannot acknowledge an
+incomplete request transfer to CLI stdin.
+
+Finite-file stdin can otherwise cause CLI write-half closure and cancellation
+of a Go HTTP request context. The retained native preflight HEAD response was
+499; its underlying handler error and cancellation cause were not measured.
+This source-backed correction does not establish that native failure's cause or
+qualify the witness. HTTP 499 remains rejected, and original allocator admission
+and OOM/refusal requirements remain unchanged.
+
+All six witness CLI routes use the explicit reviewed Unix endpoint and
+`--tls=false` without an explicit `--tlsverify` flag. At that exact CLI revision,
+`cli/flags/options.go` enables TLS for an explicitly supplied verification flag
+even when false. Default endpoint initialization in `cli/command/cli.go` reads
+CA data through `cli/context/tlsdata.go` before the Unix socket bypass in
+`cli/context/docker/load.go`. The prior invocation thus has a source-proven
+certless initialization defect. R16's native launch/archive-image failure lacked
+the underlying exception, so it does not establish a CA-read cause. Source
+research and the authored certless process-boundary regression cannot replace a
+new native run. Exact Apache-2.0 source revision, license and hashes are retained
+as private provenance; no upstream code or executable is copied, translated or
+redistributed. Historical test version/API/image facts are not new operational
+pins. Existing runtime-input and manual Docker payload/Renovate ownership remain
+unchanged; no extra manager, environment fallback or runtime authority is added.
+
+The exact Engine 29.9.2 HostConfig and CLI 29.9.2 vendored inspect type mark
+`Tmpfs` as `omitempty`; the JSON template does not restore that empty optional
+map. The driver accepts its absence as empty while still requiring an actual
+HostConfig object, explicit `ReadonlyRootfs: false`, and separate top-level
+Mounts evidence. Existing explicit-null/type allowances, unsafe destinations,
+covering mount/Tmpfs rejection, identity bookends, deadlines and cleanup remain
+unchanged. Versioned Moby/CLI Apache-2.0 and Go 1.26.10 BSD-3-Clause JSON source
+references are retained in private R18 provenance; no oracle code is copied or
+translated. The authored wire fixture is not a native inspect capture. Native
+40998114033's preflight/rootfs reason and verified cleanup do not identify the
+failed conjunct or prove an unsafe rootfs cause. This normalization and its
+hermetic tests do not qualify native behavior or add a software pin/manager.
+
+Host code supplies bounded base64 request bytes and parses a distinct held
+response inode. The active image TAR's bytes, inode and offset remain untouched;
+response-role descriptors cannot enter any image-load or stdin route. Read limits
+are validated before seeking or reading. Both stream roles retain a directory FD,
+bind its identity at private-directory creation, and verify the named and held
+parent's UID, mode 0700 and directory type before and after I/O. Allocation uses
+fixed names relative to that FD; renamed, replaced or symlinked parents refuse
+further I/O without rebinding or touching the active image TAR. The
+selected guest `/bin/dash` sets and verifies both soft and hard file-size limits
+in the actual decoder and CLI ancestor, with core dumps disabled. Dash's
+[documented file-size unit](https://manpages.debian.org/trixie/dash/dash.1.en.html#ulimit)
+is 512 bytes: request preparation has the larger bound, while separate CLI stderr
+is capped at one block. Empty-stderr proof pairs the held regular inode and name,
+UID, mode, link count and exact zero size. Setup, decoder, CLI, custody or cleanup
+failure cannot produce the success receipt. The supervisor validates a separate
+held completion file and appends its receipt outside the bounded stdout pipeline;
+producer death cannot turn HTTP payload into a trusted receipt. Complete HTTP
+framing and the independently appended receipt are required; neither CLI nor `head` exit zero is HTTP success.
+
+One protocol end is anchored before create from the existing command timeout,
+work deadline and preserved backend cleanup reserve. Preflight never renews it;
+full ten-second room must remain before START. The existing eight-second await
+window additionally includes PUT, every implicit CLI ping, HEAD poll and sleep.
+Late parsing, transport uncertainty or incomplete framing stays unavailable.
+Only the root observer copy receives the absolute protocol end as a tighter
+runtime deadline, so delayed entry cannot renew its allowance. The original
+context and backend deadlines remain unchanged. HEAD stat timestamps require a
+valid bounded RFC3339 calendar value; they establish no freshness or OOM cause.
+The separate R15 failure capture retains its existing two-second cap under the
+original work deadline and reserve. Closed archive operation/reason facts retain
+where the protocol stopped without exposing requests, responses or operands.
+
+One nonrenewable ten-second controller alarm covers all gates, allocation and
+after hold, within the existing original work deadline and cleanup reserve.
+Insufficient time, controller death, group killing, missing after data, changed
+identities, non-SIGKILL termination or unsupported accounting produces bounded
+unavailable evidence. The existing runtime watchdog and exact owned-guest
+cleanup also bound stalled cleanup; a failed or unknown cleanup is not success.
+Controller exit zero means observation completion only. Even a bound child
+SIGKILL and increasing leaf counters do not identify the OOM cause, supply an
+original-probe ledger debit, or qualify this image. Synthetic syscall-shim and mock tests are
+not native namespace or genuine OOM evidence.

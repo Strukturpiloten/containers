@@ -42,7 +42,7 @@ class PrivateDockerControls(unittest.TestCase):
         for name, mode, privilege, valid in cases:
             with self.subTest(name=name, mode=mode, privilege=privilege), tempfile.TemporaryDirectory() as directory:
                 store = Path(directory) / "owned"
-                store.mkdir()
+                store.mkdir(mode=0o700)
                 with patch("scripts.runtime_tests.tempfile.mkdtemp", return_value=str(store)):
                     ctx = RuntimeContext(
                         image=name, architecture="amd64", timeout=45, use_sudo=False, outer_engine="docker"

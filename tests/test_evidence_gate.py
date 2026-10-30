@@ -4,13 +4,22 @@ from __future__ import annotations
 
 import copy
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.evidence_gate import EvidenceError, _outer_runtime, _systemd_phase_backends, main, verify_architecture
+from scripts.evidence_gate import (
+    EvidenceError,
+    _outer_runtime,
+    _systemd_phase_backends,
+    main,
+    require_ordinary_runtime_authority,
+    verify_architecture,
+)
+from tests.test_docker_userns_qualification import scoped_receipt, stage_disposal
 
 NAME = "example"
 IMAGE = "ghcr.io/strukturpiloten/example"
@@ -67,6 +76,181 @@ SCAN = {
 }
 
 
+def maintained_runtime(architecture: str = "amd64", profile: str = "full") -> dict:
+    """Build archived native results with independent root and accounting facts."""
+    result = copy.deepcopy(RUNTIME)
+    result["architecture"] = architecture
+    result.update(
+        image="docker-29-conformance-rootless",
+        runId="1",
+        runAttempt="2",
+        producingJob="smoke-build",
+        qualification="complete",
+        oomAccountingMode="qualification",
+        oomAccountingStatus="complete",
+        oomAccountingRequired=True,
+        focusedRuntime="none",
+        prerequisitePurpose="maintained-prerequisite",
+    )
+    identity = {
+        "architecture": architecture,
+        "archiveSha256": "b" * 64,
+        "manifestDigest": "sha256:" + "c" * 64,
+        "configDigest": "sha256:" + "d" * 64,
+        "sourceRevision": "a" * 40,
+        "version": "1.0.0",
+    }
+    result["imageIdentity"] = identity
+    result["phases"] = []
+    for name in ("clean-control", "enforcement"):
+        scoped = scoped_receipt(
+            purpose="maintained-prerequisite", phase=name, architecture=architecture, requested=profile
+        )
+        result["phases"].append(
+            {
+                "phase": name,
+                "architecture": architecture,
+                "status": "passed",
+                "cleanupVerified": True,
+                "imageIdentity": copy.deepcopy(identity),
+                "scopedProfile": scoped,
+                "qualification": "complete",
+                "prerequisiteAuthority": "maintained-prerequisite",
+                "oomAccountingMode": "qualification",
+                "oomAccountingStatus": "complete",
+                "oomAccountingRequired": True,
+                "focusedRuntime": "none",
+                "outerRuntime": copy.deepcopy(result["host"]["outerRuntime"]),
+                "checks": [
+                    {
+                        "name": "owned parent OOM lifecycle accounting",
+                        "status": "passed",
+                        "mode": "qualification",
+                        "property": "no-additional-oom-killed-process-in-bound-lifetime",
+                    }
+                ],
+            }
+        )
+    result["workflowContext"] = copy.deepcopy(result["phases"][0]["scopedProfile"]["workflowContext"])
+    result["stageDisposal"] = stage_disposal(result["phases"][1]["scopedProfile"])
+    result["phases"][1]["stageDisposal"] = copy.deepcopy(result["stageDisposal"])
+    return result
+
+
+def _mutate_maintained_phase(fault: str, changed: dict) -> None:
+    first, last = changed["phases"]
+    if fault == "missing-receipt":
+        del last["scopedProfile"]
+    elif fault == "missing-phase":
+        changed["phases"].pop()
+    elif fault == "phase-order":
+        changed["phases"].reverse()
+    elif fault == "accounting":
+        last["checks"][0]["status"] = "failed"
+    elif fault == "cleanup":
+        last["cleanupVerified"] = False
+    elif fault == "cohort":
+        last["scopedProfile"]["preflight"]["kernel"] = "unknown"
+    elif fault == "archive":
+        last["imageIdentity"]["archiveSha256"] = "f" * 64
+    elif fault == "owner":
+        last["scopedProfile"]["binding"]["owner"] = first["scopedProfile"]["binding"]["owner"]
+    elif fault == "lease":
+        last["scopedProfile"]["lease"] = first["scopedProfile"]["lease"]
+    else:
+        changed["stageDisposal"]["bootstrapSha256"] = "f" * 64
+        last["stageDisposal"] = copy.deepcopy(changed["stageDisposal"])
+
+
+def maintained_mutations(architecture: str = "amd64") -> list[tuple[str, dict]]:
+    """Hostile imported records; each mutation has an independently invalid meaning."""
+    changes = []
+    for key, value in (
+        ("runId", "9"),
+        ("runAttempt", "9"),
+        ("producingJob", "build"),
+        ("architecture", "amd64" if architecture == "arm64" else "arm64"),
+        ("status", "failed"),
+        ("qualification", "none"),
+        ("oomAccountingRequired", False),
+        ("focusedRuntime", "mandatory-accounting"),
+        ("stageDisposal", {}),
+        ("workflowContext", {}),
+    ):
+        changed = maintained_runtime(architecture)
+        changed[key] = value
+        changes.append((key, changed))
+    for key, value in (
+        ("purpose", "experimental-candidate"),
+        ("admissionSha256", "0" * 64),
+        ("admissionRevision", "unknown"),
+        ("bootstrapSha256", "1" * 64),
+        ("state", "loaded"),
+        ("retained", True),
+        ("readerPending", True),
+        ("childPending", True),
+        ("custodyDisposed", False),
+        ("ownerTerminationVerified", False),
+        ("guestAbsenceVerified", False),
+        ("profileAbsenceVerified", False),
+        ("profileObservation", {}),
+    ):
+        changed = maintained_runtime(architecture)
+        changed["phases"][1]["scopedProfile"][key] = value
+        changes.append((key, changed))
+    for key, value in (
+        ("ref", "refs/heads/other"),
+        ("workflow", "f" * 40),
+        ("checkout", "f" * 40),
+        ("repository", "fork/containers"),
+        ("event", "push"),
+        ("job", "build"),
+        ("validationProfile", "docker-rootless-diagnostic"),
+        ("admissionSha256", "f" * 64),
+    ):
+        changed = maintained_runtime(architecture)
+        changed["phases"][1]["scopedProfile"]["workflowContext"][key] = value
+        changes.append(("context-" + key, changed))
+    for fault in (
+        "missing-receipt",
+        "missing-phase",
+        "phase-order",
+        "accounting",
+        "cleanup",
+        "cohort",
+        "archive",
+        "owner",
+        "lease",
+        "ack",
+    ):
+        changed = maintained_runtime(architecture)
+        _mutate_maintained_phase(fault, changed)
+        changes.append((fault, changed))
+    for status in ("failed", "skipped", "unknown"):
+        changed = maintained_runtime(architecture)
+        changed["checks"][0]["status"] = status
+        changes.append(("aggregate-check-" + status, changed))
+    return changes
+
+
+class MaintainedPrerequisiteEvidenceTests(unittest.TestCase):
+    def test_archived_maintained_authority_is_intrinsic_and_environment_cannot_supply_it(self) -> None:
+        configuration = {"launcher": "systemd", "mode": "rootless"}
+        for environment in ({}, {"GITHUB_RUN_ID": "999", "GITHUB_JOB": "build", "GITHUB_SHA": "f" * 40}):
+            with self.subTest(environment=environment), patch.dict("os.environ", environment, clear=True):
+                require_ordinary_runtime_authority(maintained_runtime(), "docker", configuration)
+                for fault, record in maintained_mutations():
+                    with self.subTest(fault=fault), self.assertRaises(EvidenceError):
+                        require_ordinary_runtime_authority(record, "docker", configuration)
+
+    def test_historical_experimental_receipt_cannot_be_relabelled_as_maintained(self) -> None:
+        record = maintained_runtime()
+        for phase in record["phases"]:
+            phase["scopedProfile"] = scoped_receipt(phase=phase["phase"])
+        with patch.dict("os.environ", {}, clear=True), self.assertRaises(EvidenceError):
+            require_ordinary_runtime_authority(record, "docker", {"launcher": "systemd", "mode": "rootless"})
+
+
 class ArchitectureEvidenceTests(unittest.TestCase):
     def test_each_required_systemd_phase_proves_the_same_private_docker_policy(self) -> None:
         configuration = {"mode": "rootless", "launcher": "systemd"}
@@ -100,7 +284,7 @@ class ArchitectureEvidenceTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(EvidenceError):
                 _systemd_phase_backends(changed, "docker", configuration)
 
-    def _verify(self, *, runtime: dict = RUNTIME, scan: dict = SCAN) -> None:
+    def _verify(self, *, runtime: dict = RUNTIME, scan: dict = SCAN, configuration: dict | None = None) -> None:
         with (
             patch(
                 "scripts.evidence_gate.image_policy",
@@ -109,7 +293,7 @@ class ArchitectureEvidenceTests(unittest.TestCase):
             patch("scripts.evidence_gate.archive_identity", return_value=IDENTITY),
             patch(
                 "scripts.evidence_gate.container_engine._load_images",
-                return_value=[{"name": NAME, "tests": {"docker": {}}}],
+                return_value=[{"name": NAME, "tests": {"docker": configuration or {}}}],
             ),
         ):
             verify_architecture(
@@ -123,6 +307,80 @@ class ArchitectureEvidenceTests(unittest.TestCase):
                 runtime=runtime,
                 scan=scan,
             )
+
+    def test_private_required_route_never_invents_normal_prerequisite_authority(self) -> None:
+        # Deliberately forged completion labels, not an accepted future normal fixture.
+        record = copy.deepcopy(RUNTIME)
+        record.update(
+            qualification="complete",
+            oomAccountingMode="qualification",
+            oomAccountingStatus="complete",
+            oomAccountingRequired=True,
+            focusedRuntime="none",
+        )
+        record["phases"] = [
+            {
+                "phase": name,
+                "status": "passed",
+                "cleanupVerified": True,
+                "imageIdentity": copy.deepcopy(IDENTITY),
+                "qualification": "complete",
+                "oomAccountingMode": "qualification",
+                "oomAccountingStatus": "complete",
+                "oomAccountingRequired": True,
+                "focusedRuntime": "none",
+                "checks": [
+                    {
+                        "name": "owned parent OOM lifecycle accounting",
+                        "status": "passed",
+                        "mode": "qualification",
+                        "property": "no-additional-oom-killed-process-in-bound-lifetime",
+                    }
+                ],
+                "outerRuntime": copy.deepcopy(RUNTIME["host"]["outerRuntime"]),
+            }
+            for name in ("clean-control", "enforcement")
+        ]
+        configuration = {"launcher": "systemd", "mode": "rootless"}
+        with self.assertRaisesRegex(EvidenceError, "Required phase authority/accounting"):
+            self._verify(runtime=record, configuration=configuration)
+        for change in ("missing", "none", "experimental", "mixed", "accounting", "missing-outcome", "focused"):
+            changed = copy.deepcopy(record)
+            if change == "missing":
+                del changed["qualification"]
+            elif change == "none":
+                changed["qualification"] = "none"
+            elif change == "experimental":
+                changed["scopedProfileRequired"] = False
+                changed["phases"][0]["scopedProfile"] = {"qualification": "experimental-candidate-only"}
+            elif change == "mixed":
+                changed["phases"][1]["qualification"] = "none"
+            elif change == "accounting":
+                changed["phases"][0]["oomAccountingStatus"] = "incomplete"
+            elif change == "missing-outcome":
+                changed["phases"][1]["checks"] = [{"name": "label only", "status": "passed"}]
+            else:
+                changed["focusedRuntime"] = "mandatory-accounting"
+            with (
+                self.subTest(change=change),
+                patch.dict(
+                    "os.environ",
+                    {
+                        "GITHUB_EVENT_NAME": "workflow_dispatch",
+                        "GITHUB_REF": "refs/heads/main",
+                        "VALIDATION_PROFILE": "full",
+                    },
+                ),
+                self.assertRaises(EvidenceError),
+            ):
+                self._verify(runtime=changed, configuration=configuration)
+
+    def test_actual_supported_ordinary_routes_keep_legacy_authority_contract(self) -> None:
+        for profile in ("docker", "podman", "phpFpm", "notifyPush"):
+            with self.subTest(profile=profile):
+                require_ordinary_runtime_authority({"status": "passed"}, profile, {"launcher": "direct"})
+                with self.assertRaises(EvidenceError):
+                    require_ordinary_runtime_authority({"status": "passed", "qualification": "none"}, profile, {})
 
     def test_cli_reads_exact_uploaded_artifact_filenames(self) -> None:
         with tempfile.TemporaryDirectory() as root:
@@ -235,3 +493,27 @@ class ArchitectureEvidenceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AuthorityImportOrderTests(unittest.TestCase):
+    def test_cold_import_orders_and_deferred_catalogue_import_remain_acyclic(self) -> None:
+        modules = ["evidence_gate", "admission", "maintenance", "release_evidence", "docs_observations"]
+        root = Path(__file__).resolve().parents[1]
+        program = (
+            "import importlib,json,sys;sys.path.insert(0,sys.argv[1]);"
+            "[importlib.import_module('scripts.'+name) for name in json.loads(sys.argv[2])];"
+            "from scripts.maintenance import _runtime_authority_view;"
+            "assert _runtime_authority_view({'tests':{}},'docker',{'status':'passed'})=={'status':'passed'};print('ok')"
+        )
+        for index in range(len(modules)):
+            order = modules[index:] + modules[:index]
+            for selected in (order, list(reversed(order))):
+                with self.subTest(order=selected):
+                    result = subprocess.run(  # noqa: S603 - fixed data-only import order regression.
+                        [sys.executable, "-I", "-B", "-c", program, str(root), json.dumps(selected)],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout.strip(), "ok")

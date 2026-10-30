@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+import json
 import os
 import re
 import shutil
@@ -12,24 +14,43 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from typing import TYPE_CHECKING
+from unittest.mock import MagicMock, patch
 
 from scripts.runtime_docker_systemd import (
     HIERARCHY_READBACK_COMMAND,
     JOURNAL_BOUNDARY_COMMAND,
+    LEAF_WITNESS_FAILURE_LOG_COMMAND,
+    LEAF_WITNESS_FAILURE_STATE_COMMAND,
+    LEAF_WITNESS_STAGES,
     MEMORY_ASSOCIATION_COMMAND,
     MEMORY_BYTES,
     _allocator_records,
     _allocator_telemetry,
     _cgroup_ancestors,
     _cgroup_path,
+    _collect_leaf_memory_witness,
     _hierarchy_evidence,
     _journal_boundary_evidence,
+    _leaf_witness_association,
+    _leaf_witness_failure_capture,
+    _leaf_witness_failure_protocol,
+    _leaf_witness_failure_state,
+    _leaf_witness_needed,
+    _leaf_witness_observe,
+    _leaf_witness_public,
+    _leaf_witness_records,
+    _leaf_witness_retained_after,
+    _leaf_witness_snapshot_root,
     _memory_association,
     _memory_probe_result,
     _memory_values,
+    verify_inner_limits,
 )
 from scripts.runtime_tests import ProbeError
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 READBACK = """masked-unit=systemd-sysctl.service:masked:inactive
 masked-unit=systemd-timesyncd.service:masked:inactive
@@ -886,12 +907,30 @@ class HierarchyBoundaryTests(unittest.TestCase):
 ACCOUNTING_SHIM = r"""
 #define _POSIX_C_SOURCE 200809L
 #include <errno.h>
+#include <fcntl.h>
+#include <stdarg.h>
 #include <linux/magic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/vfs.h>
+#include <unistd.h>
+pid_t __real_getpid(void);
+pid_t __wrap_getpid(void) { return getenv("TEST_WITNESS_PID1") ? 1 : __real_getpid(); }
+int __real_fcntl(int, int, ...);
+int __wrap_fcntl(int fd, int command, ...) {
+    const char *failure = getenv("TEST_WITNESS_FCNTL_FAILURE");
+    if (fd == STDOUT_FILENO && failure &&
+        ((command == F_GETFL && strcmp(failure, "get") == 0) ||
+         (command == F_SETFL && strcmp(failure, "set") == 0))) { errno = EBADF; return -1; }
+    if (command == F_GETFL) return __real_fcntl(fd, command);
+    va_list arguments;
+    va_start(arguments, command);
+    int flags = va_arg(arguments, int);
+    va_end(arguments);
+    return __real_fcntl(fd, command, flags);
+}
 FILE *__real_fopen(const char *, const char *);
 int __real_stat(const char *, struct stat *);
 int __real_statfs(const char *, struct statfs *);
@@ -955,7 +994,7 @@ class CompiledResourceGateTests(unittest.TestCase):
                 "-Werror",
                 str(source),
                 str(shim),
-                "-Wl,--wrap=fopen,--wrap=stat,--wrap=statfs",
+                "-Wl,--wrap=fopen,--wrap=stat,--wrap=statfs,--wrap=getpid,--wrap=fcntl",
                 "-o",
                 str(cls.instrumented),
             ],
@@ -1144,6 +1183,202 @@ class CompiledResourceGateTests(unittest.TestCase):
                     [str(self.binary), *arguments], capture_output=True, text=True, check=False, timeout=12
                 )
                 self.assertEqual(result.returncode, expected, result.stderr)
+
+    def witness_accounting(self, root: Path) -> None:
+        self.accounting(root)
+        for name, value in {
+            "memory.events.local": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\n",
+            "memory.oom.group": "0",
+            "pids.max": "16",
+        }.items():
+            (root / name).write_text(value)
+
+    def witness_child(self, probe: subprocess.Popen) -> int:
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            children = (Path("/proc") / str(probe.pid) / "task" / str(probe.pid) / "children").read_text().split()
+            if children:
+                self.assertEqual(len(children), 1)
+                return int(children[0])
+            time.sleep(0.01)
+        message = "authored controller did not create its one bounded child"
+        raise AssertionError(message)
+
+    def test_witness_controller_survives_reaps_and_retains_actual_after_for_manual_sigkill(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.witness_accounting(root / "accounting")
+            start = root / "start"
+            with subprocess.Popen(  # noqa: S603 — bounded authored controller and synthetic read-only accounting.
+                [str(self.instrumented), "memory-witness", "--wait-for-start", str(start)],
+                env={**os.environ, "TEST_ACCOUNTING": str(root / "accounting"), "TEST_WITNESS_PID1": "1"},
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            ) as probe:
+                try:
+                    child = self.witness_child(probe)
+                    os.kill(child, signals.SIGSTOP)
+                    start.touch()
+                    # Child is stopped, so the owned pipe remains open while controller writes release.
+                    time.sleep(0.05)
+                    os.kill(child, signals.SIGKILL)
+                    deadline = time.monotonic() + 2
+                    while not Path(str(start) + ".after").exists() and time.monotonic() < deadline:
+                        self.assertIsNone(probe.poll())
+                        time.sleep(0.01)
+                    self.assertTrue(Path(str(start) + ".after").is_file())
+                    self.assertIsNone(probe.poll())
+                    self.assertEqual(self.identity(probe.pid)[4], "")
+                    self.assertFalse((Path("/proc") / str(child)).exists())
+                    Path(str(start) + ".finish").touch()
+                    stdout, stderr = probe.communicate(timeout=2)
+                    self.assertEqual(probe.returncode, 0, stderr)
+                    records = _leaf_witness_records(stdout)
+                    self.assertEqual(
+                        records["result"], {"child-reaped": "yes", "child-signal": "9", "child-signaled": "yes"}
+                    )
+                    self.assertEqual(records["before"]["scope-identity"], records["after"]["scope-identity"])
+                    self.assertEqual(records["after"]["memory.events.local"], "low 0;high 0;max 0;oom 0;oom_kill 0")
+                    self.assertNotIn("allocator-before-", stdout)
+                finally:
+                    if probe.poll() is None:
+                        probe.terminate()
+                        probe.communicate(timeout=2)
+
+    def test_witness_cancellation_and_timeout_reap_only_owned_unreaped_child(self) -> None:
+        for cancellation in (signals.SIGTERM, signals.SIGINT, signals.SIGALRM):
+            with self.subTest(signal=cancellation), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                self.witness_accounting(root / "accounting")
+                with subprocess.Popen(  # noqa: S603 — synthetic accounting, no allocation gate release.
+                    [str(self.instrumented), "memory-witness", "--wait-for-start", str(root / "never")],
+                    env={**os.environ, "TEST_ACCOUNTING": str(root / "accounting"), "TEST_WITNESS_PID1": "1"},
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                ) as probe:
+                    child = self.witness_child(probe)
+                    probe.send_signal(cancellation)
+                    stdout, _ = probe.communicate(timeout=2)
+                    self.assertEqual(probe.returncode, 12)
+                    self.assertFalse((Path("/proc") / str(child)).exists())
+                    self.assertNotIn("leaf-witness-after-", stdout)
+                failure = _leaf_witness_failure_protocol(stdout.strip() + "\nleaf-witness-capture-complete=yes")
+                self.assertEqual(failure["stage"], "start-gate")
+                expected = {signals.SIGTERM: "sigterm", signals.SIGINT: "sigint", signals.SIGALRM: "sigalrm"}
+                self.assertEqual(failure["receivedSignal"], expected[cancellation])
+
+    def test_witness_failed_before_snapshot_reports_stage_after_child_reaping(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.witness_accounting(root / "accounting")
+            (root / "accounting/memory.events.local").unlink()
+            start = root / "start"
+            with subprocess.Popen(  # noqa: S603 — synthetic accounting only, no cgroup mutation.
+                [str(self.instrumented), "memory-witness", "--wait-for-start", str(start)],
+                env={**os.environ, "TEST_ACCOUNTING": str(root / "accounting"), "TEST_WITNESS_PID1": "1"},
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            ) as probe:
+                child = self.witness_child(probe)
+                start.touch()
+                stdout, _ = probe.communicate(timeout=2)
+                self.assertEqual(probe.returncode, 12)
+                self.assertFalse((Path("/proc") / str(child)).exists())
+                self.assertFalse(Path(str(start) + ".after").exists())
+                failure = _leaf_witness_failure_protocol(stdout.strip() + "\nleaf-witness-capture-complete=yes")
+                self.assertEqual(
+                    failure, {"availability": "observed", "stage": "before-snapshot", "receivedSignal": "none"}
+                )
+                self.assertNotIn("memory.events.local", stdout.split("leaf-witness-failure-stage=")[1])
+
+    def test_witness_failed_after_snapshot_reports_stage_without_after_sentinel(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.witness_accounting(root / "accounting")
+            start, log = root / "start", root / "output"
+            with (
+                log.open("w") as output,
+                subprocess.Popen(  # noqa: S603 — manual SIGKILL is not OOM evidence.
+                    [str(self.instrumented), "memory-witness", "--wait-for-start", str(start)],
+                    env={**os.environ, "TEST_ACCOUNTING": str(root / "accounting"), "TEST_WITNESS_PID1": "1"},
+                    stdout=output,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                ) as probe,
+            ):
+                try:
+                    child = self.witness_child(probe)
+                    os.kill(child, signals.SIGSTOP)
+                    start.touch()
+                    deadline = time.monotonic() + 2
+                    while "leaf-witness-before-complete=yes" not in log.read_text() and time.monotonic() < deadline:
+                        self.assertIsNone(probe.poll())
+                        time.sleep(0.01)
+                    self.assertIn("leaf-witness-before-complete=yes", log.read_text())
+                    (root / "accounting/memory.events.local").unlink()
+                    os.kill(child, signals.SIGKILL)
+                    probe.communicate(timeout=2)
+                    self.assertEqual(probe.returncode, 12)
+                    self.assertFalse((Path("/proc") / str(child)).exists())
+                    self.assertFalse(Path(str(start) + ".after").exists())
+                    failure = _leaf_witness_failure_protocol(
+                        log.read_text().strip() + "\nleaf-witness-capture-complete=yes"
+                    )
+                    self.assertEqual(failure["stage"], "after-snapshot")
+                    self.assertEqual(failure["receivedSignal"], "none")
+                finally:
+                    if probe.poll() is None:
+                        probe.terminate()
+                        probe.communicate(timeout=2)
+
+    def test_witness_policy_failure_and_fcntl_failures_cannot_block_on_full_stdout(self) -> None:
+        for fcntl_failure in (None, "get", "set"):
+            with self.subTest(fcntl_failure=fcntl_failure), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                self.witness_accounting(root / "accounting")
+                (root / "accounting/memory.oom.group").write_text("1")
+                start = root / "start"
+                reader, writer = os.pipe()
+                try:
+                    os.set_blocking(writer, False)
+                    while True:
+                        try:
+                            os.write(writer, b"x" * 4096)
+                        except BlockingIOError:
+                            break
+                    os.set_blocking(writer, True)
+                    environment = {**os.environ, "TEST_ACCOUNTING": str(root / "accounting"), "TEST_WITNESS_PID1": "1"}
+                    if fcntl_failure is not None:
+                        environment["TEST_WITNESS_FCNTL_FAILURE"] = fcntl_failure
+                    with subprocess.Popen(  # noqa: S603 — private pipe and policy fixture, no allocator release.
+                        [str(self.instrumented), "memory-witness", "--wait-for-start", str(start)],
+                        env=environment,
+                        stdout=writer,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                    ) as probe:
+                        try:
+                            child = self.witness_child(probe)
+                            start.touch()
+                            probe.communicate(timeout=2)
+                            self.assertEqual(probe.returncode, 12)
+                            self.assertFalse((Path("/proc") / str(child)).exists())
+                            self.assertFalse(Path(str(start) + ".after").exists())
+                            self.assertEqual(os.get_blocking(writer), fcntl_failure is not None)
+                        finally:
+                            if probe.poll() is None:
+                                probe.terminate()
+                                try:
+                                    probe.communicate(timeout=2)
+                                except subprocess.TimeoutExpired:
+                                    probe.kill()
+                                    probe.communicate(timeout=2)
+                finally:
+                    os.close(writer)
+                    os.close(reader)
 
 
 class JournalBoundaryTests(unittest.TestCase):
@@ -1441,6 +1676,965 @@ class JournalBoundaryTests(unittest.TestCase):
                 else:
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(_journal_boundary_evidence(result.stdout)["socketInodes"], [100, 101, 102])
+
+
+class LeafWitnessProtocolTests(unittest.TestCase):
+    def association(self) -> dict:
+        hierarchy = _hierarchy_evidence(
+            hierarchy_fixture(kind="scope"), kind="scope", mode="rootful", unit="docker-" + "a" * 64 + ".scope"
+        )
+        service = _hierarchy_evidence(hierarchy_fixture(), kind="service", mode="rootful", unit="docker.service")
+        association = _memory_association(memory_association_fixture(), hierarchy, service)
+        association["scope-device"] = 4
+        association["child"] = {**association["allocator"], "pid": 102, "starttime": 200, "nspid": [102, 2]}
+        return association
+
+    def full_binding(self, mode: str = "rootful") -> tuple[str, dict, dict]:
+        source = hierarchy_fixture(kind="scope", mode=mode)
+        fields = _memory_fixture_process(mode, "allocator")
+        fields[0] = "102"
+        fields[4] = "102 (/usr/bin/docker-resource-probe) S " + "101 " + "1 " * 17 + "200 1"
+        fields[5] = "102 202 2" if mode == "rootless" else "102 2"
+        lines = [
+            line + " 102" if line.startswith("group-") and line.endswith("|101") else line
+            for line in source.splitlines()
+        ]
+        raw = memory_association_fixture(mode=mode)
+        for phase in ("before", "after"):
+            lines.append(f"process-{phase}=probe-102|102|{fields[1]}|{fields[2][3:]}|{fields[3]}|{fields[4]}")
+            raw += f"\nassociation-{phase}-child=" + "|".join(fields)
+            raw += f"\nwitness-{phase}-scope-device=4"
+        hierarchy = _hierarchy_evidence("\n".join(lines), kind="scope", mode=mode, unit="docker-" + "a" * 64 + ".scope")
+        service = _hierarchy_evidence(hierarchy_fixture(mode=mode), kind="service", mode=mode, unit="docker.service")
+        return raw, hierarchy, service
+
+    def test_full_membership_child_parent_namespace_and_device_bindings(self) -> None:
+        for mode in ("rootful", "rootless"):
+            raw, hierarchy, service = self.full_binding(mode)
+            association = _leaf_witness_association(raw, hierarchy, service)
+            self.assertEqual(association["child"]["pid"], 102)
+            self.assertEqual(association["allocator"]["pid"], 101)
+            self.assertEqual(
+                {role for role in hierarchy["processes"] if role.startswith("probe-")}, {"probe-101", "probe-102"}
+            )
+            _leaf_witness_retained_after(hierarchy_fixture(kind="scope", mode=mode), association)
+            for changed in (
+                raw.replace(") S 101 ", ") S 103 "),
+                raw.replace("association-after-child=102", "association-after-child=103"),
+                raw.replace("witness-after-scope-device=4", "witness-after-scope-device=5"),
+                raw.replace("association-after-child=", "unknown-child="),
+            ):
+                with self.subTest(mode=mode, changed=changed[-60:]), self.assertRaises(ProbeError):
+                    _leaf_witness_association(changed, hierarchy, service)
+            extra = copy.deepcopy(hierarchy)
+            extra["groups"][extra["controlGroup"]][4] += " 103"
+            with self.assertRaises(ProbeError):
+                _leaf_witness_association(raw, extra, service)
+            with self.assertRaises(ProbeError):
+                _leaf_witness_retained_after(
+                    "\n".join(
+                        line.replace("|101", "|101 102") if line.startswith("group-") else line
+                        for line in hierarchy_fixture(kind="scope", mode=mode).splitlines()
+                    ),
+                    association,
+                )
+
+    def protocol(self) -> str:
+        association = self.association()
+        fields = {
+            "scope-identity": "4:" + association["scope-inode"],
+            "controller-pid": "1",
+            "controller-stat": "1 (resource-probe) S " + " ".join(["0"] * 18 + ["100"] + ["0"] * 5),
+            "controller-cgroup": "0::/",
+            "controller-pidns": "pid:[701]",
+            "controller-cgroupns": "cgroup:[801]",
+            "controller-userns": "user:[900]",
+            "child-pid": "2",
+            "child-stat": "2 (resource-probe) S " + " ".join(["1"] + ["0"] * 17 + ["200"] + ["0"] * 5),
+            "memory.max": str(MEMORY_BYTES),
+            "memory.current": "8192",
+            "memory.swap.max": "0",
+            "memory.swap.current": "0",
+            "memory.events": "low 0;high 0;max 0;oom 0;oom_kill 0;oom_group_kill 0",
+            "memory.events.local": "low 0;high 0;max 0;oom 0;oom_kill 0;oom_group_kill 0",
+            "memory.oom.group": "0",
+            "pids.max": "16",
+            "complete": "yes",
+        }
+        lines = [
+            f"leaf-witness-{phase}-{key}={value}" for phase in ("before", "after") for key, value in fields.items()
+        ]
+        lines.extend(
+            [
+                "leaf-witness-result-child-reaped=yes",
+                "leaf-witness-result-child-signal=9",
+                "leaf-witness-result-child-signaled=yes",
+            ]
+        )
+        return "\n".join(lines)
+
+    def roots(self) -> list[dict]:
+        events = {"availability": "observed", "values": {"low": 0, "high": 0, "max": 0, "oom": 0, "oom_kill": 0}}
+        return [
+            {
+                "availability": "observed",
+                "authority": "observation-only",
+                "bindingChecks": dict.fromkeys(
+                    (
+                        "ownedContainer",
+                        "containerIncarnation",
+                        "ownedSlice",
+                        "hostProcess",
+                        "cgroup2Mount",
+                        "outerCgroup",
+                        "stableRead",
+                    ),
+                    True,
+                ),
+                "bindings": {"scope": "private-hash"},
+                "mountSemantics": {"root": "full-hierarchy", "memoryLocalevents": False},
+                "sampleWindowMonotonicNs": window,
+                "counters": {"memory.events": copy.deepcopy(events), "memory.events.local": copy.deepcopy(events)},
+            }
+            for window in ([1, 2], [5, 6])
+        ]
+
+    def observe(self, output: str | None = None, roots: list[dict] | None = None) -> dict:
+        return _leaf_witness_public(output or self.protocol(), self.association(), roots or self.roots(), [3, 4])
+
+    def test_actual_after_and_waitpid_sigkill_are_separate_observation_without_cause_authority(self) -> None:
+        result = self.observe()
+        self.assertEqual(result["availability"], "observed")
+        self.assertEqual(result["childTermination"], "waitpid-signaled-sigkill")
+        self.assertFalse(result["oomAccountingObserved"])
+        self.assertTrue(result["childReaped"])
+        self.assertNotIn("enforcementSatisfied", result)
+        self.assertNotIn("controller-stat", json.dumps(result))
+        self.assertNotIn("pid:[701]", json.dumps(result))
+        self.assertNotIn("scope-inode", json.dumps(result))
+
+    def test_missing_after_identity_policy_status_and_non_sigkill_fail_closed(self) -> None:
+        original = self.protocol()
+        for changed in (
+            "\n".join(line for line in original.splitlines() if not line.startswith("leaf-witness-after-")),
+            original.replace("leaf-witness-after-scope-identity=4:", "leaf-witness-after-scope-identity=5:"),
+            original.replace("leaf-witness-after-child-pid=2", "leaf-witness-after-child-pid=3"),
+            original.replace("leaf-witness-after-child-stat=2", "leaf-witness-after-child-stat=3"),
+            original.replace("memory.oom.group=0", "memory.oom.group=1"),
+            original.replace("memory.swap.max=0", "memory.swap.max=max"),
+            original.replace("child-reaped=yes", "child-reaped=no"),
+            original.replace("child-signal=9", "child-signal=15"),
+            original.replace("child-signaled=yes", "child-signaled=no"),
+            original + "\nleaf-witness-after-unknown=1",
+            original + "\n" + original.splitlines()[0],
+        ):
+            with self.subTest(change=changed[-80:]), self.assertRaises(ProbeError):
+                self.observe(changed)
+
+    def test_counter_sets_are_actual_optional_and_never_defaulted_to_zero(self) -> None:
+        original = self.protocol()
+        sock = original.replace("oom_group_kill 0", "oom_group_kill 0;sock_throttled 2")
+        result = self.observe(sock)
+        self.assertEqual(result["counters"]["memory.events.local"]["delta"]["sock_throttled"], 0)
+        for changed in (
+            "\n".join(
+                line.replace("sock_throttled 2", "sock_throttled 1") if line.startswith("leaf-witness-after-") else line
+                for line in sock.splitlines()
+            ),
+            original.replace("leaf-witness-before-memory.events=low 0", "leaf-witness-before-memory.events=low 1"),
+            sock.replace(";sock_throttled 2", "", 1),
+        ):
+            with self.subTest(change=changed[-80:]), self.assertRaises(ProbeError):
+                self.observe(changed)
+
+    def test_unknown_mount_or_root_ordering_is_unavailable(self) -> None:
+        for value in (None, True, "false"):
+            roots = self.roots()
+            roots[0]["mountSemantics"]["memoryLocalevents"] = value
+            with self.subTest(mount=value), self.assertRaises(ProbeError):
+                self.observe(roots=roots)
+        roots = self.roots()
+        roots[0]["sampleWindowMonotonicNs"] = [1, 4]
+        with self.assertRaises(ProbeError):
+            self.observe(roots=roots)
+        roots = self.roots()
+        roots[1]["bindings"]["scope"] = "changed"
+        with self.assertRaises(ProbeError):
+            self.observe(roots=roots)
+
+    def test_root_missing_counters_and_regression_are_unavailable(self) -> None:
+        roots = self.roots()
+        roots[0]["counters"]["memory.events"]["values"]["low"] = 1
+        with self.assertRaises(ProbeError):
+            self.observe(roots=roots)
+        roots = self.roots()
+        roots[1]["counters"]["memory.events.local"] = {"availability": "missing"}
+        with self.assertRaises(ProbeError):
+            self.observe(roots=roots)
+        roots = self.roots()
+        del roots[0]["bindingChecks"]["ownedSlice"]
+        with self.assertRaises(ProbeError):
+            self.observe(roots=roots)
+
+    def test_trigger_requires_existing_typed_outer_marker_and_keeps_other_backends_out(self) -> None:
+        for marker in (False, None, "true", 1, True):
+            ctx = MagicMock(
+                outer_engine="docker",
+                observations=[
+                    {
+                        "name": "owned systemd OOM diagnostic",
+                        "phase": "after-inner-memory",
+                        "schemaVersion": 1,
+                        "authority": "observation-only",
+                        "ociState": {"OOMKilled": marker},
+                    }
+                ],
+            )
+            self.assertEqual(_leaf_witness_needed(ctx, MagicMock()), marker is True)
+            ctx.outer_engine = "podman"
+            self.assertFalse(_leaf_witness_needed(ctx, MagicMock()))
+        self.assertFalse(_leaf_witness_needed(MagicMock(outer_engine="docker", observations=[]), MagicMock()))
+
+    def test_driver_preserves_original_deadline_private_checks_and_exact_cleanup(self) -> None:
+        ctx = self.driver_context()
+        original_checks, deadline = copy.deepcopy(ctx.checks), ctx.runtime_deadline
+        self.collect_driver(ctx=ctx)
+        self.assertEqual(ctx.runtime_deadline, deadline)
+        self.assertEqual(ctx.checks, original_checks)
+        result = ctx.observations[-1]
+        self.assertEqual(result["availability"], "observed")
+        self.assertEqual(result["controllerCompletion"], "observation-complete")
+        self.assertEqual(result["cleanup"], "verified")
+        cleanup = ctx.exec.call_args_list[-1].args
+        self.assertIn("a" * 64, cleanup)
+        self.assertIn('docker rm --force "$cid"', cleanup[4])
+        self.assertNotIn("prune", cleanup[4])
+
+    def assert_archive_cancellation(self, stage: str) -> None:
+        ctx = self.driver_context()
+        ctx.backend.command_timeout.side_effect = lambda value: value
+        ctx.containers = ["b" * 64]
+        cancellation = KeyboardInterrupt("PRIVATE /proc/4789/root/operand")
+        outputs = {
+            "read diagnostic archive API range": '{"ApiVersion":"1.56","MinAPIVersion":"1.40"}',
+            "pin actual diagnostic witness image": "sha256:" + "c" * 64,
+            "create diagnostic-only leaf memory witness": "a" * 64,
+            "start diagnostic-only leaf memory witness": "a" * 64,
+        }
+
+        def execute(name: str, *_args: object, **_kwargs: object) -> str:
+            if (stage == "create" and name.startswith("create diagnostic")) or (
+                stage == "start" and name.startswith("start diagnostic")
+            ):
+                raise cancellation
+            return outputs.get(name, "")
+
+        ctx.exec.side_effect = execute
+
+        def rpc(_session: object, method: str, *_args: object) -> tuple[int, dict]:
+            if method == "PUT":
+                raise cancellation
+            return 404, {}
+
+        with (
+            patch("scripts.runtime_docker_systemd._LeafWitnessArchive.inspect"),
+            patch("scripts.runtime_docker_systemd._LeafWitnessArchive.rpc", autospec=True, side_effect=rpc),
+            patch("scripts.runtime_docker_systemd._leaf_witness_bind", return_value=self.association()),
+            patch("scripts.runtime_docker_systemd._leaf_witness_snapshot_root", return_value=self.roots()[0]),
+            self.assertRaises(KeyboardInterrupt) as caught,
+        ):
+            _collect_leaf_memory_witness(ctx, MagicMock(), "b" * 64, "rootful")
+        self.assertIs(caught.exception, cancellation)
+        result = ctx.observations[-1]
+        self.assertEqual(result["enteredStage"], "release-await-after" if stage == "put" else "launch")
+        self.assertEqual(result["completedStage"], "root-before" if stage == "put" else "room-check")
+        self.assertEqual(result["cleanup"], "verified")
+        cleanup = ctx.exec.call_args_list[-1].args
+        self.assertEqual(cleanup[0], "remove and read back exact diagnostic leaf")
+        self.assertEqual(cleanup[-2], "" if stage == "create" else "a" * 64)
+        self.assertIn('test "$cid" = "$2"', cleanup[4])
+        self.assertNotIn("PRIVATE", json.dumps(result))
+        self.assertNotIn("4789", json.dumps(result))
+
+    def test_actual_archive_create_start_and_put_cancellation_keep_owned_cleanup(self) -> None:
+        for stage in ("create", "start", "put"):
+            with self.subTest(stage=stage):
+                self.assert_archive_cancellation(stage)
+
+    def test_delayed_root_observer_entry_launches_no_command_after_absolute_end(self) -> None:
+        ctx = self.driver_context()
+        ctx.outer_engine, ctx.containers, ctx.runtime_deadline = "docker", ["b" * 64], 200
+        archive = self.driver_session(ctx, {})
+        archive.guest, archive.end = "b" * 64, 100
+        archive.create.side_effect = None
+        archive.create.return_value = "a" * 64
+        clock = [99]
+        stop = KeyboardInterrupt()
+        observed = []
+
+        def delayed(observer: object, role: str) -> dict:
+            observed.append(observer.ctx.runtime_deadline)
+            clock[0] = 101
+            _leaf_witness_snapshot_root(observer, role)
+            raise stop
+
+        with (
+            patch("scripts.runtime_docker_systemd._leaf_witness_bind", return_value=self.association()),
+            patch("scripts.runtime_docker_systemd._leaf_witness_snapshot_root", side_effect=delayed),
+            patch("scripts.runtime_docker_systemd.time.monotonic", side_effect=lambda: clock[0]),
+            self.assertRaises(KeyboardInterrupt) as caught,
+        ):
+            _leaf_witness_observe(archive)
+        self.assertIs(caught.exception, stop)
+        self.assertEqual(observed, [100])
+        ctx.podman.assert_not_called()
+        ctx.command.assert_not_called()
+        ctx.exec.assert_not_called()
+        self.assertEqual(ctx.observations[-1]["availability"], "timeout")
+        self.assertEqual(ctx.runtime_deadline, 200)
+        self.assertEqual(archive.ctx.runtime_deadline, 200)
+        self.assertEqual(ctx.timeout, 45)
+        self.assertEqual(archive.ctx.timeout, 45)
+
+    def test_only_explicit_diagnostic_mode_can_trigger_optional_actor_for_known_marker(self) -> None:
+        for execution_mode, marker in (
+            ("qualification", True),
+            ("diagnostic", False),
+            ("diagnostic", None),
+            ("diagnostic", True),
+        ):
+            ctx = MagicMock(
+                unsafe=True,
+                outer_engine="docker",
+                oom_accounting_mode=execution_mode,
+                observations=[],
+                checks=[],
+                image_ref="private-image",
+            )
+            ctx.checks.append(
+                _hierarchy_evidence(hierarchy_fixture(), kind="service", mode="rootful", unit="docker.service")
+            )
+
+            def execute(name: str, *_args: str) -> str:
+                if name.startswith("start bounded inner"):
+                    return "a" * 64
+                if name.startswith("wait bounded inner"):
+                    return "137" if "memory" in name else "0"
+                return {
+                    "inspect inner memory enforcement state": '{"OOMKilled":true}',
+                    "inspect inner pids enforcement state": "{}",
+                    "verify inner memory scope placement and ownership": hierarchy_fixture(kind="scope"),
+                    "verify inner pids scope placement and ownership": hierarchy_fixture(kind="scope"),
+                    "read actual memory allocator swap and namespace association": memory_association_fixture(),
+                    "read actual memory allocator self telemetry": allocator_telemetry_fixture(),
+                    "read exact inner memory cgroup limits": f"{MEMORY_BYTES}\n16",
+                    "read exact inner pids cgroup limits": f"{MEMORY_BYTES}\n16",
+                    "read bounded inner PID refusal": "bounded-pid-refusal events-before=0 events-after=1",
+                }.get(name, "")
+
+            ctx.exec.side_effect = execute
+
+            def snapshot(
+                phase: str, *, _context: MagicMock = ctx, _marker: bool | None = marker, **_kwargs: object
+            ) -> None:
+                _context.observations.append(
+                    {
+                        "name": "owned systemd OOM diagnostic",
+                        "phase": phase,
+                        "schemaVersion": 1,
+                        "authority": "observation-only",
+                        "ociState": {"OOMKilled": _marker},
+                    }
+                )
+
+            diagnostics = MagicMock()
+            diagnostics.snapshot.side_effect = snapshot
+            with (
+                patch("scripts.runtime_docker_systemd._collect_leaf_memory_witness") as witness,
+                patch("scripts.runtime_docker_systemd.verify_outer_container_limits"),
+            ):
+                verify_inner_limits(ctx, MagicMock(), "owned", diagnostics=diagnostics)
+            self.assertEqual(witness.call_count, int(marker is True and execution_mode == "diagnostic"))
+            legacy = next(check for check in ctx.checks if check["name"] == "inner memory allocator diagnostic")
+            self.assertTrue(legacy["enforcementSatisfied"])
+            self.assertIsNone(legacy["telemetry"]["after"])
+
+    def test_deadline_shortage_launches_no_actor_and_private_exception_operands_do_not_escape(self) -> None:
+        ctx = MagicMock(runtime_deadline=time.monotonic() - 1, observations=[], checks=[])
+        _collect_leaf_memory_witness(ctx, MagicMock(), "owned", "rootful")
+        ctx.exec.assert_not_called()
+        self.assertEqual(ctx.observations[-1]["availability"], "unavailable")
+        self.assertEqual(ctx.observations[-1]["cleanup"], "not-created")
+        ctx = self.driver_context()
+        self.collect_driver(ctx=ctx, fail_at=("launch", "cleanup"), failure=ProbeError("PRIVATE-PROC-PATH-PID-OPERAND"))
+        self.assertNotIn("PRIVATE-PROC-PATH-PID-OPERAND", json.dumps(ctx.observations))
+        self.assertEqual(ctx.observations[-1]["cleanup"], "unavailable")
+
+    def driver_context(self) -> MagicMock:
+        ctx = MagicMock(
+            runtime_deadline=time.monotonic() + 100, timeout=45, observations=[], checks=[], image_ref="private-image"
+        )
+        ctx.backend.command_timeout.return_value = 10
+        ctx.checks.append(
+            _hierarchy_evidence(hierarchy_fixture(), kind="service", mode="rootful", unit="docker.service")
+        )
+        return ctx
+
+    def driver_session(self, ctx: MagicMock, record: dict) -> MagicMock:
+        archive = MagicMock()
+        archive.original, archive.ctx = ctx, copy.copy(ctx)
+        archive.ctx.checks = []
+        archive.budget, archive.guest, archive.mode = MagicMock(), "owned", "rootful"
+        archive.record = record
+        archive.endpoint = "unix:///var/run/docker.sock"
+        archive.custody, archive.workload = False, None
+        archive.remaining.return_value = 100
+        archive.end = ctx.runtime_deadline
+
+        def create() -> str:
+            archive.custody = True
+            result = ctx.exec("start diagnostic-only leaf memory witness")
+            if not re.fullmatch(r"[a-f0-9]{64}", result):
+                raise ProbeError
+            archive.workload = result
+            return result
+
+        def await_after() -> None:
+            result = ctx.exec("release diagnostic leaf and await actual after")
+            choices = {
+                "leaf-witness-await=" + token: token for token in ("after-observed", "poll-exhausted", "release-failed")
+            }
+            if result not in choices:
+                raise ProbeError
+            archive.record["awaitResult"] = choices[result]
+            if choices[result] != "after-observed":
+                raise ProbeError
+
+        archive.create.side_effect = create
+        archive.await_after.side_effect = await_after
+        archive.command.side_effect = lambda name, *args: ctx.exec(name, "owned", "docker", *args)
+        archive.finish.side_effect = lambda: ctx.exec("finish diagnostic leaf hold")
+        return archive
+
+    def collect_driver(
+        self,
+        *,
+        fail_at: str | tuple[str, ...] | None = None,
+        overrides: dict[str, str] | None = None,
+        ctx: MagicMock | None = None,
+        failure: BaseException | None = None,
+    ) -> MagicMock:
+        ctx = ctx if ctx is not None else self.driver_context()
+        private_failure = failure if failure is not None else ProbeError("PRIVATE /proc/4789/root/secret operand")
+
+        def operation(name: str, value: object = None) -> object:
+            if name == fail_at or (isinstance(fail_at, tuple) and name in fail_at):
+                raise private_failure
+            return value
+
+        commands = {
+            "start diagnostic-only leaf memory witness": ("launch", "a" * 64),
+            "release diagnostic leaf and await actual after": (
+                "release-await-after",
+                "leaf-witness-await=after-observed",
+            ),
+            "read private leaf witness protocol": ("log-read", self.protocol()),
+            "rebind live diagnostic controller": ("controller-rebind", memory_association_fixture()),
+            "verify diagnostic leaf retained only controller": ("retained-hierarchy", "private-hierarchy"),
+            "finish diagnostic leaf hold": ("finish-hold", ""),
+            "wait diagnostic controller completion": ("wait-completion", "0"),
+            "remove and read back exact diagnostic leaf": ("cleanup", ""),
+        }
+        if overrides:
+            for name, value in overrides.items():
+                commands[name] = (commands[name][0] if name in commands else name, value)
+        ctx.exec.side_effect = lambda name, *_args, **_kwargs: operation(*commands[name])
+
+        roots = iter(self.roots())
+
+        def project(*args: object) -> dict:
+            operation("projection-validation")
+            return _leaf_witness_public(*args)
+
+        with (
+            patch(
+                "scripts.runtime_docker_systemd._LeafWitnessArchive",
+                side_effect=lambda *args: self.driver_session(ctx, args[-1]),
+            ),
+            patch(
+                "scripts.runtime_docker_systemd._leaf_witness_room", side_effect=lambda _ctx: operation("room-check")
+            ),
+            patch(
+                "scripts.runtime_docker_systemd._leaf_witness_bind",
+                side_effect=lambda *_args: operation("bind", self.association()),
+            ),
+            patch(
+                "scripts.runtime_docker_systemd._leaf_witness_retained_after",
+                side_effect=lambda *_args: operation("retained-hierarchy-validation"),
+            ),
+            patch(
+                "scripts.runtime_docker_systemd._leaf_witness_snapshot_root",
+                side_effect=lambda _observer, role: operation(role, next(roots)),
+            ),
+            patch("scripts.runtime_docker_systemd._leaf_witness_public", side_effect=project),
+            patch("scripts.runtime_docker_systemd.time.monotonic_ns", side_effect=[3, 4]),
+        ):
+            _collect_leaf_memory_witness(ctx, MagicMock(), "owned", "rootful")
+        return ctx
+
+    def test_collection_failure_identifies_each_operation_without_cleanup_overwriting_it(self) -> None:
+        # Independently specified public protocol: no command-derived or exception-derived labels.
+        stages = (
+            "room-check",
+            "launch",
+            "bind",
+            "root-before",
+            "release-await-after",
+            "log-read",
+            "controller-rebind",
+            "retained-hierarchy",
+            "root-after",
+            "projection-validation",
+            "finish-hold",
+            "wait-completion",
+        )
+        self.assertEqual(LEAF_WITNESS_STAGES, frozenset(stages))
+        for index, stage in enumerate(stages):
+            with self.subTest(stage=stage):
+                ctx = self.collect_driver(fail_at=stage)
+                result = ctx.observations[-1]
+                self.assertEqual(result["enteredStage"], stage)
+                self.assertEqual(result["completedStage"], stages[index - 1] if index else None)
+                self.assertEqual(result["availability"], "unavailable")
+                self.assertEqual(result["controllerCompletion"], "unavailable")
+                self.assertEqual(result["cleanup"], "not-created" if index == 0 else "verified")
+                cleanup_stage = None if index == 0 else "exact-owned-leaf"
+                self.assertEqual(result["cleanupEnteredStage"], cleanup_stage)
+                self.assertEqual(result["cleanupCompletedStage"], cleanup_stage)
+                self.assertEqual(
+                    ctx.checks,
+                    [_hierarchy_evidence(hierarchy_fixture(), kind="service", mode="rootful", unit="docker.service")],
+                )
+                public = json.dumps(result)
+                for private in ("/proc/4789", "secret", "PRIVATE", "private-hierarchy", "private-image", "a" * 64):
+                    self.assertNotIn(private, public)
+
+    def test_success_and_controller_failure_have_completed_wait_without_invented_completion(self) -> None:
+        for completion, expected, availability in (
+            ("0", "observation-complete", "observed"),
+            ("1", "failed", "unavailable"),
+        ):
+            with self.subTest(completion=completion):
+                result = self.collect_driver(
+                    overrides={"wait diagnostic controller completion": completion}
+                ).observations[-1]
+                self.assertEqual(result["enteredStage"], "wait-completion")
+                self.assertEqual(result["completedStage"], "wait-completion")
+                self.assertEqual(result["controllerCompletion"], expected)
+                self.assertEqual(result["availability"], availability)
+                self.assertEqual(result["cleanupEnteredStage"], "exact-owned-leaf")
+                self.assertEqual(result["cleanupCompletedStage"], "exact-owned-leaf")
+                self.assertEqual(result["cleanup"], "verified")
+
+    def test_cleanup_failure_keeps_collection_location_and_actual_controller_completion(self) -> None:
+        for fail_at, entered, completed, controller in (
+            ("release-await-after", "release-await-after", "root-before", "unavailable"),
+            (None, "wait-completion", "wait-completion", "observation-complete"),
+        ):
+            with self.subTest(fail_at=fail_at):
+                failures = (fail_at, "cleanup") if fail_at else "cleanup"
+                result = self.collect_driver(fail_at=failures).observations[-1]
+                self.assertEqual(result["enteredStage"], entered)
+                self.assertEqual(result["completedStage"], completed)
+                self.assertEqual(result["controllerCompletion"], controller)
+                self.assertEqual(result["cleanupEnteredStage"], "exact-owned-leaf")
+                self.assertIsNone(result["cleanupCompletedStage"])
+                self.assertEqual(result["cleanup"], "unavailable")
+                self.assertEqual(result["availability"], "unavailable")
+                self.assertNotIn("PRIVATE", json.dumps(result))
+
+    def test_invalid_launch_identity_is_not_forwarded_as_owned_cleanup_identity(self) -> None:
+        ctx = self.collect_driver(
+            overrides={"start diagnostic-only leaf memory witness": "PRIVATE invalid container identity"}
+        )
+        result = ctx.observations[-1]
+        self.assertEqual(result["enteredStage"], "launch")
+        self.assertEqual(result["completedStage"], "room-check")
+        self.assertEqual(result["availability"], "unavailable")
+        self.assertEqual(result["cleanup"], "verified")
+        cleanup = ctx.exec.call_args_list[-1].args
+        self.assertEqual(cleanup[-2], "")
+        self.assertNotIn("PRIVATE", json.dumps(result))
+
+    def test_retained_hierarchy_validation_failure_is_not_a_completed_read(self) -> None:
+        result = self.collect_driver(fail_at="retained-hierarchy-validation").observations[-1]
+        self.assertEqual(result["enteredStage"], "retained-hierarchy")
+        self.assertEqual(result["completedStage"], "controller-rebind")
+        self.assertEqual(result["cleanup"], "verified")
+        self.assertEqual(result["availability"], "unavailable")
+
+    def test_cancellation_propagates_after_exact_cleanup_and_retains_interrupted_stage(self) -> None:
+        ctx = self.driver_context()
+        cancellation = KeyboardInterrupt("PRIVATE cancellation operand")
+        with self.assertRaises(KeyboardInterrupt) as caught:
+            self.collect_driver(ctx=ctx, fail_at="root-after", failure=cancellation)
+        self.assertIs(caught.exception, cancellation)
+        result = ctx.observations[-1]
+        self.assertEqual(result["enteredStage"], "root-after")
+        self.assertEqual(result["completedStage"], "retained-hierarchy")
+        self.assertEqual(result["cleanup"], "verified")
+        cleanup = ctx.exec.call_args_list[-1].args
+        self.assertEqual(cleanup[0], "remove and read back exact diagnostic leaf")
+        self.assertIn("a" * 64, cleanup)
+        self.assertNotIn("PRIVATE", json.dumps(result))
+
+
+class LeafWitnessFailureDiagnosticsTests(unittest.TestCase):
+    def state(self, **changes: object) -> str:
+        value = {
+            "id": "a" * 64,
+            "name": "/docker-native-limit-memory-witness",
+            "state": {"Running": False, "OOMKilled": False, "ExitCode": 12},
+        }
+        value.update(changes)
+        return json.dumps(value) + "\nleaf-witness-state-complete=yes"
+
+    def failure(self, stage: str = "after-snapshot", received: str = "none") -> str:
+        return (
+            f"leaf-witness-failure-stage={stage}\nleaf-witness-failure-signal={received}"
+            "\nleaf-witness-capture-complete=yes"
+        )
+
+    def outputs(self, await_result: str = "poll-exhausted") -> dict[str, str]:
+        return {
+            "release diagnostic leaf and await actual after": "leaf-witness-await=" + await_result,
+            "read private diagnostic leaf failure state": self.state(),
+            "read private diagnostic leaf failure log": self.failure(),
+        }
+
+    def test_real_capture_shell_caps_bytes_and_requires_successful_cli_receipt(self) -> None:
+        shell, head = shutil.which("sh"), shutil.which("head")
+        self.assertIsNotNone(shell)
+        self.assertIsNotNone(head)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "head").symlink_to(head)
+            docker = root / "docker"
+            docker.write_text('#!/bin/sh\nprintf "%s\\n" "$TEST_OUTPUT"\nexit "$TEST_STATUS"\n')
+            docker.chmod(0o700)
+            for command, private, bound, parser in (
+                (
+                    LEAF_WITNESS_FAILURE_STATE_COMMAND,
+                    self.state().split("\n")[0],
+                    1025,
+                    lambda raw: _leaf_witness_failure_state(raw, "a" * 64),
+                ),
+                (
+                    LEAF_WITNESS_FAILURE_LOG_COMMAND,
+                    self.failure().rsplit("\n", 1)[0],
+                    65537,
+                    _leaf_witness_failure_protocol,
+                ),
+            ):
+                for status, content in ((0, private), (1, private), (0, "x" * (bound + 1))):
+                    with self.subTest(bound=bound, status=status, oversized=len(content) > bound):
+                        output = subprocess.run(  # noqa: S603 — fake Docker only emits authored private fixture bytes.
+                            [shell, "-euc", command, "--", "a" * 64],
+                            env={**os.environ, "PATH": temporary, "TEST_OUTPUT": content, "TEST_STATUS": str(status)},
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                            timeout=2,
+                        )
+                        self.assertEqual(output.returncode, 0)
+                        self.assertLessEqual(len(output.stdout.encode()), bound)
+                        if status == 0 and content == private:
+                            self.assertEqual(parser(output.stdout.strip())["availability"], "observed")
+                        else:
+                            with self.assertRaises((ProbeError, ValueError)):
+                                parser(output.stdout.strip())
+
+    def test_state_requires_exact_id_name_closed_fields_and_actual_types(self) -> None:
+        self.assertEqual(
+            _leaf_witness_failure_state(self.state(), "a" * 64),
+            {"availability": "observed", "Running": False, "OOMKilled": False, "ExitCode": 12},
+        )
+        for raw in (
+            self.state(id="b" * 64),
+            self.state(name="/unrelated"),
+            self.state(extra="PRIVATE"),
+            self.state(state={"Running": 0, "OOMKilled": False, "ExitCode": 12}),
+            self.state(state={"Running": False, "OOMKilled": "false", "ExitCode": 12}),
+            self.state(state={"Running": False, "OOMKilled": False, "ExitCode": True}),
+            self.state(state={"Running": False, "OOMKilled": False, "ExitCode": -1}),
+            self.state(state={"Running": False, "OOMKilled": False, "ExitCode": 256}),
+            self.state(state={"Running": False, "OOMKilled": False}),
+            self.state(state={"Running": False, "OOMKilled": False, "ExitCode": 12, "Pid": 4789}),
+            self.state().replace('"Running": false', '"Running": false, "Running": true'),
+            self.state().replace("leaf-witness-state-complete=yes", "leaf-witness-state-complete=no"),
+            self.state() + "\nleaf-witness-state-complete=yes",
+            self.state()[:-1],
+        ):
+            with self.subTest(raw=raw[:100]), self.assertRaises((ProbeError, ValueError)):
+                _leaf_witness_failure_state(raw, "a" * 64)
+        with patch("scripts.runtime_docker_systemd.json.loads") as parse, self.assertRaises(ProbeError):
+            _leaf_witness_failure_state("é" * 513, "a" * 64)
+        parse.assert_not_called()
+
+    def test_failure_parser_accepts_only_complete_bounded_closed_tokens(self) -> None:
+        expected_stages = {
+            "child-identity",
+            "start-gate",
+            "before-snapshot",
+            "release-child",
+            "wait-child",
+            "result-write",
+            "after-snapshot",
+            "after-sentinel",
+            "finish-gate",
+        }
+        for stage in expected_stages:
+            for received in ("none", "sigalrm", "sigterm", "sigint"):
+                result = _leaf_witness_failure_protocol(self.failure(stage, received))
+                self.assertEqual(result, {"availability": "observed", "stage": stage, "receivedSignal": received})
+        for raw in (
+            self.failure(stage="PRIVATE /proc/4789"),
+            self.failure(received="deadline-expired"),
+            self.failure() + "\nleaf-witness-capture-complete=yes",
+            self.failure().replace(
+                "leaf-witness-failure-signal=none", "leaf-witness-failure-signal=none\nleaf-witness-failure-signal=none"
+            ),
+            self.failure().replace("leaf-witness-failure-signal=none", "leaf-witness-failure-errno=PRIVATE"),
+            self.failure().replace("leaf-witness-capture-complete=yes", "leaf-witness-capture-complete=no"),
+            self.failure()[:-1],
+            "leaf-witness-before-unknown=PRIVATE\n" + self.failure(),
+            "leaf-witness-before-complete=yes\nleaf-witness-before-complete=yes\n" + self.failure(),
+            "PRIVATE exception\n" + self.failure(),
+            "é" * 32769,
+            "",
+        ):
+            with self.subTest(raw=raw[:80]), self.assertRaises(ProbeError):
+                _leaf_witness_failure_protocol(raw)
+
+    def test_await_failures_capture_closed_facts_without_overwriting_stage_or_completion(self) -> None:
+        driver = LeafWitnessProtocolTests()
+        for await_result in ("release-failed", "poll-exhausted"):
+            with self.subTest(await_result=await_result):
+                ctx = driver.collect_driver(overrides=self.outputs(await_result))
+                result = ctx.observations[-1]
+                self.assertEqual(result["awaitResult"], await_result)
+                self.assertEqual(result["enteredStage"], "release-await-after")
+                self.assertEqual(result["completedStage"], "root-before")
+                self.assertEqual(result["controllerCompletion"], "unavailable")
+                self.assertEqual(result["availability"], "unavailable")
+                self.assertEqual(result["failureCapture"]["availability"], "observed")
+                self.assertEqual(result["failureCapture"]["controllerFailure"]["stage"], "after-snapshot")
+                self.assertEqual(result["failureCapture"]["ociState"]["ExitCode"], 12)
+                self.assertEqual(result["cleanup"], "verified")
+                self.assertNotIn("a" * 64, json.dumps(result))
+                self.assertNotIn("leaf-witness-before", json.dumps(result))
+
+    def test_guard_failure_keeps_await_unknown_and_does_not_parse_exception_text(self) -> None:
+        driver = LeafWitnessProtocolTests()
+        ctx = driver.collect_driver(
+            overrides=self.outputs(),
+            fail_at="release-await-after",
+            failure=ProbeError("PRIVATE leaf-witness-await=poll-exhausted /proc/4789"),
+        )
+        result = ctx.observations[-1]
+        self.assertEqual(result["awaitResult"], "unavailable")
+        self.assertEqual(result["failureCapture"]["availability"], "observed")
+        self.assertEqual(result["controllerCompletion"], "unavailable")
+        self.assertNotIn("PRIVATE", json.dumps(result))
+        self.assertNotIn("4789", json.dumps(result))
+
+    def test_running_zero_exit_state_is_not_controller_completion(self) -> None:
+        outputs = self.outputs()
+        outputs["read private diagnostic leaf failure state"] = self.state(
+            state={"Running": True, "OOMKilled": False, "ExitCode": 0}
+        )
+        outputs["read private diagnostic leaf failure log"] = "leaf-witness-capture-complete=yes"
+        result = LeafWitnessProtocolTests().collect_driver(overrides=outputs).observations[-1]
+        self.assertEqual(result["failureCapture"]["ociState"]["Running"], True)
+        self.assertEqual(result["failureCapture"]["controllerFailure"]["availability"], "unavailable")
+        self.assertEqual(result["controllerCompletion"], "unavailable")
+        self.assertEqual(result["failureCapture"]["completedStage"], "owned-state")
+        self.assertEqual(result["cleanup"], "verified")
+
+    def test_capture_exception_or_mismatched_identity_never_publishes_raw_data(self) -> None:
+        for failure in ("read private diagnostic leaf failure state", "read private diagnostic leaf failure log"):
+            with self.subTest(failure=failure):
+                result = (
+                    LeafWitnessProtocolTests()
+                    .collect_driver(
+                        overrides=self.outputs(),
+                        fail_at=failure,
+                        failure=ProbeError("PRIVATE /proc/4789/root/secret"),
+                    )
+                    .observations[-1]
+                )
+                self.assertEqual(result["failureCapture"]["availability"], "unavailable")
+                self.assertEqual(result["enteredStage"], "release-await-after")
+                self.assertEqual(result["completedStage"], "root-before")
+                self.assertEqual(result["cleanup"], "verified")
+                self.assertNotIn("PRIVATE", json.dumps(result))
+        outputs = self.outputs()
+        outputs["read private diagnostic leaf failure state"] = self.state(id="b" * 64)
+        ctx = LeafWitnessProtocolTests().collect_driver(overrides=outputs)
+        self.assertEqual(ctx.observations[-1]["failureCapture"]["ociState"], {"availability": "unavailable"})
+        self.assertNotIn("read private diagnostic leaf failure log", [call.args[0] for call in ctx.exec.call_args_list])
+
+    def test_await_cancellation_does_not_start_capture_and_preserves_exact_cleanup(self) -> None:
+        ctx = LeafWitnessProtocolTests().driver_context()
+        cancellation = KeyboardInterrupt("PRIVATE")
+        with self.assertRaises(KeyboardInterrupt) as caught:
+            LeafWitnessProtocolTests().collect_driver(ctx=ctx, fail_at="release-await-after", failure=cancellation)
+        self.assertIs(caught.exception, cancellation)
+        self.assertNotIn("failureCapture", ctx.observations[-1])
+        self.assertEqual(ctx.observations[-1]["cleanup"], "verified")
+        self.assertEqual(ctx.exec.call_args_list[-1].args[0], "remove and read back exact diagnostic leaf")
+
+    def test_optional_capture_cancellation_propagates_original_object_after_exact_cleanup(self) -> None:
+        stages = (
+            ("read private diagnostic leaf failure state", "owned-state", None),
+            ("read private diagnostic leaf failure log", "controller-failure", "owned-state"),
+        )
+        for command, entered, completed in stages:
+            with self.subTest(command=command):
+                driver = LeafWitnessProtocolTests()
+                ctx = driver.driver_context()
+                original_checks = copy.deepcopy(ctx.checks)
+                cancellation = KeyboardInterrupt("PRIVATE /proc/4789/root/secret")
+                with self.assertRaises(KeyboardInterrupt) as caught:
+                    driver.collect_driver(ctx=ctx, overrides=self.outputs(), fail_at=command, failure=cancellation)
+                self.assertIs(caught.exception, cancellation)
+                result = ctx.observations[-1]
+                self.assertEqual(result["enteredStage"], "release-await-after")
+                self.assertEqual(result["completedStage"], "root-before")
+                self.assertEqual(result["failureCapture"]["enteredStage"], entered)
+                self.assertEqual(result["failureCapture"]["completedStage"], completed)
+                self.assertEqual(result["failureCapture"]["availability"], "unavailable")
+                self.assertEqual(result["controllerCompletion"], "unavailable")
+                self.assertEqual(result["availability"], "unavailable")
+                self.assertEqual(result["cleanup"], "verified")
+                self.assertEqual(result["cleanupEnteredStage"], "exact-owned-leaf")
+                self.assertEqual(result["cleanupCompletedStage"], "exact-owned-leaf")
+                cleanup = ctx.exec.call_args_list[-1].args
+                self.assertEqual(cleanup[0], "remove and read back exact diagnostic leaf")
+                self.assertEqual(cleanup[-2], "a" * 64)
+                self.assertIn('docker rm --force "$cid"', cleanup[4])
+                self.assertNotIn("prune", cleanup[4])
+                self.assertEqual(ctx.checks, original_checks)
+                public = json.dumps(result)
+                for private in ("PRIVATE", "/proc/4789", "secret", "a" * 64):
+                    self.assertNotIn(private, public)
+
+    def capture_clock(
+        self, *, timeout: float, work_deadline: float, reserve: float = 100
+    ) -> tuple[MagicMock, dict, list]:
+        clock = [100.0]
+        ctx = MagicMock(timeout=timeout, runtime_deadline=work_deadline)
+        ctx.backend.command_timeout.side_effect = lambda requested: min(requested, reserve - (clock[0] - 100))
+        outputs = iter((self.state(), self.failure()))
+
+        def execute(*_args: object, **_kwargs: object) -> str:
+            clock[0] += 0.1
+            return next(outputs)
+
+        ctx.exec.side_effect = execute
+        record = {"enteredStage": "release-await-after", "completedStage": "root-before"}
+        with patch("scripts.runtime_docker_systemd.time.monotonic", side_effect=lambda: clock[0]):
+            _leaf_witness_failure_capture(ctx, MagicMock(), "owned", "a" * 64, record)
+        return ctx, record, clock
+
+    def test_capture_uses_one_nonrenewed_deadline_default_timeout_work_limit_and_cleanup_reserve(self) -> None:
+        for timeout, work_deadline, reserve, first, second in (
+            (45, 200, 100, 2, 1.9),
+            (0.3, 200, 100, 0.3, 0.2),
+            (45, 100.4, 100, 0.4, 0.3),
+            (45, 200, 0.25, 0.25, 0.15),
+        ):
+            with self.subTest(timeout=timeout, work_deadline=work_deadline, reserve=reserve):
+                ctx, record, _ = self.capture_clock(timeout=timeout, work_deadline=work_deadline, reserve=reserve)
+                self.assertAlmostEqual(ctx.exec.call_args_list[0].kwargs["timeout"], first)
+                self.assertAlmostEqual(ctx.exec.call_args_list[1].kwargs["timeout"], second)
+                self.assertEqual(ctx.timeout, timeout)
+                self.assertEqual(ctx.runtime_deadline, work_deadline)
+                self.assertEqual(record["failureCapture"]["availability"], "observed")
+        ctx, record, _ = self.capture_clock(timeout=45, work_deadline=100)
+        ctx.exec.assert_not_called()
+        self.assertEqual(record["failureCapture"]["availability"], "unavailable")
+        ctx, record, _ = self.capture_clock(timeout=45, work_deadline=200, reserve=0)
+        ctx.exec.assert_not_called()
+        self.assertEqual(record["failureCapture"]["availability"], "unavailable")
+
+    def test_unknown_backend_reserve_or_work_budget_starts_no_capture_command(self) -> None:
+        for reserve in (float("nan"), float("inf"), True, None):
+            with self.subTest(reserve=reserve):
+                ctx = MagicMock(timeout=45, runtime_deadline=200)
+                ctx.backend.command_timeout.return_value = reserve
+                record = {"enteredStage": "release-await-after"}
+                with patch("scripts.runtime_docker_systemd.time.monotonic", return_value=100):
+                    _leaf_witness_failure_capture(ctx, MagicMock(), "owned", "a" * 64, record)
+                ctx.exec.assert_not_called()
+                self.assertEqual(record["failureCapture"]["availability"], "unavailable")
+        for timeout, deadline in ((float("nan"), 200), (True, 200), (45, None), (45, float("inf"))):
+            with self.subTest(timeout=timeout, deadline=deadline):
+                ctx = MagicMock(timeout=timeout, runtime_deadline=deadline)
+                record = {"enteredStage": "release-await-after"}
+                _leaf_witness_failure_capture(ctx, MagicMock(), "owned", "a" * 64, record)
+                ctx.exec.assert_not_called()
+                self.assertEqual(record["failureCapture"]["availability"], "unavailable")
+
+    def test_capture_budget_failure_and_late_return_prevent_more_reads(self) -> None:
+        ctx = MagicMock(timeout=45, runtime_deadline=200)
+        budget = MagicMock()
+        budget.checkpoint.side_effect = ProbeError("PRIVATE budget failure")
+        record = {"enteredStage": "release-await-after"}
+        with patch("scripts.runtime_docker_systemd.time.monotonic", return_value=100):
+            _leaf_witness_failure_capture(ctx, budget, "owned", "a" * 64, record)
+        ctx.exec.assert_not_called()
+        self.assertNotIn("PRIVATE", json.dumps(record))
+        clock = [100]
+        ctx.backend.command_timeout.side_effect = lambda requested: requested
+
+        def late(*_args: object, **_kwargs: object) -> str:
+            clock[0] = 103
+            return self.state()
+
+        ctx.exec.side_effect = late
+        record = {"enteredStage": "release-await-after"}
+        with patch("scripts.runtime_docker_systemd.time.monotonic", side_effect=lambda: clock[0]):
+            _leaf_witness_failure_capture(ctx, MagicMock(), "owned", "a" * 64, record)
+        self.assertEqual(ctx.exec.call_count, 1)
+        self.assertEqual(record["failureCapture"]["ociState"], {"availability": "unavailable"})
+
+    def test_late_validation_does_not_publish_state_or_failure_tokens(self) -> None:
+        for late_stage in ("state", "protocol"):
+            with self.subTest(late_stage=late_stage):
+                ctx = MagicMock(timeout=45, runtime_deadline=200)
+                ctx.backend.command_timeout.side_effect = lambda requested: requested
+                ctx.exec.side_effect = [self.state(), self.failure()]
+                clock = [100]
+                original = _leaf_witness_failure_state if late_stage == "state" else _leaf_witness_failure_protocol
+
+                def slow(*args: object, _original: Callable[..., dict] = original, _clock: list[int] = clock) -> dict:
+                    value = _original(*args)
+                    _clock[0] = 103
+                    return value
+
+                record = {"enteredStage": "release-await-after", "completedStage": "root-before"}
+                with (
+                    patch("scripts.runtime_docker_systemd.time.monotonic", side_effect=lambda _clock=clock: _clock[0]),
+                    patch("scripts.runtime_docker_systemd._leaf_witness_failure_" + late_stage, side_effect=slow),
+                ):
+                    _leaf_witness_failure_capture(ctx, MagicMock(), "owned", "a" * 64, record)
+                capture = record["failureCapture"]
+                field = "ociState" if late_stage == "state" else "controllerFailure"
+                self.assertEqual(capture[field], {"availability": "unavailable"})
+                self.assertEqual(capture["availability"], "unavailable")
+                self.assertEqual(record["enteredStage"], "release-await-after")
+                self.assertEqual(record["completedStage"], "root-before")
 
 
 if __name__ == "__main__":

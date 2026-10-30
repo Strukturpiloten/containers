@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import copy
 import unittest
+from unittest.mock import patch
 
 from scripts.maintenance import MaintenanceError, catalogue, markdown_catalogue
+from tests.test_evidence_gate import maintained_mutations, maintained_runtime
 
 DIGEST = f"sha256:{'a' * 64}"
 IMAGE = {
@@ -52,7 +55,7 @@ class CatalogueTests(unittest.TestCase):
                     "architecture": "amd64",
                     "manifestDigest": DIGEST,
                     "configDigest": DIGEST,
-                    "archiveSha256": DIGEST,
+                    "archiveSha256": "a" * 64,
                     "sourceRevision": BUILD["sourceRevision"],
                     "version": "v1.0.0",
                 },
@@ -88,3 +91,111 @@ class CatalogueTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RuntimeAuthorityCatalogueTests(unittest.TestCase):
+    def test_experimental_or_forged_private_completion_cannot_be_native_coverage(self) -> None:
+        image = copy.deepcopy(IMAGE)
+        image["tests"] = {"docker": {"launcher": "systemd", "mode": "rootless"}}
+        for qualification in ("none", "complete", None):
+            with self.subTest(qualification=qualification):
+                runtime = {
+                    "image": "example",
+                    "architecture": "amd64",
+                    "profile": "docker",
+                    "status": "passed",
+                    "checks": [{"name": "actual accounting", "status": "passed"}],
+                    "host": {"architecture": "amd64"},
+                    "oomAccountingMode": "qualification",
+                    "oomAccountingStatus": "complete",
+                    "imageIdentity": {
+                        "architecture": "amd64",
+                        "manifestDigest": DIGEST,
+                        "configDigest": DIGEST,
+                        "archiveSha256": "a" * 64,
+                        "sourceRevision": BUILD["sourceRevision"],
+                        "version": "v1.0.0",
+                    },
+                }
+                if qualification is not None:
+                    runtime["qualification"] = qualification
+                before = copy.deepcopy(runtime)
+                report = catalogue([image], runtime_results={"example": [runtime]})
+                view = report["images"][0]["runtimeCoverage"]["amd64"]["docker"]
+                self.assertEqual(view["status"], "nonqualifying")
+                self.assertEqual(view["operationalStatus"], "passed")
+                self.assertEqual(view["oomAccountingStatus"], "complete")
+                self.assertEqual(view["nativeAuthority"], "none")
+                self.assertEqual(view["qualification"], qualification)
+                self.assertEqual(runtime, before)
+                self.assertIn("nonqualifying", markdown_catalogue(report))
+
+    def test_failed_operational_record_is_not_relabelled_as_normal_success(self) -> None:
+        from scripts.maintenance import _runtime_authority_view  # noqa: PLC0415 - focused pure projection check.
+
+        raw = {"status": "failed", "qualification": "none", "oomAccountingStatus": "incomplete"}
+        view = _runtime_authority_view(IMAGE, "docker", raw)
+        self.assertEqual(view["status"], "failed")
+        self.assertEqual(view["operationalStatus"], "failed")
+        self.assertEqual(view["nativeAuthority"], "none")
+
+
+class MaintainedPrerequisiteCatalogueTests(unittest.TestCase):
+    def image(self, architecture: str = "amd64") -> dict:
+        image = copy.deepcopy(IMAGE)
+        image["build"]["architectures"] = [architecture]
+        image["name"] = "docker-29-conformance-rootless"
+        image["tests"] = {"docker": {"launcher": "systemd", "mode": "rootless"}}
+        return image
+
+    def test_valid_archived_native_facts_reach_catalogue_without_release_authority(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            report = catalogue([self.image()], runtime_results={self.image()["name"]: [maintained_runtime()]})
+        coverage = report["images"][0]["runtimeCoverage"]["amd64"]["docker"]
+        self.assertEqual(coverage["status"], "passed")
+        self.assertEqual(coverage["nativeAuthority"], "ordinary")
+        self.assertEqual(report["images"][0]["registry"]["status"], "unknown")
+
+    def test_same_hostile_records_cannot_be_catalogue_native_coverage(self) -> None:
+        for fault, runtime in maintained_mutations():
+            with self.subTest(fault=fault), patch.dict("os.environ", {}, clear=True):
+                try:
+                    report = catalogue([self.image()], runtime_results={self.image()["name"]: [runtime]})
+                except MaintenanceError:
+                    continue
+                coverage = report["images"][0]["runtimeCoverage"]["amd64"]["docker"]
+                self.assertNotEqual(coverage.get("nativeAuthority"), "ordinary")
+
+    def test_archive_digest_uses_actual_bare_hex_contract(self) -> None:
+        for archive in ("sha256:" + "b" * 64, "b" * 63, "B" * 64, "unknown"):
+            runtime = maintained_runtime()
+            runtime["imageIdentity"]["archiveSha256"] = archive
+            with self.subTest(archive=archive), self.assertRaises(MaintenanceError):
+                catalogue([self.image()], runtime_results={self.image()["name"]: [runtime]})
+
+    def test_arm_native_facts_and_same_hostile_records_obey_catalogue_consumer(self) -> None:
+        image = self.image("arm64")
+        report = catalogue([image], runtime_results={image["name"]: [maintained_runtime("arm64")]})
+        self.assertEqual(report["images"][0]["runtimeCoverage"]["arm64"]["docker"]["nativeAuthority"], "ordinary")
+        for fault, runtime in maintained_mutations("arm64"):
+            with self.subTest(fault=fault):
+                try:
+                    report = catalogue([image], runtime_results={image["name"]: [runtime]})
+                except MaintenanceError:
+                    continue
+                self.assertNotEqual(
+                    report["images"][0]["runtimeCoverage"]["arm64"]["docker"].get("nativeAuthority"), "ordinary"
+                )
+
+    def test_bounded_ordinary_native_facts_are_per_image_and_do_not_imply_registry_proof(self) -> None:
+        for architecture in ("amd64", "arm64"):
+            image = self.image(architecture)
+            runtime = maintained_runtime(architecture, "docker-rootless-qualification")
+            report = catalogue([image], runtime_results={image["name"]: [runtime]})
+            self.assertEqual(
+                report["images"][0]["runtimeCoverage"][architecture]["docker"]["nativeAuthority"], "ordinary"
+            )
+            self.assertEqual(report["images"][0]["registry"]["status"], "unknown")
+            del runtime["phases"][1]["scopedProfile"]
+            report = catalogue([image], runtime_results={image["name"]: [runtime]})
+            self.assertEqual(report["images"][0]["runtimeCoverage"][architecture]["docker"]["nativeAuthority"], "none")

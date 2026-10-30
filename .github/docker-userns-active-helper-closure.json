@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "consumer": "containers-ubuntu26-userns-active",
+  "stdlibOnly": true,
+  "files": [
+    "scripts/__init__.py",
+    "scripts/docker_userns_active.py",
+    "scripts/docker_userns_qualification.py",
+    "scripts/docker_runner_security.py",
+    "scripts/docker_userns_custody_child.py",
+    "scripts/docker_userns_policy_source.py",
+    "scripts/docker_userns_custody.py",
+    "scripts/docker_userns_hosted.py",
+    "scripts/docker_userns_dryparse.py",
+    "scripts/runtime_docker_diagnostics.py",
+    "scripts/runtime_docker_systemd_guard.py",
+    ".github/docker-userns-active-admission.json",
+    ".github/docker-userns-active-helper-closure.json",
+    ".github/docker-userns-policy-source.json"
+  ]
+}

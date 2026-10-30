@@ -30,7 +30,14 @@ class PullRequestSourceIdentityTests(unittest.TestCase):
                 if job == "plan":
                     self.assertEqual(step["env"]["SOURCE_SHA"], "${{ github.sha }}")
         required = workflow["jobs"]["required-ci"]
-        for profile in ("", "full", "docker-rootless-diagnostic", "DOCKER-ROOTLESS-DIAGNOSTIC", "unknown"):
+        for profile in (
+            "",
+            "full",
+            "docker-rootless-qualification",
+            "docker-rootless-diagnostic",
+            "DOCKER-ROOTLESS-DIAGNOSTIC",
+            "unknown",
+        ):
             with self.subTest(merge_group_profile=profile):
                 self.assertEqual(
                     render_workflow_value(required["name"], event="merge_group", profile=profile), "Required CI"

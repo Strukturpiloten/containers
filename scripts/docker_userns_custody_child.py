@@ -34,9 +34,23 @@ _RECEIPT_CHECKS = ("MATCH", "EMPTY", "MISMATCH")
 BUILD_STATUS_LIMIT = 128
 BUILD_STATUS_FIELDS = ("terminationForm", "receiptCheck")
 _QUALIFIED_VERSION = (3, 14, 4, "final", 0)
-GUARD_CATEGORIES = ("FD_FSTAT_NON_EBADF", "FD_NOT_ALLOWLISTED", "RESULT_TYPE_OR_SIZE")
+_FD_SLOT_RELATIONS = ("INTERPRETER_SLOT_REUSED", "RECEIPT_SLOT_REUSED", "OTHER_SLOT")
+_FD_TYPES = ("REGULAR", "DIRECTORY", "PIPE", "SOCKET", "CHARACTER", "BLOCK", "SYMLINK", "OTHER")
+GUARD_CATEGORIES = (
+    "FD_FSTAT_NON_EBADF",
+    "FD_NOT_ALLOWLISTED",
+    "RESULT_TYPE_OR_SIZE",
+    *(f"FD_NOT_ALLOWLISTED_{relation}_{kind}" for relation in _FD_SLOT_RELATIONS for kind in _FD_TYPES),
+    *(
+        f"FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_SAMEFILE_{role}"
+        for role in ("SOURCE_FIRST", "SOURCE_SECOND", "STDIO_INPUT", "STDIO_OUTPUT", "STDIO_ERROR")
+    ),
+    "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_NO_MATCH",
+    "FD_NOT_ALLOWLISTED_OTHER_SLOT_REGULAR_STDIO_UNAVAILABLE",
+)
 GUARD_DECLARATION_LIMIT = 96
 _GUARD_CODES = {111: GUARD_CATEGORIES[0], 112: GUARD_CATEGORIES[1], 113: GUARD_CATEGORIES[2]}
+_GUARD_CODES.update(enumerate(GUARD_CATEGORIES[3:], start=120))
 _GUARD_SOURCES = (
     ("canonical_policy", 31133, "17cc280b593466f143ba848183485b796d1e87a60b41d74ca25d49dc86241abe"),
     ("native_outer_diagnostic_capture", 13870, "23202211ec3b58a70c1120b0395f43663e3cacff1948609a8fb0fe2dac012962"),
@@ -48,15 +62,11 @@ SEALS = sum(_SEAL_VALUES) if all(type(value) is int for value in _SEAL_VALUES) e
 MODULES = ("canonical_policy", "native_outer_diagnostic_capture")
 ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C", "LC_ALL": "C"}
 CODE = r"""
-import ctypes, errno, fcntl, hashlib, importlib.abc, importlib.util, json, os, re, resource, signal, sys
-interpreter, receipt, first, second, name, uid, gid, seconds = sys.argv[1:]
+import errno, fcntl, hashlib, importlib.abc, importlib.util, json, os, re, sys, time
+interpreter, receipt, first, second, name, uid, gid, seconds, deadline = sys.argv[1:]
 uid, gid = int(uid), int(gid)
-if uid <= 0 or gid <= 0 or os.getresuid() != (uid, uid, uid) or os.getresgid() != (gid, gid, gid) or os.getgroups():
-    raise SystemExit(1)
-libc = ctypes.CDLL(None, use_errno=True)
-libc.prctl.restype = ctypes.c_int
-libc.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
-if libc.prctl(38, 1, 0, 0, 0) != 0 or libc.prctl(39, 0, 0, 0, 0) != 1:
+if (uid <= 0 or gid <= 0 or os.getresuid() != (uid, uid, uid) or os.getresgid() != (gid, gid, gid)
+        or os.getgroups() or time.monotonic_ns() >= int(deadline)):
     raise SystemExit(1)
 with open("/proc/self/status", "rb") as stream:
     status = stream.read(8193)
@@ -68,13 +78,9 @@ for key in (b"CapEff", b"CapPrm", b"CapInh", b"CapAmb", b"NoNewPrivs"):
         raise SystemExit(1)
     if int(values[0], 16) != (1 if key == b"NoNewPrivs" else 0):
         raise SystemExit(1)
-resource.setrlimit(resource.RLIMIT_CPU, (2, 2))
-resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-resource.setrlimit(resource.RLIMIT_FSIZE, (65536, 65536))
-signal.signal(signal.SIGALRM, signal.SIG_DFL)
-signal.alarm(int(seconds))
 os.close(int(interpreter))
 records = {}
+source_files = {}
 for module, encoded in zip(("canonical_policy", "native_outer_diagnostic_capture"), (first, second), strict=True):
     descriptor, size, digest = encoded.split(":")
     descriptor, size = int(descriptor), int(size)
@@ -92,22 +98,53 @@ for module, encoded in zip(("canonical_policy", "native_outer_diagnostic_capture
             or len(raw) != size or hashlib.sha256(raw).hexdigest() != digest):
         raise SystemExit(1)
     records[module] = raw
+    source_files[module] = (before.st_dev, before.st_ino, before.st_mode & 0o170000)
 proof = {"schema": 1, "uid": uid, "gid": gid, "groups": [], "nnp": 1, "capabilities": "zero"}
 raw = json.dumps(proof, sort_keys=True).encode("ascii")
 if os.write(int(receipt), raw) != len(raw):
     raise SystemExit(1)
 os.close(int(receipt))
 allowed = {0, 1, 2, int(first.split(":")[0]), int(second.split(":")[0])}
+stdio_files = {}
+seen = set()
 for entry in os.listdir("/proc/self/fd"):
     descriptor = int(entry)
     try:
-        os.fstat(descriptor)
+        witness = os.fstat(descriptor)
     except OSError as error:
         if error.errno != errno.EBADF:
             raise SystemExit(111)
         continue
+    seen.add(descriptor)
+    if descriptor in (0, 1, 2):
+        try:
+            stdio_files[descriptor] = (witness.st_dev, witness.st_ino, witness.st_mode & 0o170000)
+        except Exception:
+            pass
     if descriptor not in allowed:
-        raise SystemExit(112)
+        code = 112
+        try:
+            # Only current type bits and numeric-slot relationships: no ownership claim.
+            kinds = (0o100000, 0o040000, 0o010000, 0o140000, 0o020000, 0o060000, 0o120000)
+            kind = witness.st_mode & 0o170000
+            kind_index = kinds.index(kind) if kind in kinds else 7
+            relation = 0 if descriptor == int(interpreter) else 1 if descriptor == int(receipt) else 2
+            code = 120 + relation * 8 + kind_index
+            if relation == 2 and kind_index == 0:
+                # File identity only; not ownership or the same open file description.
+                identity = (witness.st_dev, witness.st_ino, kind)
+                candidates = (source_files["canonical_policy"], source_files["native_outer_diagnostic_capture"],
+                              stdio_files.get(0), stdio_files.get(1), stdio_files.get(2))
+                code = 149 if len(stdio_files) == 3 else 150
+                for index, candidate in enumerate(candidates):
+                    if identity == candidate:
+                        code = 144 + index
+                        break
+        except Exception:
+            pass
+        raise SystemExit(code)
+if seen != allowed:
+    raise SystemExit(112)
 class SourceLoader(importlib.abc.MetaPathFinder, importlib.abc.SourceLoader):
     def find_spec(self, fullname, path=None, target=None):
         return importlib.util.spec_from_loader(fullname, self) if fullname in records else None
@@ -445,7 +482,7 @@ def guard_declaration(value: object, fault: object, observation: object) -> dict
     category = value["category"]
     if type(category) is not str or category not in GUARD_CATEGORIES:
         return None
-    # These three exact ASCII constants have a statically tested <=96-byte wire
+    # These exact ASCII constants have a statically tested <=96-byte wire
     # form. No additional classifier encoding or numeric formatting is needed.
     return {"schema": 1, "category": category}
 
@@ -1035,6 +1072,11 @@ class _ExecuteArgs:
     seconds: int
 
 
+def _launch_binding(descriptors: tuple[int, ...]) -> str:
+    """Bind each fixed authored role to its held parent identity, never supply an allowlist or payload."""
+    return ";".join(",".join(map(str, file_mark(os.fstat(descriptor)))) for descriptor in descriptors)
+
+
 def _execute(
     interpreter: Interpreter, sources: tuple[Source, ...], lease: Build, clock: Clock, seconds: int
 ) -> tuple[bytes, bytes, int | None, Lifetime]:
@@ -1062,6 +1104,7 @@ def _execute_observed(
         seconds = min(seconds, (lease.deadline_ns - _observe(observer, "B_EXECUTE_W02", clock.now_ns)) // 1_000_000_000)
         with _work(observer, "B_EXECUTE_G01"):
             _need(seconds >= 1)
+            binding = _launch_binding((interpreter.descriptor, write, *(item.descriptor for item in sources)))
         arguments = [
             str(interpreter.descriptor),
             str(write),
@@ -1070,13 +1113,15 @@ def _execute_observed(
             str(lease.uid),
             str(lease.gid),
             str(seconds),
+            str(lease.deadline_ns),
+            binding,
         ]
         attempted = True
         process = _observe(
             observer,
             "B_EXECUTE_W03",
             subprocess.Popen,
-            [f"/proc/self/fd/{interpreter.descriptor}", "-I", "-B", "-S", "-c", CODE, *arguments],
+            [f"/proc/self/fd/{interpreter.descriptor}", "-I", "-B", "-S", "-c", BUILD_LAUNCHER, *arguments],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -1261,11 +1306,11 @@ def _unique(pairs: list[tuple[str, object]], *, observer: WorkObserver | None = 
     return result
 
 
-# Reuse the same pre-import credential/NNP checks, but expose only two fixed probes.
+# Reuse the same post-reexec kernel credential/NNP checks, but expose only two fixed probes.
 PROBE_CODE = (
     CODE[: CODE.index("os.close(int(interpreter))")].replace(
-        "interpreter, receipt, first, second, name, uid, gid, seconds = sys.argv[1:]",
-        "interpreter, receipt, target, kind, uid, gid, seconds = sys.argv[1:]",
+        "interpreter, receipt, first, second, name, uid, gid, seconds, deadline = sys.argv[1:]",
+        "interpreter, receipt, target, kind, uid, gid, seconds, deadline = sys.argv[1:]",
     )
     + r"""
 os.close(int(interpreter))
@@ -1275,6 +1320,23 @@ if os.write(int(receipt), raw) != len(raw):
     raise SystemExit(1)
 os.close(int(receipt))
 target = int(target)
+if kind not in ("parser-version", "write-denial"):
+    raise SystemExit(1)
+allowed = {0, 1, 2, target}
+seen = set()
+for entry in os.listdir("/proc/self/fd"):
+    descriptor = int(entry)
+    try:
+        os.fstat(descriptor)
+    except OSError as error:
+        if error.errno != errno.EBADF:
+            raise SystemExit(111)
+        continue
+    if descriptor not in allowed:
+        raise SystemExit(112)
+    seen.add(descriptor)
+if seen != allowed:
+    raise SystemExit(112)
 if kind == "parser-version":
     if os.execve not in os.supports_fd:
         raise SystemExit(1)
@@ -1293,6 +1355,106 @@ else:
     raise SystemExit(1)
 """
 )
+
+
+_LAUNCHER = r"""
+import errno, os, sys, time
+
+def mark(info):
+    return (info.st_dev, info.st_ino, info.st_uid, info.st_gid, info.st_mode,
+            info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+def census(allowed):
+    found = {}
+    for entry in os.listdir("/proc/self/fd"):
+        descriptor = int(entry)
+        try:
+            info = os.fstat(descriptor)
+        except OSError as error:
+            if error.errno != errno.EBADF:
+                raise SystemExit(111)
+            continue
+        if allowed is not None and descriptor not in allowed:
+            raise SystemExit(112)
+        found[descriptor] = mark(info)
+    return found
+
+def launch():
+    arguments, encoded = sys.argv[1:-1], sys.argv[-1]
+    if ROLE == "builder" and len(arguments) == 9:
+        interpreter, receipt, first, second, name, uid, gid, seconds, deadline = arguments
+        roles = (int(interpreter), int(receipt), int(first.split(":")[0]), int(second.split(":")[0]))
+    elif ROLE == "probe" and len(arguments) == 8:
+        interpreter, receipt, target, kind, uid, gid, seconds, deadline = arguments
+        if kind not in ("parser-version", "write-denial"):
+            raise SystemExit(1)
+        roles = (int(interpreter), int(receipt), int(target))
+    else:
+        raise SystemExit(1)
+    uid, gid, deadline, seconds = int(uid), int(gid), int(deadline), int(seconds)
+    if (uid <= 0 or gid <= 0 or os.getresuid() != (uid, uid, uid) or os.getresgid() != (gid, gid, gid)
+            or os.getgroups() or not 1 <= seconds <= 5 or time.monotonic_ns() >= deadline):
+        raise SystemExit(1)
+    if len(set(roles)) != len(roles) or any(descriptor <= 2 for descriptor in roles) or len(encoded) > 2048:
+        raise SystemExit(1)
+    expected = tuple(tuple(int(value) for value in item.split(",")) for item in encoded.split(";"))
+    if len(expected) != len(roles) or any(len(item) != 9 for item in expected):
+        raise SystemExit(1)
+    allowed = {0, 1, 2, *roles}
+    authored = census(allowed)
+    if set(authored) != allowed or tuple(authored[descriptor] for descriptor in roles) != expected:
+        raise SystemExit(1)
+    identities = [(authored[descriptor][0], authored[descriptor][1], authored[descriptor][4] & 0o170000)
+                  for descriptor in roles]
+    stdio = [(authored[descriptor][0], authored[descriptor][1], authored[descriptor][4] & 0o170000)
+             for descriptor in (0, 1, 2)]
+    if len(set(identities)) != len(identities) or any(item in stdio for item in identities):
+        raise SystemExit(1)
+    for index, descriptor in enumerate(roles):
+        info = authored[descriptor]
+        if (info[4] & 0o170000) != (0o010000 if index == 1 else 0o100000):
+            raise SystemExit(1)
+        if index != 1 and (info[2] != 0 or info[4] & 0o7022):
+            raise SystemExit(1)
+    if not authored[roles[0]][4] & 0o111 or authored[roles[0]][5] != 1:
+        raise SystemExit(1)
+    import resource, signal
+    resource.setrlimit(resource.RLIMIT_CPU, (2, 2))
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    resource.setrlimit(resource.RLIMIT_FSIZE, (65536, 65536))
+    signal.signal(signal.SIGALRM, signal.SIG_DFL)
+    signal.alarm(seconds)
+    import ctypes
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.prctl.restype = ctypes.c_int
+    libc.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+    if libc.prctl(38, 1, 0, 0, 0) != 0 or libc.prctl(39, 0, 0, 0, 0) != 1:
+        raise SystemExit(1)
+    after = census(None)
+    if any(after.get(descriptor) != identity for descriptor, identity in authored.items()):
+        raise SystemExit(1)
+    for descriptor, identity in after.items():
+        if descriptor not in authored:
+            os.set_inheritable(descriptor, False)
+            if os.get_inheritable(descriptor) or mark(os.fstat(descriptor)) != identity:
+                raise SystemExit(1)
+    if any(mark(os.fstat(descriptor)) != identity or not os.get_inheritable(descriptor)
+           for descriptor, identity in authored.items()):
+        raise SystemExit(1)
+    if time.monotonic_ns() >= deadline or os.execve not in os.supports_fd:
+        raise SystemExit(1)
+    os.execve(roles[0], ["held-python", "-I", "-B", "-S", "-c", PAYLOAD, *arguments],
+              {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C", "LC_ALL": "C"})
+    raise SystemExit(1)
+
+try:
+    launch()
+except Exception:
+    raise SystemExit(1) from None
+"""
+# Payloads and roles are immutable source choices, never command-line content or caller-selected allowlists.
+BUILD_LAUNCHER = "ROLE = 'builder'\nPAYLOAD = " + repr(CODE) + "\n" + _LAUNCHER
+PROBE_LAUNCHER = "ROLE = 'probe'\nPAYLOAD = " + repr(PROBE_CODE) + "\n" + _LAUNCHER
 
 
 @dataclass(frozen=True)
@@ -1350,6 +1512,7 @@ def _probe_observed(arguments: _ProbeArgs, observer: WorkObserver | None = None)
         seconds = min(5, (lease.deadline_ns - clock.now_ns()) // 1_000_000_000)
         with _work(observer, "B_PROBE_G04"):
             _need(os.geteuid() == 0 and seconds >= 1 and lease.deadline_ns < lease.cleanup_deadline_ns)
+            binding = _launch_binding((interpreter.descriptor, write, target))
         attempted = True
         process = _observe(
             observer,
@@ -1361,7 +1524,7 @@ def _probe_observed(arguments: _ProbeArgs, observer: WorkObserver | None = None)
                 "-B",
                 "-S",
                 "-c",
-                PROBE_CODE,
+                PROBE_LAUNCHER,
                 str(interpreter.descriptor),
                 str(write),
                 str(target),
@@ -1369,6 +1532,8 @@ def _probe_observed(arguments: _ProbeArgs, observer: WorkObserver | None = None)
                 str(lease.uid),
                 str(lease.gid),
                 str(seconds),
+                str(lease.deadline_ns),
+                binding,
             ],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,

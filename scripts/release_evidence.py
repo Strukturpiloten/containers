@@ -15,7 +15,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from scripts import container_engine
 from scripts.admission import image_policy
+from scripts.evidence_gate import EvidenceError, require_ordinary_runtime_authority
 from scripts.scan_sources import published_manifest
 
 DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -121,6 +123,18 @@ def _require_complete(  # noqa: PLR0913, C901
     for architecture in sorted(expected):
         policy = image_policy(name, architecture)
         runtime_item = next(item for item in runtime if item["architecture"] == architecture)
+        metadata = next((item for item in container_engine._load_images() if item["name"] == name), None)  # noqa: SLF001 - trusted declaration loader shared with the publisher gate.
+        if metadata is None:
+            msg = "Release evidence has no trusted image declaration."
+            raise ReleaseEvidenceError(msg)
+        try:
+            require_ordinary_runtime_authority(
+                runtime_item,
+                policy["requiredRuntimeProfile"],
+                metadata.get("tests", {}).get(policy["requiredRuntimeProfile"], {}),
+            )
+        except EvidenceError as error:
+            raise ReleaseEvidenceError(str(error)) from error
         scan_item = next(item for item in scans if item["architecture"] == architecture)
         identity = runtime_item.get("imageIdentity")
         candidate = scan_item.get("candidateSource")

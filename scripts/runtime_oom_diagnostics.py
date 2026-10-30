@@ -1,8 +1,9 @@
-"""Bounded OOM evidence only; never classify an outer OOM flag as expected."""
+"""Bounded observations and mandatory owned-parent OOM lifecycle accounting."""
 
 from __future__ import annotations
 
 import copy
+import ctypes
 import hashlib
 import json
 import os
@@ -12,6 +13,7 @@ import stat
 import subprocess
 import sys
 import time
+from contextlib import ExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -1086,8 +1088,904 @@ def _terminal_custody_record(value: dict[str, Any], *, expected_watch: dict[str,
         _terminal_event(event)
 
 
+# Docker's outer-only observer has no lifecycle or conmon authority. Its output
+# vocabulary is closed; raw command results, operands and host paths stay private.
+DOCKER_EVENT_FILES = ("memory.events", "memory.events.local")
+DOCKER_CHECKS = (
+    "ownedContainer",
+    "containerIncarnation",
+    "ownedSlice",
+    "hostProcess",
+    "cgroup2Mount",
+    "outerCgroup",
+    "stableRead",
+)
+DOCKER_STATUSES = {
+    "observed",
+    "unavailable",
+    "missing",
+    "unsupported",
+    "malformed",
+    "oversized",
+    "changed",
+    "regressed",
+    "timeout",
+    "error",
+    "not-sampled",
+}
+DOCKER_COUNTER_MAX = (1 << 64) - 1
+DOCKER_COUNTER_DIGITS = 20
+DOCKER_EVENT_KEYS = {"low", "high", "max", "oom", "oom_kill", "oom_group_kill", "sock_throttled"}
+DOCKER_COUNTER_PHASES = {"before-inner-memory", "after-inner-memory"}
+DOCKER_STARTED_MAX = 128
+DOCKER_EXIT_MAX = 255
+MOUNT_MIN_FIELDS = 10
+MOUNT_SEPARATOR_MIN = 6
+DOCKER_SLICE_FIELDS = {"Id", "Names", "LoadState", "ActiveState", "ControlGroup"}
+
+
+class _DockerObservationError(ValueError):
+    def __init__(self, status: str) -> None:
+        self.status = status
+        super().__init__(status)
+
+
+def _docker_require(condition: object, status: str = "malformed") -> None:
+    if not condition:
+        raise _DockerObservationError(status)
+
+
+def _docker_record() -> dict[str, Any]:
+    return {
+        "schemaVersion": 1,
+        "availability": "unavailable",
+        "attribution": "unresolved",
+        "authority": "observation-only",
+        "bindingChecks": dict.fromkeys(DOCKER_CHECKS, False),
+        "bindings": {},
+        "counters": {name: {"availability": "unavailable"} for name in DOCKER_EVENT_FILES},
+        "sampleWindowMonotonicNs": [time.monotonic_ns(), time.monotonic_ns()],
+    }
+
+
+def _docker_hash(value: object) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+
+def _docker_identity(descriptor: int) -> tuple[int, int]:
+    info = os.fstat(descriptor)
+    return info.st_dev, info.st_ino
+
+
+def _docker_filesystem(descriptor: int, expected: int) -> None:
+    # Linux statfs starts with a native long f_type; overallocate the remaining
+    # architecture-specific structure and expose none of it in public evidence.
+    buffer = ctypes.create_string_buffer(256)
+    operation = ctypes.CDLL(None, use_errno=True).fstatfs
+    operation.argtypes = [ctypes.c_int, ctypes.c_void_p]
+    operation.restype = ctypes.c_int
+    _docker_require(operation(descriptor, buffer) == 0, "unsupported")
+    _docker_require(ctypes.c_long.from_buffer(buffer).value == expected, "unsupported")
+
+
+class _DockerOuterRead:
+    """Held nofollow descriptors and one original, nonrenewable read deadline."""
+
+    def __init__(self, stack: ExitStack, deadline: float) -> None:
+        self.stack = stack
+        self.deadline = deadline
+
+    def check(self) -> None:
+        _docker_require(time.monotonic() < self.deadline, "timeout")
+
+    def directory(self, path: str, *, parent: int | None = None) -> int:
+        self.check()
+        _docker_require(len(path) <= MAX_FILE_BYTES and len(Path(path).parts) <= MAX_PATH_COMPONENTS)
+        if parent is None:
+            descriptor = _open_directory(Path(path))
+        else:
+            _docker_require(path != "" and "/" not in path and path not in {".", ".."})
+            descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=parent)
+        self.stack.callback(os.close, descriptor)
+        return descriptor
+
+    def descend(self, root: int, path: str) -> int:
+        _group_path(path)
+        result = root
+        for part in path.strip("/").split("/"):
+            if part:
+                result = self.directory(part, parent=result)
+        return result
+
+    def text(self, parent: int, name: str, maximum: int = MAX_FILE_BYTES) -> str:
+        self.check()
+        descriptor = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        try:
+            _docker_require(
+                stat.S_ISREG(os.fstat(descriptor).st_mode) and os.fstat(descriptor).st_dev == os.fstat(parent).st_dev,
+                "unsupported",
+            )
+            raw = bytearray()
+            while True:
+                self.check()
+                part = os.read(descriptor, maximum + 1 - len(raw))
+                self.check()
+                if not part:
+                    return raw.decode("ascii")
+                raw.extend(part)
+                _docker_require(len(raw) <= maximum, "oversized")
+        finally:
+            os.close(descriptor)
+
+    def process(self, descriptor: int, pid: int) -> tuple[str, str]:
+        raw = self.text(descriptor, "stat")
+        prefix, separator, fields = raw.rpartition(") ")
+        values = fields.split()
+        _docker_require(separator and prefix.startswith(str(pid) + " (") and len(values) > STARTTIME_INDEX)
+        _docker_require(values[0] not in {"Z", "X"}, "changed")
+        start = values[STARTTIME_INDEX]
+        _docker_require(start.isascii() and start.isdecimal() and int(start) > 0)
+        membership = self.text(descriptor, "cgroup").strip()
+        _docker_require(membership.startswith("0::") and "\n" not in membership, "unsupported")
+        _group_path(membership[3:])
+        return start, membership[3:]
+
+    def stable_host(self, held: dict[str, int], expected: dict[str, Any]) -> int:
+        """Reject replacement visible through either held or freshly opened fds."""
+        _docker_require(expected["process"] == self.process(held["process"], expected["pid"]), "changed")
+        linked_process = self.directory(str(expected["pid"]), parent=held["proc"])
+        _docker_require(
+            _docker_identity(held["process"]) == _docker_identity(linked_process)
+            and expected["process"] == self.process(linked_process, expected["pid"]),
+            "changed",
+        )
+        linked_root = self.directory("/sys/fs/cgroup")
+        _docker_filesystem(linked_root, 0x63677270)
+        _docker_require(_docker_identity(held["root"]) == _docker_identity(linked_root), "changed")
+        _docker_require(
+            _docker_mount(self.text(held["collector"], "mountinfo", MAX_BYTES), linked_root)[0] == expected["mount"],
+            "changed",
+        )
+        return linked_root
+
+    def events(self, scope: int) -> dict[str, Any]:
+        """Keep unsupported or malformed files distinct from actual zero counters."""
+        result = {}
+        for filename in DOCKER_EVENT_FILES:
+            try:
+                values = _docker_events(self.text(scope, filename))
+                result[filename] = {"availability": "observed", "values": values}
+            except FileNotFoundError:
+                result[filename] = {"availability": "missing"}
+            except (UnicodeError, _DockerObservationError) as error:
+                result[filename] = {
+                    "availability": error.status if isinstance(error, _DockerObservationError) else "malformed"
+                }
+        return result
+
+
+def _docker_events(raw: str) -> dict[str, int]:
+    _docker_require(len(raw) <= MAX_FILE_BYTES, "oversized")
+    result = {}
+    for row in raw.splitlines():
+        parts = row.split()
+        _docker_require(
+            len(parts) == EVENT_FIELDS
+            and parts[0] in DOCKER_EVENT_KEYS
+            and parts[0] not in result
+            and parts[1].isascii()
+            and parts[1].isdecimal()
+            and len(parts[1]) <= DOCKER_COUNTER_DIGITS
+        )
+        value = int(parts[1])
+        _docker_require(value <= DOCKER_COUNTER_MAX)
+        result[parts[0]] = value
+    _docker_require({"low", "high", "max", "oom", "oom_kill"} <= result.keys() and result.keys() <= DOCKER_EVENT_KEYS)
+    return result
+
+
+def _docker_mount(raw: str, descriptor: int) -> tuple[str, bool]:
+    rows = [
+        row.split()
+        for row in raw.splitlines()
+        if len(row.split()) >= MOUNT_MIN_FIELDS and row.split()[4] == "/sys/fs/cgroup"
+    ]
+    _docker_require(len(rows) == 1, "unsupported")
+    _docker_require(
+        not any(
+            len(row.split()) >= MOUNT_MIN_FIELDS and row.split()[4].startswith("/sys/fs/cgroup/")
+            for row in raw.splitlines()
+        ),
+        "unsupported",
+    )
+    row = rows[0]
+    separator = row.index("-") if "-" in row else -1
+    _docker_require(separator >= MOUNT_SEPARATOR_MIN and len(row) == separator + 4, "unsupported")
+    info = os.fstat(descriptor)
+    _docker_require(
+        row[3] == "/"
+        and row[separator + 1] == "cgroup2"
+        and row[2] == f"{os.major(info.st_dev)}:{os.minor(info.st_dev)}",
+        "unsupported",
+    )
+    return " ".join(row), "memory_localevents" in (row[5] + "," + row[-1]).split(",")
+
+
+def _docker_outer_request(request: dict[str, Any]) -> tuple[str, int, str, str]:
+    _docker_require(
+        request.keys() == {"container", "startedAt", "pid", "sliceName", "slicePath", "sliceIdentity", "deadline"}
+    )
+    cid, pid = request["container"], request["pid"]
+    _docker_require(isinstance(cid, str) and re.fullmatch(r"[a-f0-9]{64}", cid) is not None)
+    _docker_require(type(pid) is int and pid > 1)
+    _docker_require(isinstance(request["startedAt"], str) and 0 < len(request["startedAt"]) <= DOCKER_STARTED_MAX)
+    name = request["sliceName"]
+    _docker_require(
+        isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*\.slice", name) is not None
+    )
+    parts = name.removesuffix(".slice").split("-")
+    expected_slice = "/" + "/".join("-".join(parts[:index]) + ".slice" for index in range(1, len(parts) + 1))
+    _docker_require(request["slicePath"] == expected_slice, "unsupported")
+    _docker_require(
+        isinstance(request["sliceIdentity"], str)
+        and re.fullmatch(r"[0-9]+:[0-9]+", request["sliceIdentity"]) is not None
+    )
+    _docker_require(
+        type(request["deadline"]) in {int, float}
+        and time.monotonic() < request["deadline"] <= time.monotonic() + SNAPSHOT_SECONDS,
+        "timeout",
+    )
+    outer = expected_slice + "/docker-" + cid + ".scope"
+    return cid, pid, expected_slice, outer
+
+
+def _collect_docker_outer(request: dict[str, Any]) -> dict[str, Any]:
+    """Read just the owned outer scope; never interpret the guest hook's path."""
+    record = _docker_record()
+    checks = record["bindingChecks"]
+    try:
+        cid, pid, expected_slice, outer = _docker_outer_request(request)
+        with ExitStack() as stack:
+            reads = _DockerOuterRead(stack, request["deadline"])
+            proc = reads.directory("/proc")
+            _docker_filesystem(proc, 0x9FA0)
+            process = reads.directory(str(pid), parent=proc)
+            collector = reads.directory(str(os.getpid()), parent=proc)
+            original = reads.process(process, pid)
+            _docker_require(original[1] in {outer, outer + "/init.scope"}, "unsupported")
+            checks["hostProcess"] = True
+            root = reads.directory("/sys/fs/cgroup")
+            _docker_filesystem(root, 0x63677270)
+            mount, localevents = _docker_mount(reads.text(collector, "mountinfo", MAX_BYTES), root)
+            checks["cgroup2Mount"] = True
+            owned_slice = reads.descend(root, expected_slice)
+            slice_identity = _docker_identity(owned_slice)
+            _docker_require(":".join(map(str, slice_identity)) == request["sliceIdentity"], "changed")
+            checks["ownedSlice"] = True
+            scope = reads.directory("docker-" + cid + ".scope", parent=owned_slice)
+            scope_identity = _docker_identity(scope)
+            member = scope if original[1] == outer else reads.directory("init.scope", parent=scope)
+            member_identity = _docker_identity(member)
+            _docker_require(
+                scope_identity[0] == slice_identity[0] == member_identity[0] == os.fstat(root).st_dev, "unsupported"
+            )
+            checks["outerCgroup"] = True
+            record["counters"] = reads.events(scope)
+            # Re-resolve from fixed roots, in addition to checking held objects:
+            # an unlinked old fd must not hide process, cgroup or mount replacement.
+            linked_root = reads.stable_host(
+                {"process": process, "proc": proc, "root": root, "collector": collector},
+                {"process": original, "pid": pid, "mount": mount},
+            )
+            linked_slice = reads.descend(linked_root, expected_slice)
+            linked_scope = reads.directory("docker-" + cid + ".scope", parent=linked_slice)
+            linked_member = linked_scope if original[1] == outer else reads.directory("init.scope", parent=linked_scope)
+            _docker_require(
+                slice_identity == _docker_identity(linked_slice)
+                and scope_identity == _docker_identity(linked_scope)
+                and member_identity == _docker_identity(linked_member),
+                "changed",
+            )
+            reads.check()
+            checks["stableRead"] = True
+            record["bindings"] = {
+                "containerIncarnation": _docker_hash([cid, request["startedAt"]]),
+                "hostProcess": _docker_hash([pid, original[0], _docker_identity(process)]),
+                "outerCgroup": _docker_hash(
+                    [expected_slice, slice_identity, outer, scope_identity, original[1], member_identity]
+                ),
+                "mount": _docker_hash([mount, _docker_identity(root)]),
+            }
+            record["mountSemantics"] = {"root": "full-hierarchy", "memoryLocalevents": localevents}
+            record["availability"] = "observed"
+    except _DockerObservationError as error:
+        record["availability"] = error.status
+    except FileNotFoundError:
+        record["availability"] = "missing"
+    except OSError, ValueError, TypeError, KeyError:
+        record["availability"] = "error"
+    record["sampleWindowMonotonicNs"][1] = time.monotonic_ns()
+    return record
+
+
+def _docker_validate_record(value: object) -> dict[str, Any]:
+    """Reject collector stdout unless every public field has a closed schema."""
+    _docker_require(isinstance(value, dict))
+    template = _docker_record()
+    _docker_require(value.keys() in (template.keys(), template.keys() | {"mountSemantics"}))
+    _docker_require(value["schemaVersion"] == 1 and type(value["schemaVersion"]) is int)
+    _docker_require(
+        value["availability"] in DOCKER_STATUSES
+        and value["attribution"] == "unresolved"
+        and value["authority"] == "observation-only"
+    )
+    checks, bindings = value["bindingChecks"], value["bindings"]
+    _docker_require(
+        isinstance(checks, dict)
+        and checks.keys() == set(DOCKER_CHECKS)
+        and all(type(item) is bool for item in checks.values())
+    )
+    _docker_require(
+        isinstance(bindings, dict)
+        and bindings.keys() in (set(), {"containerIncarnation", "hostProcess", "outerCgroup", "mount"})
+    )
+    _docker_require(
+        all(isinstance(item, str) and re.fullmatch(r"[a-f0-9]{64}", item) is not None for item in bindings.values())
+    )
+    window = value["sampleWindowMonotonicNs"]
+    _docker_require(
+        isinstance(window, list)
+        and len(window) == EVENT_FIELDS
+        and all(type(item) is int and item >= 0 for item in window)
+        and window[0] <= window[1]
+        and window[1] - window[0] <= SNAPSHOT_SECONDS * 1_000_000_000
+    )
+    _docker_require(isinstance(value["counters"], dict) and value["counters"].keys() == set(DOCKER_EVENT_FILES))
+    for counter in value["counters"].values():
+        _docker_require(isinstance(counter, dict) and counter.get("availability") in DOCKER_STATUSES)
+        _docker_require(
+            counter.keys()
+            == ({"availability", "values"} if counter["availability"] == "observed" else {"availability"})
+        )
+        if counter["availability"] == "observed":
+            _docker_require(
+                isinstance(counter["values"], dict)
+                and all(type(item) is int and 0 <= item <= DOCKER_COUNTER_MAX for item in counter["values"].values())
+            )
+            _docker_events("\n".join(f"{key} {item}" for key, item in counter["values"].items()))
+    if "mountSemantics" in value:
+        _docker_require(
+            value["mountSemantics"].keys() == {"root", "memoryLocalevents"}
+            and value["mountSemantics"]["root"] == "full-hierarchy"
+            and type(value["mountSemantics"]["memoryLocalevents"]) is bool
+        )
+    if value["availability"] == "observed":
+        _docker_require(
+            bool(bindings)
+            and all(checks[key] for key in DOCKER_CHECKS if key not in {"ownedContainer", "containerIncarnation"})
+            and "mountSemantics" in value
+        )
+    return copy.deepcopy(value)
+
+
+def _docker_slice(raw: str, slice_name: str) -> str:
+    _docker_require(len(raw) <= MAX_BYTES, "oversized")
+    rows = [row.split("=", 1) for row in raw.splitlines()]
+    _docker_require(all(len(row) == EVENT_FIELDS for row in rows) and len(rows) == len(DOCKER_SLICE_FIELDS))
+    state = dict(rows)
+    _docker_require(state.keys() == DOCKER_SLICE_FIELDS)
+    _docker_require(
+        state["Id"] == slice_name
+        and state["Names"] == slice_name
+        and state["LoadState"] == "loaded"
+        and state["ActiveState"] == "active",
+        "changed",
+    )
+    _group_path(state["ControlGroup"])
+    return state["ControlGroup"]
+
+
+def _docker_public_state(state: object) -> dict[str, Any]:
+    """Project finite OCI fields independently of live-process/counter support."""
+    _docker_require(state is not None, "unavailable")
+    _docker_require(isinstance(state, dict))
+    public_state = {}
+    for key in ("Running", "OOMKilled"):
+        if key in state:
+            _docker_require(type(state[key]) is bool)
+            public_state[key] = state[key]
+    if "ExitCode" in state:
+        _docker_require(type(state["ExitCode"]) is int and 0 <= state["ExitCode"] <= DOCKER_EXIT_MAX)
+        public_state["ExitCode"] = state["ExitCode"]
+    return public_state
+
+
+def _docker_inspect(raw: str, container: str, slice_name: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    value = json.loads(raw)
+    _docker_require(isinstance(value, dict) and value.keys() == {"id", "state", "parent"})
+    _docker_require(value["id"] == container and value["parent"] == slice_name, "changed")
+    return value["state"], _docker_public_state(value["state"])
+
+
+def _docker_incarnation(state: dict[str, Any]) -> tuple[str, int]:
+    _docker_require(state.get("Running") is True, "unavailable")
+    pid, started = state.get("Pid"), state.get("StartedAt")
+    _docker_require(type(pid) is int and pid > 1)
+    _docker_require(isinstance(started, str) and 0 < len(started) <= DOCKER_STARTED_MAX)
+    return started, pid
+
+
+def _docker_deltas(before: dict[str, Any] | None, after: dict[str, Any]) -> dict[str, Any]:
+    result = {name: {"availability": "unavailable"} for name in DOCKER_EVENT_FILES}
+    if before is None or before["availability"] != "observed" or after["availability"] != "observed":
+        return result
+    if not all(before["bindingChecks"].values()) or not all(after["bindingChecks"].values()):
+        return result
+    if before["bindings"] != after["bindings"] or before["mountSemantics"] != after["mountSemantics"]:
+        return {name: {"availability": "changed"} for name in DOCKER_EVENT_FILES}
+    if before["sampleWindowMonotonicNs"][1] > after["sampleWindowMonotonicNs"][0]:
+        return {name: {"availability": "changed"} for name in DOCKER_EVENT_FILES}
+    for name in DOCKER_EVENT_FILES:
+        first, last = before["counters"][name], after["counters"][name]
+        if first["availability"] != "observed" or last["availability"] != "observed":
+            continue
+        if first["values"].keys() != last["values"].keys():
+            result[name] = {"availability": "changed"}
+        elif any(last["values"][key] < value for key, value in first["values"].items()):
+            result[name] = {"availability": "regressed"}
+        else:
+            result[name] = {
+                "availability": "observed",
+                "values": {key: last["values"][key] - value for key, value in first["values"].items()},
+            }
+    return result
+
+
+PARENT_CHECKS = {"ownedParent", "fullHierarchy", "outsideCollector", "stableRead", "quiescent"}
+OOM_KEYS = {"oom", "oom_kill", "oom_group_kill"}
+LIFECYCLE_MODES = {"qualification", "diagnostic"}
+MIN_BUILD_PREFIX = 7
+FULL_COMMIT_LENGTH = 40
+ALLOCATOR_PROCESS_FIELDS = 5
+OOM_EXIT_CODE = 137
+ORIGINAL_PROBE_SOURCE_SHA256 = "43b1c7d6affa6a226a4547203f3b2b0b0fdc6930cae40f6c91a2ffda5ffe6bc6"
+ORIGINAL_PROBE_COMMAND = [
+    "docker-resource-probe",
+    "memory",
+    "--wait-for-start",
+    "/tmp/resource-start",  # noqa: S108 - fixed barrier inside the exact owned disposable guest only.
+    "--memory-evidence",
+]
+
+
+def _parent_request(request: dict[str, Any]) -> str:
+    _docker_require(request.keys() == {"owner", "purpose", "sliceIdentity", "deadline"})
+    _docker_require(type(request["owner"]) is str and re.fullmatch(r"[a-f0-9]{32}", request["owner"]) is not None)
+    _docker_require(type(request["purpose"]) is str and request["purpose"] in {"baseline", "terminal"})
+    _docker_require(
+        type(request["sliceIdentity"]) is str and re.fullmatch(r"[0-9]+:[0-9]+", request["sliceIdentity"]) is not None
+    )
+    _docker_require(
+        type(request["deadline"]) in {int, float}
+        and time.monotonic() < request["deadline"] <= time.monotonic() + SNAPSHOT_SECONDS,
+        "timeout",
+    )
+    return "/strukturpiloten" + request["owner"] + ".slice"
+
+
+def _parent_record(purpose: str) -> dict[str, Any]:
+    return {
+        "schemaVersion": 1,
+        "kind": "owned-parent-oom-lifecycle",
+        "purpose": purpose,
+        "availability": "unavailable",
+        "bindingChecks": dict.fromkeys(PARENT_CHECKS, False),
+        "bindings": {},
+        "mountSemantics": {"root": "full-hierarchy", "memoryLocalevents": False},
+        "populated": [],
+        "counters": {},
+        "sampleWindowMonotonicNs": [time.monotonic_ns(), time.monotonic_ns()],
+    }
+
+
+def _parent_namespace(reads: _DockerOuterRead, process: int) -> str:
+    namespace = reads.directory("ns", parent=process)
+    value = os.readlink("cgroup", dir_fd=namespace)
+    _docker_require(
+        len(value) <= MAX_FILE_BYTES and re.fullmatch(r"cgroup:\[[0-9]+\]", value) is not None, "unsupported"
+    )
+    return value
+
+
+def _parent_outside(path: str, parent: str) -> None:
+    _group_path(path)
+    _docker_require(path != parent and not path.startswith(parent + "/"), "unsupported")
+
+
+def _parent_populated(reads: _DockerOuterRead, parent: int) -> int:
+    rows = [row.split() for row in reads.text(parent, "cgroup.events").splitlines()]
+    _docker_require(
+        len(rows) == EVENT_FIELDS
+        and {row[0] for row in rows if len(row) == EVENT_FIELDS} == {"populated", "frozen"}
+        and all(len(row) == EVENT_FIELDS and row[1] in {"0", "1"} for row in rows)
+    )
+    values = dict(rows)
+    _docker_require(values["populated"] == "0", "changed")
+    return 0
+
+
+def _parent_counters(reads: _DockerOuterRead, parent: int) -> tuple[dict[str, Any], dict[str, str]]:
+    values, identities = {}, {}
+    for name in DOCKER_EVENT_FILES:
+        descriptor = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        reads.stack.callback(os.close, descriptor)
+        info = os.fstat(descriptor)
+        _docker_require(stat.S_ISREG(info.st_mode) and info.st_dev == os.fstat(parent).st_dev, "unsupported")
+        raw = bytearray()
+        while True:
+            reads.check()
+            part = os.read(descriptor, MAX_FILE_BYTES + 1 - len(raw))
+            if not part:
+                break
+            raw.extend(part)
+            _docker_require(len(raw) <= MAX_FILE_BYTES, "oversized")
+        counter = _docker_events(raw.decode("ascii"))
+        _docker_require(counter.keys() >= OOM_KEYS, "unsupported")
+        linked = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        _docker_require(
+            _identity(info) == _identity(os.fstat(descriptor)) == _identity(linked) and stat.S_ISREG(linked.st_mode),
+            "changed",
+        )
+        values[name] = counter
+        identities[name] = _docker_hash([info.st_dev, info.st_ino])
+    return values, identities
+
+
+def _collect_docker_parent(request: dict[str, Any]) -> dict[str, Any]:
+    """Read only the freshly owned parent, before daemons or after full drain."""
+    record = _parent_record(
+        "terminal" if type(request) is dict and request.get("purpose") == "terminal" else "baseline"
+    )
+    try:
+        _docker_require(type(request) is dict)
+        path = _parent_request(request)
+        with ExitStack() as stack:
+            reads = _DockerOuterRead(stack, request["deadline"])
+            proc = reads.directory("/proc")
+            _docker_filesystem(proc, 0x9FA0)
+            collector = reads.directory(str(os.getpid()), parent=proc)
+            init = reads.directory("1", parent=proc)
+            process = reads.process(collector, os.getpid())
+            namespace = _parent_namespace(reads, collector)
+            _docker_require(namespace == _parent_namespace(reads, init), "unsupported")
+            _parent_outside(process[1], path)
+            record["bindingChecks"]["outsideCollector"] = True
+            root = reads.directory("/sys/fs/cgroup")
+            _docker_filesystem(root, 0x63677270)
+            mount, localevents = _docker_mount(reads.text(collector, "mountinfo", MAX_BYTES), root)
+            _docker_require(not localevents, "unsupported")
+            record["bindingChecks"]["fullHierarchy"] = True
+            parent = reads.descend(root, path)
+            identity = _docker_identity(parent)
+            _docker_require(":".join(map(str, identity)) == request["sliceIdentity"], "changed")
+            record["bindingChecks"]["ownedParent"] = True
+            record["populated"].append(_parent_populated(reads, parent))
+            record["counters"], file_identities = _parent_counters(reads, parent)
+            record["populated"].append(_parent_populated(reads, parent))
+            record["bindingChecks"]["quiescent"] = True
+            linked_root = reads.directory("/sys/fs/cgroup")
+            linked_parent = reads.descend(linked_root, path)
+            linked_collector = reads.directory(str(os.getpid()), parent=proc)
+            linked_init = reads.directory("1", parent=proc)
+            _docker_filesystem(linked_root, 0x63677270)
+            _docker_require(
+                _docker_identity(root) == _docker_identity(linked_root)
+                and identity == _docker_identity(linked_parent)
+                and _docker_identity(collector) == _docker_identity(linked_collector)
+                and process == reads.process(linked_collector, os.getpid())
+                and namespace == _parent_namespace(reads, linked_collector) == _parent_namespace(reads, linked_init)
+                and mount == _docker_mount(reads.text(linked_collector, "mountinfo", MAX_BYTES), linked_root)[0],
+                "changed",
+            )
+            _parent_outside(reads.process(linked_collector, os.getpid())[1], path)
+            for name, expected in file_identities.items():
+                observed = os.stat(name, dir_fd=linked_parent, follow_symlinks=False)
+                _docker_require(
+                    stat.S_ISREG(observed.st_mode) and _docker_hash([observed.st_dev, observed.st_ino]) == expected,
+                    "changed",
+                )
+            reads.check()
+            record["bindingChecks"]["stableRead"] = True
+            record["bindings"] = {
+                "parent": _docker_hash([path, identity]),
+                "mount": _docker_hash([mount, _docker_identity(root)]),
+                "namespace": _docker_hash(namespace),
+                **file_identities,
+            }
+            record["availability"] = "observed"
+    except _DockerObservationError as error:
+        record["availability"] = error.status
+    except FileNotFoundError:
+        record["availability"] = "missing"
+    except OSError, ValueError, TypeError, KeyError:
+        record["availability"] = "error"
+    record["sampleWindowMonotonicNs"][1] = time.monotonic_ns()
+    return record
+
+
+def _lifecycle_counters(values: object) -> dict[str, Any]:
+    _docker_require(type(values) is dict and values.keys() == set(DOCKER_EVENT_FILES))
+    for counter in values.values():
+        _docker_require(type(counter) is dict and counter.keys() >= OOM_KEYS and counter.keys() <= DOCKER_EVENT_KEYS)
+        _docker_require(all(type(item) is int and 0 <= item <= DOCKER_COUNTER_MAX for item in counter.values()))
+        _docker_events("\n".join(f"{key} {value}" for key, value in counter.items()))
+    return values
+
+
+def _lifecycle_window(value: object) -> list[int]:
+    _docker_require(
+        type(value) is list
+        and len(value) == EVENT_FIELDS
+        and all(type(item) is int and 0 <= item <= DOCKER_COUNTER_MAX for item in value)
+        and value[0] <= value[1]
+        and value[1] - value[0] <= SNAPSHOT_SECONDS * 1_000_000_000
+    )
+    return value
+
+
+def _parent_validate(value: object, purpose: str) -> dict[str, Any]:
+    _docker_require(type(value) is dict and value.keys() == _parent_record(purpose).keys())
+    _docker_require(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1)
+    _docker_require(value["kind"] == "owned-parent-oom-lifecycle" and value["purpose"] == purpose)
+    _docker_require(value["availability"] == "observed", "unavailable")
+    _docker_require(
+        type(value["bindingChecks"]) is dict
+        and value["bindingChecks"].keys() == PARENT_CHECKS
+        and all(type(item) is bool and item for item in value["bindingChecks"].values())
+    )
+    _docker_require(
+        type(value["bindings"]) is dict
+        and value["bindings"].keys() == {"parent", "mount", "namespace", *DOCKER_EVENT_FILES}
+        and all(type(item) is str and re.fullmatch(r"[a-f0-9]{64}", item) for item in value["bindings"].values())
+    )
+    _docker_require(
+        value["mountSemantics"] == {"root": "full-hierarchy", "memoryLocalevents": False}
+        and type(value["mountSemantics"]["memoryLocalevents"]) is bool
+        and value["populated"] == [0, 0]
+        and all(type(item) is int for item in value["populated"])
+    )
+    _lifecycle_counters(value["counters"])
+    _lifecycle_window(value["sampleWindowMonotonicNs"])
+    return copy.deepcopy(value)
+
+
+def _lifecycle_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    _docker_require(before.keys() == after.keys(), "changed")
+    result = {}
+    for name, first in before.items():
+        last = after[name]
+        _docker_require(first.keys() == last.keys(), "changed")
+        _docker_require(all(last[key] >= value for key, value in first.items()), "regressed")
+        result[name] = {key: last[key] - value for key, value in first.items()}
+    return result
+
+
+class DockerOomLedger:
+    """Mandatory phase-owned lifetime proof; optional diagnostics grant no debit."""
+
+    def __init__(self, baseline: object, mode: str) -> None:
+        """Retain a fresh pre-daemon zero baseline and closed execution mode."""
+        _docker_require(mode in LIFECYCLE_MODES)
+        self.mode = mode
+        self.baseline = _parent_validate(baseline, "baseline")
+        _docker_require(all(counter[key] == 0 for counter in self.baseline["counters"].values() for key in OOM_KEYS))
+        self.entries: list[dict[str, Any]] = []
+        self.root: dict[str, Any] | None = None
+        self.pending: dict[str, Any] | None = None
+        self.after: dict[str, Any] | None = None
+        self.states: list[dict[str, Any]] = []
+        self.provenance: dict[str, str] | None = None
+        self.image_identity: dict[str, str] | None = None
+        self.initial_root: dict[str, Any] | None = None
+        self.reconciled = False
+        self.finalized = False
+
+    def bind_server(self, server: dict[str, Any], containerd: str) -> None:
+        """Retain reported build provenance, without binary/source attestation."""
+        _docker_require(self.provenance is None and not self.reconciled)
+        _docker_require(
+            type(server) is dict
+            and server.keys() == {"Version", "GitCommit"}
+            and server.get("Version") == "29.4.2"
+            and type(server.get("GitCommit")) is str
+            and MIN_BUILD_PREFIX <= len(server["GitCommit"]) <= FULL_COMMIT_LENGTH
+            and "d3298094ac5111e5d67517a252d291d27543e408".startswith(server["GitCommit"])
+            and type(containerd) is str
+            and re.fullmatch(
+                r"containerd(?: containerd| github.com/containerd/containerd(?:/v2)?)? "
+                r"v?2\.4\.2 b7a25261e029d68978bbf290df0a62fc819b3c51",
+                containerd,
+            ),
+            "unsupported",
+        )
+        self.provenance = {
+            "engine": "docker",
+            "provenanceKind": "reported-build-not-binary-attestation",
+            "serverVersion": server["Version"],
+            "serverGitCommit": server["GitCommit"],
+            "containerdVersion": containerd,
+        }
+
+    def bind_image(self, identity: dict[str, str]) -> None:
+        """Retain the already validated immutable image configuration identity."""
+        _docker_require(self.image_identity is None and type(identity) is dict)
+        _docker_require(
+            type(identity.get("configDigest")) is str and re.fullmatch(r"sha256:[a-f0-9]{64}", identity["configDigest"])
+        )
+        _docker_require(identity.get("architecture") in {"amd64", "arm64"})
+        self.image_identity = copy.deepcopy(identity)
+
+    def root_snapshot(self, phase: str, observation: dict[str, Any]) -> None:
+        """Bind mandatory original root brackets; reject drift, overlap or local OOM."""
+        _docker_require(not self.reconciled)
+        keys = _docker_record().keys() | {"mountSemantics"}
+        snapshot = _docker_validate_record({key: observation[key] for key in keys if key in observation})
+        _docker_require(snapshot["availability"] == "observed" and all(snapshot["bindingChecks"].values()))
+        _docker_require(snapshot["mountSemantics"] == self.baseline["mountSemantics"])
+        _docker_require(snapshot["bindings"]["mount"] == self.baseline["bindings"]["mount"], "changed")
+        _lifecycle_window(snapshot["sampleWindowMonotonicNs"])
+        values = {name: counter.get("values") for name, counter in snapshot["counters"].items()}
+        _lifecycle_counters(values)
+        snapshot["values"] = values
+        _docker_require(
+            all(values["memory.events.local"][key] == 0 for key in OOM_KEYS)
+            and values["memory.events"]["oom_group_kill"] == 0
+        )
+        _docker_require(self.baseline["sampleWindowMonotonicNs"][1] <= snapshot["sampleWindowMonotonicNs"][0])
+        if self.root is None:
+            _docker_require(phase == "lifecycle-start" and observation["ociState"].get("Running") is True)
+            _docker_require(observation["ociState"].get("OOMKilled") is False)
+            _docker_require(all(values["memory.events"][key] == 0 for key in OOM_KEYS))
+            self.initial_root = copy.deepcopy(snapshot)
+        else:
+            _docker_require(self.root["bindings"] == snapshot["bindings"], "changed")
+            _docker_require(self.root["sampleWindowMonotonicNs"][1] <= snapshot["sampleWindowMonotonicNs"][0])
+            _lifecycle_delta(self.root["values"], values)
+        if phase == "before-inner-memory":
+            _docker_require(self.pending is None and self.after is None)
+            self.pending = snapshot
+        elif phase == "after-inner-memory":
+            _docker_require(self.pending is not None and self.after is None)
+            self.after = snapshot
+        else:
+            _docker_require(phase == "lifecycle-start" and self.root is None)
+        self.root = snapshot
+
+    def admit_original(
+        self, identity: dict[str, Any], processes: list[list[Any]], telemetry: dict[str, Any], outcome: dict[str, Any]
+    ) -> None:
+        """Debit only the independently verified original single-process outcome."""
+        _docker_require(self.mode == "qualification" and self.pending is not None and self.after is not None)
+        _docker_require(
+            type(processes) is list and len(processes) == 1 and len(processes[0]) == ALLOCATOR_PROCESS_FIELDS
+        )
+        _docker_require(
+            outcome.keys() == {"wait", "state", "effectiveNoSwap", "workload", "command", "sourceSha256", "executable"}
+            and self.image_identity is not None
+            and outcome["command"] == ORIGINAL_PROBE_COMMAND
+            and outcome["sourceSha256"] == ORIGINAL_PROBE_SOURCE_SHA256
+            and outcome["executable"] == identity["exe"]
+            and identity["exe"].rsplit("/", 1)[-1] == "docker-resource-probe"
+            and outcome["wait"] == "137"
+            and type(outcome["state"]) is dict
+            and outcome["state"].keys() == {"OOMKilled", "ExitCode"}
+            and outcome["state"].get("OOMKilled") is True
+            and type(outcome["state"].get("ExitCode")) is int
+            and outcome["state"]["ExitCode"] == OOM_EXIT_CODE
+            and outcome["effectiveNoSwap"] is True
+            and type(outcome["workload"]) is str
+            and re.fullmatch(r"[a-f0-9]{64}", outcome["workload"]) is not None
+        )
+        before = telemetry["before"]["identity"]
+        _docker_require(
+            type(before["pid"]) is int
+            and before["pid"] == 1
+            and before["nspid"] == [1]
+            and all(type(item) is int for item in before["nspid"])
+            and type(before["starttime"]) is int
+            and before["starttime"] > 0
+            and before["starttime"] == identity["starttime"]
+            and type(identity["pid"]) is int
+            and identity["pid"] > 1
+            and str(identity["pid"]) == str(processes[0][0])
+            and type(processes[0][4]) is int
+            and identity["starttime"] == processes[0][4]
+            and identity["group"] == processes[0][2]
+            and identity["exe"] == processes[0][3]
+        )
+        token = _docker_hash(identity)
+        _docker_require(all(entry["identity"] != token for entry in self.entries))
+        if self.entries:
+            _docker_require(self.entries[-1]["after"][1] <= self.pending["sampleWindowMonotonicNs"][0])
+        delta = _lifecycle_delta(self.pending["values"], self.after["values"])
+        killed = len(processes)
+        _docker_require(delta["memory.events"]["oom_kill"] == killed)
+        self.entries.append(
+            {
+                "identity": token,
+                "authority": {
+                    "kind": "original-single-process-memory",
+                    "outcome": copy.deepcopy(outcome),
+                    "allocator": copy.deepcopy(identity),
+                    "beforeCensus": copy.deepcopy(processes),
+                    "beforeIdentity": copy.deepcopy(before),
+                    "imageIdentity": self.image_identity,
+                },
+                "rootBindings": self.pending["bindings"],
+                "beforeCounters": self.pending["values"],
+                "afterCounters": self.after["values"],
+                "killedProcesses": killed,
+                "before": self.pending["sampleWindowMonotonicNs"],
+                "after": self.after["sampleWindowMonotonicNs"],
+            }
+        )
+        self.pending = self.after = None
+
+    def defer_state(self, check: dict[str, Any]) -> None:
+        """Keep even false-flag lifecycle states pending until full reconciliation."""
+        _docker_require(not self.reconciled and type(check["actual"]["OOMKilled"]) is bool)
+        check["status"] = "pending"
+        self.states.append(check)
+
+    def reconcile(self, terminal: object) -> None:
+        """Require exact lifetime total equality after all charged resources drain."""
+        last = _parent_validate(terminal, "terminal")
+        _docker_require(
+            not self.reconciled
+            and self.provenance is not None
+            and self.root is not None
+            and self.image_identity is not None
+            and bool(self.states)
+        )
+        _docker_require(
+            self.pending is None and self.after is None and self.baseline["bindings"] == last["bindings"], "changed"
+        )
+        _docker_require(self.root["sampleWindowMonotonicNs"][1] <= last["sampleWindowMonotonicNs"][0])
+        delta = _lifecycle_delta(self.baseline["counters"], last["counters"])
+        total = sum(entry["killedProcesses"] for entry in self.entries)
+        _docker_require(
+            delta["memory.events"]["oom_kill"] == total
+            and delta["memory.events"]["oom_group_kill"] == 0
+            and all(delta["memory.events.local"][key] == 0 for key in OOM_KEYS)
+            and all(check["actual"]["OOMKilled"] is False or total > 0 for check in self.states)
+            and self.mode == "qualification"
+        )
+        self.terminal = last
+        self.reconciled = True
+
+    def finalize(self, ctx: RuntimeContext) -> None:
+        """Publish acceptance only after the caller proves every cleanup predicate."""
+        _docker_require(self.reconciled and not self.finalized)
+        for check in self.states:
+            check["status"] = "passed"
+        self.finalized = True
+        ctx.checks.append(
+            {
+                "name": "owned parent OOM lifecycle accounting",
+                "status": "passed",
+                "mode": self.mode,
+                "property": "no-additional-oom-killed-process-in-bound-lifetime",
+                "entries": self.entries,
+                "outerRuntime": self.provenance,
+                "baseline": self.baseline,
+                "terminal": self.terminal,
+                "initialRoot": self.initial_root,
+            }
+        )
+
+
 class OomDiagnostics:
-    """Retain read-only observations without changing lifecycle admission or cleanup."""
+    """Retain observations; a configured mandatory ledger validates its root snapshots."""
 
     def __init__(self, ctx: RuntimeContext, container: str) -> None:
         """Bind diagnostic state to the existing invocation's exact owned guest."""
@@ -1096,6 +1994,7 @@ class OomDiagnostics:
         self.scope: str | None = None
         self.scope_inode: int | None = None
         self.baseline: dict[str, Any] | None = None
+        self.docker_baseline: dict[str, Any] | None = None
         self.monitor_context: dict[str, Any] | None = None
         self.exit_observed = False
         self.custody: subprocess.Popen[bytes] | None = None
@@ -1221,24 +2120,186 @@ class OomDiagnostics:
         if self.custody_started:
             self._custody_sample("before-stop-request")
 
-    def _backend_not_applicable(self, phase: str, state: dict[str, Any]) -> bool:
-        if getattr(self.ctx, "outer_engine", "podman") != "docker":
-            return False
-        self.ctx.observations.append(
+    def _lifecycle_root(self, phase: str) -> None:
+        ledger = getattr(self.ctx.backend, "oom_ledger", None)
+        if isinstance(ledger, DockerOomLedger) and phase in {*DOCKER_COUNTER_PHASES, "lifecycle-start"}:
+            ledger.root_snapshot(phase, self.ctx.observations[-1])
+
+    def lifecycle_start(self) -> None:
+        """Require an initial root-zero/false-flag record before ordinary work."""
+        self._docker_memory_snapshot("lifecycle-start")
+        self._lifecycle_root("lifecycle-start")
+
+    def _docker_oci_snapshot(self, phase: str) -> None:
+        """Retain OCI-only hooks without allocating a host collector allowance."""
+        collection = copy.copy(self.ctx)
+        collection.checks = []
+        state: object = {}
+        availability = "not-sampled"
+        try:
+            _docker_require(self.container in self.ctx.containers, "unavailable")
+            _docker_require(re.fullmatch(r"[0-9a-f]{64}", self.container) is not None)
+            raw = collection.podman(
+                "read owned OOM diagnostic OCI state",
+                "inspect",
+                "--format",
+                "{{json .State}}",
+                self.container,
+                timeout=min(SNAPSHOT_SECONDS, self.ctx.timeout),
+            )
+            _docker_require(len(raw) <= MAX_BYTES, "oversized")
+            state = json.loads(raw)
+        except _DockerObservationError as error:
+            availability = error.status
+        except subprocess.TimeoutExpired:
+            availability = "timeout"
+        except Exception:  # noqa: BLE001 — optional OCI evidence cannot alter native failures.
+            availability = "error"
+        self._backend_not_applicable(phase, state, availability=availability)
+
+    def _docker_snapshot(self, phase: str) -> None:
+        if phase in DOCKER_COUNTER_PHASES:
+            self._docker_memory_snapshot(phase)
+        else:
+            self._docker_oci_snapshot(phase)
+
+    def _docker_memory_snapshot(self, phase: str) -> None:
+        record = _docker_record()
+        record.update(
             {
                 "name": "owned systemd OOM diagnostic",
                 "phase": phase,
-                "availability": "backend-not-applicable",
-                "attribution": "unresolved",
-                "ociState": copy.deepcopy(state),
                 "sources": {
                     "conmonProcess": "not-applicable",
                     "conmonWatch": "not-applicable",
                     "conmonMarkers": "not-applicable",
                 },
-                "limits": "Docker has no Podman conmon marker source; no substituted identity, marker or custody proof",
             }
         )
+        # Neither raw commands nor exception operands cross this boundary.
+        collection = copy.copy(self.ctx)
+        collection.checks = []
+        try:
+            backend = self.ctx.backend
+            _docker_require(self.container in self.ctx.containers, "unavailable")
+            _docker_require(re.fullmatch(r"[0-9a-f]{64}", self.container) is not None)
+            deadline = time.monotonic() + backend.command_timeout(min(SNAPSHOT_SECONDS, self.ctx.timeout))
+            if getattr(self.ctx, "runtime_deadline", None) is not None:
+                deadline = min(deadline, self.ctx.runtime_deadline)
+
+            def remaining() -> float:
+                value = deadline - time.monotonic()
+                _docker_require(value > 0, "timeout")
+                return backend.command_timeout(value)
+
+            def inspect() -> tuple[str, int]:
+                raw = collection.podman(
+                    "read private owned Docker OOM state",
+                    "inspect",
+                    "--format",
+                    '{"id":{{json .Id}},"state":{{json .State}},"parent":{{json .HostConfig.CgroupParent}}}',
+                    self.container,
+                    timeout=remaining(),
+                )
+                _docker_require(len(raw) <= MAX_BYTES, "oversized")
+                state, public_state = _docker_inspect(raw, self.container, backend.slice)
+                record["ociState"] = public_state
+                return _docker_incarnation(state)
+
+            def slice_path() -> str:
+                raw = collection.command(
+                    "read private owned Docker OOM slice",
+                    backend.privileged(
+                        [
+                            "systemctl",
+                            "show",
+                            backend.slice,
+                            "--no-pager",
+                            "--all",
+                            "--property=Id,Names,LoadState,ActiveState,ControlGroup",
+                        ],
+                        remaining(),
+                    ),
+                    timeout=remaining(),
+                )
+                return _docker_slice(raw, backend.slice)
+
+            original = inspect()
+            record["bindingChecks"]["ownedContainer"] = True
+            path = slice_path()
+            _docker_require(backend.slice_identity is not None, "unavailable")
+            request = {
+                "container": self.container,
+                "startedAt": original[0],
+                "pid": original[1],
+                "sliceName": backend.slice,
+                "slicePath": path,
+                "sliceIdentity": backend.slice_identity,
+                "deadline": deadline,
+            }
+            raw = collection.command(
+                "read private owned Docker outer OOM counters",
+                backend.privileged(
+                    [
+                        sys.executable,
+                        "-I",
+                        "-B",
+                        str(Path(__file__).resolve()),
+                        "--docker-outer",
+                        json.dumps(request),
+                    ],
+                    remaining(),
+                ),
+                timeout=remaining(),
+            )
+            _docker_require(len(raw) <= MAX_BYTES, "oversized")
+            snapshot = _docker_validate_record(json.loads(raw))
+            # Always read back Docker incarnation and systemd slice after the
+            # host reader, even if the reader returned partial/unavailable data.
+            _docker_require(inspect() == original and slice_path() == path, "changed")
+            backend.check_deadline()
+            remaining()
+            snapshot["bindingChecks"]["ownedContainer"] = True
+            snapshot["bindingChecks"]["containerIncarnation"] = True
+            if snapshot["availability"] == "observed":
+                _docker_require(
+                    snapshot["bindings"]["containerIncarnation"] == _docker_hash([self.container, original[0]]),
+                    "changed",
+                )
+            record.update(snapshot)
+            record["baselineDelta"] = _docker_deltas(self.docker_baseline, snapshot)
+            if phase == "before-inner-memory":
+                self.docker_baseline = copy.deepcopy(snapshot)
+        except _DockerObservationError as error:
+            record["availability"] = error.status
+        except subprocess.TimeoutExpired:
+            record["availability"] = "timeout"
+        except Exception:  # noqa: BLE001 — diagnostics cannot replace the original native failure.
+            record["availability"] = "error"
+        record["sampleWindowMonotonicNs"][1] = time.monotonic_ns()
+        self.ctx.observations.append(record)
+
+    def _backend_not_applicable(self, phase: str, state: object, *, availability: str = "not-sampled") -> bool:
+        if getattr(self.ctx, "outer_engine", "podman") != "docker":
+            return False
+        record = _docker_record()
+        record.update(
+            {
+                "name": "owned systemd OOM diagnostic",
+                "phase": phase,
+                "availability": availability,
+                "sources": {
+                    "conmonProcess": "not-applicable",
+                    "conmonWatch": "not-applicable",
+                    "conmonMarkers": "not-applicable",
+                },
+            }
+        )
+        try:
+            record["ociState"] = _docker_public_state(state)
+        except _DockerObservationError as error:
+            record["availability"] = error.status
+        self.ctx.observations.append(record)
         return True
 
     def _before_inner_custody(self, phase: str, state: dict[str, Any], snapshot: dict[str, Any]) -> None:
@@ -1279,6 +2340,14 @@ class OomDiagnostics:
         )
 
     def snapshot(self, phase: str, *, scope: str | None = None, scope_inode: int | None = None) -> None:
+        """Collect observations and require mandatory root evidence when configured."""
+        if getattr(self.ctx, "outer_engine", "podman") == "docker":
+            self._docker_snapshot(phase)
+            self._lifecycle_root(phase)
+        else:
+            self._podman_snapshot(phase, scope=scope, scope_inode=scope_inode)
+
+    def _podman_snapshot(self, phase: str, *, scope: str | None = None, scope_inode: int | None = None) -> None:
         """Record missing/invalid evidence as unresolved, never obstruct owned shutdown."""
         if scope is not None:
             self.scope, self.scope_inode = scope, scope_inode
@@ -1444,11 +2513,17 @@ def _deltas(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
 
 if __name__ == "__main__":
     _require(
-        len(sys.argv) == HOST_ARGUMENTS and sys.argv[1] in {"--snapshot", "--after-exit"},
+        len(sys.argv) == HOST_ARGUMENTS
+        and sys.argv[1] in {"--snapshot", "--after-exit", "--docker-outer", "--docker-parent"},
         "diagnostic invocation was invalid",
     )
     _require(len(sys.argv[2]) <= MAX_BYTES, "diagnostic request exceeded its byte bound")
-    collector = _collect if sys.argv[1] == "--snapshot" else _collect_after_exit
+    collector = {
+        "--snapshot": _collect,
+        "--after-exit": _collect_after_exit,
+        "--docker-outer": _collect_docker_outer,
+        "--docker-parent": _collect_docker_parent,
+    }[sys.argv[1]]
     payload = json.dumps(collector(json.loads(sys.argv[2])))
     _require(len(payload) <= MAX_BYTES, "diagnostic response exceeded its byte bound")
     sys.stdout.write(payload + "\n")

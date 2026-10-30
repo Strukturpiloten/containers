@@ -3,17 +3,24 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
 from scripts import container_engine
+from scripts import docker_userns_qualification as prerequisite
 from scripts.admission import image_policy
+from scripts.docker_userns_qualification import MAX_NAMESPACES, NativeBinding, QualificationError, validation_profile
 from scripts.oci_artifacts import archive_identity
 
+MAX_WORKFLOW_EVENT = 262144
+IMAGE_VERSION_ENV = "ImageVersion"
 MAX_VERSION_CHARACTERS = 256
 FIRST_PRINTABLE_CHARACTER = 32
+REQUIRED_SYSTEMD_PHASE_COUNT = 2
 
 
 class EvidenceError(ValueError):
@@ -100,6 +107,290 @@ def _outer_runtime(record: dict[str, Any], profile: str) -> None:
         raise EvidenceError(msg)
 
 
+def _active_candidate(record: dict[str, Any]) -> bool:
+    return (
+        os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+        and os.environ.get("GITHUB_REF") == "refs/heads/TheRealBecks/issue527"
+        and os.environ.get("GITHUB_JOB") == "smoke-build"
+        and record.get("image") == "docker-29-conformance-rootless"
+    )
+
+
+def _active_validation_request() -> str:
+    """Preserve the raw request while rejecting unknown or non-ASCII workflow choices."""
+    try:
+        event_path = Path("/home/runner/work/_temp/_github_workflow/event.json")
+        if os.environ.get("GITHUB_EVENT_PATH") != str(event_path):
+            reason = "Active candidate workflow context is unavailable."
+            raise EvidenceError(reason)
+        with event_path.open("rb") as stream:
+            raw = stream.read(MAX_WORKFLOW_EVENT + 1)
+        if len(raw) > MAX_WORKFLOW_EVENT:
+            reason = "Active candidate workflow context exceeds its bound."
+            raise EvidenceError(reason)
+        requested = json.loads(raw).get("inputs", {}).get("validation_profile", "full")
+        validation_profile(requested)
+    except (OSError, ValueError, TypeError, AttributeError, QualificationError) as error:
+        reason = "Active candidate workflow context is unverified."
+        raise EvidenceError(reason) from error
+    else:
+        return requested
+
+
+def _active_scoped_required(record: dict[str, Any]) -> bool:
+    requested = _active_validation_request() if _active_candidate(record) else None
+    return record.get("scopedProfileRequired") is True or (
+        requested is not None and validation_profile(requested) == "docker-rootless-diagnostic"
+    )
+
+
+def _scoped_preflight(scoped: dict[str, Any]) -> bool:
+    """Check the active helper's finite actual-host facts against reviewed admission."""
+    admission = prerequisite.admission_document(
+        (Path(__file__).resolve().parents[1] / ".github/docker-userns-active-admission.json").read_bytes()
+    )
+    cohort = prerequisite.active_cohort(admission, scoped["workflowContext"])
+    facts = scoped["preflight"]
+    controls, namespace = facts["controls"], scoped["namespace"]
+    keys = ("parserSha256", "abiSha256", "namespaceMaskSha256", "policyVersion9Sha256", "interpreterSha256")
+    return (
+        all(facts[key] == cohort[key] for key in ("osID", "osVersion", "machine", "kernel", "parserVersion"))
+        and all(facts["files"][key]["sha256"] == cohort[key] for key in keys)
+        and facts["imageVersion"] == scoped["imageVersion"]
+        and controls["enabled"] is True
+        and type(controls["restricted_userns"]) is int
+        and controls["restricted_userns"] == 1
+        and type(controls["maximum_userns"]) is int
+        and 0 < controls["maximum_userns"] <= MAX_NAMESPACES
+        and (
+            controls["legacy_clone"] is None
+            or (type(controls["legacy_clone"]) is int and controls["legacy_clone"] == 1)
+        )
+        and all(
+            namespace[key] == hashlib.sha256(value.encode()).hexdigest()
+            for key, value in admission["policyNamespace"].items()
+        )
+        and all(type(namespace[key]) is int and namespace[key] > 0 for key in ("user", "mnt", "cgroup"))
+    )
+
+
+def _scoped_binding(record: dict[str, Any], scoped: dict[str, Any], expected_purpose: str | None) -> NativeBinding:
+    """Bind the closed receipt envelope to intrinsic aggregate and admission identity."""
+    raw = (Path(__file__).resolve().parents[1] / ".github/docker-userns-active-admission.json").read_bytes()
+    admission = prerequisite.admission_document(raw)
+    context = scoped["workflowContext"]
+    prerequisite.validate_workflow_context(context, admission, hashlib.sha256(raw).hexdigest())
+    binding = NativeBinding(**scoped["binding"])
+    binding.validate()
+    if (
+        set(scoped) != prerequisite.SCOPED_RECEIPT_KEYS
+        or type(scoped["schemaVersion"]) is not int
+        or scoped["schemaVersion"] != prerequisite.PREREQUISITE_SCHEMA
+        or (expected_purpose is not None and binding.purpose != expected_purpose)
+        or scoped["purpose"] != binding.purpose
+        or context["purpose"] != binding.purpose
+        or scoped["admissionRevision"] != context["admissionRevision"]
+        or scoped["admissionSha256"] != context["admissionSha256"]
+        or binding.admission_sha256 != context["admissionSha256"]
+        or binding.workflow_context_sha256 != prerequisite.context_digest(context)
+        or type(scoped["bootstrapSha256"]) is not str
+        or re.fullmatch(r"[0-9a-f]{64}", scoped["bootstrapSha256"]) is None
+        or binding.run != context["run"]
+        or binding.run != record["runId"]
+        or binding.attempt != context["attempt"]
+        or binding.attempt != record["runAttempt"]
+        or binding.job != context["job"]
+        or binding.job != record["producingJob"]
+        or binding.candidate != context["candidate"]
+        or binding.image != context["image"]
+        or binding.architecture != context["architecture"]
+        or binding.architecture != record["architecture"]
+        or context["imageVersion"] != scoped["imageVersion"]
+        or context["validationProfileRequested"] != scoped["validationProfileRequested"]
+        or ("workflowContext" in record and record["workflowContext"] != context)
+    ):
+        reason = "context"
+        raise QualificationError(reason)
+    return binding
+
+
+def _scoped_phase(record: dict[str, Any], phase: dict[str, Any], *, expected_purpose: str | None = None) -> str:
+    """Require exact archived image, actual profile readback and completed custody."""
+    scoped = phase.get("scopedProfile")
+    if not isinstance(scoped, dict):
+        reason = "Active systemd candidate lacks scoped qualification evidence."
+        raise EvidenceError(reason)
+    try:
+        binding = _scoped_binding(record, scoped, expected_purpose)
+        context = scoped["workflowContext"]
+        identity = phase["imageIdentity"]
+        observation = scoped["profileObservation"]
+        valid = (
+            _scoped_preflight(scoped)
+            and scoped["consumer"] == "containers-ubuntu26-userns-active"
+            and scoped["qualification"]
+            == (
+                "maintained-prerequisite"
+                if binding.purpose == prerequisite.MAINTAINED_PURPOSE
+                else "experimental-candidate-only"
+            )
+            and scoped["validationProfile"] == context["validationProfile"]
+            and validation_profile(scoped["validationProfileRequested"]) == scoped["validationProfile"]
+            and scoped["bindingSha256"] == binding.digest()
+            and binding.phase == phase["phase"]
+            and binding.image == record["image"]
+            and binding.architecture == phase["architecture"]
+            and binding.archive_sha256 == identity["archiveSha256"]
+            and binding.manifest_digest == identity["manifestDigest"]
+            and binding.config_digest == identity["configDigest"]
+            and binding.candidate == identity["sourceRevision"]
+            and re.fullmatch(r"[0-9a-f]{32}", scoped["lease"]) is not None
+            and scoped["profileName"]
+            == f"dockerlens-127-upstream-rootless-{binding.run}-{binding.attempt}-{scoped['lease']}"
+            and scoped["sourceManifestSha256"] == "7f6693f40311617e4854f8c6a35cbe13b3afdd3d7a8bef58978397ba1178dbd8"
+            and scoped["state"] == "closed"
+            and scoped["cleanOwnerVerified"] is True
+            and scoped["ownerTerminationVerified"] is True
+            and scoped["custodyDisposed"] is True
+            and scoped["ownerReady"] is True
+            and scoped["guestAbsenceVerified"] is True
+            and scoped["taskAbsenceVerified"] is True
+            and scoped["scopeAbsenceVerified"] is True
+            and scoped["profileAbsenceVerified"] is True
+            and scoped["retained"] is False
+            and scoped["readerPending"] is False
+            and scoped["childPending"] is False
+            and scoped["imageVersionKind"] == "workflow-reported-provenance-not-vm-attestation"
+            and scoped["parserExecutionNamespace"]["measuredPostExec"] is False
+            and scoped["parserExecutionNamespace"]["kind"]
+            == "reviewed-trusted-fixed-os-no-parser-exec-transition-assumption"
+            and observation["source"] == "held-task-attr/apparmor/current"
+            and observation["exactMatch"] is True
+            and observation["singleLabel"] is True
+            and observation["bytes"] == len((scoped["profileName"] + " (unconfined)\n").encode())
+            and observation["sha256"]
+            == hashlib.sha256((scoped["profileName"] + " (unconfined)\n").encode()).hexdigest()
+            and observation["taskIdentityBound"] is True
+            and observation["timing"] == "post-create"
+        )
+        if binding.purpose == prerequisite.EXPERIMENTAL_PURPOSE:
+            # The workflow's ImageVersion is provenance and is compared only with
+            # the frozen same-job report, never treated as independent VM attestation.
+            if _active_candidate(record):
+                valid = valid and scoped["validationProfileRequested"] == _active_validation_request()
+            if os.environ.get(IMAGE_VERSION_ENV):
+                valid = valid and scoped["imageVersion"] == os.environ[IMAGE_VERSION_ENV]
+            if os.environ.get("GITHUB_SHA"):
+                valid = valid and binding.candidate == os.environ["GITHUB_SHA"]
+            if os.environ.get("GITHUB_RUN_ID"):
+                valid = valid and binding.run == os.environ["GITHUB_RUN_ID"]
+            if os.environ.get("GITHUB_RUN_ATTEMPT"):
+                valid = valid and binding.attempt == os.environ["GITHUB_RUN_ATTEMPT"]
+    except KeyError, TypeError, ValueError, AttributeError, QualificationError:
+        valid = False
+    if not valid:
+        reason = "Active systemd candidate scoped identity, attachment or cleanup is unverified."
+        raise EvidenceError(reason)
+    return binding.purpose
+
+
+def _maintained_phase(record: dict[str, Any], expected_phase: str, phase: object) -> None:
+    """Require a completed genuine phase and its original mandatory accounting outcome."""
+    if (
+        not isinstance(phase, dict)
+        or phase.get("phase") != expected_phase
+        or phase.get("prerequisiteAuthority") != prerequisite.MAINTAINED_PURPOSE
+        or phase.get("qualification") != "complete"
+        or phase.get("oomAccountingMode") != record["oomAccountingMode"]
+        or phase.get("oomAccountingStatus") != record["oomAccountingStatus"]
+        or phase.get("oomAccountingRequired") is not True
+        or phase.get("focusedRuntime") != "none"
+        or phase.get("status") != "passed"
+        or phase.get("cleanupVerified") is not True
+    ):
+        reason = "Required phase authority/accounting differs from the aggregate."
+        raise EvidenceError(reason)
+    checks = phase.get("checks")
+    accounting = (
+        [
+            item
+            for item in checks
+            if isinstance(item, dict) and item.get("name") == "owned parent OOM lifecycle accounting"
+        ]
+        if isinstance(checks, list)
+        else []
+    )
+    if (
+        len(accounting) != 1
+        or accounting[0].get("status") != "passed"
+        or accounting[0].get("mode") != "qualification"
+        or accounting[0].get("property") != "no-additional-oom-killed-process-in-bound-lifetime"
+    ):
+        reason = "Required phase lacks its actual completed accounting outcome."
+        raise EvidenceError(reason)
+    _scoped_phase(record, phase, expected_purpose=prerequisite.MAINTAINED_PURPOSE)
+
+
+def require_ordinary_runtime_authority(record: dict[str, Any], profile: str, configuration: object) -> None:
+    """Validate maintained authority using trusted metadata and intrinsic root evidence."""
+    phases = record.get("phases", [])
+    records = (
+        [record, *(phase for phase in phases if isinstance(phase, dict))] if isinstance(phases, list) else [record]
+    )
+    if any(item.get("focusedRuntime", "none") != "none" for item in records):
+        reason = "Focused evidence is not ordinary native authority."
+        raise EvidenceError(reason)
+    if any("qualification" in item and item["qualification"] != "complete" for item in records):
+        reason = "Runtime evidence explicitly lacks ordinary native qualification."
+        raise EvidenceError(reason)
+    required = (
+        profile == "docker"
+        and isinstance(configuration, dict)
+        and configuration.get("launcher") == "systemd"
+        and configuration.get("mode") == "rootless"
+    )
+    if not required:
+        if any("scopedProfile" in item or item.get("scopedProfileRequired") is True for item in records):
+            reason = "Unexpected scoped authority on an unrelated ordinary route."
+            raise EvidenceError(reason)
+        return
+    if (
+        record.get("status") != "passed"
+        or not isinstance(phases, list)
+        or len(phases) != REQUIRED_SYSTEMD_PHASE_COUNT
+        or record.get("qualification") != "complete"
+        or record.get("oomAccountingMode") != "qualification"
+        or record.get("oomAccountingStatus") != "complete"
+        or record.get("oomAccountingRequired") is not True
+        or record.get("focusedRuntime") != "none"
+    ):
+        reason = "Required systemd runtime authority/accounting fields are missing or contradictory."
+        raise EvidenceError(reason)
+    for expected_phase, phase in zip(("clean-control", "enforcement"), phases, strict=True):
+        _maintained_phase(record, expected_phase, phase)
+    first, last = phases
+    if (
+        record.get("prerequisitePurpose") != prerequisite.MAINTAINED_PURPOSE
+        or "scopedProfile" in record
+        or record.get("workflowContext") != first["scopedProfile"]["workflowContext"]
+        or first["scopedProfile"]["workflowContext"] != last["scopedProfile"]["workflowContext"]
+        or first["scopedProfile"]["bootstrapSha256"] != last["scopedProfile"]["bootstrapSha256"]
+        or first["scopedProfile"]["binding"]["owner"] == last["scopedProfile"]["binding"]["owner"]
+        or first["scopedProfile"]["lease"] == last["scopedProfile"]["lease"]
+        or record.get("stageDisposal") != last.get("stageDisposal")
+    ):
+        reason = "Required phases do not share the exact maintained source/stage context."
+        raise EvidenceError(reason)
+    try:
+        prerequisite.validate_stage_disposal(record.get("stageDisposal"), last["scopedProfile"])
+    except (QualificationError, ValueError, TypeError, KeyError, AttributeError) as error:
+        reason = "Maintained prerequisite stage disposal is unverified."
+        raise EvidenceError(reason) from error
+    _outer_runtime(record, profile)
+    _systemd_phase_backends(record, profile, configuration)
+    _runtime_skips(record, nested_disabled=False, profile=profile)
+
+
 def _systemd_phase_backends(record: dict[str, Any], profile: str, configuration: object) -> None:
     if (
         profile != "docker"
@@ -123,6 +414,8 @@ def _systemd_phase_backends(record: dict[str, Any], profile: str, configuration:
         ):
             msg = "Systemd Docker phase identity, admission or cleanup differs from its required contract."
             raise EvidenceError(msg)
+        if "scopedProfile" in phase or _active_scoped_required(record):
+            _scoped_phase(record, phase)
         _runtime_skips(phase, nested_disabled=False, profile="docker")
         _outer_runtime(
             {
@@ -173,6 +466,7 @@ def verify_architecture(  # noqa: PLR0913
         raise EvidenceError(msg)
     _runtime_skips(runtime, nested_disabled=nested_disabled, profile=profile)
     _outer_runtime(runtime, profile)
+    require_ordinary_runtime_authority(runtime, profile, test_profile)
     _systemd_phase_backends(runtime, profile, test_profile)
     candidate = scan.get("candidateSource")
     if (

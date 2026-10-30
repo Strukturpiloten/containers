@@ -5,6 +5,14 @@ inputs:
   entry:
     description: JSON matrix entry with image name and architecture.
     required: true
+  focused-runtime:
+    description: Validated nonqualifying experiment selection, or none.
+    required: false
+    default: none
+  oom-accounting-mode:
+    description: Explicit qualification or nonqualifying diagnostic runtime mode.
+    required: false
+    default: qualification
   upload-archive:
     description: Upload the OCI archive for a later publish job.
     required: false
@@ -17,6 +25,31 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Validate focused runtime request
+      shell: bash
+      env:
+        FOCUSED_RUNTIME: ${{ inputs.focused-runtime }}
+        OOM_ACCOUNTING_MODE: ${{ inputs.oom-accounting-mode }}
+        IMAGE_NAME: ${{ fromJSON(inputs.entry).name }}
+        VALIDATION_PROFILE: ${{ github.event.inputs.validation_profile }}
+      run: |
+        set -euo pipefail
+        case "${OOM_ACCOUNTING_MODE}" in qualification|diagnostic) ;; *) exit 1 ;; esac
+        case "${FOCUSED_RUNTIME}" in
+          none) ;;
+          witness-diagnostic|mandatory-accounting)
+            test "${GITHUB_EVENT_NAME}" = workflow_dispatch &&
+              test "${GITHUB_REF}" = refs/heads/TheRealBecks/issue527 && test "${GITHUB_JOB}" = smoke-build &&
+              test "${VALIDATION_PROFILE,,}" = docker-rootless-diagnostic &&
+              test "${IMAGE_NAME}" = docker-29-conformance-rootless || { echo "Focused runtime context refused." >&2; exit 1; }
+            case "${FOCUSED_RUNTIME}:${OOM_ACCOUNTING_MODE}" in
+              witness-diagnostic:diagnostic|mandatory-accounting:qualification) ;;
+              *) echo "Focused runtime and workload mode disagree." >&2; exit 1 ;;
+            esac
+            ;;
+          *) echo "Unknown focused runtime." >&2; exit 1 ;;
+        esac
+
     - name: Install OCI tooling
       shell: bash
       run: |
@@ -78,14 +111,573 @@ runs:
         IMAGE_ARCH: ${{ steps.build.outputs.arch }}
         IMAGE_NAME: ${{ steps.build.outputs.image_name }}
         IMAGE_PATH: ${{ steps.build.outputs.archive_path }}
+        OOM_ACCOUNTING_MODE: ${{ inputs.oom-accounting-mode }}
+        FOCUSED_RUNTIME: ${{ inputs.focused-runtime }}
+        VALIDATION_PROFILE: ${{ github.event.inputs.validation_profile }}
         TRUSTED_RUNTIME: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+        ACTIVE_USERNS_CONTEXT: ${{ github.repository == 'Strukturpiloten/containers' && runner.os == 'Linux' && runner.environment == 'github-hosted' && (fromJSON(inputs.entry).arch == 'amd64' || fromJSON(inputs.entry).arch == 'arm64') && ((startsWith(github.workflow_ref, 'Strukturpiloten/containers/.github/workflows/ci.yml@') && github.job == 'smoke-build' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository) || (github.event_name == 'merge_group' && github.event.action == 'checks_requested') || (github.event_name == 'workflow_dispatch' && (github.event.inputs.validation_profile == '' || github.event.inputs.validation_profile == 'full' || github.event.inputs.validation_profile == 'docker-rootless-qualification' || (github.event.inputs.validation_profile == 'docker-rootless-diagnostic' && github.ref == 'refs/heads/TheRealBecks/issue527'))))) || (startsWith(github.workflow_ref, 'Strukturpiloten/containers/.github/workflows/publish-images.yml@') && github.job == 'build' && ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.deleted == false) || (github.event_name == 'schedule' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'))) }}
+        ACTIVE_CANDIDATE: ${{ github.sha }}
+        ACTIVE_WORKFLOW: ${{ github.workflow_sha }}
+        ACTIVE_RUN: ${{ github.run_id }}
+        ACTIVE_ATTEMPT: ${{ github.run_attempt }}
+        ACTIVE_REPOSITORY: ${{ github.repository }}
+        ACTIVE_EVENT: ${{ github.event_name }}
+        ACTIVE_REF: ${{ github.ref }}
+        ACTIVE_WORKFLOW_REF: ${{ github.workflow_ref }}
+        ACTIVE_JOB: ${{ github.job }}
+        FIXED_ACTIVE_ROOT_BOOTSTRAP: |
+          import base64, hashlib, json, os, re, stat, sys, time
+          from pathlib import Path
+
+          CONSUMER = 'containers-ubuntu26-userns-active'
+          SOURCE_MANIFEST_SHA256 = '7f6693f40311617e4854f8c6a35cbe13b3afdd3d7a8bef58978397ba1178dbd8'
+          ADMISSION_SCHEMA = 4
+          MAINTAINED_PROFILES = ('full', 'docker-rootless-qualification')
+          ADMISSION_REVISION = 'containers527-maintained-callers-v1'
+          EXPERIMENTAL_PURPOSE = 'experimental-candidate'
+          MAINTAINED_PURPOSE = 'maintained-prerequisite'
+          PREREQUISITE_SCHEMA = 3
+          REPOSITORY = 'Strukturpiloten/containers'
+          CI_WORKFLOW = '.github/workflows/ci.yml'
+          PUBLICATION_WORKFLOW = '.github/workflows/publish-images.yml'
+          NATIVE_JOBS = ('build', 'smoke-build')
+          MAX_CALLER_FIELD = 512
+          CRON_FIELDS = 5
+          CALLER_FACT_KEYS = ('caller', 'workflowPath', 'eventAction', 'pullRequestNumber', 'eventHeadSha', 'eventBaseSha', 'eventHeadRef', 'eventBaseRef', 'headRepository', 'baseRepository', 'defaultBranch', 'eventSchedule', 'publicationScope', 'publicationTarget')
+          MAINTAINED_CALLERS = {'ci-pr': {'workflow': '.github/workflows/ci.yml', 'event': 'pull_request', 'job': 'smoke-build', 'refPolicy': 'pr-merge', 'selector': 'automatic-full'}, 'ci-merge-group': {'workflow': '.github/workflows/ci.yml', 'event': 'merge_group', 'job': 'smoke-build', 'refPolicy': 'queue-head', 'selector': 'automatic-full'}, 'ci-manual': {'workflow': '.github/workflows/ci.yml', 'event': 'workflow_dispatch', 'job': 'smoke-build', 'refPolicy': 'event-selected-manual-ref', 'selector': 'manual-ci'}, 'publication-push': {'workflow': '.github/workflows/publish-images.yml', 'event': 'push', 'job': 'build', 'refPolicy': 'main-push', 'selector': 'publication-default'}, 'publication-schedule': {'workflow': '.github/workflows/publish-images.yml', 'event': 'schedule', 'job': 'build', 'refPolicy': 'main-schedule', 'selector': 'publication-default'}, 'publication-manual': {'workflow': '.github/workflows/publish-images.yml', 'event': 'workflow_dispatch', 'job': 'build', 'refPolicy': 'event-selected-manual-ref', 'selector': 'publication-default'}}
+          CLOSED_FILES = (
+              'scripts/__init__.py', 'scripts/docker_userns_active.py', 'scripts/docker_userns_qualification.py',
+              'scripts/docker_runner_security.py', 'scripts/docker_userns_custody_child.py',
+              'scripts/docker_userns_policy_source.py', 'scripts/docker_userns_custody.py',
+              'scripts/docker_userns_hosted.py', 'scripts/docker_userns_dryparse.py',
+              'scripts/runtime_docker_diagnostics.py', 'scripts/runtime_docker_systemd_guard.py',
+              '.github/docker-userns-active-admission.json', '.github/docker-userns-active-helper-closure.json',
+              '.github/docker-userns-policy-source.json',
+          )
+
+          DIAGNOSTIC = {'schemaVersion': 1, 'consumer': CONSUMER, 'kind': 'active-qualification-failure',
+              'actor': 'root-bootstrap', 'operation': 'bootstrap', 'phase': 'bootstrap-entry', 'reason': 'refused',
+              'context': None, 'bindingSha256': None, 'sourceVerified': False, 'bindingVerified': False,
+              'sourceManifestSha256': None, 'reportingLease': None, 'lastDurablePhase': None, 'lastIntent': None,
+              'attemptedPhase': None, 'durabilityUnknown': False, 'readerPending': None, 'childPending': None,
+              'ownerDisposition': 'not-recorded', 'comparisons': {}, 'retained': None, 'cleanupAuthority': False}
+
+          def failure(error):
+              if isinstance(error, OSError):
+                  reason = {1: 'permission-denied', 13: 'permission-denied', 2: 'missing', 40: 'unsafe-link', 11: 'busy'}.get(error.errno, 'os-error')
+              elif isinstance(error, (ValueError, KeyError, TypeError)):
+                  reason = 'invalid-data'
+              else:
+                  reason = 'unexpected'
+              DIAGNOSTIC['reason'] = reason
+              raw = (json.dumps(DIAGNOSTIC, sort_keys=True) + '\n').encode('ascii')
+              require(len(raw) <= 8192)
+              sys.stdout.buffer.write(raw)
+
+          def require(value):
+              if not value:
+                  raise ValueError('active-root-bootstrap-refused')
+
+          def validation_profile(value):
+              require(type(value) is str and value.isascii() and value.lower() in {'', *MAINTAINED_PROFILES, 'docker-rootless-diagnostic'})
+              return value.lower() or 'full'
+
+          def selected_manual_ref(value: object) -> str:
+              """Keep the actual dispatch branch/tag ref; never normalize an arbitrary locator."""
+              if (
+                  type(value) is not str
+                  or re.fullmatch(r"refs/(?:heads|tags)/[A-Za-z0-9][A-Za-z0-9._/-]{0,179}", value) is None
+                  or any(part in {"", ".", ".."} or part.endswith((".", ".lock")) for part in value.split("/"))
+                  or ".." in value
+              ):
+                  require(False)
+              return value
+
+          def event_scope(event: object) -> tuple[str, str]:
+              """Derive the finite purpose/ref from the fixed workflow-dispatch payload."""
+              if type(event) is not dict or type(event.get("inputs", {})) is not dict:
+                  require(False)
+              inputs = event.get("inputs", {})
+              canonical = validation_profile(inputs.get("validation_profile", "full"))
+              focused = inputs.get("focused_runtime", "witness-diagnostic")
+              if type(focused) is not str or focused not in {"witness-diagnostic", "mandatory-accounting"}:
+                  require(False)
+              if canonical in MAINTAINED_PROFILES:
+                  if (
+                      "inputs" not in event
+                      or focused != "witness-diagnostic"
+                      or type(event.get("repository")) is not dict
+                      or event["repository"].get("full_name") != "Strukturpiloten/containers"
+                      or event.get("workflow") != ".github/workflows/ci.yml"
+                  ):
+                      require(False)
+                  return MAINTAINED_PURPOSE, selected_manual_ref(event.get("ref"))
+              if (
+                  event.get("ref", "refs/heads/TheRealBecks/issue527") != "refs/heads/TheRealBecks/issue527"
+                  or ("repository" in event and (type(event["repository"]) is not dict or event["repository"].get("full_name") != "Strukturpiloten/containers"))
+                  or event.get("workflow", ".github/workflows/ci.yml") != ".github/workflows/ci.yml"
+              ):
+                  require(False)
+              return EXPERIMENTAL_PURPOSE, "refs/heads/TheRealBecks/issue527"
+
+          def _refuse(_reason):
+              require(False)
+
+
+          def caller_identity(identity: dict[str, str]) -> str:
+              """Check only the finite runner-provided caller tuple before reading event data."""
+              if (
+                  type(identity) is not dict
+                  or set(identity) != {"repository", "event", "ref", "workflowRef", "job", "candidate"}
+                  or any(type(value) is not str or len(value) > MAX_CALLER_FIELD for value in identity.values())
+                  or identity["repository"] != REPOSITORY
+              ):
+                  _refuse("context")
+              event_ref(identity["ref"])
+              prefix, separator, suffix = identity["workflowRef"].partition("@")
+              if not separator or suffix != identity["ref"] or not prefix.startswith(REPOSITORY + "/"):
+                  _refuse("context")
+              workflow = prefix.removeprefix(REPOSITORY + "/")
+              if not any(
+                  (workflow, identity["event"], identity["job"]) == (policy["workflow"], policy["event"], policy["job"])
+                  for policy in MAINTAINED_CALLERS.values()
+              ):
+                  _refuse("context")
+              return workflow
+
+          def event_ref(value: object) -> str:
+              """Accept a finite PR merge ref or the existing validated branch/tag refs."""
+              if type(value) is str and re.fullmatch(r"refs/pull/[1-9][0-9]{0,19}/merge", value):
+                  return value
+              return selected_manual_ref(value)
+
+          def _event_oid(value: object) -> str:
+              if type(value) is not str or re.fullmatch(r"[0-9a-f]{40}", value) is None or value == "0" * 40:
+                  _refuse("context")
+              return value
+
+          def _event_repository(value: object) -> None:
+              if type(value) is not dict or value.get("full_name") != REPOSITORY:
+                  _refuse("context")
+
+          def _head_ref(value: object) -> str:
+              result = selected_manual_ref(value)
+              if not result.startswith("refs/heads/"):
+                  _refuse("context")
+              return result
+
+          def _branch_ref(value: object) -> str:
+              if type(value) is not str:
+                  _refuse("context")
+              return _head_ref("refs/heads/" + value)
+
+          def _pr_caller(event: dict, identity: dict, facts: dict) -> None:
+              request = event.get("pull_request")
+              number = event.get("number")
+              if (
+                  event.get("action") not in ("opened", "synchronize", "reopened")
+                  or type(request) is not dict
+                  or type(number) is not int
+                  or not 0 < number < 10**20
+                  or type(request.get("number")) is not int
+                  or request["number"] != number
+                  or identity["ref"] != f"refs/pull/{number}/merge"
+              ):
+                  _refuse("context")
+              for role in ("head", "base"):
+                  part = request.get(role)
+                  if type(part) is not dict:
+                      _refuse("context")
+                  _event_repository(part.get("repo"))
+                  facts["event" + role.title() + "Sha"] = _event_oid(part.get("sha"))
+                  facts["event" + role.title() + "Ref"] = _branch_ref(part.get("ref"))
+                  facts[role + "Repository"] = REPOSITORY
+              if request.get("merge_commit_sha") is not None:
+                  _event_oid(request["merge_commit_sha"])
+              if identity["candidate"] in {facts["eventHeadSha"], facts["eventBaseSha"]}:
+                  _refuse("context")
+              facts.update(caller="ci-pr", eventAction=event["action"], pullRequestNumber=str(number))
+
+          def _queue_caller(event: dict, identity: dict, facts: dict) -> None:
+              group = event.get("merge_group")
+              if event.get("action") != "checks_requested" or type(group) is not dict:
+                  _refuse("context")
+              head = _head_ref(group.get("head_ref"))
+              base = _head_ref(group.get("base_ref"))
+              head_sha, base_sha = _event_oid(group.get("head_sha")), _event_oid(group.get("base_sha"))
+              if (
+                  not head.startswith("refs/heads/gh-readonly-queue/")
+                  or head != identity["ref"]
+                  or head_sha != identity["candidate"]
+                  or base_sha == head_sha
+                  or base == head
+              ):
+                  _refuse("context")
+              facts.update(
+                  caller="ci-merge-group",
+                  eventAction="checks_requested",
+                  eventHeadRef=head,
+                  eventBaseRef=base,
+                  eventHeadSha=head_sha,
+                  eventBaseSha=base_sha,
+              )
+
+          def _publication_caller(event: dict, identity: dict, facts: dict) -> None:
+              if event["repository"].get("default_branch") != "main":
+                  _refuse("context")
+              facts.update(defaultBranch="main", publicationScope="all")
+              kind = identity["event"]
+              if kind == "push":
+                  if (
+                      event.get("deleted") is not False
+                      or event.get("ref") != "refs/heads/main"
+                      or identity["ref"] != "refs/heads/main"
+                  ):
+                      _refuse("context")
+                  after = _event_oid(event.get("after"))
+                  if after != identity["candidate"]:
+                      _refuse("context")
+                  facts.update(caller="publication-push", eventHeadSha=after)
+              elif kind == "schedule":
+                  schedule = event.get("schedule")
+                  if (
+                      identity["ref"] != "refs/heads/main"
+                      or event.get("ref", identity["ref"]) != identity["ref"]
+                      or type(schedule) is not str
+                      or re.fullmatch(r"[A-Za-z0-9*/ ,\-]{1,96}", schedule) is None
+                      or len(schedule.split()) != CRON_FIELDS
+                  ):
+                      _refuse("context")
+                  facts.update(caller="publication-schedule", eventSchedule=schedule)
+              else:
+                  _publication_dispatch(event, identity, facts)
+
+          def _publication_dispatch(event: dict, identity: dict, facts: dict) -> None:
+              inputs = event.get("inputs", {})
+              if (
+                  event.get("workflow") != PUBLICATION_WORKFLOW
+                  or selected_manual_ref(event.get("ref")) != identity["ref"]
+                  or type(inputs) is not dict
+                  or set(inputs) - {"scope", "target"}
+              ):
+                  _refuse("context")
+              scope, target = inputs.get("scope", "all"), inputs.get("target", "")
+              if (
+                  type(scope) is not str
+                  or scope not in {"all", "image", "family"}
+                  or type(target) is not str
+                  or (scope == "all" and target != "")
+                  or (scope != "all" and re.fullmatch(r"[a-z0-9][a-z0-9.-]{0,127}", target) is None)
+              ):
+                  _refuse("context")
+              facts.update(caller="publication-manual", publicationScope=scope, publicationTarget=target)
+
+          def caller_context(event: object, identity: dict[str, str]) -> dict[str, str]:
+              """Derive purpose and source/caller facts; a routing Boolean grants no authority."""
+              workflow = caller_identity(identity)
+              _event_oid(identity["candidate"])
+              if type(event) is not dict or ("workflow" in event and event["workflow"] != workflow):
+                  _refuse("context")
+              facts = dict.fromkeys(CALLER_FACT_KEYS, "")
+              facts["workflowPath"] = workflow
+              purpose, profile, requested = MAINTAINED_PURPOSE, "full", ""
+              if workflow == CI_WORKFLOW and identity["event"] == "workflow_dispatch":
+                  purpose, ref = event_scope(event)
+                  if ref != identity["ref"]:
+                      _refuse("context")
+                  requested = event.get("inputs", {}).get("validation_profile", "full")
+                  profile = validation_profile(requested)
+                  facts["caller"] = "ci-manual"
+              else:
+                  _event_repository(event.get("repository"))
+                  if workflow == PUBLICATION_WORKFLOW:
+                      _publication_caller(event, identity, facts)
+                  elif identity["event"] == "pull_request":
+                      _pr_caller(event, identity, facts)
+                  else:
+                      _queue_caller(event, identity, facts)
+              return {
+                  **facts,
+                  **{key: identity[key] for key in ("repository", "event", "ref", "workflowRef", "job")},
+                  "purpose": purpose,
+                  "validationProfile": profile,
+                  "validationProfileRequested": requested,
+              }
+
+          def unique(pairs):
+              result = {}
+              for key, value in pairs:
+                  require(key not in result)
+                  result[key] = value
+              return result
+
+          def sha256(raw):
+              return hashlib.sha256(raw).hexdigest()
+
+          def exact(value, keys):
+              require(type(value) is dict and set(value) == set(keys))
+              return value
+
+          def tree(raw):
+              result, order, offset = {}, [], 0
+              while offset < len(raw):
+                  end = raw.index(b'\0', offset)
+                  mode, name = raw[offset:end].split(b' ', 1)
+                  require(mode in {b'40000', b'100644', b'100755'} and end + 21 <= len(raw))
+                  require(re.fullmatch(rb'[A-Za-z0-9_.-]{1,128}', name) and name not in {b'.', b'..'})
+                  key = name.decode('ascii')
+                  require(key not in result)
+                  result[key] = mode, raw[end + 1:end + 21].hex()
+                  order.append(name + (b'/' if mode == b'40000' else b''))
+                  offset = end + 21
+              require(offset == len(raw) and order == sorted(order))
+              return result
+
+          def validate_pr_commit(commit, context):
+            if context['caller'] != 'ci-pr':
+              return
+            header, delimiter, _message = commit.partition(b'\n\n')
+            lines = header.split(b'\n')
+            expected = [b'parent ' + context[key].encode('ascii') for key in ('eventBaseSha', 'eventHeadSha')]
+            require(delimiter and len(lines) >= 3 and re.fullmatch(rb'tree [0-9a-f]{40}', lines[0]))
+            require(lines[1:3] == expected and not any(line.startswith(b'parent') for line in lines[3:]))
+          def verify_bundle(raw, trusted):
+              value = exact(json.loads(raw, object_pairs_hook=unique), ('schemaVersion', 'consumer', 'context', 'objects', 'sdk'))
+              require(type(value['schemaVersion']) is int and value['schemaVersion'] == PREREQUISITE_SCHEMA and value['consumer'] == CONSUMER)
+              context = exact(value['context'], ('candidate', 'workflow', 'checkout', 'repository', 'event', 'ref', 'job',
+                  'run', 'attempt', 'architecture', 'image', 'imageOS', 'imageVersion', 'imageVersionKind',
+                  'validationProfile', 'validationProfileRequested', 'workflowRef', 'purpose', 'admissionRevision', 'admissionSha256', *CALLER_FACT_KEYS))
+              require(type(value['objects']) is list and 1 <= len(value['objects']) <= 48)
+              objects, used, total = {}, set(), 0
+              for item in value['objects']:
+                  item = exact(item, ('oid', 'kind', 'data'))
+                  oid, kind = item['oid'], item['kind']
+                  require(type(oid) is str and re.fullmatch(r'[0-9a-f]{40}', oid) and oid not in objects)
+                  require(kind in ('commit', 'tree', 'blob') and type(item['data']) is str)
+                  content = base64.b64decode(item['data'], validate=True)
+                  require(len(content) <= (8192 if kind == 'commit' else 262144))
+                  total += len(content)
+                  require(total <= 1048576)
+                  computed = hashlib.sha1(kind.encode('ascii') + b' ' + str(len(content)).encode('ascii') + b'\0' + content,
+                      usedforsecurity=False).hexdigest()
+                  require(computed == oid)
+                  objects[oid] = kind, content
+              def get(kind, oid):
+                  require(oid in objects and objects[oid][0] == kind)
+                  used.add(oid)
+                  return objects[oid][1]
+              commit = get('commit', trusted['candidate'])
+              validate_pr_commit(commit, trusted)
+              header = commit.split(b'\n', 1)[0]
+              require(re.fullmatch(rb'tree [0-9a-f]{40}', header))
+              files = {}
+              for path in CLOSED_FILES:
+                  current = header[5:].decode('ascii')
+                  parts = path.split('/')
+                  for index, name in enumerate(parts):
+                      mode, identifier = tree(get('tree', current))[name]
+                      if index == len(parts) - 1:
+                          require(mode == b'100644')
+                          files[path] = get('blob', identifier)
+                      else:
+                          require(mode == b'40000')
+                          current = identifier
+              require(used == set(objects))
+              closure = json.loads(files['.github/docker-userns-active-helper-closure.json'], object_pairs_hook=unique)
+              require(closure == {'schemaVersion': 1, 'consumer': CONSUMER, 'stdlibOnly': True, 'files': list(CLOSED_FILES)})
+              require(sha256(files['.github/docker-userns-policy-source.json']) == SOURCE_MANIFEST_SHA256)
+              manifest = json.loads(files['.github/docker-userns-policy-source.json'], object_pairs_hook=unique)
+              source = manifest['source']
+              require(source['repository'] == 'Strukturpiloten/docker-lens' and source['license'] == 'MPL-2.0'
+                  and source['commit'] == '26bf21298c839893177c96fc2036b64e2911344f')
+              require(type(value['sdk']) is dict and set(value['sdk']) == {item['path'] for item in source['files']})
+              sdk = {}
+              for item in source['files']:
+                  content = base64.b64decode(value['sdk'][item['path']], validate=True)
+                  require(len(content) == item['size'] and sha256(content) == item['sha256'])
+                  sdk[Path(item['path']).name] = content
+              admission_raw = files['.github/docker-userns-active-admission.json']
+              admission = json.loads(admission_raw, object_pairs_hook=unique)
+              exact(admission, ('schemaVersion', 'consumer', 'purpose', 'qualification', 'sourceManifestSha256',
+                               'context', 'cohorts', 'architectures', 'policyNamespace', 'parserExecutionNamespace',
+                               'review', 'revision', 'maintainedContext', 'maintainedArchitectures', 'maintainedCallers'))
+              require(type(admission['schemaVersion']) is int and admission['schemaVersion'] == ADMISSION_SCHEMA
+                      and admission['consumer'] == CONSUMER and admission['purpose'] == 'scoped-prerequisite-attempt'
+                      and admission['qualification'] == 'none' and admission['revision'] == ADMISSION_REVISION)
+              require(admission['maintainedCallers'] == MAINTAINED_CALLERS)
+              policy = admission['maintainedContext'] if trusted['purpose'] == MAINTAINED_PURPOSE else admission['context']
+              require(policy['repository'] == trusted['repository'] and policy['image'] == trusted['image'])
+              if trusted['purpose'] == MAINTAINED_PURPOSE:
+                  exact(policy, ('repository', 'image', 'imageOS', 'imageVersion', 'validationProfiles'))
+                  require(policy['validationProfiles'] == list(MAINTAINED_PROFILES) and trusted['validationProfile'] in policy['validationProfiles'])
+                  caller = admission['maintainedCallers'][trusted['caller']]
+                  require((caller['workflow'], caller['event'], caller['job']) == (trusted['workflowPath'], trusted['event'], trusted['job']))
+              else:
+                  exact(policy, ('repository', 'workflow', 'event', 'ref', 'job', 'image', 'imageOS', 'imageVersion', 'validationProfile'))
+                  require(trusted['caller'] == 'ci-manual' and policy['workflow'] == trusted['workflowPath'] == CI_WORKFLOW
+                          and policy['event'] == trusted['event'] and policy['job'] == trusted['job']
+                          and policy['ref'] == trusted['ref'] and policy['validationProfile'] == trusted['validationProfile'] == 'docker-rootless-diagnostic')
+              require(admission['maintainedArchitectures'] == {'amd64': MAINTAINED_PURPOSE, 'arm64': MAINTAINED_PURPOSE})
+              require(type(admission['cohorts']) is dict and set(admission['cohorts']) == {'amd64', 'arm64'})
+              trusted['admissionRevision'] = admission['revision']
+              trusted['admissionSha256'] = sha256(admission_raw)
+              require(context == trusted)
+              return files, sdk
+
+          def read_input(path, uid, limit):
+              descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC)
+              try:
+                  before = os.fstat(descriptor)
+                  require(stat.S_ISREG(before.st_mode) and before.st_uid == uid and before.st_nlink == 1 and before.st_size <= limit)
+                  raw = bytearray()
+                  while len(raw) <= limit:
+                      part = os.read(descriptor, min(65536, limit + 1 - len(raw)))
+                      if not part:
+                          break
+                      raw.extend(part)
+                  require(len(raw) <= limit and before == os.fstat(descriptor))
+                  return bytes(raw)
+              finally:
+                  os.close(descriptor)
+
+          def create(path, raw):
+              descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o400)
+              try:
+                  require(os.write(descriptor, raw) == len(raw))
+                  os.fsync(descriptor)
+              finally:
+                  os.close(descriptor)
+
+          def main():
+              require(os.getuid() == os.geteuid() == 0 and len(sys.argv) == 17)
+              require(sys.implementation.name == 'cpython' and tuple(sys.version_info) == (3, 14, 4, 'final', 0)
+                  and sys.flags.isolated == 1 and sys.flags.no_site == 1 and sys.dont_write_bytecode)
+              handoff, candidate, workflow, checkout, run, attempt, architecture, image_version, uid, gid, deadline, repository, event_name, event_ref, workflow_ref, job = sys.argv[1:]
+              uid, gid, deadline = int(uid), int(gid), int(deadline)
+              require(uid > 0 and gid > 0 and time.monotonic_ns() < deadline <= time.monotonic_ns() + 1800_000_000_000)
+              require(re.fullmatch(r'[0-9a-f]{40}', candidate) and candidate == workflow == checkout)
+              require(all(re.fullmatch(r'[1-9][0-9]{0,19}', item) for item in (run, attempt)))
+              require(architecture in {'amd64', 'arm64'} and re.fullmatch(r'[0-9]{8}\.[0-9]+\.[0-9]+', image_version))
+              event = json.loads(read_input('/home/runner/work/_temp/_github_workflow/event.json', uid, 262144), object_pairs_hook=unique)
+              identity = {'repository': repository, 'event': event_name, 'ref': event_ref, 'workflowRef': workflow_ref,
+                          'job': job, 'candidate': candidate}
+              DIAGNOSTIC['phase'] = 'bootstrap-context'
+              derived = caller_context(event, identity)
+              trusted = {'candidate': candidate, 'workflow': workflow, 'checkout': checkout, **derived,
+                  'run': run, 'attempt': attempt, 'architecture': architecture, 'image': 'docker-29-conformance-rootless',
+                  'imageOS': {'amd64': 'ubuntu26', 'arm64': 'ubuntu26-arm64'}[architecture], 'imageVersion': image_version,
+                  'imageVersionKind': 'workflow-reported-provenance-not-vm-attestation'}
+              DIAGNOSTIC['context'] = {key: trusted[key] for key in ('candidate', 'run', 'attempt', 'job', 'image', 'architecture')}
+              DIAGNOSTIC['context']['phase'] = None
+              DIAGNOSTIC['phase'] = 'bootstrap-proof'
+              files, sdk = verify_bundle(read_input(handoff, uid, 2097152), trusted)
+              DIAGNOSTIC.update(sourceVerified=True, sourceManifestSha256=SOURCE_MANIFEST_SHA256, phase='bootstrap-stage')
+              DIAGNOSTIC['comparisons']['bootstrap-proof'] = True
+              require(time.monotonic_ns() < deadline)
+              stage = Path('/run') / ('containers-userns-active.' + os.urandom(16).hex())
+              stage.mkdir(mode=0o700)
+              for name in ('scripts', '.github', 'sdk', 'leases'):
+                  (stage / name).mkdir(mode=0o700)
+              create(stage / "lock", b"")
+              os.chmod(stage / "lock", 0o600)
+              for name, raw in files.items():
+                  create(stage / name, raw)
+              for name, raw in sdk.items():
+                  create(stage / 'sdk' / name, raw)
+              info = stage.lstat()
+              bootstrap = {'schemaVersion': PREREQUISITE_SCHEMA, 'consumer': CONSUMER, 'context': trusted,
+                  'uid': uid, 'gid': gid, 'deadlineNs': deadline, 'stageIdentity': [info.st_dev, info.st_ino],
+                  'files': {name: sha256(raw) for name, raw in files.items()}}
+              create(stage / 'bootstrap.json', (json.dumps(bootstrap, sort_keys=True) + '\n').encode('ascii'))
+              descriptor = os.open(stage, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+              try:
+                  os.fsync(descriptor)
+              finally:
+                  os.close(descriptor)
+              print(stage, flush=True)
+
+          if __name__ == '__main__':
+              try:
+                  main()
+              except Exception as error:
+                  failure(error)
+                  raise SystemExit(1) from None
       run: |
         set -euo pipefail
 
         mkdir -p "${RUNNER_TEMP}/runtime-evidence"
         runtime_args=()
+        case "${OOM_ACCOUNTING_MODE}" in
+          qualification|diagnostic) runtime_args+=(--oom-accounting-mode "${OOM_ACCOUNTING_MODE}") ;;
+          *) echo "Unsupported OOM accounting mode" >&2; exit 1 ;;
+        esac
+        case "${FOCUSED_RUNTIME}" in
+          none) ;;
+          witness-diagnostic|mandatory-accounting)
+            test "${VALIDATION_PROFILE,,}" = docker-rootless-diagnostic &&
+              test "${ACTIVE_USERNS_CONTEXT}" = true && test "${IMAGE_NAME}" = docker-29-conformance-rootless &&
+              test "${GITHUB_EVENT_NAME}" = workflow_dispatch && test "${GITHUB_REF}" = refs/heads/TheRealBecks/issue527 &&
+              test "${GITHUB_JOB}" = smoke-build || { echo "Focused runtime context refused." >&2; exit 1; }
+            case "${FOCUSED_RUNTIME}:${OOM_ACCOUNTING_MODE}" in
+              witness-diagnostic:diagnostic|mandatory-accounting:qualification) ;;
+              *) echo "Focused runtime and workload mode disagree." >&2; exit 1 ;;
+            esac
+            ;;
+          *) echo "Unknown focused runtime." >&2; exit 1 ;;
+        esac
+        runtime_args+=(--focused-runtime "${FOCUSED_RUNTIME}")
         if [ "${TRUSTED_RUNTIME}" = "true" ]; then
           runtime_args+=(--allow-privileged)
+        fi
+        active_stage=""
+        if [ "${ACTIVE_USERNS_CONTEXT}" = "true" ] && [ "${IMAGE_NAME}" = "docker-29-conformance-rootless" ]; then
+          readonly FIXED_ACTIVE_ROOT_BOOTSTRAP
+          active_checkout="$(git rev-parse HEAD)"
+          test "${ACTIVE_CANDIDATE}" = "${ACTIVE_WORKFLOW}"
+          test "${ACTIVE_CANDIDATE}" = "${active_checkout}"
+          active_deadline="$(/usr/bin/python3 -I -B -S -c 'import time;print(time.monotonic_ns()+1800000000000)')"
+          active_handoff="${RUNNER_TEMP}/docker-userns-active-${IMAGE_ARCH}.json"
+          active_failure="${RUNNER_TEMP}/runtime-evidence/${IMAGE_NAME}-${IMAGE_ARCH}-userns-failure.json"
+          /usr/bin/python3 -I -B -S -c 'import json,sys; value={"schemaVersion":1,"kind":"active-qualification-failure","actor":"workflow","operation":"producer","phase":"producer-launch","reason":"execution-unverified","cleanupAuthority":False,"context":{"candidate":sys.argv[2],"run":sys.argv[3],"attempt":sys.argv[4],"job":sys.argv[6],"image":"docker-29-conformance-rootless","architecture":sys.argv[5],"phase":None}};open(sys.argv[1],"x").write(json.dumps(value)+"\n")' \
+            "${active_failure}" "${ACTIVE_CANDIDATE}" "${ACTIVE_RUN}" "${ACTIVE_ATTEMPT}" "${IMAGE_ARCH}" "${ACTIVE_JOB}"
+          uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.docker_userns_active_bootstrap_bundle \
+            --architecture "${IMAGE_ARCH}" --output "${active_handoff}" --failure-output "${active_failure}"
+          /usr/bin/python3 -I -B -S -c 'import json,sys; p=sys.argv[1];value=json.load(open(p));value.update(actor="workflow",operation="bootstrap",phase="bootstrap-launch",reason="execution-unverified");open(p,"w").write(json.dumps(value)+"\n")' "${active_failure}"
+          if active_stage="$(sudo -n /usr/bin/timeout --signal=TERM --kill-after=1s 25s \
+            /usr/bin/python3.14 -I -B -S -c "${FIXED_ACTIVE_ROOT_BOOTSTRAP}" \
+            "${active_handoff}" "${ACTIVE_CANDIDATE}" "${ACTIVE_WORKFLOW}" "${active_checkout}" \
+            "${ACTIVE_RUN}" "${ACTIVE_ATTEMPT}" "${IMAGE_ARCH}" "${ImageVersion}" \
+            "$(id -u)" "$(id -g)" "${active_deadline}" \
+            "${ACTIVE_REPOSITORY}" "${ACTIVE_EVENT}" "${ACTIVE_REF}" "${ACTIVE_WORKFLOW_REF}" "${ACTIVE_JOB}")"; then
+            :
+          else
+            printf '%s' "${active_stage}" | uv run --frozen --python "${PYTHON_VERSION}" python -c 'import json,sys;from pathlib import Path;from scripts.docker_userns_active import valid_failure;raw=sys.stdin.buffer.read(8193);value=json.loads(raw) if len(raw)<=8192 and raw else None;sys.exit(1) if not valid_failure(value) or value["actor"]!="root-bootstrap" else Path(sys.argv[1]).write_bytes(raw)' "${active_failure}" || true
+            exit 1
+          fi
+          [[ "${active_stage}" =~ ^/run/containers-userns-active\.[0-9a-f]{32}$ ]]
+          rm -- "${active_failure}"
+          runtime_args+=(--active-userns-stage "${active_stage}")
+          finish_active_stage() {
+            active_status=$?
+            trap - EXIT
+            if [ -n "${active_stage}" ] && ! sudo -n /usr/bin/timeout --signal=TERM --kill-after=1s 20s \
+              /usr/bin/python3.14 -I -B -S "${active_stage}/scripts/docker_userns_active.py" \
+              dispose-stage "${active_stage}"; then
+              active_status=1
+            fi
+            exit "${active_status}"
+          }
+          trap finish_active_stage EXIT
+          if [ "${IMAGE_ARCH}" = "arm64" ] && [ "${VALIDATION_PROFILE,,}" = docker-rootless-diagnostic ]; then
+            # Observation cannot qualify native tests or admit ARM policy loading.
+            if sudo -n /usr/bin/timeout --signal=TERM --kill-after=1s 20s \
+              /usr/bin/python3.14 -I -B -S "${active_stage}/scripts/docker_userns_active.py" \
+              observe-arm "${active_stage}" \
+              > "${RUNNER_TEMP}/runtime-evidence/${IMAGE_NAME}-${IMAGE_ARCH}-userns-observation.json"; then
+              :
+            fi
+            exit 1
+          fi
         fi
         uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.runtime_tests \
           --image-name "${IMAGE_NAME}" \
@@ -95,12 +687,34 @@ runs:
           --evidence "${RUNNER_TEMP}/runtime-evidence/${IMAGE_NAME}-${IMAGE_ARCH}.json" \
           --sudo "${runtime_args[@]}"
 
+        if [ "${FOCUSED_RUNTIME}" = none ]; then
+          # Ordinary CI must consume native authority, not operational exit zero.
+          uv run --frozen --python "${PYTHON_VERSION}" python - "${IMAGE_NAME}" "${IMAGE_ARCH}" \
+            "${RUNNER_TEMP}/runtime-evidence/${IMAGE_NAME}-${IMAGE_ARCH}.json" <<'PY_AUTHORITY'
+        import json, sys
+        from pathlib import Path
+        from scripts import container_engine
+        from scripts.evidence_gate import require_ordinary_runtime_authority
+        name, architecture, path = sys.argv[1:]
+        metadata = next(item for item in container_engine._load_images() if item["name"] == name)
+        profile, configuration = next(iter(metadata["tests"].items()))
+        record = json.loads(Path(path).read_text())
+        if record.get("image") != name or record.get("architecture") != architecture or record.get("profile") != profile or record.get("status") != "passed":
+            raise SystemExit("Ordinary runtime evidence identity or operation failed")
+        require_ordinary_runtime_authority(record, profile, configuration)
+        PY_AUTHORITY
+          active_stage=""
+        fi
+
     - name: Upload runtime evidence
       if: always() && steps.build.outcome == 'success'
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
         name: ${{ steps.build.outputs.image_name }}-${{ steps.build.outputs.arch }}-runtime-evidence
-        path: ${{ runner.temp }}/runtime-evidence/${{ steps.build.outputs.image_name }}-${{ steps.build.outputs.arch }}.json
+        path: |
+          ${{ runner.temp }}/runtime-evidence/${{ steps.build.outputs.image_name }}-${{ steps.build.outputs.arch }}.json
+          ${{ runner.temp }}/runtime-evidence/${{ steps.build.outputs.image_name }}-${{ steps.build.outputs.arch }}-userns-failure.json
+          ${{ runner.temp }}/runtime-evidence/${{ steps.build.outputs.image_name }}-${{ steps.build.outputs.arch }}-userns-observation.json
         if-no-files-found: error
         retention-days: 7
 
