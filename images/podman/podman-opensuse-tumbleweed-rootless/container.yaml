@@ -27,7 +27,7 @@ build:
   runtimeBaseArg: DISTRO_IMAGE
   args:
     DISTRO_IMAGE:
-      value: registry.opensuse.org/opensuse/tumbleweed:latest@sha256:c8540a89f15cfdeb13b85540643ff78ba8cdf3608304d69867b7d0034a080676
+      value: registry.opensuse.org/opensuse/tumbleweed:latest@sha256:b56730060917ba7411c7720bb262b5512a048a302c78dc7a0149a985d7b85a8a
       type: external-image
     HOME_DIR: {value: /home/podman, type: static}
     RUN_AS_USER: {value: podman, type: static}
