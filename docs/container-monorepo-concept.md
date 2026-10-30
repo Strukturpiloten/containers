@@ -115,7 +115,7 @@ Transient publication failures have two bounded recovery layers. Idempotent regi
 
 ## Update policy
 
-Renovate reads external image references from `container.yaml`, commit-pinned GitHub Actions, Python dependencies, and selected build tools. Narrow, compatible digest and patch updates may automerge only after required CI passes. Major, incompatible, and compatibility-line changes remain review decisions.
+Renovate reads external image references from `container.yaml`, commit-pinned GitHub Actions, Python dependencies, and selected build tools. All eligible updates, including major releases, enter the merge queue automatically and merge only after required CI passes. Declared compatibility lines remain constrained. New Python release lines become eligible at stable patch level 4; see [workflow configuration](workflow-configuration.md#automatic-dependency-merges).
 
 Renovate updates repository inputs; it does not update installed packages that come from a distro repository during a build. The daily no-cache rebuild and package-manager upgrade are responsible for those OS security updates. Application inputs move only through reviewed metadata changes: notify_push has a paired version and immutable commit plus a locked Cargo graph; PHP images pin Composer and externally released extensions. Images record actual tool/component versions and installed OS package lists under `/usr/share/strukturpiloten/`. Build results tie declared component inputs to the source revision and exact per-architecture image digests, while registry SBOM attestations describe the packages in each published architecture. Distro compatibility image base tags stay on their declared OS release while Renovate refreshes their pinned digests.
 
