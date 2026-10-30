@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
 DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
+ARCHIVE_DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
 SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
 MIN_SUPPORT_BOUNDARY_LENGTH = 16
 RUNTIME_PROFILES = frozenset({"podman", "phpFpm", "notifyPush", "docker"})
@@ -194,8 +195,10 @@ def _runtime_coverage(
             or identity.get("architecture") != architecture
             or any(
                 not isinstance(identity.get(field), str) or DIGEST_RE.fullmatch(identity[field]) is None
-                for field in ("manifestDigest", "configDigest", "archiveSha256")
+                for field in ("manifestDigest", "configDigest")
             )
+            or not isinstance(identity.get("archiveSha256"), str)
+            or ARCHIVE_DIGEST_RE.fullmatch(identity["archiveSha256"]) is None
             or not isinstance(identity.get("sourceRevision"), str)
             or SHA_RE.fullmatch(identity["sourceRevision"]) is None
         ):

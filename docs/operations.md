@@ -33,14 +33,14 @@ A push to `main` selects changed images and their reverse dependencies; the dail
 See [runtime backends](runtime-backends.md) for the explicit CI profile policy, local Podman default, private Docker prerequisites, evidence and publication boundary.
 
 For a manual, non-publishing diagnosis of the Docker rootless conformance fixture
-on a selected source branch, dispatch the existing CI workflow:
+on the admitted issue527 source branch, dispatch the existing CI workflow:
 
 ```sh
-gh workflow run ci.yml --repo Strukturpiloten/containers --ref your-reviewed-branch -f validation_profile=docker-rootless-diagnostic
-gh run list --repo Strukturpiloten/containers --workflow ci.yml --branch your-reviewed-branch --limit 5
+gh workflow run ci.yml --repo Strukturpiloten/containers --ref TheRealBecks/issue527 -f validation_profile=docker-rootless-diagnostic
+gh run list --repo Strukturpiloten/containers --workflow ci.yml --branch TheRealBecks/issue527 --limit 5
 ```
 
-Substitute the reviewed candidate branch for `your-reviewed-branch`. The workflow
+The diagnostic profile admits only `TheRealBecks/issue527`. The workflow
 must already be registered on the default branch; `--ref` selects
 the candidate branch to execute. This profile selects only the catalogue identity
 `docker-29-conformance-rootless`, on AMD64 and ARM64, through the normal planner
@@ -54,6 +54,18 @@ they cannot satisfy `Required CI`, full PR/main/merge-queue validation, release,
 or publication gates. There is no image publication. The default manual profile
 is `full`; PR and merge-queue runs always ignore this input and retain their
 ordinary selection. Use the full gates before merging or publishing.
+
+The existing full/manual route additionally admits a maintained scoped
+prerequisite attempt for the Docker rootless conformance fixture on reviewed
+AMD64 or ARM64 GitHub-hosted Linux, with its complete reviewed cohort. It binds the exact selected branch/tag ref and source,
+run, attempt and producing job; both native phases, original accounting, cleanup
+and stage disposal must complete before ordinary native authority is recorded.
+The raw default focused input does not select a diagnostic workload in full mode.
+This does not enable PR/push/merge/schedule/publication/local callers. Diagnostic
+ARM still observes/refuses; maintained full/manual ARM may attempt the same
+strict lifecycle after its per-architecture preflight. Full still selects the
+complete matrix, and source support alone cannot make that matrix pass. No native success or publication permission follows from
+admission or offline checks. See the [scoped prerequisite contract](runtime-backends.md#scoped-issue527-prerequisite-and-experimental-candidate).
 
 Run the non-publishing repository checks before a pull request:
 

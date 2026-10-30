@@ -24,6 +24,7 @@ from scripts.evidence_gate import EvidenceError, _read, require_ordinary_runtime
 from scripts.runtime_docker import DockerProbePhase
 from scripts.runtime_docker_backend import DockerBackend, DockerBackendError
 from scripts.runtime_errors import ProbeError
+from tests.test_docker_userns_qualification import scoped_receipt, stage_disposal
 
 OWNER = "c" * 32
 SERVER = {"Version": "29.4.2", "GitCommit": "d329809"}
@@ -703,7 +704,8 @@ class _PhaseCase:
     ledger: bool = False
     launcher: str = "systemd"
     phase: DockerProbePhase = DockerProbePhase.ENFORCEMENT
-    loaded_arch: str = "amd64"
+    architecture: str = "amd64"
+    loaded_arch: str | None = None
     expected: dict[str, str] | None = None
     stage: str | None = None
     probe_failure: bool = False
@@ -717,29 +719,12 @@ class _PhaseCase:
 
 def experimental_receipt() -> dict:
     """Build actual experimental authority and cleanup labels without a normal grant."""
-    return {
-        "qualification": "experimental-candidate-only",
-        "state": "closed",
-        **dict.fromkeys(
-            (
-                "cleanOwnerVerified",
-                "ownerTerminationVerified",
-                "custodyDisposed",
-                "ownerReady",
-                "guestAbsenceVerified",
-                "taskAbsenceVerified",
-                "scopeAbsenceVerified",
-                "profileAbsenceVerified",
-            ),
-            True,
-        ),
-        **dict.fromkeys(("retained", "readerPending", "childPending"), False),
-    }
+    return scoped_receipt(phase="enforcement")
 
 
 class _PhaseScopedReceipt:
-    def __init__(self, receipt: dict, *, fail: bool) -> None:
-        self.receipt, self.fail = receipt, fail
+    def __init__(self, receipt: dict, *, fail: bool, late: str | None, events: list[str]) -> None:
+        self.receipt, self.fail, self.late, self.events = receipt, fail, late, events
 
     @property
     def evidence(self) -> dict:
@@ -748,14 +733,29 @@ class _PhaseScopedReceipt:
             raise ProbeError(message)
         return copy.deepcopy(self.receipt)
 
+    def dispose_stage(self) -> dict:
+        self.events.append("stage.dispose")
+        if self.late == "disposal":
+            message = "stage disposal sentinel"
+            raise ProbeError(message)
+        if self.late == "disposal-cancel":
+            raise KeyboardInterrupt
+        return stage_disposal(self.receipt)
+
 
 def _phase_scope(context: SimpleNamespace, budget: _PhaseBudget, case: _PhaseCase) -> None:
     """Model only scoped prerequisite preparation, inside the independent live budget."""
     budget.checkpoint()
     context.scoped_calls += 1
     if not case.scope_missing:
-        receipt = experimental_receipt() if case.scoped_receipt is None else case.scoped_receipt
-        context.backend.scoped_profile = _PhaseScopedReceipt(receipt, fail=case.late == "export")
+        receipt = (
+            scoped_receipt(phase=case.phase.value, architecture=case.architecture)
+            if case.scoped_receipt is None
+            else case.scoped_receipt
+        )
+        context.backend.scoped_profile = _PhaseScopedReceipt(
+            receipt, fail=case.late == "export", late=case.late, events=budget.events
+        )
 
 
 def _phase_cleanup(
@@ -775,6 +775,15 @@ def _phase_cleanup(
         raise ProbeError(message)
     if accounting is not None:
         accounting.finalized = True
+    if accounting is not None:
+        context.checks.append(
+            {
+                "name": "owned parent OOM lifecycle accounting",
+                "status": "passed",
+                "mode": case.mode,
+                "property": "no-additional-oom-killed-process-in-bound-lifetime",
+            }
+        )
     if case.late == "deadline":
         clock[0] += 61
     if case.late == "check":
@@ -790,7 +799,7 @@ class PhaseExecutionTests(unittest.TestCase):
             case.ledger,
             case.launcher,
             case.phase,
-            case.loaded_arch,
+            case.loaded_arch or case.architecture,
             case.expected,
             case.stage,
             case.probe_failure,
@@ -800,7 +809,13 @@ class PhaseExecutionTests(unittest.TestCase):
         budget = _PhaseBudget(self, events)
         archive = _PhaseArchive(budget)
         accounting = _PhaseLedger(budget) if ledger else None
-        identity = {"architecture": loaded_arch, "configDigest": "sha256:" + "a" * 64}
+        identity = {
+            "architecture": loaded_arch,
+            "configDigest": "sha256:" + "d" * 64,
+            "manifestDigest": "sha256:" + "c" * 64,
+            "archiveSha256": "b" * 64,
+            "sourceRevision": "a" * 40,
+        }
         context = SimpleNamespace(
             outer_engine=engine,
             backend=SimpleNamespace(oom_ledger=accounting, scoped_profile=None),
@@ -814,7 +829,16 @@ class PhaseExecutionTests(unittest.TestCase):
 
         def prepare() -> dict[str, str]:
             context.checks.append({"name": "prepare fixture", "status": "passed"})
-            return {"engine": engine, "clientVersion": "fixture client"}
+            return {
+                "engine": engine,
+                "clientVersion": "Docker version 29.8.2" if engine == "docker" else "podman version 5.4.2",
+                "serverVersion": "29.8.2",
+                "containerdVersion": "containerd 2.2.0",
+                "systemdVersion": "systemd 259",
+                "rootMode": "rootful",
+                "endpoint": "private-unix",
+                "storage": "invocation-owned",
+            }
 
         def load(path: Path) -> dict[str, str]:
             self.assertEqual(path, archive.path)
@@ -857,7 +881,7 @@ class PhaseExecutionTests(unittest.TestCase):
                 "name": "docker-29-conformance-rootless",
                 "tests": {"docker": {"launcher": launcher, "mode": "rootless", "outerPrivilege": "privileged"}},
             },
-            architecture="amd64",
+            architecture=case.architecture,
             use_sudo=False,
             archive=archive,
             phase=phase,
@@ -872,9 +896,12 @@ class PhaseExecutionTests(unittest.TestCase):
                     "GITHUB_EVENT_NAME": "workflow_dispatch",
                     "GITHUB_REF": "refs/heads/TheRealBecks/issue527",
                     "GITHUB_JOB": "smoke-build",
+                    "GITHUB_RUN_ID": "1",
+                    "GITHUB_RUN_ATTEMPT": "2",
                 },
             ),
             patch("scripts.runtime_tests.time.monotonic", side_effect=lambda: clock[0]),
+            patch("scripts.evidence_gate._active_validation_request", return_value="docker-rootless-diagnostic"),
             patch.object(runtime_tests, "RuntimeContext", return_value=context),
             patch.object(runtime_tests, "IsolatedStoreDiskBudget", return_value=budget),
             patch("scripts.runtime_docker._run_docker_phase", side_effect=probe) as control,
@@ -908,7 +935,7 @@ class PhaseExecutionTests(unittest.TestCase):
         for phase in (DockerProbePhase.CLEAN_CONTROL, DockerProbePhase.ENFORCEMENT):
             with self.subTest(phase=phase):
                 result, context, budget, _archive, events = self.execute(
-                    _PhaseCase(engine="docker", ledger=True, phase=phase)
+                    _PhaseCase(engine="docker", ledger=True, phase=phase, stage="owned-stage")
                 )
                 self.assertEqual(result["status"], "passed")
                 self.assertEqual(result["qualification"], "none")
@@ -978,7 +1005,12 @@ class PhaseExecutionTests(unittest.TestCase):
                 with self.subTest(ledger=ledger, phase=phase):
                     result, context, budget, _archive, events = self.execute(
                         _PhaseCase(
-                            engine="docker", ledger=ledger, phase=phase, probe_failure=True, cleanup_failure=True
+                            engine="docker",
+                            ledger=ledger,
+                            phase=phase,
+                            stage="owned-stage",
+                            probe_failure=True,
+                            cleanup_failure=True,
                         )
                     )
                     self.assertEqual(result["status"], "failed")
@@ -995,7 +1027,7 @@ class PhaseExecutionTests(unittest.TestCase):
         for ledger in (False, True):
             with self.subTest(ledger=ledger):
                 result, context, budget, _archive, _events = self.execute(
-                    _PhaseCase(engine="docker", ledger=ledger, cleanup_failure=True)
+                    _PhaseCase(engine="docker", ledger=ledger, stage="owned-stage", cleanup_failure=True)
                 )
                 self.assertEqual(context.probe_calls, 1)
                 self.assertEqual(result["status"], "failed")
@@ -1025,8 +1057,8 @@ class ProducerAuthorityTests(unittest.TestCase):
 
     def test_missing_normal_prerequisite_does_not_become_authority_without_stage(self) -> None:
         result, _context, _budget, _archive, _events = self.execute(_PhaseCase(engine="docker", ledger=True))
-        self.assertEqual(result["status"], "passed")
-        self.assertEqual(result["oomAccountingStatus"], "complete")
+        self.assertEqual(result["status"], "failed")
+        self.assertNotEqual(result["oomAccountingStatus"], "complete")
         self.assertEqual(result["qualification"], "none")
         self.assertEqual(result["prerequisiteAuthority"], "unavailable")
 
@@ -1068,6 +1100,45 @@ class ProducerAuthorityTests(unittest.TestCase):
         self.assertEqual(result["qualification"], "none")
         self.assertEqual(context.oom_accounting_mode, "diagnostic")
         self.assertEqual(context.probe_calls, 0)
+
+    def test_actual_maintained_phases_validate_root_facts_and_dispose_after_cleanup(self) -> None:
+        for phase in (DockerProbePhase.CLEAN_CONTROL, DockerProbePhase.ENFORCEMENT):
+            with self.subTest(phase=phase):
+                result, _context, _budget, _archive, events = self.execute(
+                    _PhaseCase(
+                        engine="docker",
+                        ledger=True,
+                        stage="owned-stage",
+                        phase=phase,
+                        scoped_receipt=scoped_receipt(purpose="maintained-prerequisite", phase=phase.value),
+                    )
+                )
+                self.assertEqual(result["status"], "passed")
+                self.assertEqual(result["qualification"], "complete")
+                self.assertEqual(result["oomAccountingStatus"], "complete")
+                self.assertEqual(result["prerequisiteAuthority"], "maintained-prerequisite")
+                if phase is DockerProbePhase.ENFORCEMENT:
+                    self.assertEqual(events[-2:], ["cleanup", "stage.dispose"])
+                    self.assertTrue(result["stageDisposal"]["stageDisposed"])
+                else:
+                    self.assertNotIn("stageDisposal", result)
+                    self.assertNotIn("stage.dispose", events)
+
+    def test_maintained_late_failures_never_publish_completion(self) -> None:
+        for late in ("export", "deadline", "check", "disposal", "disposal-cancel"):
+            with self.subTest(late=late):
+                result, _context, _budget, _archive, _events = self.execute(
+                    _PhaseCase(
+                        engine="docker",
+                        ledger=True,
+                        stage="owned-stage",
+                        late=late,
+                        scoped_receipt=scoped_receipt(purpose="maintained-prerequisite", phase="enforcement"),
+                    )
+                )
+                self.assertEqual(result["status"], "failed")
+                self.assertEqual(result["qualification"], "none")
+                self.assertNotEqual(result["oomAccountingStatus"], "complete")
 
 
 class _PairArchiveFixture:
@@ -1126,16 +1197,30 @@ class _PairOpenFixture:
 class PairAuthorityTests(unittest.TestCase):
     execute = PhaseExecutionTests.execute
 
-    def pair(self, *, engine: str = "docker", late: str | None = None, mixed: bool = False) -> tuple[dict, list[str]]:
+    def pair(
+        self,
+        *,
+        engine: str = "docker",
+        late: str | None = None,
+        mixed: bool = False,
+        maintained: bool = False,
+        architecture: str = "amd64",
+    ) -> tuple[dict, list[str]]:
         actual = []
         for phase in (DockerProbePhase.CLEAN_CONTROL, DockerProbePhase.ENFORCEMENT):
             result, _ctx, _budget, _archive, _events = self.execute(
                 _PhaseCase(
                     engine=engine,
+                    architecture=architecture,
                     ledger=engine == "docker",
                     phase=phase,
                     stage="owned-stage" if engine == "docker" else None,
-                    focused="mandatory-accounting" if engine == "docker" else "none",
+                    focused="mandatory-accounting" if engine == "docker" and not maintained else "none",
+                    scoped_receipt=scoped_receipt(
+                        purpose="maintained-prerequisite", phase=phase.value, architecture=architecture
+                    )
+                    if maintained
+                    else None,
                 )
             )
             actual.append(result)
@@ -1149,7 +1234,7 @@ class PairAuthorityTests(unittest.TestCase):
             args = argparse.Namespace(
                 oom_accounting_mode="qualification",
                 outer_engine=engine,
-                focused_runtime="mandatory-accounting" if engine == "docker" else "none",
+                focused_runtime="mandatory-accounting" if engine == "docker" and not maintained else "none",
                 active_userns_stage="owned-stage" if engine == "docker" else None,
                 skip_nested=False,
                 allow_privileged=True,
@@ -1161,7 +1246,16 @@ class PairAuthorityTests(unittest.TestCase):
                 "name": "docker-29-conformance-rootless",
                 "tests": {"docker": {"launcher": "systemd", "mode": "rootless"}},
             }
-            evidence = {"status": "failed", "checks": [], "host": {}, "architecture": "amd64"}
+            evidence = {
+                "image": "docker-29-conformance-rootless",
+                "runId": "1",
+                "runAttempt": "2",
+                "producingJob": "smoke-build",
+                "status": "failed",
+                "checks": [],
+                "host": {"outerEngineSelection": "profile"},
+                "architecture": architecture,
+            }
             open_record = _PairOpenFixture(Path(args.evidence), clock, late=late == "write")
 
             def bound_open(path: Path, *arguments: object, **keywords: object) -> object:
@@ -1184,7 +1278,9 @@ class PairAuthorityTests(unittest.TestCase):
         self.assertEqual(result["oomAccountingStatus"], "complete")
         self.assertEqual(result["qualification"], "none")
         self.assertTrue(all(phase["qualification"] == "none" for phase in result["phases"]))
-        self.assertTrue(all(phase["scopedProfile"] == experimental_receipt() for phase in result["phases"]))
+        self.assertTrue(
+            all(phase["scopedProfile"] == scoped_receipt(phase=phase["phase"]) for phase in result["phases"])
+        )
 
     def test_actual_pair_late_archive_and_deadline_failures_clear_all_completion_labels(self) -> None:
         for late in ("verify", "close", "deadline"):
@@ -1205,6 +1301,22 @@ class PairAuthorityTests(unittest.TestCase):
         mixed, _events = self.pair(engine="podman", mixed=True)
         self.assertEqual(mixed["qualification"], "none")
         self.assertTrue(all(phase["qualification"] == "none" for phase in mixed["phases"]))
+
+    def test_actual_maintained_pair_reaches_canonical_authority_after_both_phases(self) -> None:
+        result, _events = self.pair(maintained=True)
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(result["qualification"], "complete")
+        self.assertEqual(result["oomAccountingStatus"], "complete")
+        with patch.dict(os.environ, {}, clear=True):
+            require_ordinary_runtime_authority(result, "docker", {"launcher": "systemd", "mode": "rootless"})
+
+    def test_actual_maintained_pair_late_archive_deadline_and_writer_failures_revoke_authority(self) -> None:
+        for late in ("verify", "close", "deadline", "write"):
+            with self.subTest(late=late):
+                result, _events = self.pair(maintained=True, late=late)
+                self.assertEqual(result["status"], "failed")
+                self.assertEqual(result["qualification"], "none")
+                self.assertTrue(all(phase["qualification"] == "none" for phase in result["phases"]))
 
 
 class LatePairEvidenceTests(unittest.TestCase):

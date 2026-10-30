@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from scripts import container_engine
+from scripts import docker_userns_qualification as prerequisite
 from scripts.admission import image_policy
 from scripts.docker_userns_qualification import MAX_NAMESPACES, NativeBinding, QualificationError, validation_profile
 from scripts.oci_artifacts import archive_identity
@@ -145,10 +146,11 @@ def _active_scoped_required(record: dict[str, Any]) -> bool:
 
 def _scoped_preflight(scoped: dict[str, Any]) -> bool:
     """Check the active helper's finite actual-host facts against reviewed admission."""
-    admission = json.loads(
-        (Path(__file__).resolve().parents[1] / ".github/docker-userns-active-admission.json").read_text()
+    admission = prerequisite.admission_document(
+        (Path(__file__).resolve().parents[1] / ".github/docker-userns-active-admission.json").read_bytes()
     )
-    cohort, facts = admission["cohort"], scoped["preflight"]
+    cohort = prerequisite.active_cohort(admission, scoped["workflowContext"])
+    facts = scoped["preflight"]
     controls, namespace = facts["controls"], scoped["namespace"]
     keys = ("parserSha256", "abiSha256", "namespaceMaskSha256", "policyVersion9Sha256", "interpreterSha256")
     return (
@@ -172,27 +174,72 @@ def _scoped_preflight(scoped: dict[str, Any]) -> bool:
     )
 
 
-def _scoped_phase(record: dict[str, Any], phase: dict[str, Any]) -> None:
+def _scoped_binding(record: dict[str, Any], scoped: dict[str, Any], expected_purpose: str | None) -> NativeBinding:
+    """Bind the closed receipt envelope to intrinsic aggregate and admission identity."""
+    raw = (Path(__file__).resolve().parents[1] / ".github/docker-userns-active-admission.json").read_bytes()
+    admission = prerequisite.admission_document(raw)
+    context = scoped["workflowContext"]
+    prerequisite.validate_workflow_context(context, admission, hashlib.sha256(raw).hexdigest())
+    binding = NativeBinding(**scoped["binding"])
+    binding.validate()
+    if (
+        set(scoped) != prerequisite.SCOPED_RECEIPT_KEYS
+        or type(scoped["schemaVersion"]) is not int
+        or scoped["schemaVersion"] != prerequisite.PREREQUISITE_SCHEMA
+        or (expected_purpose is not None and binding.purpose != expected_purpose)
+        or scoped["purpose"] != binding.purpose
+        or context["purpose"] != binding.purpose
+        or scoped["admissionRevision"] != context["admissionRevision"]
+        or scoped["admissionSha256"] != context["admissionSha256"]
+        or binding.admission_sha256 != context["admissionSha256"]
+        or binding.workflow_context_sha256 != prerequisite.context_digest(context)
+        or type(scoped["bootstrapSha256"]) is not str
+        or re.fullmatch(r"[0-9a-f]{64}", scoped["bootstrapSha256"]) is None
+        or binding.run != context["run"]
+        or binding.run != record["runId"]
+        or binding.attempt != context["attempt"]
+        or binding.attempt != record["runAttempt"]
+        or binding.job != context["job"]
+        or binding.job != record["producingJob"]
+        or binding.candidate != context["candidate"]
+        or binding.image != context["image"]
+        or binding.architecture != context["architecture"]
+        or binding.architecture != record["architecture"]
+        or context["imageVersion"] != scoped["imageVersion"]
+        or context["validationProfileRequested"] != scoped["validationProfileRequested"]
+        or ("workflowContext" in record and record["workflowContext"] != context)
+    ):
+        reason = "context"
+        raise QualificationError(reason)
+    return binding
+
+
+def _scoped_phase(record: dict[str, Any], phase: dict[str, Any], *, expected_purpose: str | None = None) -> str:
     """Require exact archived image, actual profile readback and completed custody."""
     scoped = phase.get("scopedProfile")
     if not isinstance(scoped, dict):
         reason = "Active systemd candidate lacks scoped qualification evidence."
         raise EvidenceError(reason)
     try:
-        binding = NativeBinding(**scoped["binding"])
-        binding.validate()
+        binding = _scoped_binding(record, scoped, expected_purpose)
+        context = scoped["workflowContext"]
         identity = phase["imageIdentity"]
         observation = scoped["profileObservation"]
         valid = (
             _scoped_preflight(scoped)
             and scoped["consumer"] == "containers-ubuntu26-userns-active"
-            and scoped["qualification"] == "experimental-candidate-only"
-            and scoped["validationProfile"] == "docker-rootless-diagnostic"
+            and scoped["qualification"]
+            == (
+                "maintained-prerequisite"
+                if binding.purpose == prerequisite.MAINTAINED_PURPOSE
+                else "experimental-candidate-only"
+            )
+            and scoped["validationProfile"] == context["validationProfile"]
             and validation_profile(scoped["validationProfileRequested"]) == scoped["validationProfile"]
             and scoped["bindingSha256"] == binding.digest()
             and binding.phase == phase["phase"]
             and binding.image == record["image"]
-            and binding.architecture == phase["architecture"] == "amd64"
+            and binding.architecture == phase["architecture"]
             and binding.archive_sha256 == identity["archiveSha256"]
             and binding.manifest_digest == identity["manifestDigest"]
             and binding.config_digest == identity["configDigest"]
@@ -226,38 +273,72 @@ def _scoped_phase(record: dict[str, Any], phase: dict[str, Any]) -> None:
             and observation["taskIdentityBound"] is True
             and observation["timing"] == "post-create"
         )
-        # The workflow's ImageVersion is provenance and is compared only with
-        # the frozen same-job report, never treated as independent VM attestation.
-        if _active_candidate(record):
-            valid = valid and scoped["validationProfileRequested"] == _active_validation_request()
-        if os.environ.get(IMAGE_VERSION_ENV):
-            valid = valid and scoped["imageVersion"] == os.environ[IMAGE_VERSION_ENV]
-        if os.environ.get("GITHUB_SHA"):
-            valid = valid and binding.candidate == os.environ["GITHUB_SHA"]
-        if os.environ.get("GITHUB_RUN_ID"):
-            valid = valid and binding.run == os.environ["GITHUB_RUN_ID"]
-        if os.environ.get("GITHUB_RUN_ATTEMPT"):
-            valid = valid and binding.attempt == os.environ["GITHUB_RUN_ATTEMPT"]
-    except KeyError, TypeError, ValueError, QualificationError:
+        if binding.purpose == prerequisite.EXPERIMENTAL_PURPOSE:
+            # The workflow's ImageVersion is provenance and is compared only with
+            # the frozen same-job report, never treated as independent VM attestation.
+            if _active_candidate(record):
+                valid = valid and scoped["validationProfileRequested"] == _active_validation_request()
+            if os.environ.get(IMAGE_VERSION_ENV):
+                valid = valid and scoped["imageVersion"] == os.environ[IMAGE_VERSION_ENV]
+            if os.environ.get("GITHUB_SHA"):
+                valid = valid and binding.candidate == os.environ["GITHUB_SHA"]
+            if os.environ.get("GITHUB_RUN_ID"):
+                valid = valid and binding.run == os.environ["GITHUB_RUN_ID"]
+            if os.environ.get("GITHUB_RUN_ATTEMPT"):
+                valid = valid and binding.attempt == os.environ["GITHUB_RUN_ATTEMPT"]
+    except KeyError, TypeError, ValueError, AttributeError, QualificationError:
         valid = False
     if not valid:
         reason = "Active systemd candidate scoped identity, attachment or cleanup is unverified."
         raise EvidenceError(reason)
+    return binding.purpose
+
+
+def _maintained_phase(record: dict[str, Any], expected_phase: str, phase: object) -> None:
+    """Require a completed genuine phase and its original mandatory accounting outcome."""
+    if (
+        not isinstance(phase, dict)
+        or phase.get("phase") != expected_phase
+        or phase.get("prerequisiteAuthority") != prerequisite.MAINTAINED_PURPOSE
+        or phase.get("qualification") != "complete"
+        or phase.get("oomAccountingMode") != record["oomAccountingMode"]
+        or phase.get("oomAccountingStatus") != record["oomAccountingStatus"]
+        or phase.get("oomAccountingRequired") is not True
+        or phase.get("focusedRuntime") != "none"
+        or phase.get("status") != "passed"
+        or phase.get("cleanupVerified") is not True
+    ):
+        reason = "Required phase authority/accounting differs from the aggregate."
+        raise EvidenceError(reason)
+    checks = phase.get("checks")
+    accounting = (
+        [
+            item
+            for item in checks
+            if isinstance(item, dict) and item.get("name") == "owned parent OOM lifecycle accounting"
+        ]
+        if isinstance(checks, list)
+        else []
+    )
+    if (
+        len(accounting) != 1
+        or accounting[0].get("status") != "passed"
+        or accounting[0].get("mode") != "qualification"
+        or accounting[0].get("property") != "no-additional-oom-killed-process-in-bound-lifetime"
+    ):
+        reason = "Required phase lacks its actual completed accounting outcome."
+        raise EvidenceError(reason)
+    _scoped_phase(record, phase, expected_purpose=prerequisite.MAINTAINED_PURPOSE)
 
 
 def require_ordinary_runtime_authority(record: dict[str, Any], profile: str, configuration: object) -> None:
-    """Reject experimental authority using trusted metadata, never consumer env."""
+    """Validate maintained authority using trusted metadata and intrinsic root evidence."""
     phases = record.get("phases", [])
     records = (
         [record, *(phase for phase in phases if isinstance(phase, dict))] if isinstance(phases, list) else [record]
     )
-    if any(
-        item.get("focusedRuntime", "none") != "none"
-        or "scopedProfile" in item
-        or item.get("scopedProfileRequired") is True
-        for item in records
-    ):
-        reason = "Focused, experimental or required scoped evidence is not ordinary native authority."
+    if any(item.get("focusedRuntime", "none") != "none" for item in records):
+        reason = "Focused evidence is not ordinary native authority."
         raise EvidenceError(reason)
     if any("qualification" in item and item["qualification"] != "complete" for item in records):
         reason = "Runtime evidence explicitly lacks ordinary native qualification."
@@ -269,9 +350,13 @@ def require_ordinary_runtime_authority(record: dict[str, Any], profile: str, con
         and configuration.get("mode") == "rootless"
     )
     if not required:
+        if any("scopedProfile" in item or item.get("scopedProfileRequired") is True for item in records):
+            reason = "Unexpected scoped authority on an unrelated ordinary route."
+            raise EvidenceError(reason)
         return
     if (
-        not isinstance(phases, list)
+        record.get("status") != "passed"
+        or not isinstance(phases, list)
         or len(phases) != REQUIRED_SYSTEMD_PHASE_COUNT
         or record.get("qualification") != "complete"
         or record.get("oomAccountingMode") != "qualification"
@@ -281,41 +366,29 @@ def require_ordinary_runtime_authority(record: dict[str, Any], profile: str, con
     ):
         reason = "Required systemd runtime authority/accounting fields are missing or contradictory."
         raise EvidenceError(reason)
-    for phase in phases:
-        if (
-            not isinstance(phase, dict)
-            or phase.get("qualification") != "complete"
-            or phase.get("oomAccountingMode") != record["oomAccountingMode"]
-            or phase.get("oomAccountingStatus") != record["oomAccountingStatus"]
-            or phase.get("oomAccountingRequired") is not True
-            or phase.get("focusedRuntime") != "none"
-            or phase.get("status") != "passed"
-            or phase.get("cleanupVerified") is not True
-        ):
-            reason = "Required phase authority/accounting differs from the aggregate."
-            raise EvidenceError(reason)
-        checks = phase.get("checks")
-        accounting = (
-            [
-                item
-                for item in checks
-                if isinstance(item, dict) and item.get("name") == "owned parent OOM lifecycle accounting"
-            ]
-            if isinstance(checks, list)
-            else []
-        )
-        if (
-            len(accounting) != 1
-            or accounting[0].get("status") != "passed"
-            or accounting[0].get("mode") != "qualification"
-            or accounting[0].get("property") != "no-additional-oom-killed-process-in-bound-lifetime"
-        ):
-            reason = "Required phase lacks its actual completed accounting outcome."
-            raise EvidenceError(reason)
-    # There is currently no maintained normal prerequisite for this route.
-    # Labels, a matching total or consumer environment cannot invent one.
-    reason = "Private Docker systemd evidence has no supported maintained normal prerequisite authority."
-    raise EvidenceError(reason)
+    for expected_phase, phase in zip(("clean-control", "enforcement"), phases, strict=True):
+        _maintained_phase(record, expected_phase, phase)
+    first, last = phases
+    if (
+        record.get("prerequisitePurpose") != prerequisite.MAINTAINED_PURPOSE
+        or "scopedProfile" in record
+        or record.get("workflowContext") != first["scopedProfile"]["workflowContext"]
+        or first["scopedProfile"]["workflowContext"] != last["scopedProfile"]["workflowContext"]
+        or first["scopedProfile"]["bootstrapSha256"] != last["scopedProfile"]["bootstrapSha256"]
+        or first["scopedProfile"]["binding"]["owner"] == last["scopedProfile"]["binding"]["owner"]
+        or first["scopedProfile"]["lease"] == last["scopedProfile"]["lease"]
+        or record.get("stageDisposal") != last.get("stageDisposal")
+    ):
+        reason = "Required phases do not share the exact maintained source/stage context."
+        raise EvidenceError(reason)
+    try:
+        prerequisite.validate_stage_disposal(record.get("stageDisposal"), last["scopedProfile"])
+    except (QualificationError, ValueError, TypeError, KeyError, AttributeError) as error:
+        reason = "Maintained prerequisite stage disposal is unverified."
+        raise EvidenceError(reason) from error
+    _outer_runtime(record, profile)
+    _systemd_phase_backends(record, profile, configuration)
+    _runtime_skips(record, nested_disabled=False, profile=profile)
 
 
 def _systemd_phase_backends(record: dict[str, Any], profile: str, configuration: object) -> None:
@@ -341,7 +414,7 @@ def _systemd_phase_backends(record: dict[str, Any], profile: str, configuration:
         ):
             msg = "Systemd Docker phase identity, admission or cleanup differs from its required contract."
             raise EvidenceError(msg)
-        if _active_scoped_required(record):
+        if "scopedProfile" in phase or _active_scoped_required(record):
             _scoped_phase(record, phase)
         _runtime_skips(phase, nested_disabled=False, profile="docker")
         _outer_runtime(

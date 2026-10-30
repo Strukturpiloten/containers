@@ -15,6 +15,7 @@ import yaml
 
 from scripts import container_engine as engine
 from scripts.workflow_config import load_config
+from tests.test_evidence_gate import maintained_runtime
 
 
 def render_workflow_value(
@@ -537,6 +538,75 @@ class DiagnosticDispatchTests(unittest.TestCase):
     def test_generated_workflow_matches_canonical_template(self) -> None:
         generated = engine._workflow_environment().get_template("ci.yml.j2").render(config=load_config(self.root))
         self.assertEqual(generated, (self.root / ".github/workflows/ci.yml").read_text())
+
+    def test_actual_action_retains_failure_fallback_until_maintained_disposal_and_authority(self) -> None:
+        action = yaml.safe_load((self.root / ".github/actions/build-arch-image/action.yml").read_text())
+        runtime = next(step for step in action["runs"]["steps"] if step.get("name") == "Verify image runtime")
+        tail = "finish_active_stage() {" + runtime["run"].split("finish_active_stage() {", 1)[1]
+        # Only runtime and sudo boundaries are inert; execute the actual ordinary guard and EXIT trap.
+        shim = r"""set -euo pipefail
+runtime_args=()
+active_stage=/run/containers-userns-active.ffffffffffffffffffffffffffffffff
+sudo() {
+  printf 'fallback-dispose\n' >> "${TEST_EVENTS}"
+  return "${TEST_DISPOSAL_EXIT}"
+}
+uv() {
+  if [[ "$*" == *"scripts.runtime_tests"* ]]; then
+    printf 'runtime\n' >> "${TEST_EVENTS}"
+    cp "${TEST_FIXTURE}" "${RUNNER_TEMP}/runtime-evidence/${IMAGE_NAME}-${IMAGE_ARCH}.json"
+    return "${TEST_RUNTIME_EXIT}"
+  fi
+  printf 'authority\n' >> "${TEST_EVENTS}"
+  while [ "$1" != python ]; do shift; done
+  shift
+  "${TEST_PYTHON}" "$@"
+}
+if true; then
+"""
+        for architecture, fault in (
+            (architecture, fault)
+            for architecture in ("amd64", "arm64")
+            for fault in (None, "runtime", "invalid-ack", "fallback-failure")
+        ):
+            with self.subTest(architecture=architecture, fault=fault), tempfile.TemporaryDirectory() as directory:
+                root_path = Path(directory)
+                (root_path / "runtime-evidence").mkdir()
+                fixture = root_path / "fixture.json"
+                events = root_path / "events"
+                record = maintained_runtime(architecture)
+                if fault in {"invalid-ack", "fallback-failure"}:
+                    record["stageDisposal"]["stageDisposed"] = False
+                fixture.write_text(json.dumps(record))
+                result = subprocess.run(  # noqa: S603 - inert runtime/sudo functions; actual repository shell and data guard.
+                    ["/bin/bash", "-c", shim + tail],
+                    cwd=self.root,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    env={
+                        **os.environ,
+                        "RUNNER_TEMP": directory,
+                        "TEST_FIXTURE": str(fixture),
+                        "TEST_EVENTS": str(events),
+                        "TEST_PYTHON": os.sys.executable,
+                        "TEST_RUNTIME_EXIT": "1" if fault == "runtime" else "0",
+                        "TEST_DISPOSAL_EXIT": "1" if fault == "fallback-failure" else "0",
+                        "IMAGE_NAME": record["image"],
+                        "IMAGE_ARCH": architecture,
+                        "VALIDATION_PROFILE": "full",
+                        "IMAGE_PATH": "unused.tar",
+                        "PYTHON_VERSION": "3.14",
+                        "FOCUSED_RUNTIME": "none",
+                    },
+                )
+                self.assertEqual(result.returncode == 0, fault is None, result.stderr)
+                expected = ["runtime", "authority"]
+                if fault == "runtime":
+                    expected = ["runtime"]
+                if fault is not None:
+                    expected.append("fallback-dispose")
+                self.assertEqual(events.read_text().splitlines(), expected)
 
 
 if __name__ == "__main__":

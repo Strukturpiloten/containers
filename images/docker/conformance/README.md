@@ -181,11 +181,26 @@ Its orthogonal `focused_runtime` choice defaults to `witness-diagnostic`;
 that optional witness. Both choices are nonqualifying and require the exact
 existing issue527 context. An experimental AMD64 result may report operation
 passed and accounting complete while phase and aggregate qualification stay
-none. ARM still observes/refuses load. The current private Docker route has no
-maintained normal prerequisite; mode, stage or status cannot supply it. Ordinary
-Action/publisher/release/catalogue consumers enforce that boundary independently
-of the requesting environment. Normal prerequisite rollout and ARM qualification
-remain separate milestones, not completed by this experiment.
+none. ARM still observes/refuses load.
+
+The existing full/manual `ci.yml` route admits a maintained AMD64 or ARM64 prerequisite
+attempt on repository-owned GitHub-hosted Linux for this fixture and its private
+outer Docker backend. Root derives the purpose and selected manual ref from the
+fixed event and connected candidate source proof, with candidate/workflow/checkout
+source equality and the complete reviewed cohort for the selected architecture. Full selection keeps
+`focused_runtime=none` and the original qualification workload. Each phase must
+supply genuine, context/admission-bound host/profile and cleanup evidence; both
+original ledgers must finalize. Existing root stage disposal must succeed and
+acknowledge the same immutable stage before aggregate authority is published.
+Late failures and failed producing steps retain no native authority. Ordinary
+Action/publisher/release/catalogue consumers share this decision independently
+of the consumer environment. PR/push/merge/schedule/publication/local activation
+remain unadmitted. Diagnostic ARM still observes/refuses; maintained ARM uses
+its own held parser/interpreter, ABI/features and namespace predicate under the
+existing preinstalled-tool trust exception. Reported ImageVersion is same-job
+provenance, not VM/vendor binary attestation. The full matrix is unchanged;
+source admission for both architectures claims no native success or publication
+permission.
 
 The opt-in repository-owned `memory-witness` mode runs as inner PID1 with one
 bounded allocator child in the same 32 MiB, zero-swap, 16-PID leaf. It reads and

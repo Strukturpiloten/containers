@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from scripts.docker_userns_qualification import NativeBinding, State
 
 CONSUMER = "containers-ubuntu26-userns-active"
+PREREQUISITE_SCHEMA = 2
 ROOT = Path("/run")
 PREFIX = "containers-userns-active."
 MAX_STATE = 32768
@@ -544,7 +545,8 @@ def verify_stage(stage: Path) -> dict[str, Any]:
     bootstrap = json.loads(root_bytes(stage / "bootstrap.json"), object_pairs_hook=unique)
     require(
         bootstrap["consumer"] == CONSUMER
-        and bootstrap["schemaVersion"] == 1
+        and type(bootstrap["schemaVersion"]) is int
+        and bootstrap["schemaVersion"] == PREREQUISITE_SCHEMA
         and bootstrap["stageIdentity"] == [info.st_dev, info.st_ino]
         and set(bootstrap["files"]) == set(FILES)
     )
@@ -673,56 +675,21 @@ class Clock:
 def preflight_authority(
     stage: Path, bootstrap: dict[str, Any], modules: SimpleNamespace, *, progress: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    """Check the immutable source and strict reported workflow provenance only."""
+    """Authenticate the purpose/admission from the connected, immutable root stage."""
     progress = {} if progress is None else progress
     progress["phase"] = "preflight-source"
-    context = bootstrap["context"]
-    admission = json.loads(root_bytes(stage / ".github/docker-userns-active-admission.json"), object_pairs_hook=unique)
-    require(
-        set(admission)
-        == {
-            "schemaVersion",
-            "consumer",
-            "purpose",
-            "qualification",
-            "sourceManifestSha256",
-            "context",
-            "cohort",
-            "architectures",
-            "policyNamespace",
-            "parserExecutionNamespace",
-            "review",
-        }
-    )
-    require(
-        admission["schemaVersion"] == 1
-        and admission["consumer"] == CONSUMER
-        and admission["purpose"] == "single-candidate-qualification"
-        and admission["qualification"] == "none"
-    )
-    comparison(
-        progress,
-        "preflight-source",
-        digest(root_bytes(stage / ".github/docker-userns-policy-source.json")) == admission["sourceManifestSha256"],
-    )
-    progress["phase"] = "admission"
-    expected = admission["context"]
-    require(
-        context["repository"] == expected["repository"] == "Strukturpiloten/containers"
-        and context["event"] == expected["event"] == "workflow_dispatch"
-        and context["ref"] == expected["ref"] == "refs/heads/TheRealBecks/issue527"
-        and context["job"] == expected["job"] == "smoke-build"
-        and context["image"] == expected["image"] == "docker-29-conformance-rootless"
-        and expected["imageOS"] == "ubuntu26"
-        and context["architecture"] in REPORTED_IMAGE_OS
-        and context["imageOS"] == REPORTED_IMAGE_OS[context["architecture"]]
-        and context["validationProfile"] == expected["validationProfile"] == "docker-rootless-diagnostic"
-        and modules.qualification.validation_profile(context["validationProfileRequested"])
-        == context["validationProfile"]
-        and context["candidate"] == context["workflow"] == context["checkout"]
-        and re.fullmatch(r"[0-9a-f]{40}", context["candidate"])
-        and re.fullmatch(r"[0-9]{8}\.[0-9]+\.[0-9]+", context["imageVersion"])
-    )
+    raw = root_bytes(stage / ".github/docker-userns-active-admission.json")
+    try:
+        admission = modules.qualification.admission_document(raw)
+        comparison(
+            progress,
+            "preflight-source",
+            digest(root_bytes(stage / ".github/docker-userns-policy-source.json")) == admission["sourceManifestSha256"],
+        )
+        progress["phase"] = "admission"
+        modules.qualification.validate_workflow_context(bootstrap["context"], admission, digest(raw))
+    except modules.qualification.QualificationError, ValueError, KeyError, TypeError, AttributeError:
+        raise RefusedError from None
     return admission
 
 
@@ -761,7 +728,8 @@ def root_preflight(
     """Evaluate the collected facts against the reviewed compatibility contract."""
     progress = {} if progress is None else progress
     admission = preflight_authority(stage, bootstrap, modules, progress=progress)
-    context, cohort = bootstrap["context"], admission["cohort"]
+    context = bootstrap["context"]
+    cohort = modules.qualification.active_cohort(admission, context)
 
     def evaluate(kind: str, facts: dict[str, Any]) -> None:
         if kind == "os":
@@ -772,8 +740,7 @@ def root_preflight(
             )
         else:
             require(facts["machine"] == {"amd64": "x86_64", "arm64": "aarch64"}[context["architecture"]])
-            if context["architecture"] == "amd64":
-                require(facts["machine"] == cohort["machine"] and facts["kernel"] == cohort["kernel"])
+            require(facts["machine"] == cohort["machine"] and facts["kernel"] == cohort["kernel"])
             comparison(progress, "preflight-host", matched=True)
 
     facts: dict[str, Any] = {}
@@ -782,7 +749,7 @@ def root_preflight(
     check(bootstrap["deadlineNs"] - RESERVE_NS)
     controls = modules.qualification.observe_controls(bootstrap["deadlineNs"] - RESERVE_NS)
     comparison(progress, "preflight-controls", matched=True)
-    files = cohort_files(modules, context, cohort, progress)
+    files = cohort_files(modules, cohort, progress)
     check(bootstrap["deadlineNs"] - RESERVE_NS)
     return {
         "controls": asdict(controls),
@@ -795,14 +762,11 @@ def root_preflight(
     }
 
 
-def cohort_files(
-    modules: SimpleNamespace, context: dict[str, Any], cohort: dict[str, Any], progress: dict[str, Any]
-) -> dict[str, Any]:
+def cohort_files(modules: SimpleNamespace, cohort: dict[str, Any], progress: dict[str, Any]) -> dict[str, Any]:
     """Read the same fixed cohort leaves and retain only completed comparison booleans on failure."""
 
     def evaluate(key: str, raw: bytes, phase: str) -> None:
-        if context["architecture"] == "amd64" or key not in {"parserSha256", "interpreterSha256"}:
-            comparison(progress, phase, digest(raw) == cohort[key])
+        comparison(progress, phase, digest(raw) == cohort[key])
 
     files: dict[str, Any] = {}
     collect_cohort_files(modules, progress, files, evaluate)
@@ -858,10 +822,12 @@ def compile_worker(bootstrap: dict[str, Any], modules: SimpleNamespace, director
     admission = json.loads(
         root_bytes(directory.parent.parent / ".github/docker-userns-active-admission.json"), object_pairs_hook=unique
     )
+    cohort = modules.qualification.active_cohort(admission, bootstrap["context"])
     namespace_snapshot(modules, admission)
     policy = root_bytes(directory / "policy", 1024)
     require(digest(policy) == record["policySha256"])
     with modules.source.hold_executable(Path("/usr/sbin/apparmor_parser"), 16 * 1024 * 1024, 0) as parser:
+        require(parser.file.public()["sha256"] == cohort["parserSha256"])
         os.setgroups([])
         os.setresgid(bootstrap["gid"], bootstrap["gid"], bootstrap["gid"])
         os.setresuid(bootstrap["uid"], bootstrap["uid"], bootstrap["uid"])
@@ -973,8 +939,23 @@ class RootPort:
         self.stage, self.bootstrap, self.modules, self.store, self.record = stage, bootstrap, modules, store, record
         self.binding = modules.qualification.NativeBinding(**record["binding"])
         self.binding.validate()
-        self.admission = json.loads(
-            root_bytes(stage / ".github/docker-userns-active-admission.json"), object_pairs_hook=unique
+        raw = root_bytes(stage / ".github/docker-userns-active-admission.json")
+        self.admission = modules.qualification.admission_document(raw)
+        modules.qualification.validate_workflow_context(bootstrap["context"], self.admission, digest(raw))
+        context = bootstrap["context"]
+        require(
+            type(record["schemaVersion"]) is int
+            and record["schemaVersion"] == PREREQUISITE_SCHEMA
+            and record["bindingSha256"] == self.binding.digest()
+            and record["bootstrapSha256"] == digest(root_bytes(stage / "bootstrap.json"))
+            and self.binding.purpose == context["purpose"]
+            and self.binding.admission_sha256 == context["admissionSha256"]
+            and self.binding.workflow_context_sha256 == modules.qualification.context_digest(context)
+            and all(
+                getattr(self.binding, key) == context[key]
+                for key in ("candidate", "run", "attempt", "job", "architecture", "image")
+            )
+            and self.binding.deadline_ns <= bootstrap["deadlineNs"]
         )
         self.work_until = self.binding.deadline_ns - RESERVE_NS - FINALIZER_HEADSTART_NS
         self.cleanup = False
@@ -1136,7 +1117,9 @@ class RootPort:
             cutoff = min(end - 1_000_000_000, time.monotonic_ns() + 5_000_000_000)
             check(cutoff)
             outcome = self.modules.child.probe(
-                self.modules.child.Interpreter(interpreter, self.admission["cohort"]["interpreterSha256"]),
+                self.modules.child.Interpreter(
+                    interpreter, self.admission["cohorts"][self.binding.architecture]["interpreterSha256"]
+                ),
                 parser,
                 "parser-version",
                 self.modules.child.Build("version", self.bootstrap["uid"], self.bootstrap["gid"], cutoff, end),
@@ -1183,8 +1166,17 @@ class RootPort:
         comparison(
             self.point("admission"),
             "admission",
-            binding.architecture == "amd64"
-            and self.admission["architectures"]["amd64"] == "experimental-load-candidate",
+            (
+                (
+                    binding.architecture == "amd64"
+                    and binding.purpose == self.modules.qualification.EXPERIMENTAL_PURPOSE
+                    and self.admission["architectures"]["amd64"] == "experimental-load-candidate"
+                )
+                or (
+                    binding.purpose == self.modules.qualification.MAINTAINED_PURPOSE
+                    and self.admission["maintainedArchitectures"].get(binding.architecture) == "maintained-prerequisite"
+                )
+            ),
         )
         for path in (
             Path("/usr/bin/gnutimeout") if self.provider.endswith("gnutimeout") else Path("/usr/bin/timeout"),
@@ -1250,7 +1242,9 @@ class RootPort:
         try:
             with child.observing(observer):
                 outcome = child.build(
-                    child.Interpreter(interpreter, self.admission["cohort"]["interpreterSha256"]),
+                    child.Interpreter(
+                        interpreter, self.admission["cohorts"][self.binding.architecture]["interpreterSha256"]
+                    ),
                     sources,
                     child.Build(
                         self.record["profileName"],
@@ -1326,7 +1320,9 @@ class RootPort:
         require(namespace_snapshot(self.modules, self.admission) == self.record["namespace"])
         self.verify_owner("owner")
         with self.modules.source.hold_executable(Path("/usr/sbin/apparmor_parser"), 16 * 1024 * 1024, 0) as parser:
-            require(parser.file.public()["sha256"] == self.admission["cohort"]["parserSha256"])
+            require(
+                parser.file.public()["sha256"] == self.admission["cohorts"][self.binding.architecture]["parserSha256"]
+            )
             descriptor = os.open(self.store.path / "policy", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
             try:
                 require(digest(root_bytes(self.store.path / "policy", 1024)) == self.record["policySha256"])
@@ -2037,6 +2033,16 @@ def new_record(
     require(set(request) == {"binding", "daemonDirectory", "timeoutExecutable", "coordinatorPid"})
     binding = modules.qualification.NativeBinding(**request["binding"])
     binding.validate()
+    context = bootstrap["context"]
+    require(
+        binding.purpose == context["purpose"]
+        and binding.admission_sha256 == context["admissionSha256"]
+        and binding.workflow_context_sha256 == modules.qualification.context_digest(context)
+        and all(
+            getattr(binding, key) == context[key]
+            for key in ("candidate", "run", "attempt", "job", "architecture", "image")
+        )
+    )
     if progress is not None:
         progress["binding"] = binding
         comparison(progress, "request-binding", matched=True)
@@ -2057,7 +2063,7 @@ def new_record(
         os.close(pidfd)
         os.close(descriptor)
     return {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "binding": asdict(binding),
         "bindingSha256": binding.digest(),
         "bootstrapSha256": digest(root_bytes(Path(bootstrap["stage"]) / "bootstrap.json")),
@@ -2085,9 +2091,18 @@ def receipt(port: RootPort) -> dict[str, Any]:
     """Export finite qualification evidence without root records or protected values."""
     record = port.record
     return {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "consumer": CONSUMER,
-        "qualification": "experimental-candidate-only",
+        "qualification": (
+            "maintained-prerequisite"
+            if port.binding.purpose == port.modules.qualification.MAINTAINED_PURPOSE
+            else "experimental-candidate-only"
+        ),
+        "purpose": port.binding.purpose,
+        "admissionRevision": port.bootstrap["context"]["admissionRevision"],
+        "admissionSha256": port.binding.admission_sha256,
+        "workflowContext": port.bootstrap["context"],
+        "bootstrapSha256": record["bootstrapSha256"],
         "binding": asdict(port.binding),
         "bindingSha256": port.binding.digest(),
         "lease": port.store.path.name,
@@ -2544,7 +2559,10 @@ def observe_arm(
     facts: dict[str, Any] = {}
     try:
         progress["phase"] = "observation-entry"
-        require(bootstrap["context"]["architecture"] == "arm64")
+        require(
+            bootstrap["context"]["architecture"] == "arm64"
+            and bootstrap["context"]["purpose"] == modules.qualification.EXPERIMENTAL_PURPOSE
+        )
         require(not list((stage / "leases").iterdir()))
         admission = preflight_authority(stage, bootstrap, modules, progress=progress)
         facts.update(
@@ -2612,8 +2630,21 @@ def main() -> int:
             return 1
         elif args.operation == "dispose-stage":
             with stage_lock(args.stage):
+                require(args.name == "new" and args.kind is None and args.request == "e30=")
+                commitment = digest(root_bytes(args.stage / "bootstrap.json"))
+                context = bootstrap["context"]
                 dispose_stage(args.stage, bootstrap)
-            result = {"stageDisposed": True}
+            # No positive ack until source removal and the original lock's close.
+            result = {
+                "schemaVersion": 2,
+                "consumer": CONSUMER,
+                "stageDisposed": True,
+                "purpose": context["purpose"],
+                "admissionRevision": context["admissionRevision"],
+                "admissionSha256": context["admissionSha256"],
+                "bootstrapSha256": commitment,
+                "workflowContextSha256": modules.qualification.context_digest(context),
+            }
         else:
             with stage_lock(args.stage):
                 result = root_rpc(args.stage, bootstrap, modules, args)

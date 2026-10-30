@@ -6,8 +6,10 @@ import ast
 import base64
 import copy
 import hashlib
+import io
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from contextlib import ExitStack, contextmanager, nullcontext
@@ -24,7 +26,7 @@ from scripts import docker_userns_active_bootstrap_bundle as producer
 from scripts import docker_userns_custody_child as child
 from scripts import docker_userns_hosted as host
 from scripts import docker_userns_qualification as qualification
-from tests.test_docker_userns_qualification import PRIVATE, binding
+from tests.test_docker_userns_qualification import PRIVATE, binding, scoped_receipt, stage_disposal, workflow_context
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -32,6 +34,20 @@ if TYPE_CHECKING:
     from scripts.docker_userns_active_client import ActiveClient
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@contextmanager
+def event_payload(raw: bytes) -> Iterator[None]:
+    """Mock only the fixed event, preserving real admission/source reads."""
+    original = Path.open
+
+    def opened(path: Path, *args: object, **kwargs: object) -> object:
+        if str(path) == "/home/runner/work/_temp/_github_workflow/event.json":
+            return io.BytesIO(raw)
+        return original(path, *args, **kwargs)
+
+    with patch.object(Path, "open", new=opened):
+        yield
 
 
 def literal_namespace() -> dict[str, object]:
@@ -78,24 +94,7 @@ class SyntheticProof:
         self.candidate = self.add(
             "commit", f"tree {tree}\nauthor Fixture <fixture@example.invalid> 1 +0000\n\nfixture\n".encode()
         )
-        self.context = {
-            "candidate": self.candidate,
-            "workflow": self.candidate,
-            "checkout": self.candidate,
-            "repository": "Strukturpiloten/containers",
-            "event": "workflow_dispatch",
-            "ref": "refs/heads/TheRealBecks/issue527",
-            "job": "smoke-build",
-            "run": "1",
-            "attempt": "2",
-            "architecture": "amd64",
-            "image": "docker-29-conformance-rootless",
-            "imageOS": "ubuntu26",
-            "imageVersion": "20261026.180.1",
-            "imageVersionKind": "workflow-reported-provenance-not-vm-attestation",
-            "validationProfile": "docker-rootless-diagnostic",
-            "validationProfileRequested": "docker-rootless-diagnostic",
-        }
+        self.context = workflow_context(candidate=self.candidate)
 
     def add(self, kind: str, raw: bytes) -> str:
         identifier = hashlib.sha1(
@@ -106,7 +105,7 @@ class SyntheticProof:
 
     def value(self) -> dict[str, object]:
         return {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "consumer": active.CONSUMER,
             "context": self.context,
             "objects": list(self.objects.values()),
@@ -408,66 +407,21 @@ class FinalizerFailure(unittest.TestCase):
 
 class QualificationEvidence(unittest.TestCase):
     def fixture(self) -> tuple[dict[str, object], dict[str, object]]:
-        from dataclasses import asdict  # noqa: PLC0415
-
-        admission = json.loads((ROOT / ".github/docker-userns-active-admission.json").read_text())
-        cohort = admission["cohort"]
+        scoped = scoped_receipt()
         context = binding()
-        name = "dockerlens-127-upstream-rootless-1-2-" + "f" * 32
-        label = (name + " (unconfined)\n").encode()
-        facts = {key: cohort[key] for key in ("osID", "osVersion", "machine", "kernel", "parserVersion")}
-        facts["files"] = {key: {"sha256": value} for key, value in cohort.items() if key.endswith("Sha256")}
-        facts["controls"] = {"enabled": True, "restricted_userns": 1, "maximum_userns": 1024, "legacy_clone": None}
-        facts["imageVersion"] = "20261026.180.1"
-        scoped = {
-            "consumer": active.CONSUMER,
-            "qualification": "experimental-candidate-only",
-            "binding": asdict(context),
-            "bindingSha256": context.digest(),
-            "lease": "f" * 32,
-            "profileName": name,
-            "state": "closed",
-            "sourceManifestSha256": admission["sourceManifestSha256"],
-            "preflight": facts,
-            "namespace": {
-                **{key: active.digest(raw.encode()) for key, raw in admission["policyNamespace"].items()},
-                "user": 1,
-                "mnt": 2,
-                "cgroup": 3,
-            },
-            "cleanOwnerVerified": True,
-            "ownerReady": True,
-            "ownerTerminationVerified": True,
-            "custodyDisposed": True,
-            "guestAbsenceVerified": True,
-            "taskAbsenceVerified": True,
-            "scopeAbsenceVerified": True,
-            "profileAbsenceVerified": True,
-            "retained": False,
-            "readerPending": False,
-            "childPending": False,
-            "imageVersion": "20261026.180.1",
-            "imageVersionKind": "workflow-reported-provenance-not-vm-attestation",
-            "validationProfile": "docker-rootless-diagnostic",
-            "validationProfileRequested": "docker-rootless-diagnostic",
-            "parserExecutionNamespace": admission["parserExecutionNamespace"],
-            "profileObservation": {
-                "source": "held-task-attr/apparmor/current",
-                "exactMatch": True,
-                "singleLabel": True,
-                "taskIdentityBound": True,
-                "timing": "post-create",
-                "bytes": len(label),
-                "sha256": active.digest(label),
-            },
-        }
         identity = {
             "archiveSha256": context.archive_sha256,
             "manifestDigest": context.manifest_digest,
             "configDigest": context.config_digest,
             "sourceRevision": context.candidate,
         }
-        return {"image": context.image}, {
+        return {
+            "image": context.image,
+            "architecture": context.architecture,
+            "runId": context.run,
+            "runAttempt": context.attempt,
+            "producingJob": context.job,
+        }, {
             "phase": context.phase,
             "architecture": context.architecture,
             "imageIdentity": identity,
@@ -886,7 +840,6 @@ def candidate_environment(selected: str = "a" * 40) -> dict[str, str]:
 
 class DiagnosticCaseScope(unittest.TestCase):
     def test_known_ascii_variants_keep_root_proof_and_raw_client_provenance(self) -> None:
-        import io  # noqa: PLC0415
 
         from scripts.docker_userns_active_client import ActiveClient  # noqa: PLC0415
 
@@ -897,7 +850,7 @@ class DiagnosticCaseScope(unittest.TestCase):
                 environment = candidate_environment(proof.candidate)
                 event = json.dumps({"inputs": {"validation_profile": requested}}).encode()
                 with (
-                    patch.object(Path, "open", side_effect=lambda *_args, event=event, **_kwargs: io.BytesIO(event)),
+                    event_payload(event),
                     patch.dict(os.environ, environment, clear=True),
                 ):
                     produced = producer.context(environment, "amd64")
@@ -929,13 +882,8 @@ class DiagnosticCaseScope(unittest.TestCase):
                         "configDigest": fixture.config_digest,
                     }
                     client = ActiveClient(ctx, "/run/containers-userns-active." + "f" * 32, identity)
-                    response = {
-                        "bindingSha256": client.binding.digest(),
-                        "retained": False,
-                        "lease": "f" * 32,
-                        "validationProfile": produced["validationProfile"],
-                        "validationProfileRequested": requested,
-                    }
+                    response = scoped_receipt(candidate=proof.candidate, requested=requested)
+                    response.update(binding=asdict(client.binding), bindingSha256=client.binding.digest())
                     ctx.command = Mock(side_effect=lambda *_args, response=response, **_kwargs: json.dumps(response))
                     client.prepare()
                     self.assertEqual(client.evidence["validationProfileRequested"], requested)
@@ -975,7 +923,6 @@ class DiagnosticCaseScope(unittest.TestCase):
                             )
 
     def test_unknown_or_non_ascii_requests_fail_closed_and_full_remains_full(self) -> None:
-        import io  # noqa: PLC0415
 
         from scripts import evidence_gate  # noqa: PLC0415
         from scripts.docker_userns_qualification import QualificationError, validation_profile  # noqa: PLC0415
@@ -997,7 +944,7 @@ class DiagnosticCaseScope(unittest.TestCase):
                     root["validation_profile"](requested)
                 event = json.dumps({"inputs": {"validation_profile": requested}}).encode()
                 with (
-                    patch.object(Path, "open", side_effect=lambda *_args, event=event, **_kwargs: io.BytesIO(event)),
+                    event_payload(event),
                     patch.dict(os.environ, candidate_environment(), clear=True),
                 ):
                     with self.assertRaises((QualificationError, ValueError)):
@@ -1012,7 +959,7 @@ class DiagnosticCaseScope(unittest.TestCase):
                 self.assertEqual(root["validation_profile"](requested), "full")
                 event = json.dumps({"inputs": {"validation_profile": requested}}).encode()
                 with (
-                    patch.object(Path, "open", side_effect=lambda *_args, event=event, **_kwargs: io.BytesIO(event)),
+                    event_payload(event),
                     patch.dict(os.environ, candidate_environment(), clear=True),
                 ):
                     self.assertFalse(evidence_gate._active_scoped_required({"image": binding().image}))
@@ -1542,6 +1489,10 @@ class BoundedFailureJournal(unittest.TestCase):
             host=host,
             qualification=SimpleNamespace(
                 validation_profile=qualification.validation_profile,
+                admission_document=qualification.admission_document,
+                active_cohort=qualification.active_cohort,
+                validate_workflow_context=qualification.validate_workflow_context,
+                QualificationError=qualification.QualificationError,
                 observe_controls=Mock(
                     return_value=qualification.HostControls(
                         enabled=True, restricted_userns=1, maximum_userns=1024, legacy_clone=None
@@ -1549,7 +1500,7 @@ class BoundedFailureJournal(unittest.TestCase):
                 ),
             ),
         )
-        cohort = json.loads(admission)["cohort"]
+        cohort = json.loads(admission)["cohorts"]["amd64"]
         with (
             patch.object(
                 active,
@@ -1620,10 +1571,7 @@ def client_fixture(directory: Path) -> ActiveClient:
 
     client = ActiveClient.__new__(ActiveClient)
     client.binding, client.stage, client.name = binding(), Path("/run/containers-userns-active." + "e" * 32), "new"
-    client.provenance = {
-        "validationProfile": "docker-rootless-diagnostic",
-        "validationProfileRequested": "docker-rootless-diagnostic",
-    }
+    client.provenance = workflow_context()
     client.evidence, client.failures = {}, []
     client.ctx = SimpleNamespace(
         checks=[],
@@ -1973,7 +1921,10 @@ class ExistingChildBuildObservation(unittest.TestCase):
         port = failure_port()
         port.modules = SimpleNamespace(child=child)
         port.record.update(profileName="dockerlens-127-upstream-rootless-1-2-" + "e" * 32, childPending=True)
-        port.bootstrap, port.admission = {"uid": 1001, "gid": 1001}, {"cohort": {"interpreterSha256": "a" * 64}}
+        port.bootstrap, port.admission = (
+            {"uid": 1001, "gid": 1001},
+            {"cohorts": {"amd64": {"interpreterSha256": "a" * 64}}},
+        )
         port.binding = replace(binding(), deadline_ns=time.monotonic_ns() + 90_000_000_000)
         port.work_until = port.binding.deadline_ns - 60_000_000_000
         observers: list[object] = []
@@ -2173,7 +2124,6 @@ class ProducerValidationPhases(unittest.TestCase):
         self.assertEqual(progress["phase"], "producer-architecture")
 
     def test_event_read_and_choice_failures_remain_distinct_and_arm_expected_values_unchanged(self) -> None:
-        import io  # noqa: PLC0415
 
         progress = {"actor": "producer", "operation": "producer"}
         with patch.object(Path, "open", side_effect=PermissionError(13, PRIVATE)), self.assertRaises(PermissionError):
@@ -2181,14 +2131,14 @@ class ProducerValidationPhases(unittest.TestCase):
         self.assertEqual(progress["phase"], "producer-event-read")
         raw = json.dumps({"inputs": {"validation_profile": PRIVATE}}).encode()
         with (
-            patch.object(Path, "open", side_effect=lambda *_args, **_kwargs: io.BytesIO(raw)),
+            event_payload(raw),
             self.assertRaises(producer.QualificationError),
         ):
             producer.context(candidate_environment(), "amd64", progress=progress)
         self.assertEqual(progress["phase"], "producer-choice")
         environment = {**candidate_environment(), "RUNNER_ARCH": "ARM64", "ImageOS": "ubuntu26-arm64"}
         raw = json.dumps({"inputs": {"validation_profile": "docker-rootless-diagnostic"}}).encode()
-        with patch.object(Path, "open", side_effect=lambda *_args, **_kwargs: io.BytesIO(raw)):
+        with event_payload(raw):
             accepted = producer.context(environment, "arm64", progress=progress)
         self.assertEqual(accepted["architecture"], "arm64")
         self.assertEqual(accepted["imageOS"], "ubuntu26-arm64")
@@ -2197,13 +2147,12 @@ class ProducerValidationPhases(unittest.TestCase):
 
 class ARMReportedProvenance(unittest.TestCase):
     def test_producer_fixed_bootstrap_and_shared_root_agree_on_both_exact_pairs(self) -> None:
-        import io  # noqa: PLC0415
 
         for architecture, image_os, runner_arch in (("amd64", "ubuntu26", "X64"), ("arm64", "ubuntu26-arm64", "ARM64")):
             with self.subTest(architecture=architecture):
                 environment = {**candidate_environment(), "ImageOS": image_os, "RUNNER_ARCH": runner_arch}
                 event = json.dumps({"inputs": {"validation_profile": "docker-rootless-diagnostic"}}).encode()
-                with patch.object(Path, "open", side_effect=lambda *_args, event=event, **_kwargs: io.BytesIO(event)):
+                with event_payload(event):
                     produced = producer.context(environment, architecture)
                 self.assertEqual(produced["imageOS"], image_os)
                 literal = literal_namespace()
@@ -2233,7 +2182,15 @@ class ARMReportedProvenance(unittest.TestCase):
                 with self.assertRaises(RuntimeError) as raised:
                     literal["main"]()
                 self.assertIs(raised.exception, stop)
-                self.assertEqual(literal["verify_bundle"].call_args.args[1], produced)
+                provisional = literal["verify_bundle"].call_args.args[1]
+                self.assertEqual(
+                    provisional,
+                    {
+                        key: value
+                        for key, value in produced.items()
+                        if key not in {"admissionRevision", "admissionSha256"}
+                    },
+                )
                 admission = (ROOT / ".github/docker-userns-active-admission.json").read_bytes()
                 manifest = (ROOT / producer.MANIFEST).read_bytes()
                 with patch.object(
@@ -2613,7 +2570,7 @@ class ARMObservationTests(unittest.TestCase):
                 stack.enter_context(patch.object(active, name)) for name in ("root_rpc", "compile_worker", "RootPort")
             ]
             lease = stack.enter_context(patch.object(qualification, "ProfileLease"))
-            result = active.observe_arm(ROOT, bootstrap, SimpleNamespace(), progress)
+            result = active.observe_arm(ROOT, bootstrap, SimpleNamespace(qualification=qualification), progress)
             for operation in (*active_operations, lease):
                 operation.assert_not_called()
             return result
@@ -2701,7 +2658,9 @@ class ARMObservationTests(unittest.TestCase):
             self.assertFalse(result["nativeQualification"])
         bootstrap["context"]["architecture"] = "amd64"
         with patch.object(active, "preflight_authority") as authority:
-            self.assertFalse(active.observe_arm(ROOT, bootstrap, SimpleNamespace(), progress)["complete"])
+            self.assertFalse(
+                active.observe_arm(ROOT, bootstrap, SimpleNamespace(qualification=qualification), progress)["complete"]
+            )
         authority.assert_not_called()
 
     def test_action_observation_precedes_runtime_and_preserves_non_success_and_artifact(self) -> None:
@@ -2709,7 +2668,9 @@ class ARMObservationTests(unittest.TestCase):
         runtime = next(step for step in action["runs"]["steps"] if step.get("name") == "Verify image runtime")
         upload = next(step for step in action["runs"]["steps"] if step.get("name") == "Upload runtime evidence")
         script = runtime["run"]
-        start = script.index('if [ "${IMAGE_ARCH}" = "arm64" ]; then')
+        start = script.index(
+            'if [ "${IMAGE_ARCH}" = "arm64" ] && [ "${VALIDATION_PROFILE,,}" = docker-rootless-diagnostic ]; then'
+        )
         stop = script.index('uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.runtime_tests', start)
         self.assertIn('observe-arm "${active_stage}"', script[start:stop])
         self.assertIn("exit 1", script[start:stop])
@@ -2851,7 +2812,7 @@ class ARMObservationCustody(unittest.TestCase):
         self.assertEqual(authority.sha256, active.digest(interpreter.read_bytes()))
         self.assertNotEqual(
             authority.sha256,
-            json.loads((ROOT / ".github/docker-userns-active-admission.json").read_bytes())["cohort"][
+            json.loads((ROOT / ".github/docker-userns-active-admission.json").read_bytes())["cohorts"]["amd64"][
                 "interpreterSha256"
             ],
         )
@@ -2928,3 +2889,362 @@ class ARMObservationCustody(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MaintainedBootstrapContract(unittest.TestCase):
+    def event(self, context: dict[str, str]) -> dict:
+        return {
+            "inputs": {"validation_profile": context["validationProfileRequested"]},
+            "repository": {"full_name": "Strukturpiloten/containers"},
+            "workflow": ".github/workflows/ci.yml",
+            "ref": context["ref"],
+        }
+
+    def root(self, proof: SyntheticProof, event: dict, *, architecture: str = "amd64") -> tuple[dict, Mock]:
+        """Run the fixed literal through genuine proof validation, stopping before writes."""
+        literal = literal_namespace()
+        literal["SOURCE_MANIFEST_SHA256"] = active.digest(proof.files[producer.MANIFEST])
+        literal["sys"] = SimpleNamespace(
+            argv=[
+                "bootstrap",
+                "handoff",
+                *(proof.candidate for _ in range(3)),
+                "1",
+                "2",
+                architecture,
+                proof.context["imageVersion"],
+                "1000",
+                "1000",
+                "1000000000",
+            ],
+            implementation=SimpleNamespace(name="cpython"),
+            version_info=(3, 14, 4, "final", 0),
+            flags=SimpleNamespace(isolated=1, no_site=1),
+            dont_write_bytecode=True,
+        )
+        literal["os"] = SimpleNamespace(getuid=lambda: 0, geteuid=lambda: 0, urandom=lambda _: b"x" * 16)
+        literal["time"] = SimpleNamespace(monotonic_ns=lambda: 1)
+        literal["read_input"] = Mock(side_effect=[json.dumps(event).encode(), json.dumps(proof.value()).encode()])
+        stop = RuntimeError("stop before first stage write")
+        with (
+            patch.object(Path, "mkdir", side_effect=stop) as mkdir,
+            self.assertRaises((RuntimeError, ValueError)) as raised,
+        ):
+            literal["main"]()
+        if isinstance(raised.exception, RuntimeError):
+            self.assertIs(raised.exception, stop)
+        return literal, mkdir
+
+    def test_full_default_focus_reaches_root_stage_only_after_connected_proof(self) -> None:
+        for requested in ("full", "FULL", ""):
+            with self.subTest(requested=requested):
+                proof = SyntheticProof()
+                proof.context = workflow_context(
+                    purpose="maintained-prerequisite", candidate=proof.candidate, requested=requested
+                )
+                event = self.event(proof.context)
+                environment = {
+                    **candidate_environment(proof.candidate),
+                    "GITHUB_REF": proof.context["ref"],
+                    "GITHUB_WORKFLOW_REF": proof.context["workflowRef"],
+                }
+                with event_payload(json.dumps(event).encode()):
+                    produced = producer.context(environment, "amd64")
+                self.assertEqual(produced, proof.context)
+                literal, mkdir = self.root(proof, event)
+                mkdir.assert_called_once_with(mode=0o700)
+                self.assertTrue(literal["DIAGNOSTIC"]["sourceVerified"])
+
+    def test_root_derives_purpose_and_ref_instead_of_accepting_transport_labels(self) -> None:
+        for fault in ("purpose", "ref", "head", "admission", "event", "focus", "arm"):
+            with self.subTest(fault=fault):
+                proof = SyntheticProof()
+                proof.context = workflow_context(purpose="maintained-prerequisite", candidate=proof.candidate)
+                event = self.event(proof.context)
+                if fault == "purpose":
+                    proof.context["purpose"] = "experimental-candidate"
+                elif fault == "ref":
+                    event["ref"] = "refs/heads/other"
+                elif fault == "head":
+                    proof.context["checkout"] = "f" * 40
+                elif fault == "admission":
+                    proof.context["admissionSha256"] = "f" * 64
+                elif fault == "event":
+                    event["repository"]["full_name"] = "fork/containers"
+                elif fault == "focus":
+                    event["inputs"]["focused_runtime"] = "mandatory-accounting"
+                _, mkdir = self.root(proof, event, architecture="arm64" if fault == "arm" else "amd64")
+                mkdir.assert_not_called()
+
+    def test_unsupported_callers_never_receive_maintained_context(self) -> None:
+        context = workflow_context(purpose="maintained-prerequisite")
+        environment = {
+            **candidate_environment(),
+            "GITHUB_REF": context["ref"],
+            "GITHUB_WORKFLOW_REF": context["workflowRef"],
+        }
+        for key, values in {
+            "GITHUB_EVENT_NAME": ("pull_request", "push", "merge_group", "schedule", "workflow_call"),
+            "GITHUB_JOB": ("build", "publish"),
+            "GITHUB_REPOSITORY": ("fork/containers",),
+            "RUNNER_ENVIRONMENT": ("self-hosted",),
+            "GITHUB_ACTIONS": ("false",),
+            "RUNNER_ARCH": ("ARM64",),
+            "GITHUB_WORKFLOW_SHA": ("f" * 40,),
+        }.items():
+            for value in values:
+                with (
+                    self.subTest(key=key, value=value),
+                    event_payload(json.dumps(self.event(context)).encode()),
+                    self.assertRaises((ValueError, qualification.QualificationError)),
+                ):
+                    producer.context({**environment, key: value}, "amd64")
+
+
+class MaintainedStageDisposalContract(unittest.TestCase):
+    def test_root_ack_is_emitted_after_removal_and_lock_close_and_failures_never_ack(self) -> None:
+        for fault in (None, "remove", "lock-close"):
+            events = []
+            scoped = scoped_receipt(purpose="maintained-prerequisite", phase="enforcement")
+            bootstrap = {
+                "context": scoped["workflowContext"],
+                "files": {producer.MANIFEST: active.SOURCE_MANIFEST_SHA256},
+            }
+
+            @contextmanager
+            def locked(_stage: Path, *, events: list = events, fault: str | None = fault) -> Iterator[None]:
+                yield
+                events.append("lock-close")
+                if fault == "lock-close":
+                    raise OSError(PRIVATE)
+
+            def removed(*_args: object, events: list = events, fault: str | None = fault) -> None:
+                events.append("removed")
+                if fault == "remove":
+                    raise OSError(PRIVATE)
+
+            output = io.BytesIO()
+            with (
+                self.subTest(fault=fault),
+                patch.object(
+                    active.sys, "argv", ["helper", "dispose-stage", "/run/containers-userns-active." + "f" * 32]
+                ),
+                patch.object(active, "verify_stage", return_value=bootstrap),
+                patch.object(active, "dependencies", return_value=SimpleNamespace(qualification=qualification)),
+                patch.object(active, "root_bytes", return_value=b"immutable bootstrap"),
+                patch.object(active, "stage_lock", side_effect=locked),
+                patch.object(active, "dispose_stage", side_effect=removed),
+                patch.object(active.sys, "stdout", SimpleNamespace(buffer=output)),
+            ):
+                status = active.main()
+            value = json.loads(output.getvalue())
+            if fault is None:
+                self.assertEqual(events, ["removed", "lock-close"])
+                self.assertEqual(status, 0)
+                scoped["bootstrapSha256"] = active.digest(b"immutable bootstrap")
+                self.assertEqual(value, stage_disposal(scoped))
+            else:
+                self.assertEqual(status, 1)
+                self.assertNotEqual(value.get("stageDisposed"), True)
+                self.assertFalse(value["cleanupAuthority"])
+
+    def test_actual_client_disposal_checks_ack_context_exit_and_original_deadline(self) -> None:
+        from scripts import docker_userns_active_client as client_module  # noqa: PLC0415
+
+        for fault in (None, "exit", "deadline", "ack"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                client = client_fixture(Path(directory))
+                client.evidence = scoped_receipt(purpose="maintained-prerequisite", phase="enforcement")
+                client.binding = qualification.NativeBinding(**client.evidence["binding"])
+                client.provenance = client.evidence["workflowContext"]
+                ack = stage_disposal(client.evidence)
+                if fault == "ack":
+                    ack["bootstrapSha256"] = "f" * 64
+
+                def command(
+                    *_args: object,
+                    client: ActiveClient = client,
+                    fault: str | None = fault,
+                    ack: dict = ack,
+                    **_kwargs: object,
+                ) -> str:
+                    client.ctx.checks.append({"exitCode": 1 if fault == "exit" else 0})
+                    return json.dumps(ack)
+
+                client.ctx.command = Mock(side_effect=command)
+                with patch.object(client_module.time, "monotonic_ns", return_value=1000 if fault == "deadline" else 1):
+                    if fault is None:
+                        self.assertEqual(client.dispose_stage(), ack)
+                    else:
+                        with self.assertRaises((ValueError, qualification.QualificationError)):
+                            client.dispose_stage()
+                if fault == "deadline":
+                    client.ctx.command.assert_not_called()
+
+
+class MaintainedRootBindingContract(unittest.TestCase):
+    def test_every_root_rpc_rejects_cross_context_and_stage_replay_before_effects(self) -> None:
+        admission = (ROOT / ".github/docker-userns-active-admission.json").read_bytes()
+        expected = scoped_receipt(purpose="maintained-prerequisite")
+        original = qualification.NativeBinding(**expected["binding"])
+        bootstrap = {"context": expected["workflowContext"], "deadlineNs": original.deadline_ns}
+        mutations = [(None, original)]
+        mutations.extend(
+            (key, replace(original, **{key: value}))
+            for key, value in (
+                ("candidate", "f" * 40),
+                ("run", "9"),
+                ("attempt", "9"),
+                ("architecture", "arm64"),
+                ("purpose", "experimental-candidate"),
+                ("admission_sha256", "0" * 64),
+                ("workflow_context_sha256", "0" * 64),
+                ("deadline_ns", original.deadline_ns + 1),
+            )
+        )
+        for fault, native in mutations:
+            record = {
+                "schemaVersion": 2,
+                "binding": asdict(native),
+                "bindingSha256": native.digest(),
+                "bootstrapSha256": active.digest(b"bootstrap"),
+                "state": "closed",
+                "timeoutExecutable": "/usr/bin/timeout",
+            }
+            with (
+                self.subTest(fault=fault),
+                patch.object(
+                    active,
+                    "root_bytes",
+                    side_effect=lambda path: admission if path.name.endswith("admission.json") else b"bootstrap",
+                ),
+            ):
+                if fault is None:
+                    port = active.RootPort(
+                        ROOT, bootstrap, SimpleNamespace(qualification=qualification), SimpleNamespace(), record
+                    )
+                    self.assertEqual(port.binding, native)
+                else:
+                    with self.assertRaises((active.RefusedError, qualification.QualificationError)):
+                        active.RootPort(
+                            ROOT, bootstrap, SimpleNamespace(qualification=qualification), SimpleNamespace(), record
+                        )
+        for fault, value in (("schemaVersion", 1), ("bootstrapSha256", "f" * 64), ("bindingSha256", "f" * 64)):
+            changed = {**record, "binding": asdict(original), "bindingSha256": original.digest(), fault: value}
+            with (
+                self.subTest(fault=fault),
+                patch.object(
+                    active,
+                    "root_bytes",
+                    side_effect=lambda path: admission if path.name.endswith("admission.json") else b"bootstrap",
+                ),
+                self.assertRaises(active.RefusedError),
+            ):
+                active.RootPort(
+                    ROOT, bootstrap, SimpleNamespace(qualification=qualification), SimpleNamespace(), changed
+                )
+
+    def test_actual_root_receipt_projection_preserves_each_purpose_and_closed_schema(self) -> None:
+        admission = qualification.admission_document(
+            (ROOT / ".github/docker-userns-active-admission.json").read_bytes()
+        )
+        for purpose in ("experimental-candidate", "maintained-prerequisite"):
+            expected = scoped_receipt(purpose=purpose)
+            port = SimpleNamespace(
+                binding=qualification.NativeBinding(**expected["binding"]),
+                record=expected,
+                bootstrap={"context": expected["workflowContext"]},
+                store=SimpleNamespace(path=Path(expected["lease"])),
+                modules=SimpleNamespace(qualification=qualification),
+                admission=admission,
+            )
+            with self.subTest(purpose=purpose):
+                actual = active.receipt(port)
+                self.assertEqual(actual, expected)
+                self.assertEqual(set(actual), qualification.SCOPED_RECEIPT_KEYS)
+
+
+class MaintainedDisposalPrivacyTests(unittest.TestCase):
+    @staticmethod
+    def external(fault: str | None, ack: dict, canary: str) -> subprocess.CompletedProcess[str] | OSError:
+        """Replace only the external command; keep actual client and recorder behavior."""
+        if fault == "os-error":
+            return PermissionError(13, canary)
+        output = {
+            "malformed": canary,
+            "mismatch": json.dumps({**ack, "bootstrapSha256": canary}),
+            "nonzero": canary,
+            "unicode": canary + "\ud800",
+            "oversized": canary * active.MAX_STATE,
+        }.get(fault, json.dumps(ack))
+        return subprocess.CompletedProcess([], 1 if fault == "nonzero" else 0, output, canary)
+
+    def check_public(
+        self, client: ActiveClient, record: dict, fault: str | None, reason: str | None, canary: str
+    ) -> None:
+        phase = record["phases"][1]
+        for check in phase["checks"]:
+            self.assertNotIn("stdout", check)
+            self.assertNotIn("stderr", check)
+        public = {"aggregate": record, "clientEvidence": client.evidence, "failures": client.failures}
+        self.assertNotIn(canary, json.dumps(public))
+        if fault is None:
+            self.assertEqual(record["qualification"], "complete")
+        else:
+            self.assertEqual(record["qualification"], "none")
+            self.assertEqual(phase["qualification"], "none")
+            failure = client.failures[-1]
+            self.assertTrue(active.valid_failure(failure))
+            self.assertEqual(failure["operation"], "dispose-stage")
+            self.assertEqual(failure["reason"], reason)
+            self.assertNotIn(canary, client.ctx.scoped_failure_output.read_text())
+
+    def test_actual_command_output_and_failures_never_reach_public_phase_pair_or_traceback(self) -> None:
+        from scripts import docker_userns_active_client as client_module  # noqa: PLC0415
+        from scripts import runtime_tests  # noqa: PLC0415
+        from tests.test_evidence_gate import maintained_runtime  # noqa: PLC0415
+
+        canary = "PRIVATE-DISPOSAL-CANARY-/run/root-owned-unvalidated-value"
+        for fault, reason in (
+            (None, None),
+            ("malformed", "malformed-receipt"),
+            ("mismatch", "receipt-mismatch"),
+            ("nonzero", "receipt-mismatch"),
+            ("os-error", "permission-denied"),
+            ("unicode", "malformed-receipt"),
+            ("oversized", "oversized-receipt"),
+        ):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                record = maintained_runtime()
+                phase = record["phases"][1]
+                client = client_fixture(Path(directory))
+                client.evidence = phase["scopedProfile"]
+                client.binding = qualification.NativeBinding(**client.evidence["binding"])
+                client.provenance = client.evidence["workflowContext"]
+                context = runtime_tests.RuntimeContext.__new__(runtime_tests.RuntimeContext)
+                context.timeout = 45
+                context.runtime_deadline = None
+                context.checks = phase["checks"]
+                context.backend = client.ctx.backend
+                context.scoped_failure_output = Path(directory) / "failure.json"
+                client.ctx = context
+                ack = stage_disposal(client.evidence)
+                external = self.external(fault, ack, canary)
+                process = (
+                    patch.object(runtime_tests.subprocess, "run", side_effect=external)
+                    if isinstance(external, BaseException)
+                    else patch.object(runtime_tests.subprocess, "run", return_value=external)
+                )
+                with process, patch.object(client_module.time, "monotonic_ns", return_value=1):
+                    if fault is None:
+                        self.assertEqual(client.dispose_stage(), ack)
+                    else:
+                        try:
+                            client.dispose_stage()
+                        except ValueError as error:
+                            runtime_tests._phase_error(phase, error, key="cleanupError")
+                            runtime_tests._phase_error(record, error, key="cleanupError")
+                        else:
+                            self.fail("unverified disposal unexpectedly succeeded")
+                runtime_tests._finish_pair_authority(record)
+                self.check_public(client, record, fault, reason, canary)

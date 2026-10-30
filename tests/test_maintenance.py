@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import copy
 import unittest
+from unittest.mock import patch
 
 from scripts.maintenance import MaintenanceError, catalogue, markdown_catalogue
+from tests.test_evidence_gate import maintained_mutations, maintained_runtime
 
 DIGEST = f"sha256:{'a' * 64}"
 IMAGE = {
@@ -53,7 +55,7 @@ class CatalogueTests(unittest.TestCase):
                     "architecture": "amd64",
                     "manifestDigest": DIGEST,
                     "configDigest": DIGEST,
-                    "archiveSha256": DIGEST,
+                    "archiveSha256": "a" * 64,
                     "sourceRevision": BUILD["sourceRevision"],
                     "version": "v1.0.0",
                 },
@@ -110,7 +112,7 @@ class RuntimeAuthorityCatalogueTests(unittest.TestCase):
                         "architecture": "amd64",
                         "manifestDigest": DIGEST,
                         "configDigest": DIGEST,
-                        "archiveSha256": DIGEST,
+                        "archiveSha256": "a" * 64,
                         "sourceRevision": BUILD["sourceRevision"],
                         "version": "v1.0.0",
                     },
@@ -136,3 +138,51 @@ class RuntimeAuthorityCatalogueTests(unittest.TestCase):
         self.assertEqual(view["status"], "failed")
         self.assertEqual(view["operationalStatus"], "failed")
         self.assertEqual(view["nativeAuthority"], "none")
+
+
+class MaintainedPrerequisiteCatalogueTests(unittest.TestCase):
+    def image(self, architecture: str = "amd64") -> dict:
+        image = copy.deepcopy(IMAGE)
+        image["build"]["architectures"] = [architecture]
+        image["name"] = "docker-29-conformance-rootless"
+        image["tests"] = {"docker": {"launcher": "systemd", "mode": "rootless"}}
+        return image
+
+    def test_valid_archived_native_facts_reach_catalogue_without_release_authority(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            report = catalogue([self.image()], runtime_results={self.image()["name"]: [maintained_runtime()]})
+        coverage = report["images"][0]["runtimeCoverage"]["amd64"]["docker"]
+        self.assertEqual(coverage["status"], "passed")
+        self.assertEqual(coverage["nativeAuthority"], "ordinary")
+        self.assertEqual(report["images"][0]["registry"]["status"], "unknown")
+
+    def test_same_hostile_records_cannot_be_catalogue_native_coverage(self) -> None:
+        for fault, runtime in maintained_mutations():
+            with self.subTest(fault=fault), patch.dict("os.environ", {}, clear=True):
+                try:
+                    report = catalogue([self.image()], runtime_results={self.image()["name"]: [runtime]})
+                except MaintenanceError:
+                    continue
+                coverage = report["images"][0]["runtimeCoverage"]["amd64"]["docker"]
+                self.assertNotEqual(coverage.get("nativeAuthority"), "ordinary")
+
+    def test_archive_digest_uses_actual_bare_hex_contract(self) -> None:
+        for archive in ("sha256:" + "b" * 64, "b" * 63, "B" * 64, "unknown"):
+            runtime = maintained_runtime()
+            runtime["imageIdentity"]["archiveSha256"] = archive
+            with self.subTest(archive=archive), self.assertRaises(MaintenanceError):
+                catalogue([self.image()], runtime_results={self.image()["name"]: [runtime]})
+
+    def test_arm_native_facts_and_same_hostile_records_obey_catalogue_consumer(self) -> None:
+        image = self.image("arm64")
+        report = catalogue([image], runtime_results={image["name"]: [maintained_runtime("arm64")]})
+        self.assertEqual(report["images"][0]["runtimeCoverage"]["arm64"]["docker"]["nativeAuthority"], "ordinary")
+        for fault, runtime in maintained_mutations("arm64"):
+            with self.subTest(fault=fault):
+                try:
+                    report = catalogue([image], runtime_results={image["name"]: [runtime]})
+                except MaintenanceError:
+                    continue
+                self.assertNotEqual(
+                    report["images"][0]["runtimeCoverage"]["arm64"]["docker"].get("nativeAuthority"), "ordinary"
+                )

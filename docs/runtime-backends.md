@@ -664,20 +664,40 @@ environment carrier avoids that defect without disabling checks, changing host
 settings or claiming an unreleased fixed tool version. Earlier cancelled or
 timed-out validation attempts remain nonpasses.
 
-## Experimental issue527 active qualification candidate
+## Scoped issue527 prerequisite and experimental candidate
 
-The separate `containers-ubuntu26-userns-active` contract is restricted to a
-`workflow_dispatch` with `validation_profile=docker-rootless-diagnostic` on
-`refs/heads/TheRealBecks/issue527`, the `smoke-build` job, and
-`docker-29-conformance-rootless`. Other shared-action and publication contexts
-keep their existing runtime path. Known ASCII upper/mixed-case diagnostic choices
-normalize to the same canonical choice; bootstrap, producer, client and evidence
-checks also retain and compare the exact raw requested value. Unknown, non-ASCII
-or malformed choices refuse instead of skipping the scoped requirement. The old
-`armed_unused` admission, immutable
-bootstrap, and never-load observer are unchanged. The new admission records
-`qualification: none`: source admission and hermetic checks do not establish
-native compatibility, authorize a release, or establish ARM load support.
+The `containers-ubuntu26-userns-active` contract admits a maintained AMD64 or ARM64
+prerequisite attempt only through the existing `ci.yml` `workflow_dispatch`
+with the full validation profile, `smoke-build`, the declared
+`docker-29-conformance-rootless` fixture, and its private outer Docker backend.
+The runner must be repository-owned GitHub-hosted Linux with the complete reviewed cohort
+selected for that architecture. Candidate, workflow source and checkout must be identical. The fixed
+root bootstrap derives the purpose and exact branch/tag ref from the dispatch
+event and verifies the corresponding workflow ref and connected admission blob;
+unprivileged labels cannot select authority. The full selector keeps
+`focused_runtime=none` and workload mode `qualification`, even though the raw
+workflow input defaults to `witness-diagnostic`. There is no additional mode,
+workflow, architecture filter or change to the full matrix.
+
+The existing diagnostic route remains restricted to
+`validation_profile=docker-rootless-diagnostic` on
+`refs/heads/TheRealBecks/issue527`, `smoke-build`, and the same fixture. Known
+ASCII upper/mixed-case profile choices normalize to the canonical choice while
+all actors retain the exact raw request. Unknown, non-ASCII and malformed
+choices refuse. Diagnostic receipts retain purpose `experimental-candidate`
+and never grant ordinary qualification. Historical evidence remains
+nonqualifying. The old unused admission/bootstrap and never-load observer are
+unchanged. Admission itself records `qualification: none`; it permits an attempt,
+not native qualification, release or publication permission.
+
+Bootstrap transport/stage, native lease records, scoped receipts and disposal
+acknowledgments use schema 2. The existing closed helper-file list stays at
+schema 1. Every native binding authenticates purpose, admission revision/digest,
+and the digest of the complete workflow context. Every root RPC checks those
+bindings and its immutable bootstrap commitment. Both phases must agree on that
+context and commitment, with separate owned runtimes and leases. The archived
+consumer intrinsically matches source, run, attempt and producing job; ambient
+`GITHUB_*` values cannot supply missing authority or promote experimental data.
 
 The workflow carries a separate fixed root-bootstrap literal. An unprivileged
 producer supplies a finite Git commit/tree/blob proof and the existing pinned
@@ -690,21 +710,40 @@ builder is reused without invoking its active `RunnerProfile` CLI. The existing
 `dockerlens-127-upstream-rootless-RUN-ATTEMPT-NONCE` spelling remains an identifier;
 it does not confer DockerLens admission or policy authority.
 
-The manually reviewed active admission requires Ubuntu 26.04 AMD64, kernel
+The manually reviewed active admission requires Ubuntu 26.04, the selected
+`x86_64`/`aarch64` machine, kernel
 `7.0.0-1017-azure`, parser 5.0.2, and the exact parser, ABI, feature and Python
 3.14.4 fingerprints recorded in
 [the active admission](../.github/docker-userns-active-admission.json).
 Actual actor preflight reads the fixed AppArmor-enabled, restricted-userns and
 maximum-userns scalar files. The legacy `unprivileged_userns_clone` control must
 be `1` or explicitly absent with ENOENT; unreadable, malformed, disabled, or
-changed controls refuse. ARM remains compile/observation-only and refuses load
-until an independently reviewed ARM cohort exists.
+changed controls refuse. Diagnostic ARM remains observation-only and refuses
+load; maintained full/manual ARM uses its own complete finite cohort.
 
 `ImageVersion` is the workflow-reported per-job provenance value. It is frozen
 once and compared exactly across bootstrap, phase custody, receipts and evidence
 checks. It is neither an independent VM identity attestation nor a historical
 compatibility pin. The unused admission's historical image cohort is not widened
 by this contract.
+
+Maintained ARM uses the separately reviewed ARM parser and interpreter hashes
+in the admission's `cohorts.arm64` entry, including the pinned ABI 4.0 and exact
+userns/policy-v9 feature requirements. It does not borrow AMD64 executable hashes
+or weaken the single exact unconfined label contract for default-allow emulation.
+Root preflight, held version/build interpreter, no-load compiler, policy loader
+and archived importer select the same architecture predicate. Unsupported FD
+execution, missing facts and drift refuse through the existing custody path.
+The original C allocator, whole-lifetime OOM accounting and all owner/cleanup
+stages remain mandatory; this is a compatibility hypothesis for an attempt.
+
+The ARM review uses the existing trusted preinstalled-OS-tool exception.
+Historical root-bound `ImageVersion=20261026.168.1` differs from the startup
+header's `20261025.167.1`; the header-linked official image ref returned 404.
+Neither report establishes a vendor checksum or an independently verified image
+package manifest. Same-job provenance is frozen and compared, never silently
+replaced by the other value or described as VM attestation. Fingerprint drift
+requires explicit coordinated source/admission review, not automatic renewal.
 
 Each actual root actor freshly opens `.ns_name`, `.ns_level`, and `.stacked`
 directly under a held genuine `/sys/kernel/security/apparmor` securityfs
@@ -849,7 +888,7 @@ bounded boolean audit and an exact private parent-state comparison verify the
 boundary. This handles test-provider capability inheritance without changing
 parent state or weakening production UID/capability/NNP checks.
 
-ARM dispatch now stops before native runtime tests after the separate
+The diagnostic ARM dispatch stops before native runtime tests after the separate
 `observe-arm` root operation. That operation authenticates the immutable stage,
 imports its verified dependencies and holds the stage lock. It collects bounded
 structured OS/kernel/machine, fixed tool/ABI/feature digests and identities,
@@ -874,8 +913,8 @@ The always-uploaded observation artifact has its own receipt kind, qualification
 `none`, disposition `ARM_NOT_ADMITTED`, explicit false active/native/cleanup
 authority, and only completed bounded facts plus finite failure metadata. It
 cannot satisfy the active client or native evidence gate. The root operation
-and ARM workflow step return non-success even after complete observation. ARM
-loading remains refused; historical unused admission and bootstrap are unchanged.
+and diagnostic ARM workflow step return non-success even after complete observation.
+Diagnostic ARM loading remains refused; historical unused admission and bootstrap are unchanged.
 
 Public observation receipts use schema v2's strict purpose-specific projection.
 Private collection and custody retain their binding facts; publication removes
@@ -957,16 +996,29 @@ and rootless fixture, retain `diag_only=true`, and cannot satisfy Required CI,
 normal native qualification, publication or release. Validated selection metadata
 is attached to the build plan. Unknown/inapplicable choices and wrong contexts
 refuse before build/runtime; there is no fallback. The frozen privileged context
-still uses its original profile schema. ARM retains its actual observation/load
+uses the same versioned purpose/admission binding. ARM retains its actual observation/load
 refusal, even if the AMD64 accounting experiment succeeds.
 
-The private outer Docker systemd/rootless route currently has no maintained
-normal scoped prerequisite. It therefore cannot emit ordinary native authority,
-even with qualification workload mode and no requested stage. Full/PR/main and
-publication callers retain their normal selection defaults but must fail ordinary
-authority consumption for this route until the separate maintained-prerequisite
-and ARM rollout is reviewed under #527/#442. No normal prerequisite is inferred
-from a missing receipt, a completed ledger, a stage, or an environment label.
+For the admitted full/manual AMD64 and ARM64 routes, actual host/profile readback, both
+native phases, their original mandatory accounting outcomes, complete cleanup,
+and all late checks are required before phase and aggregate
+`qualification=complete`. Missing stage or receipt refuses before native work;
+there is no unscoped normal fallback. After enforcement backend cleanup, the
+existing root `dispose-stage` operation removes the source stage and closes its
+lock before acknowledging the exact context/admission/bootstrap commitment.
+The producer validates that acknowledgment before final deadline checks and
+aggregate evidence publication. The Action retains its EXIT cleanup fallback
+until the runtime command and ordinary authority guard both succeed. A failed
+producing command or failed/uncertain evidence retirement cannot be rescued by a
+detached passing record.
+
+PR, push, merge-group, schedule, publication-build and arbitrary local callers
+remain outside maintained activation. Their required private Docker route
+refuses without the admitted prerequisite. Diagnostic ARM observation and load
+refusal remain unchanged. Source admission for both architectures does not make
+the full matrix pass; each real native phase and aggregate must succeed. Fresh exact-source independent review, complete
+gates and native acceptance are separate requirements; this source change
+claims no new passing native run or publication eligibility.
 
 The shared Action's ordinary post-runtime check, architecture publisher gate,
 release evidence verifier and catalogue all use the same trusted-metadata
@@ -975,9 +1027,11 @@ required authority cannot be laundered through status/exit zero or a consumer
 claiming full scope. The catalogue preserves operational/accounting/qualification
 facts and displays nonqualifying coverage; release/documentation verification
 cannot promote it to verified runtime evidence. Actual supported direct/Podman
-ordinary contracts remain unchanged. Existing pins, original allocator, profile,
-limits and the frozen privileged-source closure are unchanged. Fresh independent
-source review, complete gates and native evidence remain required.
+ordinary contracts remain unchanged. The catalogue accepts the canonical bare
+64-hex archive hash while retaining exact prefixed manifest/configuration digests.
+Existing source/parser pins, original allocator, profile and resource limits are
+unchanged. The changed privileged closure requires a new exact-source review;
+historical evidence keeps its original source identity.
 
 The Docker guest-systemd conformance fixture may collect a separate
 [leaf-after memory witness](../images/docker/conformance/README.md#diagnostic-leaf-after-witness)

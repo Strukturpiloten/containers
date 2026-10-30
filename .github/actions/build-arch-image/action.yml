@@ -115,7 +115,7 @@ runs:
         FOCUSED_RUNTIME: ${{ inputs.focused-runtime }}
         VALIDATION_PROFILE: ${{ github.event.inputs.validation_profile }}
         TRUSTED_RUNTIME: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-        ACTIVE_USERNS_CONTEXT: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/TheRealBecks/issue527' && github.event.inputs.validation_profile == 'docker-rootless-diagnostic' && github.job == 'smoke-build' }}
+        ACTIVE_USERNS_CONTEXT: ${{ github.repository == 'Strukturpiloten/containers' && github.event_name == 'workflow_dispatch' && github.job == 'smoke-build' && runner.os == 'Linux' && runner.environment == 'github-hosted' && ((github.event.inputs.validation_profile == 'docker-rootless-diagnostic' && github.ref == 'refs/heads/TheRealBecks/issue527') || ((github.event.inputs.validation_profile == '' || github.event.inputs.validation_profile == 'full') && (fromJSON(inputs.entry).arch == 'amd64' || fromJSON(inputs.entry).arch == 'arm64'))) }}
         ACTIVE_CANDIDATE: ${{ github.sha }}
         ACTIVE_WORKFLOW: ${{ github.workflow_sha }}
         ACTIVE_RUN: ${{ github.run_id }}
@@ -126,6 +126,9 @@ runs:
 
           CONSUMER = 'containers-ubuntu26-userns-active'
           SOURCE_MANIFEST_SHA256 = '7f6693f40311617e4854f8c6a35cbe13b3afdd3d7a8bef58978397ba1178dbd8'
+          ADMISSION_REVISION = 'containers527-maintained-native-v1'
+          EXPERIMENTAL_PURPOSE = 'experimental-candidate'
+          MAINTAINED_PURPOSE = 'maintained-prerequisite'
           CLOSED_FILES = (
               'scripts/__init__.py', 'scripts/docker_userns_active.py', 'scripts/docker_userns_qualification.py',
               'scripts/docker_runner_security.py', 'scripts/docker_userns_custody_child.py',
@@ -163,6 +166,44 @@ runs:
               require(type(value) is str and value.isascii() and value.lower() in {'', 'full', 'docker-rootless-diagnostic'})
               return value.lower() or 'full'
 
+          def selected_manual_ref(value: object) -> str:
+              """Keep the actual dispatch branch/tag ref; never normalize an arbitrary locator."""
+              if (
+                  type(value) is not str
+                  or re.fullmatch(r"refs/(?:heads|tags)/[A-Za-z0-9][A-Za-z0-9._/-]{0,179}", value) is None
+                  or any(part in {"", ".", ".."} or part.endswith((".", ".lock")) for part in value.split("/"))
+                  or ".." in value
+              ):
+                  require(False)
+              return value
+
+          def event_scope(event: object) -> tuple[str, str]:
+              """Derive the finite purpose/ref from the fixed workflow-dispatch payload."""
+              if type(event) is not dict or type(event.get("inputs", {})) is not dict:
+                  require(False)
+              inputs = event.get("inputs", {})
+              canonical = validation_profile(inputs.get("validation_profile", "full"))
+              focused = inputs.get("focused_runtime", "witness-diagnostic")
+              if type(focused) is not str or focused not in {"witness-diagnostic", "mandatory-accounting"}:
+                  require(False)
+              if canonical == "full":
+                  if (
+                      "inputs" not in event
+                      or focused != "witness-diagnostic"
+                      or type(event.get("repository")) is not dict
+                      or event["repository"].get("full_name") != "Strukturpiloten/containers"
+                      or event.get("workflow") != ".github/workflows/ci.yml"
+                  ):
+                      require(False)
+                  return MAINTAINED_PURPOSE, selected_manual_ref(event.get("ref"))
+              if (
+                  event.get("ref", "refs/heads/TheRealBecks/issue527") != "refs/heads/TheRealBecks/issue527"
+                  or ("repository" in event and (type(event["repository"]) is not dict or event["repository"].get("full_name") != "Strukturpiloten/containers"))
+                  or event.get("workflow", ".github/workflows/ci.yml") != ".github/workflows/ci.yml"
+              ):
+                  require(False)
+              return EXPERIMENTAL_PURPOSE, "refs/heads/TheRealBecks/issue527"
+
           def unique(pairs):
               result = {}
               for key, value in pairs:
@@ -194,11 +235,10 @@ runs:
 
           def verify_bundle(raw, trusted):
               value = exact(json.loads(raw, object_pairs_hook=unique), ('schemaVersion', 'consumer', 'context', 'objects', 'sdk'))
-              require(type(value['schemaVersion']) is int and value['schemaVersion'] == 1 and value['consumer'] == CONSUMER)
+              require(type(value['schemaVersion']) is int and value['schemaVersion'] == 2 and value['consumer'] == CONSUMER)
               context = exact(value['context'], ('candidate', 'workflow', 'checkout', 'repository', 'event', 'ref', 'job',
                   'run', 'attempt', 'architecture', 'image', 'imageOS', 'imageVersion', 'imageVersionKind',
-                  'validationProfile', 'validationProfileRequested'))
-              require(context == trusted)
+                  'validationProfile', 'validationProfileRequested', 'workflowRef', 'purpose', 'admissionRevision', 'admissionSha256'))
               require(type(value['objects']) is list and 1 <= len(value['objects']) <= 48)
               objects, used, total = {}, set(), 0
               for item in value['objects']:
@@ -247,6 +287,24 @@ runs:
                   content = base64.b64decode(value['sdk'][item['path']], validate=True)
                   require(len(content) == item['size'] and sha256(content) == item['sha256'])
                   sdk[Path(item['path']).name] = content
+              admission_raw = files['.github/docker-userns-active-admission.json']
+              admission = json.loads(admission_raw, object_pairs_hook=unique)
+              exact(admission, ('schemaVersion', 'consumer', 'purpose', 'qualification', 'sourceManifestSha256',
+                               'context', 'cohorts', 'architectures', 'policyNamespace', 'parserExecutionNamespace',
+                               'review', 'revision', 'maintainedContext', 'maintainedArchitectures'))
+              require(type(admission['schemaVersion']) is int and admission['schemaVersion'] == 2
+                      and admission['consumer'] == CONSUMER and admission['purpose'] == 'scoped-prerequisite-attempt'
+                      and admission['qualification'] == 'none' and admission['revision'] == ADMISSION_REVISION)
+              policy = admission['maintainedContext'] if trusted['purpose'] == MAINTAINED_PURPOSE else admission['context']
+              require(policy['repository'] == trusted['repository'] and policy['event'] == trusted['event']
+                      and policy['workflow'] == '.github/workflows/ci.yml' and policy['job'] == trusted['job']
+                      and policy['image'] == trusted['image'] and policy['validationProfile'] == trusted['validationProfile'])
+              require(policy['ref'] == ('event-selected-manual-ref' if trusted['purpose'] == MAINTAINED_PURPOSE else trusted['ref']))
+              require(admission['maintainedArchitectures'] == {'amd64': MAINTAINED_PURPOSE, 'arm64': MAINTAINED_PURPOSE})
+              require(type(admission['cohorts']) is dict and set(admission['cohorts']) == {'amd64', 'arm64'})
+              trusted['admissionRevision'] = admission['revision']
+              trusted['admissionSha256'] = sha256(admission_raw)
+              require(context == trusted)
               return files, sdk
 
           def read_input(path, uid, limit):
@@ -287,10 +345,12 @@ runs:
               require(type(event) is dict and type(event.get('inputs', {})) is dict)
               requested = event.get('inputs', {}).get('validation_profile', 'full')
               canonical = validation_profile(requested)
-              require(canonical == 'docker-rootless-diagnostic')
+              purpose, selected_ref = event_scope(event)
               DIAGNOSTIC['phase'] = 'bootstrap-context'
               trusted = {'candidate': candidate, 'workflow': workflow, 'checkout': checkout,
-                  'repository': 'Strukturpiloten/containers', 'event': 'workflow_dispatch', 'ref': 'refs/heads/TheRealBecks/issue527',
+                  'repository': 'Strukturpiloten/containers', 'event': 'workflow_dispatch', 'ref': selected_ref,
+                         'workflowRef': 'Strukturpiloten/containers/.github/workflows/ci.yml@' + selected_ref,
+                         'purpose': purpose,
                   'job': 'smoke-build', 'run': run, 'attempt': attempt, 'architecture': architecture,
                   'image': 'docker-29-conformance-rootless',
                   'imageOS': {'amd64': 'ubuntu26', 'arm64': 'ubuntu26-arm64'}[architecture], 'imageVersion': image_version,
@@ -314,7 +374,7 @@ runs:
               for name, raw in sdk.items():
                   create(stage / 'sdk' / name, raw)
               info = stage.lstat()
-              bootstrap = {'schemaVersion': 1, 'consumer': CONSUMER, 'context': trusted,
+              bootstrap = {'schemaVersion': 2, 'consumer': CONSUMER, 'context': trusted,
                   'uid': uid, 'gid': gid, 'deadlineNs': deadline, 'stageIdentity': [info.st_dev, info.st_ino],
                   'files': {name: sha256(raw) for name, raw in files.items()}}
               create(stage / 'bootstrap.json', (json.dumps(bootstrap, sort_keys=True) + '\n').encode('ascii'))
@@ -388,7 +448,7 @@ runs:
           finish_active_stage() {
             active_status=$?
             trap - EXIT
-            if ! sudo -n /usr/bin/timeout --signal=TERM --kill-after=1s 20s \
+            if [ -n "${active_stage}" ] && ! sudo -n /usr/bin/timeout --signal=TERM --kill-after=1s 20s \
               /usr/bin/python3.14 -I -B -S "${active_stage}/scripts/docker_userns_active.py" \
               dispose-stage "${active_stage}"; then
               active_status=1
@@ -396,7 +456,7 @@ runs:
             exit "${active_status}"
           }
           trap finish_active_stage EXIT
-          if [ "${IMAGE_ARCH}" = "arm64" ]; then
+          if [ "${IMAGE_ARCH}" = "arm64" ] && [ "${VALIDATION_PROFILE,,}" = docker-rootless-diagnostic ]; then
             # Observation cannot qualify native tests or admit ARM policy loading.
             if sudo -n /usr/bin/timeout --signal=TERM --kill-after=1s 20s \
               /usr/bin/python3.14 -I -B -S "${active_stage}/scripts/docker_userns_active.py" \
@@ -431,6 +491,7 @@ runs:
             raise SystemExit("Ordinary runtime evidence identity or operation failed")
         require_ordinary_runtime_authority(record, profile, configuration)
         PY_AUTHORITY
+          active_stage=""
         fi
 
     - name: Upload runtime evidence

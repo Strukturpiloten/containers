@@ -6,6 +6,7 @@ import base64
 import json
 import os
 import re
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
@@ -13,7 +14,14 @@ from typing import TYPE_CHECKING, Any, NoReturn
 from scripts import docker_userns_active as protocol
 from scripts import docker_userns_custody_child as child
 from scripts.docker_userns_active_bootstrap_bundle import context
-from scripts.docker_userns_qualification import NativeBinding
+from scripts.docker_userns_qualification import (
+    PREREQUISITE_SCHEMA,
+    SCOPED_RECEIPT_KEYS,
+    NativeBinding,
+    QualificationError,
+    context_digest,
+    validate_stage_disposal,
+)
 
 if TYPE_CHECKING:
     from scripts.runtime_tests import RuntimeContext
@@ -47,6 +55,9 @@ class ActiveClient:
             runtime_slice=backend.slice,
             slice_identity=backend.slice_identity,
             deadline_ns=int(ctx.runtime_deadline * 1_000_000_000),
+            purpose=self.provenance["purpose"],
+            admission_sha256=self.provenance["admissionSha256"],
+            workflow_context_sha256=context_digest(self.provenance),
         )
         self.binding.validate()
         self.name = "new"
@@ -111,7 +122,25 @@ class ActiveClient:
         checks = getattr(self.ctx, "checks", [])
         if (
             (checks and checks[-1].get("exitCode") != 0)
+            or set(value) != SCOPED_RECEIPT_KEYS
+            or type(value.get("schemaVersion")) is not int
+            or value.get("schemaVersion") != PREREQUISITE_SCHEMA
+            or value.get("consumer") != protocol.CONSUMER
+            or value.get("binding") != asdict(self.binding)
             or value.get("bindingSha256") != self.binding.digest()
+            or value.get("purpose") != self.binding.purpose
+            or value.get("admissionSha256") != self.binding.admission_sha256
+            or value.get("admissionRevision") != self.provenance["admissionRevision"]
+            or value.get("workflowContext") != self.provenance
+            or type(value.get("bootstrapSha256")) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", value["bootstrapSha256"]) is None
+            or (self.evidence and value["bootstrapSha256"] != self.evidence.get("bootstrapSha256"))
+            or value.get("qualification")
+            != (
+                "maintained-prerequisite"
+                if self.binding.purpose == "maintained-prerequisite"
+                else "experimental-candidate-only"
+            )
             or value.get("retained") is not False
             or value.get("validationProfile") != self.provenance["validationProfile"]
             or value.get("validationProfileRequested") != self.provenance["validationProfileRequested"]
@@ -161,7 +190,7 @@ class ActiveClient:
         """Discard unsafe response bytes and retain their closed protocol category."""
         self.capture_failure(self.local_failure(operation, code))
         reason = "active qualification response unavailable; runtime retained"
-        raise ValueError(reason)
+        raise ValueError(reason) from None
 
     def capture_failure(self, value: dict[str, Any]) -> None:
         """Export before endpoint teardown; a reporting locator never changes the active lease name."""
@@ -206,3 +235,59 @@ class ActiveClient:
             reason = "unacknowledged active qualification retains private runtime"
             raise ValueError(reason)
         self.evidence = self.rpc("close", {"bindingSha256": self.binding.digest(), "container": None})
+
+    def dispose_stage(self) -> dict[str, Any]:
+        """Finish the existing root stage before maintained pair publication."""
+        if self.binding.purpose != "maintained-prerequisite" or self.binding.phase != "enforcement":
+            reason = "maintained final phase is required for stage disposal"
+            raise ValueError(reason)
+        remaining = (self.binding.deadline_ns - time.monotonic_ns()) / 1_000_000_000
+        if remaining <= 0:
+            reason = "stage disposal exceeded the original phase deadline"
+            raise ValueError(reason)
+        allowance = min(20.0, remaining)
+        command = [
+            "/usr/bin/python3.14",
+            "-I",
+            "-B",
+            "-S",
+            str(self.stage / "scripts/docker_userns_active.py"),
+            "dispose-stage",
+            str(self.stage),
+        ]
+        try:
+            result = self.ctx.command(
+                "scoped userns stage disposal",
+                self.ctx.backend.privileged(command, allowance),
+                timeout=allowance,
+                check=False,
+            )
+        except (Exception, KeyboardInterrupt) as error:  # noqa: BLE001 - same closed transport boundary as lease RPCs.
+            self.redact_command()
+            self.capture_failure(self.local_failure("dispose-stage", protocol.failure_reason(error)))
+            reason = "maintained stage disposal command unavailable; runtime retained"
+            raise ValueError(reason) from None
+        self.redact_command()
+        if (
+            time.monotonic_ns() >= self.binding.deadline_ns
+            or not self.ctx.checks
+            or self.ctx.checks[-1].get("exitCode") != 0
+        ):
+            self.refuse_response("dispose-stage", "receipt-mismatch")
+        if type(result) is not str:
+            self.refuse_response("dispose-stage", "malformed-receipt")
+        try:
+            size = len(result.encode("utf-8"))
+        except UnicodeError:
+            self.refuse_response("dispose-stage", "malformed-receipt")
+        if size > protocol.MAX_STATE:
+            self.refuse_response("dispose-stage", "oversized-receipt")
+        try:
+            value = json.loads(result, object_pairs_hook=protocol.unique)
+        except ValueError, TypeError, protocol.RefusedError:
+            self.refuse_response("dispose-stage", "malformed-receipt")
+        try:
+            validate_stage_disposal(value, self.evidence)
+        except QualificationError, ValueError, TypeError, KeyError, AttributeError:
+            self.refuse_response("dispose-stage", "receipt-mismatch")
+        return value

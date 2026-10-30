@@ -31,6 +31,8 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
+from scripts import docker_userns_qualification as prerequisite
+from scripts.evidence_gate import EvidenceError, _scoped_phase, require_ordinary_runtime_authority
 from scripts.metadata_schema import validate_metadata_schema
 from scripts.oci_artifacts import archive_identity
 from scripts.runtime_backends import PodmanBackend, select_outer_engine
@@ -1085,28 +1087,29 @@ def _export_phase_prerequisite(plan: _DockerPhasePlan, ctx: RuntimeContext, resu
     scoped = getattr(ctx.backend, "scoped_profile", None)
     if scoped is not None:
         result["scopedProfile"] = scoped.evidence
-    if scoped is None and getattr(plan.args, "active_userns_stage", None) is None:
+    required = _private_systemd_accounting(plan.metadata, ctx.outer_engine)
+    if not required and scoped is None and getattr(plan.args, "active_userns_stage", None) is None:
         return
-    actual = result.get("scopedProfile")
-    true_fields = (
-        "cleanOwnerVerified",
-        "ownerTerminationVerified",
-        "custodyDisposed",
-        "ownerReady",
-        "guestAbsenceVerified",
-        "taskAbsenceVerified",
-        "scopeAbsenceVerified",
-        "profileAbsenceVerified",
+    if scoped is None:
+        raise ProbeError("required scoped prerequisite evidence is missing")
+    try:
+        purpose = _scoped_phase(result, result)
+    except EvidenceError as error:
+        raise ProbeError("required scoped prerequisite evidence is invalid") from error
+    result["prerequisiteAuthority"] = (
+        prerequisite.MAINTAINED_PURPOSE if purpose == prerequisite.MAINTAINED_PURPOSE else "experimental-candidate-only"
     )
-    false_fields = ("retained", "readerPending", "childPending")
-    if (
-        not isinstance(actual, dict)
-        or actual.get("qualification") != "experimental-candidate-only"
-        or actual.get("state") != "closed"
-        or not all(actual.get(key) is True for key in true_fields)
-        or not all(actual.get(key) is False for key in false_fields)
-    ):
-        raise ProbeError("required scoped prerequisite evidence is missing, unknown or incomplete")
+    if purpose == prerequisite.MAINTAINED_PURPOSE and plan.phase is DockerProbePhase.ENFORCEMENT:
+        if plan.cancellation.cancelled:
+            raise KeyboardInterrupt
+        ctx.runtime_deadline = plan.deadline
+        try:
+            result["stageDisposal"] = scoped.dispose_stage()
+            prerequisite.validate_stage_disposal(result["stageDisposal"], result["scopedProfile"])
+        finally:
+            ctx.runtime_deadline = None
+        if plan.cancellation.cancelled:
+            raise KeyboardInterrupt
 
 
 def _finish_phase_authority(plan: _DockerPhasePlan, ctx: RuntimeContext | None, result: dict[str, Any]) -> None:
@@ -1126,14 +1129,14 @@ def _finish_phase_authority(plan: _DockerPhasePlan, ctx: RuntimeContext | None, 
             and ledger.finalized is True
             else "incomplete"
         )
-        actual = result.get("scopedProfile")
-        result["prerequisiteAuthority"] = (
-            "experimental-candidate-only"
-            if isinstance(actual, dict) and actual.get("qualification") == "experimental-candidate-only"
-            else "unavailable"
-        )
-        # No maintained normal prerequisite exists for this selected private route.
-        # Workload/accounting success cannot manufacture native authority.
+        result.setdefault("prerequisiteAuthority", "unavailable")
+        if (
+            successful
+            and result["oomAccountingStatus"] == "complete"
+            and result["prerequisiteAuthority"] == prerequisite.MAINTAINED_PURPOSE
+            and result.get("focusedRuntime", "none") == "none"
+        ):
+            result["qualification"] = "complete"
         return
     if (
         successful
@@ -1168,6 +1171,16 @@ def _finish_pair_authority(evidence: dict[str, Any]) -> None:
             if phase.get("oomAccountingRequired") is True:
                 phase["oomAccountingStatus"] = "incomplete"
         return
+    if accounting and complete and all(phase.get("qualification") == "complete" for phase in phases):
+        try:
+            require_ordinary_runtime_authority(
+                {**evidence, "qualification": "complete"}, "docker", {"launcher": "systemd", "mode": "rootless"}
+            )
+        except EvidenceError:
+            pass
+        else:
+            evidence["qualification"] = "complete"
+            return
     if (
         not accounting
         and evidence["focusedRuntime"] == "none"
@@ -1184,6 +1197,10 @@ def _execute_docker_phase(plan: _DockerPhasePlan) -> dict[str, Any]:
     started = time.monotonic()
     result: dict[str, Any] = {
         "phase": plan.phase.value,
+        "image": plan.metadata["name"],
+        "runId": os.environ.get("GITHUB_RUN_ID", ""),
+        "runAttempt": os.environ.get("GITHUB_RUN_ATTEMPT", ""),
+        "producingJob": os.environ.get("GITHUB_JOB", ""),
         "status": "failed",
         "checks": [],
         "observations": [],
@@ -1291,6 +1308,8 @@ def _docker_phase_work(plan: _DockerPhasePlan, ctx: RuntimeContext, result: dict
             if ctx.outer_engine == "podman":
                 result["podmanVersion"] = result["outerRuntime"]["clientVersion"]
             stage = getattr(plan.args, "active_userns_stage", None)
+            if _private_systemd_accounting(plan.metadata, ctx.outer_engine) and stage is None:
+                raise ProbeError("private Docker systemd/rootless requires its admitted scoped prerequisite")
             if stage is not None:
                 if ctx.outer_engine != "docker":
                     raise ProbeError("active userns qualification requires the explicit Docker backend")
@@ -1474,6 +1493,12 @@ def _run_systemd_pair(
                 )
             )
             evidence["phases"].append(result)
+            scoped = result.get("scopedProfile")
+            if isinstance(scoped, dict) and "workflowContext" in scoped:
+                evidence.setdefault("workflowContext", scoped["workflowContext"])
+                evidence.setdefault("prerequisitePurpose", scoped["purpose"])
+            if "stageDisposal" in result:
+                evidence["stageDisposal"] = result["stageDisposal"]
             evidence["checks"].extend({**check, "phase": phase.value} for check in result["checks"])
             evidence["observations"].extend({**item, "routePhase": phase.value} for item in result["observations"])
             if "imageIdentity" not in evidence and "imageIdentity" in result:
@@ -1568,6 +1593,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "host": {"architecture": platform.machine(), "kernel": platform.release(), "system": platform.system()},
         "runId": os.environ.get("GITHUB_RUN_ID", ""),
         "runAttempt": os.environ.get("GITHUB_RUN_ATTEMPT", ""),
+        "producingJob": os.environ.get("GITHUB_JOB", ""),
     }
     use_sudo = args.sudo or (
         not args.no_sudo
@@ -1582,6 +1608,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         execution_mode == "diagnostic" and (outer_engine != "docker" or profile.get("launcher") != "systemd")
     ):
         raise ProbeError("OOM diagnostic mode requires the explicitly selected Docker systemd fixture")
+    if _private_systemd_accounting(metadata, outer_engine):
+        if getattr(args, "active_userns_stage", None) is None:
+            raise ProbeError("private Docker systemd/rootless requires its admitted scoped prerequisite")
+        from scripts.docker_userns_active_bootstrap_bundle import context  # noqa: PLC0415 - unprivileged route check.
+
+        provenance = context(dict(os.environ), architecture)
+        if provenance["purpose"] == prerequisite.MAINTAINED_PURPOSE and (
+            execution_mode != "qualification" or getattr(args, "focused_runtime", "none") != "none"
+        ):
+            raise ProbeError("maintained prerequisite requires the ordinary qualification workload")
     evidence["host"]["outerEngineSelection"] = selection
     if outer_engine == "docker" and args.archive is None:
         raise ProbeError("private Docker backend requires an explicit OCI archive, not an ambient image reference")

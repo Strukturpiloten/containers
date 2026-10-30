@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import errno
+import hashlib
+import json
 import tempfile
 import unittest
+from dataclasses import asdict, replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -185,6 +188,42 @@ class RecordingPort:
         self.event("retain")
 
 
+def workflow_context(
+    *,
+    purpose: str = "experimental-candidate",
+    candidate: str = "a" * 40,
+    architecture: str = "amd64",
+    requested: str | None = None,
+) -> dict[str, str]:
+    """Independently author the two supported workflow envelopes; never execute them."""
+    maintained = purpose == "maintained-prerequisite"
+    selected = "refs/heads/reviewed-manual" if maintained else "refs/heads/TheRealBecks/issue527"
+    profile = "full" if maintained else "docker-rootless-diagnostic"
+    admission = Path(__file__).resolve().parents[1] / ".github/docker-userns-active-admission.json"
+    return {
+        "candidate": candidate,
+        "workflow": candidate,
+        "checkout": candidate,
+        "repository": "Strukturpiloten/containers",
+        "event": "workflow_dispatch",
+        "ref": selected,
+        "workflowRef": "Strukturpiloten/containers/.github/workflows/ci.yml@" + selected,
+        "job": "smoke-build",
+        "run": "1",
+        "attempt": "2",
+        "architecture": architecture,
+        "image": "docker-29-conformance-rootless",
+        "imageOS": "ubuntu26" if architecture == "amd64" else "ubuntu26-arm64",
+        "imageVersion": "20261026.180.1" if architecture == "amd64" else "20261026.168.1",
+        "imageVersionKind": "workflow-reported-provenance-not-vm-attestation",
+        "validationProfile": profile,
+        "validationProfileRequested": profile if requested is None else requested,
+        "purpose": purpose,
+        "admissionRevision": "containers527-maintained-native-v1",
+        "admissionSha256": hashlib.sha256(admission.read_bytes()).hexdigest(),
+    }
+
+
 def binding() -> qualification.NativeBinding:
     """Use a finite independent candidate fixture without native activity."""
     return qualification.NativeBinding(
@@ -202,7 +241,115 @@ def binding() -> qualification.NativeBinding:
         runtime_slice="strukturpiloten" + "e" * 32 + ".slice",
         slice_identity="1:2",
         deadline_ns=1000,
+        purpose="experimental-candidate",
+        admission_sha256=workflow_context()["admissionSha256"],
+        workflow_context_sha256=hashlib.sha256(
+            json.dumps(workflow_context(), sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
     )
+
+
+def scoped_receipt(
+    *,
+    purpose: str = "experimental-candidate",
+    phase: str = "clean-control",
+    candidate: str = "a" * 40,
+    requested: str | None = None,
+    architecture: str = "amd64",
+) -> dict:
+    """Build complete root facts independently of producer/receipt formatter code."""
+    context = workflow_context(purpose=purpose, candidate=candidate, requested=requested, architecture=architecture)
+    admission = json.loads(
+        (Path(__file__).resolve().parents[1] / ".github/docker-userns-active-admission.json").read_text()
+    )
+    owner = "e" * 32 if phase == "clean-control" else "d" * 32
+    native = replace(
+        binding(),
+        candidate=candidate,
+        architecture=architecture,
+        phase=phase,
+        purpose=purpose,
+        owner=owner,
+        runtime_slice="strukturpiloten" + owner + ".slice",
+        admission_sha256=context["admissionSha256"],
+        workflow_context_sha256=hashlib.sha256(
+            json.dumps(context, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+    )
+    lease = "f" * 32 if phase == "clean-control" else "8" * 32
+    name = "dockerlens-127-upstream-rootless-1-2-" + lease
+    label = (name + " (unconfined)\n").encode()
+    cohort = admission["cohorts"][architecture]
+    facts = {key: cohort[key] for key in ("osID", "osVersion", "machine", "kernel", "parserVersion")}
+    facts.update(
+        files={key: {"sha256": value} for key, value in cohort.items() if key.endswith("Sha256")},
+        controls={"enabled": True, "restricted_userns": 1, "maximum_userns": 1024, "legacy_clone": None},
+        imageVersion=context["imageVersion"],
+    )
+    return {
+        "schemaVersion": 2,
+        "consumer": "containers-ubuntu26-userns-active",
+        "purpose": purpose,
+        "qualification": "maintained-prerequisite"
+        if purpose == "maintained-prerequisite"
+        else "experimental-candidate-only",
+        "admissionRevision": context["admissionRevision"],
+        "admissionSha256": context["admissionSha256"],
+        "workflowContext": context,
+        "bootstrapSha256": "9" * 64,
+        "binding": asdict(native),
+        "bindingSha256": native.digest(),
+        "lease": lease,
+        "profileName": name,
+        "state": "closed",
+        "sourceManifestSha256": admission["sourceManifestSha256"],
+        "imageVersion": context["imageVersion"],
+        "imageVersionKind": context["imageVersionKind"],
+        "validationProfile": context["validationProfile"],
+        "validationProfileRequested": context["validationProfileRequested"],
+        "parserExecutionNamespace": admission["parserExecutionNamespace"],
+        "preflight": facts,
+        "namespace": {
+            **{key: hashlib.sha256(raw.encode()).hexdigest() for key, raw in admission["policyNamespace"].items()},
+            "user": 1,
+            "mnt": 2,
+            "cgroup": 3,
+        },
+        "cleanOwnerVerified": True,
+        "ownerReady": True,
+        "ownerTerminationVerified": True,
+        "custodyDisposed": True,
+        "guestAbsenceVerified": True,
+        "taskAbsenceVerified": True,
+        "scopeAbsenceVerified": True,
+        "profileAbsenceVerified": True,
+        "retained": False,
+        "readerPending": False,
+        "childPending": False,
+        "profileObservation": {
+            "source": "held-task-attr/apparmor/current",
+            "exactMatch": True,
+            "singleLabel": True,
+            "taskIdentityBound": True,
+            "timing": "post-create",
+            "bytes": len(label),
+            "sha256": hashlib.sha256(label).hexdigest(),
+        },
+    }
+
+
+def stage_disposal(scoped: dict) -> dict:
+    """Only the same immutable stage's disposal can finish a maintained pair."""
+    return {
+        "schemaVersion": 2,
+        "consumer": "containers-ubuntu26-userns-active",
+        "stageDisposed": True,
+        "purpose": scoped["purpose"],
+        "admissionRevision": scoped["admissionRevision"],
+        "admissionSha256": scoped["admissionSha256"],
+        "bootstrapSha256": scoped["bootstrapSha256"],
+        "workflowContextSha256": scoped["binding"]["workflow_context_sha256"],
+    }
 
 
 class LeaseOrdering(unittest.TestCase):
@@ -311,3 +458,86 @@ class LeaseOrdering(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PurposeAdmissionBindingTests(unittest.TestCase):
+    def admission(self) -> tuple[dict, str]:
+        raw = (Path(__file__).resolve().parents[1] / ".github/docker-userns-active-admission.json").read_bytes()
+        return qualification.admission_document(raw), hashlib.sha256(raw).hexdigest()
+
+    def test_both_purposes_use_same_lease_state_machine_with_distinct_bound_identity(self) -> None:
+        experimental = scoped_receipt()
+        maintained = scoped_receipt(purpose="maintained-prerequisite")
+        self.assertNotEqual(experimental["bindingSha256"], maintained["bindingSha256"])
+        admission, digest = self.admission()
+        for receipt in (experimental, maintained):
+            with self.subTest(purpose=receipt["purpose"]):
+                qualification.validate_workflow_context(receipt["workflowContext"], admission, digest)
+                native = qualification.NativeBinding(**receipt["binding"])
+                port = RecordingPort()
+                lease = qualification.ProfileLease(native, port)
+                lease.prepare()
+                lease.create_intent()
+                lease.bind("f" * 64)
+                lease.close()
+                self.assertEqual(lease.state, qualification.State.CLOSED)
+                self.assertEqual(port.events[-1], "finalizer-death-then-store-disposal")
+
+    def test_unknown_or_malformed_purpose_and_digest_fields_never_acquire_a_lease(self) -> None:
+        for key, values in {
+            "purpose": ("complete", "", True, "maintained-prerequisite\n"),
+            "admission_sha256": ("f" * 63, "F" * 64, None, True),
+            "workflow_context_sha256": ("f" * 63, "F" * 64, None, True),
+        }.items():
+            for value in values:
+                port = RecordingPort()
+                with self.subTest(key=key, value=value), self.assertRaises(qualification.QualificationError):
+                    qualification.ProfileLease(replace(binding(), **{key: value}), port).prepare()
+                self.assertEqual(port.events, ["retain"])
+
+    def test_attempt_policy_closes_schema_revision_and_architecture_authority(self) -> None:
+        admission, _digest = self.admission()
+        for key, value in (
+            ("schemaVersion", 1),
+            ("schemaVersion", True),
+            ("revision", "unknown"),
+            ("purpose", "maintained-prerequisite"),
+            ("qualification", "complete"),
+            ("maintainedArchitectures", {"amd64": "maintained-prerequisite", "arm64": "refuse-load"}),
+            ("unexpected", True),
+        ):
+            with self.subTest(key=key), self.assertRaises(qualification.QualificationError):
+                qualification.admission_document(json.dumps({**admission, key: value}).encode())
+
+    def test_manual_ref_is_finite_and_context_or_disposal_replay_is_not_equivalent(self) -> None:
+        admission, digest = self.admission()
+        context = workflow_context(purpose="maintained-prerequisite")
+        original = qualification.context_digest(context)
+        for ref in ("refs/heads/reviewed", "refs/tags/v1.2.3"):
+            changed = {**context, "ref": ref, "workflowRef": qualification.WORKFLOW + "@" + ref}
+            qualification.validate_workflow_context(changed, admission, digest)
+            self.assertNotEqual(qualification.context_digest(changed), original)
+        for ref in (
+            "main",
+            "refs/pull/1/head",
+            "refs/heads/a..b",
+            "refs/heads/a.lock",
+            "refs/heads/a//b",
+            "refs/heads/a\n",
+        ):
+            with self.subTest(ref=ref), self.assertRaises(qualification.QualificationError):
+                qualification.selected_manual_ref(ref)
+        receipt = scoped_receipt(purpose="maintained-prerequisite")
+        for key, value in (
+            ("schemaVersion", True),
+            ("schemaVersion", 1),
+            ("stageDisposed", False),
+            ("purpose", "experimental-candidate"),
+            ("bootstrapSha256", "0" * 64),
+            ("admissionSha256", "0" * 64),
+            ("workflowContextSha256", "0" * 64),
+            ("unexpected", True),
+        ):
+            ack = {**stage_disposal(receipt), key: value}
+            with self.subTest(key=key), self.assertRaises(qualification.QualificationError):
+                qualification.validate_stage_disposal(ack, receipt)
