@@ -1975,7 +1975,7 @@ def _leaf_witness_bind(
                 "bind diagnostic controller and direct child",
                 "sh",
                 "-euc",
-                'endpoint=$4; docker() { command docker --host "$endpoint" --tls=false --tlsverify=false "$@"; }; '
+                'endpoint=$4; docker() { command docker --host "$endpoint" --tls=false "$@"; }; '
                 + LEAF_WITNESS_ASSOCIATION_COMMAND,
                 "--",
                 hierarchy["controlGroup"],
@@ -1999,7 +1999,7 @@ def _leaf_witness_cleanup(collection: RuntimeContext, container: str, workload: 
         "sh",
         "-euc",
         "endpoint=$1; nonce=$2; image=$3; mode=$4; shift 4; "
-        'docker() { command docker --host "$endpoint" --tls=false --tlsverify=false "$@"; }; '
+        'docker() { command docker --host "$endpoint" --tls=false "$@"; }; '
         'cid=$(head -c 65 "$1"); test "${#cid}" -eq 64; '
         'case "$cid" in *[!a-f0-9]*) exit 1;; esac; '
         'test -z "$2" || test "$cid" = "$2"; '
@@ -2135,8 +2135,7 @@ def _leaf_witness_failure_command(
         probe[0],
         "sh",
         "-euc",
-        'endpoint=$2; docker() { command docker --host "$endpoint" --tls=false --tlsverify=false "$@"; }; '
-        + command[1],
+        'endpoint=$2; docker() { command docker --host "$endpoint" --tls=false "$@"; }; ' + command[1],
         "--",
         probe[1],
         vars(collection).get("_leaf_witness_endpoint", "unix:///var/run/docker.sock"),
@@ -2253,7 +2252,7 @@ identity "$scratch/input" 6 "$input_identity" || fail custody
 produce() {
     cli_status=0
     ( exec 7>&-; limits 1 || exit 125;
-      docker --host "$2" --tls=false --tlsverify=false system dial-stdio <&6 2>&4 ) || cli_status=$?
+      docker --host "$2" --tls=false system dial-stdio <&6 2>&4 ) || cli_status=$?
     test "$cli_status" = 0 || { printf cli >&7; return 0; }
     empty "$scratch/cli.err" 4 "$cli_identity" || { printf cli-stderr >&7; return 0; }
     empty "$scratch/decode.err" 3 "$decode_identity" || { printf decode-stderr >&7; return 0; }
@@ -2479,7 +2478,6 @@ class _LeafWitnessArchive:
             "--host",
             self.endpoint,
             "--tls=false",
-            "--tlsverify=false",
             *args,
             timeout=self.remaining(),
         )
@@ -2721,7 +2719,7 @@ def _leaf_witness_observe(archive: _LeafWitnessArchive) -> None:
             "rebind live diagnostic controller",
             "sh",
             "-euc",
-            'endpoint=$4; docker() { command docker --host "$endpoint" --tls=false --tlsverify=false "$@"; }; '
+            'endpoint=$4; docker() { command docker --host "$endpoint" --tls=false "$@"; }; '
             + MEMORY_ASSOCIATION_COMMAND,
             "--",
             association["allocator"]["group"],

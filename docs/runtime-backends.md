@@ -943,6 +943,32 @@ runtime-input ownership already covers the two changed Python modules, while
 the signed/pinned image and payload toolchain retains its existing update policy.
 Source research and offline shell/protocol tests do not qualify native support.
 
+The six witness CLI routes retain their explicit reviewed Unix endpoint and
+`--tls=false`, without an explicit `--tlsverify` flag. Source review of Docker
+CLI 29.9.2 at
+[`a82e528901260c8df6073311379eac65f92db204`](https://github.com/docker/cli/tree/a82e528901260c8df6073311379eac65f92db204)
+establishes that `cli/flags/options.go` enables TLS whenever that verification
+flag was explicitly supplied, even with value false. `cli/command/cli.go` calls
+`TLSDataFromFiles` in `cli/context/tlsdata.go` before the socket bypass in
+`cli/context/docker/load.go`; the CA-file read can therefore fail before a Unix
+socket is used. This is a source-proven initialization defect in the prior
+invocation. The retained R16 native failure stopped at launch/archive image,
+before preflight, without its underlying exception. It does not prove that native
+run failed reading a CA file; a new native run remains necessary.
+
+These Apache-2.0 source references, their exact revision, license and file hashes
+are retained as private research provenance. No upstream source or executable is
+copied, translated or redistributed in this change. The historical CLI/API/image
+facts used by inert tests are version evidence, not additional operational pins.
+The regression exercises the real archive/context/backend timeout and prefix
+interfaces with only process/tool boundaries replaced; it refuses explicit
+verification flags in an independently authored certless Unix fixture before
+CREATE. Actual shell expansion covers the four wrapper routes and the complete
+bridge. These controls do not execute Docker or qualify native behavior.
+No environment fallback, endpoint discovery, runtime authority, software pin or
+Renovate consumer changes: the existing runtime-input ownership and manually
+reviewed Docker payload/update policy continue to own this consumer.
+
 Image and response stream custody also binds the original private directory's
 identity, owner, mode and nonsymlink type. Held directory descriptors anchor
 fixed-name allocation and are checked around I/O; directory substitution cannot

@@ -239,6 +239,21 @@ no source was copied or redistributed. Future payload updates must review this
 consumer under the existing manual payload-update policy. No new download,
 software pin or Renovate manager is introduced.
 
+All six witness CLI routes use the explicit reviewed Unix endpoint and
+`--tls=false` without an explicit `--tlsverify` flag. At that exact CLI revision,
+`cli/flags/options.go` enables TLS for an explicitly supplied verification flag
+even when false. Default endpoint initialization in `cli/command/cli.go` reads
+CA data through `cli/context/tlsdata.go` before the Unix socket bypass in
+`cli/context/docker/load.go`. The prior invocation thus has a source-proven
+certless initialization defect. R16's native launch/archive-image failure lacked
+the underlying exception, so it does not establish a CA-read cause. Source
+research and the authored certless process-boundary regression cannot replace a
+new native run. Exact Apache-2.0 source revision, license and hashes are retained
+as private provenance; no upstream code or executable is copied, translated or
+redistributed. Historical test version/API/image facts are not new operational
+pins. Existing runtime-input and manual Docker payload/Renovate ownership remain
+unchanged; no extra manager, environment fallback or runtime authority is added.
+
 Host code supplies bounded base64 request bytes and parses a distinct held
 response inode. The active image TAR's bytes, inode and offset remain untouched;
 response-role descriptors cannot enter any image-load or stdin route. Read limits

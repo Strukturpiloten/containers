@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import base64
 import ctypes
 import io
@@ -19,6 +20,8 @@ from contextlib import suppress
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from scripts import runtime_docker_systemd
+from scripts.runtime_docker_backend import DockerBackend
 from scripts.runtime_docker_systemd import (
     LEAF_WITNESS_BRIDGE_COMMAND,
     LEAF_WITNESS_START,
@@ -32,10 +35,274 @@ from scripts.runtime_docker_systemd import (
     _LeafArchiveError,
     _LeafWitnessArchive,
 )
+from scripts.runtime_errors import ProbeError
+from scripts.runtime_resource_budgets import IsolatedStoreDiskBudget
+from scripts.runtime_tests import RuntimeContext
 
 CID = "a" * 64
 GUEST = "b" * 64
 IMAGE = "sha256:" + "c" * 64
+
+# Immutable public version/image facts retained from native run 40989306028,
+# not operational pins, private runtime IDs, or proof of its missing exception.
+RECORDED_SERVER = {"Version": "29.9.2", "ApiVersion": "1.56", "MinAPIVersion": "1.40"}
+RECORDED_CONFIG = "sha256:83a47ae795f62e40e87b7d2e227ef788858d068235703b23c45ba0edb93a0ba3"
+
+# An authored certless Unix command contract, not a Python port of Docker's
+# flag/default/TLS implementation. No socket, certificate read, or runtime call.
+CERTLESS_UNIX_CLI = r"""
+import json, os, sys
+args = sys.argv[1:]
+with open(os.environ["FIXTURE_ARGV"], "a", encoding="utf-8") as stream:
+    stream.write(json.dumps(args) + "\n")
+if any(item == "--tlsverify" or item.startswith("--tlsverify=") for item in args):
+    print("certless Unix fixture refuses an explicit TLS verification flag", file=sys.stderr)
+    raise SystemExit(64)
+if args[:3] != ["--host", "unix:///run/user/1000/docker.sock", "--tls=false"]:
+    raise SystemExit(65)
+if args[3:] == ["version", "--format", "{{json .Server}}"]:
+    print(os.environ["FIXTURE_SERVER"])
+elif args[3:] == ["image", "inspect", "--format", "{{.Id}}", os.environ["FIXTURE_IMAGE"]]:
+    print(os.environ["FIXTURE_CONFIG"])
+else:
+    raise SystemExit(66)
+"""
+
+
+class BeforeFixtureCreateError(RuntimeError):
+    """The inert process boundary stopped before creating any resource."""
+
+
+class CertlessUnixDriverTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.argv_log = self.root / "argv.jsonl"
+        self.cli = self.root / "docker"
+        self.cli.write_text("#!" + sys.executable + "\n" + CERTLESS_UNIX_CLI, encoding="utf-8")
+        self.cli.chmod(0o700)
+        self.ctx = RuntimeContext(
+            image="docker-29-conformance-rootless",
+            architecture="amd64",
+            timeout=45,
+            use_sudo=False,
+            outer_engine="docker",
+        )
+        self.addCleanup(shutil.rmtree, self.ctx.directory)
+        self.ctx.containers.append(GUEST)
+        self.ctx.runtime_deadline = time.monotonic() + 300
+        self.ctx.backend.deadline = time.monotonic() + 360
+        # Explicit inert provider identity. The real prefix/rebudget/deadline
+        # methods run; no provider admission or privileged tool is executed.
+        self.ctx.backend._gnu_timeout_provider = ("/fixture/gnu-timeout", "9.7", "fixture")
+        self.ctx.exec_guard = runtime_docker_systemd.guarded_command()
+        self.budget = IsolatedStoreDiskBudget(self.ctx)
+        self.session = _LeafWitnessArchive(self.ctx, self.budget, (GUEST, "rootless"), None, {})
+        self.process_run = subprocess.run
+        self.commands: list[list[str]] = []
+        self.inner_commands: list[list[str]] = []
+        self.cancel_next = False
+
+    def process(self, command: list[str], **options: object) -> subprocess.CompletedProcess[str]:
+        """Replace only the external process with an owned inert CLI/shell."""
+        self.commands.append(command)
+        self.assertEqual(command[:2], ["/fixture/gnu-timeout", "--signal=TERM"])
+        self.assertTrue(command[2].startswith("--kill-after="))
+        self.assertGreater(float(command[3][:-1]), 0)
+        self.assertLess(float(command[3][:-1]), options["timeout"])
+        self.assertGreater(options["timeout"], 0)
+        self.assertLessEqual(options["timeout"], self.ctx.timeout)
+        self.assertTrue(options["text"] is True)
+        self.assertTrue(options["check"] is False)
+        outer = command.index("/fixture/outer-docker")
+        self.assertEqual(command[4], "env")
+        self.assertEqual(
+            command[5:outer],
+            [
+                token
+                for name in (
+                    "DOCKER_HOST",
+                    "DOCKER_CONTEXT",
+                    "DOCKER_CONFIG",
+                    "DOCKER_API_VERSION",
+                    "DOCKER_TLS",
+                    "DOCKER_TLS_VERIFY",
+                    "DOCKER_CERT_PATH",
+                )
+                for token in ("-u", name)
+            ],
+        )
+        self.assertEqual(
+            command[outer + 1 : outer + 8],
+            [
+                "--config",
+                str(self.ctx.backend.cli_config),
+                "--host",
+                "unix://" + str(self.ctx.backend.socket),
+                "--tls=false",
+                "exec",
+                GUEST,
+            ],
+        )
+        guest = command[outer + 8 :]
+        self.assertEqual(guest[: len(self.ctx.exec_guard)], list(self.ctx.exec_guard))
+        inner = guest[len(self.ctx.exec_guard) :]
+        self.inner_commands.append(inner)
+        if self.cancel_next:
+            raise KeyboardInterrupt
+        if inner[:5] == ["docker", "--host", "unix:///run/user/1000/docker.sock", "--tls=false", "create"]:
+            raise BeforeFixtureCreateError
+        if inner[:3] == ["sh", "-euc", 'test ! -e "$1"; test ! -L "$1"']:
+            return subprocess.CompletedProcess(command, 0, "", "")
+        environment = {
+            "PATH": str(self.root),
+            "FIXTURE_ARGV": str(self.argv_log),
+            "FIXTURE_SERVER": json.dumps(RECORDED_SERVER),
+            "FIXTURE_CONFIG": RECORDED_CONFIG,
+            "FIXTURE_IMAGE": self.ctx.image_ref,
+        }
+        if inner[:1] == ["docker"]:
+            executable = [str(self.cli), *inner[1:]]
+        else:
+            self.assertEqual(inner[:2], ["sh", "-euc"])
+            shell = shutil.which("dash")
+            self.assertIsNotNone(shell)
+            executable = [shell, *inner[1:]]
+        return self.process_run(
+            executable,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=options["timeout"],
+        )
+
+    def test_real_archive_chain_reads_recorded_api_and_config_before_create(self) -> None:
+        original = (self.ctx.runtime_deadline, self.ctx.backend.deadline, self.session.end)
+        with (
+            patch.object(DockerBackend, "_tool", return_value="/fixture/outer-docker"),
+            patch("scripts.runtime_tests.subprocess.run", side_effect=self.process),
+            self.assertRaises(BeforeFixtureCreateError),
+        ):
+            self.session.create()
+        self.assertEqual(self.session.image, RECORDED_CONFIG)
+        self.assertEqual(self.session.record["archive"]["operation"], "create")
+        self.assertFalse(self.session.record["archive"]["preflight"])
+        calls = [json.loads(line) for line in self.argv_log.read_text().splitlines()]
+        self.assertEqual(
+            [item[3:] for item in calls],
+            [
+                ["version", "--format", "{{json .Server}}"],
+                ["image", "inspect", "--format", "{{.Id}}", self.ctx.image_ref],
+            ],
+        )
+        self.assertEqual(len(self.commands), 4)
+        self.assertEqual(original, (self.ctx.runtime_deadline, self.ctx.backend.deadline, self.session.end))
+        self.assertEqual(self.ctx.backend.units, {})
+        self.assertFalse(list(self.root.glob("*.pem")))
+
+    def test_real_chain_refuses_tlsverify_counterfactual_before_create(self) -> None:
+        with (
+            patch.object(DockerBackend, "_tool", return_value="/fixture/outer-docker"),
+            patch("scripts.runtime_tests.subprocess.run", side_effect=self.process),
+            self.assertRaisesRegex(ProbeError, "certless Unix fixture refuses"),
+        ):
+            self.session.command("certless flag counterfactual", "--tlsverify=false", "version")
+        self.assertEqual(len(self.commands), 1)
+        self.assertFalse(self.session.custody)
+        self.assertIsNone(self.session.workload)
+
+    def test_all_six_authored_cli_routes_keep_explicit_certless_unix_contract(self) -> None:
+        source = Path(runtime_docker_systemd.__file__).read_text()
+        tree = ast.parse(source)
+        self.assertEqual(
+            sum(
+                node.value.count("--tls=false")
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Constant) and isinstance(node.value, str)
+            ),
+            6,
+        )
+        arguments = {
+            "_leaf_witness_bind": ["/owned.scope", "21", CID, "unix:///run/user/1000/docker.sock"],
+            "_leaf_witness_cleanup": ["unix:///run/user/1000/docker.sock", "nonce", RECORDED_CONFIG, "rootless"],
+            "_leaf_witness_failure_command": [CID, "unix:///run/user/1000/docker.sock"],
+            "_leaf_witness_observe": ["/owned.scope", "21", CID, "unix:///run/user/1000/docker.sock"],
+        }
+        self.assertEqual(
+            set(arguments),
+            {
+                "_leaf_witness_bind",
+                "_leaf_witness_cleanup",
+                "_leaf_witness_failure_command",
+                "_leaf_witness_observe",
+            },
+        )
+        with (
+            patch.object(DockerBackend, "_tool", return_value="/fixture/outer-docker"),
+            patch("scripts.runtime_tests.subprocess.run", side_effect=self.process),
+        ):
+            self.assertEqual(
+                json.loads(
+                    self.session.command(
+                        "direct certless archive route",
+                        "version",
+                        "--format",
+                        "{{json .Server}}",
+                    )
+                ),
+                RECORDED_SERVER,
+            )
+            for owner, argv in arguments.items():
+                function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == owner)
+                literals = [
+                    node.value
+                    for node in ast.walk(function)
+                    if isinstance(node, ast.Constant)
+                    and isinstance(node.value, str)
+                    and "command docker --host" in node.value
+                ]
+                self.assertEqual(len(literals), 1, owner)
+                # Execute the actual authored wrapper and positional expansion,
+                # not a second copy or a fake cgroup/native implementation.
+                prefix = literals[0].split("};", 1)[0] + "}; "
+                result = self.ctx.exec(
+                    "certless shell route " + owner,
+                    GUEST,
+                    "sh",
+                    "-euc",
+                    prefix + 'docker version --format "{{json .Server}}"',
+                    "--",
+                    *argv,
+                )
+                self.assertEqual(json.loads(result), RECORDED_SERVER)
+        # The sixth route is the complete bridge, exercised by BridgeShellTests
+        # below; its independent CLI fixture validates actual expanded argv.
+        self.assertIn('docker --host "$2" --tls=false system dial-stdio', LEAF_WITNESS_BRIDGE_COMMAND)
+        self.assertEqual(len(self.commands), 5)
+
+    def test_original_deadline_reserve_budget_and_cancellation_precede_create(self) -> None:
+        with (
+            patch.object(DockerBackend, "_tool", return_value="/fixture/outer-docker"),
+            patch("scripts.runtime_tests.subprocess.run", side_effect=self.process),
+        ):
+            self.budget.peak_bytes = self.budget.limit_bytes + 1
+            with self.assertRaisesRegex(ProbeError, "disk budget|store exceeded"):
+                self.session.command("over-budget archive", "version")
+            self.budget.peak_bytes = 0
+            original = self.ctx.backend.deadline
+            self.ctx.backend.deadline = time.monotonic() + 59
+            with self.assertRaises(_LeafArchiveError):
+                self.session.command("reserved cleanup archive", "version")
+            self.ctx.backend.deadline = original
+            self.assertEqual(self.commands, [])
+            self.cancel_next = True
+            with self.assertRaises(KeyboardInterrupt):
+                self.session.command("cancelled archive", "version")
+        self.assertFalse(self.session.custody)
+        self.assertIsNone(self.session.workload)
+        self.assertFalse(self.session.record["archive"]["preflight"])
 
 
 def _reply(status: int = 200, *, headers: bytes = b"", body: bytes = b"") -> bytes:
@@ -456,6 +723,7 @@ class BridgeShellTests(unittest.TestCase):
                 + sys.executable
                 + "\nimport os,sys,resource,signal\n"
                 + "mode=os.environ['TEST_MODE']\n"
+                + "assert sys.argv[1:]==['--host','unix:///private.sock','--tls=false','system','dial-stdio']\n"
                 + "open(os.environ['TEST_CALLED'],'wb').write(b'x')\n"
                 + "soft,hard=resource.getrlimit(resource.RLIMIT_FSIZE)\n"
                 + "assert 0<soft<=1024 and soft==hard\n"
