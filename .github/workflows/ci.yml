@@ -659,9 +659,11 @@ jobs:
           set -euo pipefail
 
           if [ "${DIAGNOSTIC_ONLY}" = "true" ]; then
-            echo '## Nonqualifying Docker fixture experiment' >> "$GITHUB_STEP_SUMMARY"
-            printf 'Selected focused workload: %s; native qualification remains none.\n' "${FOCUSED_RUNTIME}" >> "$GITHUB_STEP_SUMMARY"
-            echo 'Selected image only: docker-29-conformance-rootless on AMD64 and ARM64. This source-bound evidence does not satisfy Required CI, full validation, release, or publication gates.' >> "$GITHUB_STEP_SUMMARY"
+            {
+              echo '## Nonqualifying Docker fixture experiment'
+              printf 'Selected focused workload: %s; native qualification remains none.\n' "${FOCUSED_RUNTIME}"
+              echo 'Selected image only: docker-29-conformance-rootless on AMD64 and ARM64. This source-bound evidence does not satisfy Required CI, full validation, release, or publication gates.'
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
           uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine plan-summary build-plan.json >> "$GITHUB_STEP_SUMMARY"
       - name: Upload build plan
