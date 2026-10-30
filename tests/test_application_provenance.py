@@ -8,6 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import yaml
+
 from scripts import container_engine as engine
 
 NOTIFY_PATH = Path("images/nextcloud/nextcloud-notifypush/container.yaml")
@@ -72,24 +74,26 @@ class ApplicationProvenanceTests(unittest.TestCase):
 
     def test_php_version_managers_match_both_images_and_inherit_automerge(self) -> None:
         config = json.loads(Path(".github/renovate.json").read_text(encoding="utf-8"))
-        versions = {
-            "PHP_APCU_VERSION": "5.1.28",
-            "PHP_IMAGICK_VERSION": "3.8.1",
-            "PHP_REDIS_VERSION": "6.3.0",
-            "COMPOSER_VERSION": "2.10.3",
-        }
-        for name, version in versions.items():
+        for name in ("PHP_APCU_VERSION", "PHP_IMAGICK_VERSION", "PHP_REDIS_VERSION", "COMPOSER_VERSION"):
             manager = next(
                 manager for manager in config["customManagers"] if name in " ".join(manager.get("matchStrings", []))
             )
             for path in PHP_PATHS:
                 with self.subTest(input=name, image=path):
-                    match = re.search(
-                        manager["matchStrings"][0].replace("(?<", "(?P<"), path.read_text(encoding="utf-8")
-                    )
+                    source = path.read_text(encoding="utf-8")
+                    version = yaml.safe_load(source)["build"]["args"][name]["value"]
+                    self.assertRegex(version, r"^\d+\.\d+\.\d+$")
+                    pattern = manager["matchStrings"][0].replace("(?<", "(?P<")
+                    match = re.search(pattern, source)
                     self.assertIsNotNone(match)
                     self.assertEqual(match.group("currentValue"), version)
                     self.assertTrue(re.search(manager["managerFilePatterns"][0][1:-1], path.as_posix()))
+                    # A future Renovate pin must pass without editing this test.
+                    metadata = yaml.safe_load(source)
+                    metadata["build"]["args"][name]["value"] = "98.76.54"
+                    updated = re.search(pattern, yaml.safe_dump(metadata, sort_keys=False))
+                    self.assertIsNotNone(updated)
+                    self.assertEqual(updated.group("currentValue"), "98.76.54")
         self.assertTrue(config["automerge"])
         self.assertFalse(any(rule.get("automerge") is False for rule in config["packageRules"]))
 
