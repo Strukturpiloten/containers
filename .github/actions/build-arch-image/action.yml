@@ -5,6 +5,14 @@ inputs:
   entry:
     description: JSON matrix entry with image name and architecture.
     required: true
+  focused-runtime:
+    description: Validated nonqualifying experiment selection, or none.
+    required: false
+    default: none
+  oom-accounting-mode:
+    description: Explicit qualification or nonqualifying diagnostic runtime mode.
+    required: false
+    default: qualification
   upload-archive:
     description: Upload the OCI archive for a later publish job.
     required: false
@@ -17,6 +25,31 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Validate focused runtime request
+      shell: bash
+      env:
+        FOCUSED_RUNTIME: ${{ inputs.focused-runtime }}
+        OOM_ACCOUNTING_MODE: ${{ inputs.oom-accounting-mode }}
+        IMAGE_NAME: ${{ fromJSON(inputs.entry).name }}
+        VALIDATION_PROFILE: ${{ github.event.inputs.validation_profile }}
+      run: |
+        set -euo pipefail
+        case "${OOM_ACCOUNTING_MODE}" in qualification|diagnostic) ;; *) exit 1 ;; esac
+        case "${FOCUSED_RUNTIME}" in
+          none) ;;
+          witness-diagnostic|mandatory-accounting)
+            test "${GITHUB_EVENT_NAME}" = workflow_dispatch &&
+              test "${GITHUB_REF}" = refs/heads/TheRealBecks/issue527 && test "${GITHUB_JOB}" = smoke-build &&
+              test "${VALIDATION_PROFILE,,}" = docker-rootless-diagnostic &&
+              test "${IMAGE_NAME}" = docker-29-conformance-rootless || { echo "Focused runtime context refused." >&2; exit 1; }
+            case "${FOCUSED_RUNTIME}:${OOM_ACCOUNTING_MODE}" in
+              witness-diagnostic:diagnostic|mandatory-accounting:qualification) ;;
+              *) echo "Focused runtime and workload mode disagree." >&2; exit 1 ;;
+            esac
+            ;;
+          *) echo "Unknown focused runtime." >&2; exit 1 ;;
+        esac
+
     - name: Install OCI tooling
       shell: bash
       run: |
@@ -78,6 +111,9 @@ runs:
         IMAGE_ARCH: ${{ steps.build.outputs.arch }}
         IMAGE_NAME: ${{ steps.build.outputs.image_name }}
         IMAGE_PATH: ${{ steps.build.outputs.archive_path }}
+        OOM_ACCOUNTING_MODE: ${{ inputs.oom-accounting-mode }}
+        FOCUSED_RUNTIME: ${{ inputs.focused-runtime }}
+        VALIDATION_PROFILE: ${{ github.event.inputs.validation_profile }}
         TRUSTED_RUNTIME: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
         ACTIVE_USERNS_CONTEXT: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/TheRealBecks/issue527' && github.event.inputs.validation_profile == 'docker-rootless-diagnostic' && github.job == 'smoke-build' }}
         ACTIVE_CANDIDATE: ${{ github.sha }}
@@ -300,6 +336,25 @@ runs:
 
         mkdir -p "${RUNNER_TEMP}/runtime-evidence"
         runtime_args=()
+        case "${OOM_ACCOUNTING_MODE}" in
+          qualification|diagnostic) runtime_args+=(--oom-accounting-mode "${OOM_ACCOUNTING_MODE}") ;;
+          *) echo "Unsupported OOM accounting mode" >&2; exit 1 ;;
+        esac
+        case "${FOCUSED_RUNTIME}" in
+          none) ;;
+          witness-diagnostic|mandatory-accounting)
+            test "${VALIDATION_PROFILE,,}" = docker-rootless-diagnostic &&
+              test "${ACTIVE_USERNS_CONTEXT}" = true && test "${IMAGE_NAME}" = docker-29-conformance-rootless &&
+              test "${GITHUB_EVENT_NAME}" = workflow_dispatch && test "${GITHUB_REF}" = refs/heads/TheRealBecks/issue527 &&
+              test "${GITHUB_JOB}" = smoke-build || { echo "Focused runtime context refused." >&2; exit 1; }
+            case "${FOCUSED_RUNTIME}:${OOM_ACCOUNTING_MODE}" in
+              witness-diagnostic:diagnostic|mandatory-accounting:qualification) ;;
+              *) echo "Focused runtime and workload mode disagree." >&2; exit 1 ;;
+            esac
+            ;;
+          *) echo "Unknown focused runtime." >&2; exit 1 ;;
+        esac
+        runtime_args+=(--focused-runtime "${FOCUSED_RUNTIME}")
         if [ "${TRUSTED_RUNTIME}" = "true" ]; then
           runtime_args+=(--allow-privileged)
         fi
@@ -359,6 +414,24 @@ runs:
           --outer-engine profile \
           --evidence "${RUNNER_TEMP}/runtime-evidence/${IMAGE_NAME}-${IMAGE_ARCH}.json" \
           --sudo "${runtime_args[@]}"
+
+        if [ "${FOCUSED_RUNTIME}" = none ]; then
+          # Ordinary CI must consume native authority, not operational exit zero.
+          uv run --frozen --python "${PYTHON_VERSION}" python - "${IMAGE_NAME}" "${IMAGE_ARCH}" \
+            "${RUNNER_TEMP}/runtime-evidence/${IMAGE_NAME}-${IMAGE_ARCH}.json" <<'PY_AUTHORITY'
+        import json, sys
+        from pathlib import Path
+        from scripts import container_engine
+        from scripts.evidence_gate import require_ordinary_runtime_authority
+        name, architecture, path = sys.argv[1:]
+        metadata = next(item for item in container_engine._load_images() if item["name"] == name)
+        profile, configuration = next(iter(metadata["tests"].items()))
+        record = json.loads(Path(path).read_text())
+        if record.get("image") != name or record.get("architecture") != architecture or record.get("profile") != profile or record.get("status") != "passed":
+            raise SystemExit("Ordinary runtime evidence identity or operation failed")
+        require_ordinary_runtime_authority(record, profile, configuration)
+        PY_AUTHORITY
+        fi
 
     - name: Upload runtime evidence
       if: always() && steps.build.outcome == 'success'

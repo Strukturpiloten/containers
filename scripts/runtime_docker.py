@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 from scripts import runtime_docker_systemd
 from scripts.runtime_docker_diagnostics import diagnose_rootless_failure
 from scripts.runtime_errors import ProbeError
-from scripts.runtime_oom_diagnostics import OomDiagnostics
+from scripts.runtime_oom_diagnostics import DockerOomLedger, OomDiagnostics
 from scripts.runtime_resource_budgets import (
     IsolatedStoreDiskBudget,
     outer_container_limits,
@@ -417,6 +417,8 @@ def _run_nested_docker_with_archive(
             runtime_docker_systemd.verify_guest(ctx, budget, container, mode, info)
             diagnostics = OomDiagnostics(ctx, container)
             diagnostics.snapshot("before-ordinary-work")
+            if isinstance(getattr(ctx.backend, "oom_ledger", None), DockerOomLedger):
+                diagnostics.lifecycle_start()
 
         budget.checkpoint()
         archive.seek(0)

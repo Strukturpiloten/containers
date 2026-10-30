@@ -216,7 +216,7 @@ still removes exact resources after an abnormal strict orderly shutdown; that
 shutdown remains a failure even when removal succeeds.
 
 Podman retains its complete existing conmon marker/PID custody observer. Docker
-only the exact before/after inner-memory hooks read the owned outer cgroup
+the mandatory lifecycle-start and original before/after inner-memory hooks read the owned outer cgroup
 `memory.events` and `memory.events.local` through held host descriptors. Private
 Docker incarnation, process birth, owned slice, cgroup2 mount/root and scope
 bindings are checked around the reads; public evidence contains hashes, bounded
@@ -901,14 +901,94 @@ fingerprints or the root verifier's manifest commitment: source/parser/helper
 changes require coordinated manual re-admission and closure/proof regression
 review, without adding duplicate upstream extraction.
 
+### Mandatory Docker parent OOM lifecycle accounting
+
+For the selected private Docker systemd fixture, preparation explicitly creates
+the exact owned empty parent slice before starting containerd, dockerd or any
+guest. Creation intent survives startup timeout and an empty service registry.
+A separate closed host `--docker-parent` reader accepts only the retained owner,
+original device/inode, baseline-or-terminal purpose and original bounded deadline;
+it derives one fixed slice operand and reads fixed counter/control files. This
+is an explicit read-scope/lifetime extension of the existing sudo/GNU-timeout
+Python boundary, not arbitrary host read authority. It never weakens the live
+PID/CID contract of `--docker-outer` or enables a host controller.
+
+Fresh hierarchical/local OOM and group counters must be zero, with full-root
+cgroup2 mount semantics, `memory_localevents=false`, stable nofollow identity and
+`cgroup.events populated=0` bookends. The actual reader must share host-init's
+cgroup namespace and be outside the charged parent. Normal qualification uses
+only the original single-PID1 allocator: its exact authored command/executable,
+loaded image identity, unchanged C source, verified before-identity, no-swap and
+genuine wait-137/Docker OOM outcome supply independent killed-process authority.
+Valid null after-telemetry remains permitted. Disjoint bound outer-counter
+brackets cannot manufacture authority from matching totals or pressure counts.
+
+Terminal accounting runs inside service teardown after exact resource removal
+and all tracked producers stop, before stopping the parent slice. Empty-subtree
+bookends and an outside reader close the whole lifetime, including shutdown;
+no charged helper or restart path follows that read. Residual tasks, extra or
+late kills, local/group OOM events, missing/reset counters, identity drift or an
+unproved boundary fail accounting while exact slice cleanup still runs. No new
+kill/drain command was added. All steps share the original deadline and reserve.
+
+Even `OOMKilled=false` states stay pending until full reconciliation and every
+existing cleanup/absence predicate succeeds. Parent `oom_kill` must equal the
+sum of independently admitted original killed processes. The actual sticky flag
+is retained; reviewed Docker/containerd event semantics and reported build
+provenance do not constitute binary attestation. Unknown versions fail closed.
+The accounting property remains **no additional OOM-killed process in the bound
+ancestor and lifetime**, not absence of pressure or arbitrary cause attribution.
+
+Execution mode, operation/accounting outcome and native authority are separate.
+`oomAccountingMode=qualification` runs the original allocator and mandatory
+ledger without the optional witness. `status=passed` and
+`oomAccountingStatus=complete` can describe a completed experiment, while both
+phase and aggregate `qualification` remain `none`. Completion labels are
+finalized only after actual scoped evidence export, cleanup, all late checks
+and the original deadline; a late evidence write invalidates any passing body.
+Actual experimental scoped receipts remain attached with their original label.
+Mode or stage presence never grants native authority or selects the workload.
+
+The existing `validation_profile=docker-rootless-diagnostic` dispatch adds an
+orthogonal `focused_runtime` choice: `witness-diagnostic` is the default and
+runs diagnostic mode; `mandatory-accounting` explicitly runs qualification
+workload mode. Both are limited to the existing issue527 ref, smoke-build job
+and rootless fixture, retain `diag_only=true`, and cannot satisfy Required CI,
+normal native qualification, publication or release. Validated selection metadata
+is attached to the build plan. Unknown/inapplicable choices and wrong contexts
+refuse before build/runtime; there is no fallback. The frozen privileged context
+still uses its original profile schema. ARM retains its actual observation/load
+refusal, even if the AMD64 accounting experiment succeeds.
+
+The private outer Docker systemd/rootless route currently has no maintained
+normal scoped prerequisite. It therefore cannot emit ordinary native authority,
+even with qualification workload mode and no requested stage. Full/PR/main and
+publication callers retain their normal selection defaults but must fail ordinary
+authority consumption for this route until the separate maintained-prerequisite
+and ARM rollout is reviewed under #527/#442. No normal prerequisite is inferred
+from a missing receipt, a completed ledger, a stage, or an environment label.
+
+The shared Action's ordinary post-runtime check, architecture publisher gate,
+release evidence verifier and catalogue all use the same trusted-metadata
+ordinary-authority decision. Experimental, missing, forged or contradictory
+required authority cannot be laundered through status/exit zero or a consumer
+claiming full scope. The catalogue preserves operational/accounting/qualification
+facts and displays nonqualifying coverage; release/documentation verification
+cannot promote it to verified runtime evidence. Actual supported direct/Podman
+ordinary contracts remain unchanged. Existing pins, original allocator, profile,
+limits and the frozen privileged-source closure are unchanged. Fresh independent
+source review, complete gates and native evidence remain required.
+
 The Docker guest-systemd conformance fixture may collect a separate
 [leaf-after memory witness](../images/docker/conformance/README.md#diagnostic-leaf-after-witness)
-only after its mandatory allocator has already exposed a typed outer OOM marker.
+only in explicit nonqualifying diagnostic mode, after its mandatory allocator
+has already exposed a typed outer OOM marker.
 The witness uses the existing invocation-owned guest, daemon, image and original
 budgets. Its fresh root counter baseline is purpose-tagged and never mixed with
 the mandatory allocator's samples. Controller completion and private identity
-bindings provide diagnostic observations only; the strict outer OOM and orderly
-shutdown guards retain their existing refusal behavior. Unknown or incomplete
+bindings provide diagnostic observations only; the witness cannot supply a
+lifecycle-ledger kill debit or qualify the diagnostic run. All non-flag orderly
+shutdown predicates remain strict. Unknown or incomplete
 witness evidence grants no native qualification or attribution authority.
 Closed last-entered and last-completed collection stages identify where an
 unavailable witness stopped without publishing operands or exception text.

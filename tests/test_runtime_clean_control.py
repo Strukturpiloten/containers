@@ -150,6 +150,8 @@ class CleanControlTests(unittest.TestCase):
                 with self.subTest(selection=selection, phase=phase):
                     ctx = MagicMock()
                     ctx.checks, ctx.observations = [], []
+                    ctx.outer_engine = expected
+                    ctx.backend.scoped_profile = None
                     ctx.prepare.return_value = {"engine": expected, "clientVersion": "observed fixture"}
                     plan = runtime_tests._DockerPhasePlan(
                         args=SimpleNamespace(timeout=45, outer_engine=selection),

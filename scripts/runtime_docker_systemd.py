@@ -20,12 +20,13 @@ from contextlib import ExitStack, contextmanager
 from datetime import datetime
 from http import HTTPStatus
 from itertools import pairwise
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
 from scripts.runtime_docker_systemd_guard import PLACEMENT_GUARD, USER_MANAGER, guarded_command  # noqa: F401 - preserve public re-exports.
 from scripts.runtime_errors import ProbeError
-from scripts.runtime_oom_diagnostics import DOCKER_CHECKS, DOCKER_EXIT_MAX, OomDiagnostics
+from scripts.runtime_oom_diagnostics import DOCKER_CHECKS, DOCKER_EXIT_MAX, DockerOomLedger, OomDiagnostics
 from scripts.runtime_resource_budgets import verify_outer_container_limits
 
 if TYPE_CHECKING:
@@ -1428,7 +1429,7 @@ def _allocator_telemetry(output: str, association: dict[str, Any], *, genuine_oo
 
 def _memory_probe_result(
     ctx: RuntimeContext, association: dict[str, Any], output: str, exit_code: str, state: dict[str, Any]
-) -> None:
+) -> dict[str, Any]:
     genuine = exit_code == "137" and state.get("OOMKilled") is True
     try:
         telemetry = _allocator_telemetry(output, association, genuine_oom=genuine)
@@ -1465,6 +1466,7 @@ def _memory_probe_result(
         raise ProbeError("inner memory probe lacked genuine Docker OOM-kill evidence")
     if not no_swap:
         raise ProbeError("inner memory probe had unexpected effective swap allowance")
+    return telemetry
 
 
 def _retained_service(ctx: RuntimeContext, mode: str) -> dict[str, Any]:
@@ -2976,8 +2978,39 @@ def verify_inner_limits(
                 output = _exec(
                     ctx, budget, container, "read actual memory allocator self telemetry", "docker", "logs", workload
                 )
-                _memory_probe_result(ctx, association, output, exit_code, state)
-                if _leaf_witness_needed(ctx, diagnostics):
+                telemetry = _memory_probe_result(ctx, association, output, exit_code, state)
+                ledger = getattr(getattr(ctx, "backend", None), "oom_ledger", None)
+                if (
+                    isinstance(ledger, DockerOomLedger)
+                    and getattr(ctx, "oom_accounting_mode", "qualification") == "qualification"
+                ):
+                    ledger.admit_original(
+                        association["allocator"],
+                        [_scope_allocator(evidence)],
+                        telemetry,
+                        {
+                            "wait": exit_code,
+                            "state": {"OOMKilled": state.get("OOMKilled"), "ExitCode": state.get("ExitCode")},
+                            "effectiveNoSwap": association["scopeMemory"]["memory.swap.max"] == 0,
+                            "workload": workload,
+                            "command": [
+                                "docker-resource-probe",
+                                "memory",
+                                "--wait-for-start",
+                                RESOURCE_START_FILE,
+                                "--memory-evidence",
+                            ],
+                            "executable": association["allocator"]["exe"],
+                            "sourceSha256": hashlib.sha256(
+                                (
+                                    Path(__file__).resolve().parents[1] / "images/docker/conformance/resource-probe.c"
+                                ).read_bytes()
+                            ).hexdigest(),
+                        },
+                    )
+                if getattr(ctx, "oom_accounting_mode", "qualification") == "diagnostic" and _leaf_witness_needed(
+                    ctx, diagnostics
+                ):
                     _collect_leaf_memory_witness(ctx, budget, container, mode)
             else:
                 output = _exec(ctx, budget, container, "read bounded inner PID refusal", "docker", "logs", name)
@@ -3030,10 +3063,30 @@ def _assert_orderly_state(ctx: RuntimeContext, state: dict[str, Any]) -> None:
         "Restarting": False,
         "Dead": False,
     }
-    if any(type(state.get(key)) is not type(value) or state[key] != value for key, value in expected.items()):
+    ledger = getattr(getattr(ctx, "backend", None), "oom_ledger", None)
+    accounting = getattr(ctx, "outer_engine", "podman") == "docker" and isinstance(ledger, DockerOomLedger)
+    if (
+        getattr(ctx, "outer_engine", "podman") == "docker"
+        and getattr(ctx, "declared_launcher", "direct") == "systemd"
+        and not accounting
+    ):
+        raise ProbeError("mandatory owned-parent OOM lifecycle ledger is missing")
+    if accounting and getattr(ctx, "oom_accounting_mode", "qualification") == "qualification":
+        expected.pop("OOMKilled")
+    if type(state.get("OOMKilled")) is not bool or any(
+        type(state.get(key)) is not type(value) or state[key] != value for key, value in expected.items()
+    ):
         ctx.checks.append({"name": "owned systemd orderly lifecycle state", "status": "failed", "actual": state})
-        raise ProbeError("owned systemd guest must stop without OOM or OCI error and exit exactly zero")
-    ctx.checks.append({"name": "owned systemd orderly lifecycle state", "status": "passed", "actual": state})
+        message = (
+            "owned systemd guest must exit exactly zero and reconcile mandatory OOM accounting"
+            if accounting
+            else "owned systemd guest must stop without OOM or OCI error and exit exactly zero"
+        )
+        raise ProbeError(message)
+    check = {"name": "owned systemd orderly lifecycle state", "status": "passed", "actual": state}
+    if accounting:
+        ledger.defer_state(check)
+    ctx.checks.append(check)
 
 
 def _observe_before_stop(ctx: RuntimeContext, observer: Callable[[], None] | None) -> None:

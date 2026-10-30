@@ -334,6 +334,65 @@ class ObservationTests(unittest.TestCase):
             row = observations._observe_one(METADATA, FakeRegistry(), "Strukturpiloten/containers", None, 5)
         self.assertEqual(row["latest"]["publishedAt"], asset["publishedAt"])
 
+        # Exercise the real shared release verifier; no mock can promote this operational success.
+        identity = {
+            "architecture": "amd64",
+            "sourceRevision": SHA,
+            "version": "1.2.3",
+            "configDigest": CONFIG_DIGEST,
+            "manifestDigest": MANIFEST_DIGEST,
+            "archiveSha256": "a" * 64,
+        }
+        asset["runtimeEvidence"] = [
+            {
+                "image": "example",
+                "architecture": "amd64",
+                "profile": "docker",
+                "status": "passed",
+                "runId": "123",
+                "runAttempt": "1",
+                "imageIdentity": identity,
+                "qualification": "none",
+                "oomAccountingStatus": "complete",
+            }
+        ]
+        asset["scanReports"] = [
+            {
+                "image": IMAGE,
+                "architecture": "amd64",
+                "admission": "isolated-test",
+                "decision": "passed",
+                "sourceRevision": SHA,
+                "runId": "123",
+                "runAttempt": "1",
+                "candidateSource": identity,
+                "candidateDigest": MANIFEST_DIGEST,
+                "baselineStatus": "absent",
+                "baselineDigest": None,
+                "baselineSource": {"status": "absent"},
+            }
+        ]
+        raw = json.dumps(asset).encode()
+        release["assets"][0]["size"] = len(raw)
+        release["assets"][0]["digest"] = observations._digest(raw)
+        with (
+            patch.object(observations, "_github_json", side_effect=response),
+            patch.object(observations, "_platforms", return_value=[PLATFORM]),
+            patch(
+                "scripts.release_evidence.image_policy",
+                return_value={"requiredRuntimeProfile": "docker", "admission": "isolated-test"},
+            ),
+            patch(
+                "scripts.release_evidence.container_engine._load_images",
+                return_value=[{"name": "example", "tests": {"docker": {"launcher": "systemd", "mode": "rootless"}}}],
+            ),
+        ):
+            blocked = observations._observe_one(METADATA, FakeRegistry(), "Strukturpiloten/containers", None, 5)
+        self.assertIsNone(blocked["latest"]["publishedAt"])
+        self.assertEqual(blocked["latest"]["evidence"]["status"], "unavailable")
+        self.assertIn("qualification", blocked["latest"]["evidence"]["reason"])
+        asset.pop("runtimeEvidence")
+        asset.pop("scanReports")
         asset["publishedAt"] = "2026-09-27T12:34:56"
         raw = json.dumps(asset).encode()
         release["assets"][0]["size"] = len(raw)

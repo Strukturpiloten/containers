@@ -14,6 +14,13 @@ on:
         options:
           - full
           - docker-rootless-diagnostic
+      focused_runtime:
+        description: Nonqualifying focused workload (only on the issue527 diagnostic route)
+        type: choice
+        default: witness-diagnostic
+        options:
+          - witness-diagnostic
+          - mandatory-accounting
 
 concurrency:
   group: validate-containers-${{ github.event_name }}-${{ github.event_name != 'workflow_dispatch' && 'full' || inputs.validation_profile == 'docker-rootless-diagnostic' && 'diagnostic' || (inputs.validation_profile == '' || inputs.validation_profile == 'full') && 'full' || 'invalid' }}-${{ github.ref }}
@@ -544,6 +551,8 @@ jobs:
       contents: read
     outputs:
       diag_only: ${{ steps.mode.outputs.diagnostic_only }}
+      runtime_mode: ${{ steps.mode.outputs.runtime_mode }}
+      focused_runtime: ${{ steps.mode.outputs.focused_runtime }}
       has_builds: ${{ steps.outputs.outputs.has_builds }}
       has_payloads: ${{ steps.outputs.outputs.has_payloads }}
       payload_matrix: ${{ steps.outputs.outputs.payload_matrix }}
@@ -564,24 +573,52 @@ jobs:
         shell: bash
         env:
           VALIDATION_PROFILE: ${{ inputs.validation_profile || 'full' }}
+          FOCUSED_RUNTIME: ${{ inputs.focused_runtime }}
         run: |
           set -euo pipefail
           export LC_ALL=C
 
-          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+          scope=all
+          target=""
+          diagnostic_only=false
+          runtime_mode=qualification
+          focused_runtime=none
+          selected_profile=full
+          authority=pending
+          requested_runtime="${FOCUSED_RUNTIME}"
+          if [ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ]; then
+            case "${requested_runtime}" in
+              ""|witness-diagnostic) requested_runtime=witness-diagnostic ;;
+              *) echo "Focused runtime requires the exact manual diagnostic route." >&2; exit 1 ;;
+            esac
+          else
+            case "${requested_runtime}" in
+              witness-diagnostic|mandatory-accounting) ;;
+              *) echo "Unknown focused runtime." >&2; exit 1 ;;
+            esac
             case "${VALIDATION_PROFILE,,}" in
-              full) ;;
+              full)
+                test "${requested_runtime}" = witness-diagnostic || { echo "Focused accounting requires diagnostic scope." >&2; exit 1; }
+                ;;
               docker-rootless-diagnostic)
-                printf '%s\n' 'scope=image' 'target=docker-29-conformance-rootless' 'diagnostic_only=true' >> "$GITHUB_OUTPUT"
-                exit 0
+                test "${GITHUB_REF}" = refs/heads/TheRealBecks/issue527 && test "${GITHUB_JOB}" = plan || {
+                  echo "Focused runtime context refused." >&2; exit 1;
+                }
+                scope=image
+                target=docker-29-conformance-rootless
+                diagnostic_only=true
+                focused_runtime="${requested_runtime}"
+                selected_profile=docker-rootless-diagnostic
+                authority=none
+                if [ "${focused_runtime}" = witness-diagnostic ]; then runtime_mode=diagnostic; fi
                 ;;
-              *)
-                echo "Unknown manual validation profile." >&2
-                exit 1
-                ;;
+              *) echo "Unknown manual validation profile." >&2; exit 1 ;;
             esac
           fi
-          printf '%s\n' 'scope=all' 'target=' 'diagnostic_only=false' >> "$GITHUB_OUTPUT"
+          printf '%s\n' "scope=${scope}" "target=${target}" "diagnostic_only=${diagnostic_only}" \
+            "runtime_mode=${runtime_mode}" "focused_runtime=${focused_runtime}" >> "$GITHUB_OUTPUT"
+          printf '{"validationProfile":"%s","focusedRuntimeRequested":"%s","focusedRuntime":"%s","oomAccountingMode":"%s","qualification":"%s"}\n' \
+            "${selected_profile}" "${requested_runtime}" "${focused_runtime}" "${runtime_mode}" "${authority}" > focused-runtime-selection.json
       - name: Create build plan
         shell: bash
         env:
@@ -617,11 +654,13 @@ jobs:
         shell: bash
         env:
           DIAGNOSTIC_ONLY: ${{ steps.mode.outputs.diagnostic_only }}
+          FOCUSED_RUNTIME: ${{ steps.mode.outputs.focused_runtime }}
         run: |
           set -euo pipefail
 
           if [ "${DIAGNOSTIC_ONLY}" = "true" ]; then
-            echo '## Nonqualifying Docker fixture diagnostic' >> "$GITHUB_STEP_SUMMARY"
+            echo '## Nonqualifying Docker fixture experiment' >> "$GITHUB_STEP_SUMMARY"
+            printf 'Selected focused workload: %s; native qualification remains none.\n' "${FOCUSED_RUNTIME}" >> "$GITHUB_STEP_SUMMARY"
             echo 'Selected image only: docker-29-conformance-rootless on AMD64 and ARM64. This source-bound evidence does not satisfy Required CI, full validation, release, or publication gates.' >> "$GITHUB_STEP_SUMMARY"
           fi
           uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine plan-summary build-plan.json >> "$GITHUB_STEP_SUMMARY"
@@ -633,6 +672,7 @@ jobs:
           path: |
             build-plan.json
             image-inputs.json
+            focused-runtime-selection.json
           if-no-files-found: error
           retention-days: 1
 
@@ -676,6 +716,8 @@ jobs:
           entry: ${{ toJSON(matrix) }}
           upload-archive: "false"
           use-published-dependency-fallback: "true"
+          oom-accounting-mode: ${{ needs.plan.outputs.runtime_mode }}
+          focused-runtime: ${{ needs.plan.outputs.focused_runtime }}
 
   required-ci:
     name: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_profile == 'docker-rootless-diagnostic' && 'Docker fixture diagnostic (not Required CI)' || 'Required CI' }}

@@ -19,6 +19,7 @@ MAX_WORKFLOW_EVENT = 262144
 IMAGE_VERSION_ENV = "ImageVersion"
 MAX_VERSION_CHARACTERS = 256
 FIRST_PRINTABLE_CHARACTER = 32
+REQUIRED_SYSTEMD_PHASE_COUNT = 2
 
 
 class EvidenceError(ValueError):
@@ -244,6 +245,79 @@ def _scoped_phase(record: dict[str, Any], phase: dict[str, Any]) -> None:
         raise EvidenceError(reason)
 
 
+def require_ordinary_runtime_authority(record: dict[str, Any], profile: str, configuration: object) -> None:
+    """Reject experimental authority using trusted metadata, never consumer env."""
+    phases = record.get("phases", [])
+    records = (
+        [record, *(phase for phase in phases if isinstance(phase, dict))] if isinstance(phases, list) else [record]
+    )
+    if any(
+        item.get("focusedRuntime", "none") != "none"
+        or "scopedProfile" in item
+        or item.get("scopedProfileRequired") is True
+        for item in records
+    ):
+        reason = "Focused, experimental or required scoped evidence is not ordinary native authority."
+        raise EvidenceError(reason)
+    if any("qualification" in item and item["qualification"] != "complete" for item in records):
+        reason = "Runtime evidence explicitly lacks ordinary native qualification."
+        raise EvidenceError(reason)
+    required = (
+        profile == "docker"
+        and isinstance(configuration, dict)
+        and configuration.get("launcher") == "systemd"
+        and configuration.get("mode") == "rootless"
+    )
+    if not required:
+        return
+    if (
+        not isinstance(phases, list)
+        or len(phases) != REQUIRED_SYSTEMD_PHASE_COUNT
+        or record.get("qualification") != "complete"
+        or record.get("oomAccountingMode") != "qualification"
+        or record.get("oomAccountingStatus") != "complete"
+        or record.get("oomAccountingRequired") is not True
+        or record.get("focusedRuntime") != "none"
+    ):
+        reason = "Required systemd runtime authority/accounting fields are missing or contradictory."
+        raise EvidenceError(reason)
+    for phase in phases:
+        if (
+            not isinstance(phase, dict)
+            or phase.get("qualification") != "complete"
+            or phase.get("oomAccountingMode") != record["oomAccountingMode"]
+            or phase.get("oomAccountingStatus") != record["oomAccountingStatus"]
+            or phase.get("oomAccountingRequired") is not True
+            or phase.get("focusedRuntime") != "none"
+            or phase.get("status") != "passed"
+            or phase.get("cleanupVerified") is not True
+        ):
+            reason = "Required phase authority/accounting differs from the aggregate."
+            raise EvidenceError(reason)
+        checks = phase.get("checks")
+        accounting = (
+            [
+                item
+                for item in checks
+                if isinstance(item, dict) and item.get("name") == "owned parent OOM lifecycle accounting"
+            ]
+            if isinstance(checks, list)
+            else []
+        )
+        if (
+            len(accounting) != 1
+            or accounting[0].get("status") != "passed"
+            or accounting[0].get("mode") != "qualification"
+            or accounting[0].get("property") != "no-additional-oom-killed-process-in-bound-lifetime"
+        ):
+            reason = "Required phase lacks its actual completed accounting outcome."
+            raise EvidenceError(reason)
+    # There is currently no maintained normal prerequisite for this route.
+    # Labels, a matching total or consumer environment cannot invent one.
+    reason = "Private Docker systemd evidence has no supported maintained normal prerequisite authority."
+    raise EvidenceError(reason)
+
+
 def _systemd_phase_backends(record: dict[str, Any], profile: str, configuration: object) -> None:
     if (
         profile != "docker"
@@ -319,6 +393,7 @@ def verify_architecture(  # noqa: PLR0913
         raise EvidenceError(msg)
     _runtime_skips(runtime, nested_disabled=nested_disabled, profile=profile)
     _outer_runtime(runtime, profile)
+    require_ordinary_runtime_authority(runtime, profile, test_profile)
     _systemd_phase_backends(runtime, profile, test_profile)
     candidate = scan.get("candidateSource")
     if (

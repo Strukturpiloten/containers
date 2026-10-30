@@ -222,9 +222,15 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 "archiveSha256": f"sha256:{'a' * 64}",
             },
         }
-        with patch(
-            "scripts.release_evidence.image_policy",
-            return_value={"requiredRuntimeProfile": "docker", "admission": "isolated-test"},
+        with (
+            patch(
+                "scripts.release_evidence.container_engine._load_images",
+                return_value=[{"name": "example", "tests": {"docker": {"launcher": "direct"}}}],
+            ),
+            patch(
+                "scripts.release_evidence.image_policy",
+                return_value={"requiredRuntimeProfile": "docker", "admission": "isolated-test"},
+            ),
         ):
             result = record(
                 BUILD,
@@ -236,6 +242,39 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 execution_attempt=2,
             )
             self.assertEqual(len(result["runtimeEvidence"]), 1)
+            for facts in (
+                {"qualification": "none", "oomAccountingStatus": "complete"},
+                {"qualification": "complete", "scopedProfileRequired": True},
+                {"qualification": "complete", "focusedRuntime": "mandatory-accounting"},
+            ):
+                with self.subTest(facts=facts), self.assertRaises(ReleaseEvidenceError):
+                    record(
+                        BUILD,
+                        release_origin_revision="d" * 40,
+                        runtime_evidence=[{**runtime, **facts}],
+                        scan_reports=[scan],
+                        published_configs=published,
+                        require_complete=True,
+                        execution_attempt=2,
+                    )
+            with (
+                patch(
+                    "scripts.release_evidence.container_engine._load_images",
+                    return_value=[
+                        {"name": "example", "tests": {"docker": {"launcher": "systemd", "mode": "rootless"}}}
+                    ],
+                ),
+                self.assertRaises(ReleaseEvidenceError),
+            ):
+                record(
+                    BUILD,
+                    release_origin_revision="d" * 40,
+                    runtime_evidence=[{**runtime, "qualification": "complete"}],
+                    scan_reports=[scan],
+                    published_configs=published,
+                    require_complete=True,
+                    execution_attempt=2,
+                )
             with self.assertRaisesRegex(ReleaseEvidenceError, "Scan evidence"):
                 record(
                     BUILD,

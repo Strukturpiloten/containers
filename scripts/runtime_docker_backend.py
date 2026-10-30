@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from scripts.runtime_docker_diagnostics import qualify_gnu_timeout
+from scripts.runtime_oom_diagnostics import MAX_BYTES, SNAPSHOT_SECONDS, DockerOomLedger, _docker_hash, _parent_validate
 
 if TYPE_CHECKING:
     from scripts.docker_userns_active_client import ActiveClient
@@ -56,6 +57,10 @@ class DockerBackend:
         self.cleaning_up = False
         self.lifecycle_failures: list[str] = []
         self.slice_identity: str | None = None
+        self.slice_creation_intent = False
+        self.producers_stopped = False
+        self.resources_drained = False
+        self.oom_ledger: DockerOomLedger | None = None
         self.watchdog: str | None = None
         self.diagnostic_reader_pending = False
         self.scoped_profile: ActiveClient | None = None
@@ -169,7 +174,7 @@ class DockerBackend:
                 "--all",
                 (
                     "--property=Id,Names,LoadState,Description,Transient,MainPID,ActiveState,ControlGroup,"
-                    "FragmentPath,SourcePath,DropInPaths,UnitFileState"
+                    "FragmentPath,SourcePath,DropInPaths,UnitFileState,Restart"
                 ),
             ],
         )
@@ -228,6 +233,8 @@ class DockerBackend:
         return identity
 
     def _start(self, ctx: RuntimeContext, role: str, argv: tuple[str, ...]) -> None:
+        if self.producers_stopped:
+            raise DockerBackendError("private runtime producer lifetime is closed")
         unit = f"strukturpiloten-{self.owner}-{role}.service"
         if self._state(ctx, unit).get("LoadState") != "not-found":
             raise DockerBackendError("private runtime service name already exists")
@@ -250,6 +257,7 @@ class DockerBackend:
                 "--slice=" + self.slice,
                 "--property=Description=" + self.owner,
                 "--property=Type=exec",
+                "--property=Restart=no",
                 f"--property=RuntimeMaxSec={remaining}",
                 "--property=TimeoutStopSec=10",
                 "--property=KillMode=control-group",
@@ -447,6 +455,7 @@ class DockerBackend:
         except ValueError:
             raise DockerBackendError("GNU timeout prerequisite admission failed") from None
         self._unused_slice(ctx)
+        self._prepare_oom_accounting(ctx)
         self._start_services(ctx)
         version = self._endpoint_version(ctx)
         for unit in self.units:
@@ -465,6 +474,7 @@ class DockerBackend:
         systemd_version = self._call(
             ctx, "observe private systemd version", [self._tool("systemd-run"), "--version"]
         ).splitlines()[0]
+        self._bind_oom_server(ctx, version, containerd_version)
         self.ready = True
         self._network(ctx)
         return {
@@ -477,6 +487,71 @@ class DockerBackend:
             "endpoint": "private-unix",
             "storage": "invocation-owned",
         }
+
+    def _bind_oom_server(self, ctx: RuntimeContext, server_version: str, containerd_version: str) -> None:
+        if self.oom_ledger is not None:
+            raw = ctx.podman(
+                "observe owned Docker server build",
+                "version",
+                "--format",
+                '{"Version":{{json .Server.Version}},"GitCommit":{{json .Server.GitCommit}}}',
+            )
+            if len(raw) > MAX_BYTES:
+                raise DockerBackendError("owned Docker server build record exceeded its bound")
+            server = json.loads(raw)
+            if type(server) is not dict or server.get("Version") != server_version:
+                raise DockerBackendError("owned Docker server version changed during binding")
+            self.oom_ledger.bind_server(server, containerd_version)
+
+    def _prepare_oom_accounting(self, ctx: RuntimeContext) -> None:
+        if getattr(ctx, "declared_launcher", "direct") == "systemd":
+            # Register intent before dispatch: a timed-out caller is not proof
+            # that systemd did not materialize this previously absent slice.
+            self.slice_creation_intent = True
+            self._call(ctx, "create empty owned runtime slice", ["systemctl", "start", self.slice])
+            self.slice_identity = self._slice_identity(ctx)
+            baseline = self.parent_oom_snapshot(ctx, "baseline")
+            self.oom_ledger = DockerOomLedger(baseline, ctx.oom_accounting_mode)
+
+    def _terminal_oom_accounting(self, ctx: RuntimeContext) -> None:
+        if not self.resources_drained:
+            raise DockerBackendError("owned resources did not drain")
+        self.oom_ledger.reconcile(self.parent_oom_snapshot(ctx, "terminal"))
+
+    def parent_oom_snapshot(self, ctx: RuntimeContext, purpose: str) -> dict[str, object]:
+        """Mandatory parent-only host read, independent of daemon/live guest PID."""
+        if not self.slice_creation_intent or self.slice_identity is None:
+            raise DockerBackendError("owned parent creation custody is missing")
+        if purpose not in {"baseline", "terminal"} or self._slice_identity(ctx) != self.slice_identity:
+            raise DockerBackendError("owned parent accounting identity changed")
+        seconds = self.command_timeout(min(SNAPSHOT_SECONDS, ctx.timeout))
+        end = min(time.monotonic() + seconds, self.deadline if self.deadline is not None else 0)
+        request = {"owner": self.owner, "purpose": purpose, "sliceIdentity": self.slice_identity, "deadline": end}
+        started_ns = time.monotonic_ns()
+        raw = self._call(
+            ctx,
+            "read quiescent owned parent OOM counters",
+            [
+                sys.executable,
+                "-I",
+                "-B",
+                str(Path(__file__).with_name("runtime_oom_diagnostics.py").resolve()),
+                "--docker-parent",
+                json.dumps(request),
+            ],
+            seconds=seconds,
+        )
+        if len(raw) > MAX_BYTES or time.monotonic() >= end or self._slice_identity(ctx) != self.slice_identity:
+            raise DockerBackendError("owned parent accounting read is late or changed")
+        result = _parent_validate(json.loads(raw), purpose)
+        expected = _docker_hash(["/" + self.slice, tuple(map(int, self.slice_identity.split(":")))])
+        window = result["sampleWindowMonotonicNs"]
+        if result["bindings"]["parent"] != expected or not started_ns <= window[0] <= window[1] <= time.monotonic_ns():
+            raise DockerBackendError("owned parent accounting response does not bind this request")
+        if time.monotonic() >= end:
+            raise DockerBackendError("owned parent accounting validation returned late")
+        self.check_deadline()
+        return result
 
     def _start_expiry(self, ctx: RuntimeContext) -> None:
         """Bound the whole slice even if the Python caller is killed outright."""
@@ -513,6 +588,7 @@ class DockerBackend:
                 "--slice=system.slice",
                 "--property=Description=" + self.owner,
                 "--property=Type=exec",
+                "--property=Restart=no",
                 f"--property=RuntimeMaxSec={remaining}",
                 "--property=TimeoutStopSec=5",
                 "--property=KillMode=control-group",
@@ -539,6 +615,8 @@ class DockerBackend:
 
     def run_options(self, options: tuple[str, ...]) -> tuple[str, ...]:
         """Require owned network, labels and cgroup parent for every outer run."""
+        if self.producers_stopped:
+            raise DockerBackendError("owned parent lifetime is closed to new resources")
         if not self.ready or self.network_id is None:
             raise DockerBackendError("private Docker network is not ready")
         forbidden = ("--network", "--net", "--label", "-l", "--cgroup-parent")
@@ -665,6 +743,8 @@ class DockerBackend:
         state = self._state(ctx, unit)
         if state.get("LoadState") == "not-found":
             return
+        if self.oom_ledger is not None and state.get("Restart") != "no":
+            raise DockerBackendError("owned producer restart policy is unproved")
         self._call(ctx, "stop owned private runtime service", ["systemctl", "stop", unit], seconds=20)
         state = self._state(ctx, unit)
         if state.get("LoadState") != "not-found" and (
@@ -676,6 +756,8 @@ class DockerBackend:
         state = self._read_state(ctx, self.slice)
         if state.get("LoadState") != "not-found" and state.get("ControlGroup"):
             observed = self._slice_identity(ctx)
+            if self.slice_identity is None and self.slice_creation_intent:
+                self.slice_identity = observed
             if self.slice_identity is None or observed != self.slice_identity:
                 raise DockerBackendError("cannot stop an unverified private runtime slice")
             # Includes scopes and shims outside the daemon's service cgroup.
@@ -685,12 +767,12 @@ class DockerBackend:
                 state.get("ControlGroup") or state.get("ActiveState") != "inactive"
             ):
                 raise DockerBackendError("owned runtime slice still contains resources")
-        if self.slice_identity is not None:
+        if self.slice_identity is not None or self.slice_creation_intent:
             self._call(ctx, "verify owned runtime cgroup absence", ["test", "!", "-e", "/sys/fs/cgroup/" + self.slice])
 
     def stop_services(self, ctx: RuntimeContext) -> None:
         """Drain owned service cgroups before permitting store removal."""
-        if not self.units:
+        if not self.units and not self.slice_creation_intent:
             return
         failures = []
         for unit in reversed(self.units):
@@ -698,6 +780,14 @@ class DockerBackend:
                 self._stop_unit(ctx, unit)
             except Exception as error:  # noqa: BLE001 - attempt both independently owned services.
                 failures.append(f"{unit}: {error}")
+        self.producers_stopped = True
+        if self.oom_ledger is not None:
+            try:
+                if failures:
+                    self.resources_drained = False
+                self._terminal_oom_accounting(ctx)
+            except Exception as error:  # noqa: BLE001 - accounting never skips exact slice cleanup.
+                failures.append("mandatory parent OOM accounting: " + str(error))
         try:
             self._stop_slice(ctx)
         except Exception as error:  # noqa: BLE001 - retain the service and scope failures together.
@@ -737,7 +827,9 @@ class DockerBackend:
         """Remove exact resources, drain the full slice, then remove the store."""
         self.cleaning_up = True
         failures = []
-        failures.extend(self._cleanup_resources(ctx))
+        resource_failures = self._cleanup_resources(ctx)
+        failures.extend(resource_failures)
+        self.resources_drained = not resource_failures
         try:
             self.stop_services(ctx)
         except Exception as error:  # noqa: BLE001 - retain original resource failure too.
@@ -765,6 +857,10 @@ class DockerBackend:
         ctx.run_containers.clear()
         ctx.checks.append({"name": "cleanup isolated store", "status": "passed"})
         self._assert_orderly_cleanup()
+        if self.oom_ledger is not None:
+            self.check_deadline()
+            self.oom_ledger.finalize(ctx)
+            self.check_deadline()
 
     def _cleanup_resources(self, ctx: RuntimeContext) -> list[str]:
         """Close scoped custody before touching endpoint dependencies."""

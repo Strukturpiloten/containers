@@ -167,10 +167,25 @@ provenance are retained in the final image.
 ### Diagnostic leaf-after witness
 
 The mandatory single-PID1 allocator, its genuine `137`/Docker OOM predicate,
-its possibly unavailable after sample, and the strict outer OOM refusal remain
-unchanged. Only after that primary probe has already exposed the typed outer
-Docker OOM marker does the harness optionally run a separate diagnostic leaf.
-Passing paths and Podman do not start this additional actor.
+and its valid possibly unavailable after sample remain unchanged. The qualification
+workload uses mandatory pre-daemon-through-quiescent-parent accounting,
+not a sticky-flag waiver; see the [lifetime contract](../../../docs/runtime-backends.md#mandatory-docker-parent-oom-lifecycle-accounting).
+Only explicit `--oom-accounting-mode diagnostic` may run a separate witness
+after the primary probe exposes a typed outer Docker OOM marker. The default
+qualification mode and Podman never start this optional actor. Diagnostic
+witness kills cannot enter the mandatory ledger or qualify any run.
+
+The focused dispatch retains `validation_profile=docker-rootless-diagnostic`.
+Its orthogonal `focused_runtime` choice defaults to `witness-diagnostic`;
+`mandatory-accounting` selects the original allocator/ledger workload without
+that optional witness. Both choices are nonqualifying and require the exact
+existing issue527 context. An experimental AMD64 result may report operation
+passed and accounting complete while phase and aggregate qualification stay
+none. ARM still observes/refuses load. The current private Docker route has no
+maintained normal prerequisite; mode, stage or status cannot supply it. Ordinary
+Action/publisher/release/catalogue consumers enforce that boundary independently
+of the requesting environment. Normal prerequisite rollout and ARM qualification
+remain separate milestones, not completed by this experiment.
 
 The opt-in repository-owned `memory-witness` mode runs as inner PID1 with one
 bounded allocator child in the same 32 MiB, zero-swap, 16-PID leaf. It reads and
@@ -330,6 +345,6 @@ identities, non-SIGKILL termination or unsupported accounting produces bounded
 unavailable evidence. The existing runtime watchdog and exact owned-guest
 cleanup also bound stalled cleanup; a failed or unknown cleanup is not success.
 Controller exit zero means observation completion only. Even a bound child
-SIGKILL and increasing leaf counters do not identify the OOM cause, excuse the
-outer marker, or qualify this image. Synthetic syscall-shim and mock tests are
+SIGKILL and increasing leaf counters do not identify the OOM cause, supply an
+original-probe ledger debit, or qualify this image. Synthetic syscall-shim and mock tests are
 not native namespace or genuine OOM evidence.

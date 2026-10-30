@@ -1996,9 +1996,21 @@ class LeafWitnessProtocolTests(unittest.TestCase):
         self.assertEqual(ctx.timeout, 45)
         self.assertEqual(archive.ctx.timeout, 45)
 
-    def test_primary_result_only_triggers_extra_actor_for_already_known_outer_marker_true(self) -> None:
-        for marker in (False, None, True):
-            ctx = MagicMock(unsafe=True, outer_engine="docker", observations=[], checks=[], image_ref="private-image")
+    def test_only_explicit_diagnostic_mode_can_trigger_optional_actor_for_known_marker(self) -> None:
+        for execution_mode, marker in (
+            ("qualification", True),
+            ("diagnostic", False),
+            ("diagnostic", None),
+            ("diagnostic", True),
+        ):
+            ctx = MagicMock(
+                unsafe=True,
+                outer_engine="docker",
+                oom_accounting_mode=execution_mode,
+                observations=[],
+                checks=[],
+                image_ref="private-image",
+            )
             ctx.checks.append(
                 _hierarchy_evidence(hierarchy_fixture(), kind="service", mode="rootful", unit="docker.service")
             )
@@ -2042,7 +2054,7 @@ class LeafWitnessProtocolTests(unittest.TestCase):
                 patch("scripts.runtime_docker_systemd.verify_outer_container_limits"),
             ):
                 verify_inner_limits(ctx, MagicMock(), "owned", diagnostics=diagnostics)
-            self.assertEqual(witness.call_count, int(marker is True))
+            self.assertEqual(witness.call_count, int(marker is True and execution_mode == "diagnostic"))
             legacy = next(check for check in ctx.checks if check["name"] == "inner memory allocator diagnostic")
             self.assertTrue(legacy["enforcementSatisfied"])
             self.assertIsNone(legacy["telemetry"]["after"])

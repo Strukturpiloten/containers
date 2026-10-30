@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import unittest
 
 from scripts.maintenance import MaintenanceError, catalogue, markdown_catalogue
@@ -88,3 +89,50 @@ class CatalogueTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RuntimeAuthorityCatalogueTests(unittest.TestCase):
+    def test_experimental_or_forged_private_completion_cannot_be_native_coverage(self) -> None:
+        image = copy.deepcopy(IMAGE)
+        image["tests"] = {"docker": {"launcher": "systemd", "mode": "rootless"}}
+        for qualification in ("none", "complete", None):
+            with self.subTest(qualification=qualification):
+                runtime = {
+                    "image": "example",
+                    "architecture": "amd64",
+                    "profile": "docker",
+                    "status": "passed",
+                    "checks": [{"name": "actual accounting", "status": "passed"}],
+                    "host": {"architecture": "amd64"},
+                    "oomAccountingMode": "qualification",
+                    "oomAccountingStatus": "complete",
+                    "imageIdentity": {
+                        "architecture": "amd64",
+                        "manifestDigest": DIGEST,
+                        "configDigest": DIGEST,
+                        "archiveSha256": DIGEST,
+                        "sourceRevision": BUILD["sourceRevision"],
+                        "version": "v1.0.0",
+                    },
+                }
+                if qualification is not None:
+                    runtime["qualification"] = qualification
+                before = copy.deepcopy(runtime)
+                report = catalogue([image], runtime_results={"example": [runtime]})
+                view = report["images"][0]["runtimeCoverage"]["amd64"]["docker"]
+                self.assertEqual(view["status"], "nonqualifying")
+                self.assertEqual(view["operationalStatus"], "passed")
+                self.assertEqual(view["oomAccountingStatus"], "complete")
+                self.assertEqual(view["nativeAuthority"], "none")
+                self.assertEqual(view["qualification"], qualification)
+                self.assertEqual(runtime, before)
+                self.assertIn("nonqualifying", markdown_catalogue(report))
+
+    def test_failed_operational_record_is_not_relabelled_as_normal_success(self) -> None:
+        from scripts.maintenance import _runtime_authority_view  # noqa: PLC0415 - focused pure projection check.
+
+        raw = {"status": "failed", "qualification": "none", "oomAccountingStatus": "incomplete"}
+        view = _runtime_authority_view(IMAGE, "docker", raw)
+        self.assertEqual(view["status"], "failed")
+        self.assertEqual(view["operationalStatus"], "failed")
+        self.assertEqual(view["nativeAuthority"], "none")

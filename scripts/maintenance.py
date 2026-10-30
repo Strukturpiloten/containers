@@ -136,6 +136,28 @@ def _build_evidence(image: Mapping[str, Any], evidence: Mapping[str, Any] | None
     }
 
 
+def _runtime_authority_view(image: Mapping[str, Any], profile: str, item: Mapping[str, Any]) -> dict[str, Any]:
+    # Delay this import: evidence_gate -> admission -> maintenance must stay acyclic.
+    from scripts.evidence_gate import EvidenceError, require_ordinary_runtime_authority  # noqa: PLC0415
+
+    qualified = True
+    try:
+        require_ordinary_runtime_authority(item, profile, image.get("tests", {}).get(profile, {}))
+    except EvidenceError:
+        qualified = False
+    result = {"status": item["status"] if qualified or item["status"] != "passed" else "nonqualifying"}
+    if not qualified or "qualification" in item or "oomAccountingStatus" in item:
+        result.update(
+            {
+                "operationalStatus": item["status"],
+                "qualification": item.get("qualification"),
+                "oomAccountingStatus": item.get("oomAccountingStatus"),
+                "nativeAuthority": "ordinary" if qualified and item["status"] == "passed" else "none",
+            }
+        )
+    return result
+
+
 def _runtime_coverage(
     image: Mapping[str, Any], evidence: Sequence[Mapping[str, Any]], build: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -190,7 +212,7 @@ def _runtime_coverage(
             msg = f"Runtime evidence for {name} has no host context at {key}."
             raise MaintenanceError(msg)
         by_key[key] = {
-            "status": item["status"],
+            **_runtime_authority_view(image, str(profile), item),
             "checks": checks,
             "imageIdentity": identity,
             "host": host,

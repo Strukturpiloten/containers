@@ -4,13 +4,21 @@ from __future__ import annotations
 
 import copy
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.evidence_gate import EvidenceError, _outer_runtime, _systemd_phase_backends, main, verify_architecture
+from scripts.evidence_gate import (
+    EvidenceError,
+    _outer_runtime,
+    _systemd_phase_backends,
+    main,
+    require_ordinary_runtime_authority,
+    verify_architecture,
+)
 
 NAME = "example"
 IMAGE = "ghcr.io/strukturpiloten/example"
@@ -100,7 +108,7 @@ class ArchitectureEvidenceTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(EvidenceError):
                 _systemd_phase_backends(changed, "docker", configuration)
 
-    def _verify(self, *, runtime: dict = RUNTIME, scan: dict = SCAN) -> None:
+    def _verify(self, *, runtime: dict = RUNTIME, scan: dict = SCAN, configuration: dict | None = None) -> None:
         with (
             patch(
                 "scripts.evidence_gate.image_policy",
@@ -109,7 +117,7 @@ class ArchitectureEvidenceTests(unittest.TestCase):
             patch("scripts.evidence_gate.archive_identity", return_value=IDENTITY),
             patch(
                 "scripts.evidence_gate.container_engine._load_images",
-                return_value=[{"name": NAME, "tests": {"docker": {}}}],
+                return_value=[{"name": NAME, "tests": {"docker": configuration or {}}}],
             ),
         ):
             verify_architecture(
@@ -123,6 +131,80 @@ class ArchitectureEvidenceTests(unittest.TestCase):
                 runtime=runtime,
                 scan=scan,
             )
+
+    def test_private_required_route_never_invents_normal_prerequisite_authority(self) -> None:
+        # Deliberately forged completion labels, not an accepted future normal fixture.
+        record = copy.deepcopy(RUNTIME)
+        record.update(
+            qualification="complete",
+            oomAccountingMode="qualification",
+            oomAccountingStatus="complete",
+            oomAccountingRequired=True,
+            focusedRuntime="none",
+        )
+        record["phases"] = [
+            {
+                "phase": name,
+                "status": "passed",
+                "cleanupVerified": True,
+                "imageIdentity": copy.deepcopy(IDENTITY),
+                "qualification": "complete",
+                "oomAccountingMode": "qualification",
+                "oomAccountingStatus": "complete",
+                "oomAccountingRequired": True,
+                "focusedRuntime": "none",
+                "checks": [
+                    {
+                        "name": "owned parent OOM lifecycle accounting",
+                        "status": "passed",
+                        "mode": "qualification",
+                        "property": "no-additional-oom-killed-process-in-bound-lifetime",
+                    }
+                ],
+                "outerRuntime": copy.deepcopy(RUNTIME["host"]["outerRuntime"]),
+            }
+            for name in ("clean-control", "enforcement")
+        ]
+        configuration = {"launcher": "systemd", "mode": "rootless"}
+        with self.assertRaisesRegex(EvidenceError, "no supported maintained normal prerequisite"):
+            self._verify(runtime=record, configuration=configuration)
+        for change in ("missing", "none", "experimental", "mixed", "accounting", "missing-outcome", "focused"):
+            changed = copy.deepcopy(record)
+            if change == "missing":
+                del changed["qualification"]
+            elif change == "none":
+                changed["qualification"] = "none"
+            elif change == "experimental":
+                changed["scopedProfileRequired"] = False
+                changed["phases"][0]["scopedProfile"] = {"qualification": "experimental-candidate-only"}
+            elif change == "mixed":
+                changed["phases"][1]["qualification"] = "none"
+            elif change == "accounting":
+                changed["phases"][0]["oomAccountingStatus"] = "incomplete"
+            elif change == "missing-outcome":
+                changed["phases"][1]["checks"] = [{"name": "label only", "status": "passed"}]
+            else:
+                changed["focusedRuntime"] = "mandatory-accounting"
+            with (
+                self.subTest(change=change),
+                patch.dict(
+                    "os.environ",
+                    {
+                        "GITHUB_EVENT_NAME": "workflow_dispatch",
+                        "GITHUB_REF": "refs/heads/main",
+                        "VALIDATION_PROFILE": "full",
+                    },
+                ),
+                self.assertRaises(EvidenceError),
+            ):
+                self._verify(runtime=changed, configuration=configuration)
+
+    def test_actual_supported_ordinary_routes_keep_legacy_authority_contract(self) -> None:
+        for profile in ("docker", "podman", "phpFpm", "notifyPush"):
+            with self.subTest(profile=profile):
+                require_ordinary_runtime_authority({"status": "passed"}, profile, {"launcher": "direct"})
+                with self.assertRaises(EvidenceError):
+                    require_ordinary_runtime_authority({"status": "passed", "qualification": "none"}, profile, {})
 
     def test_cli_reads_exact_uploaded_artifact_filenames(self) -> None:
         with tempfile.TemporaryDirectory() as root:
@@ -235,3 +317,27 @@ class ArchitectureEvidenceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AuthorityImportOrderTests(unittest.TestCase):
+    def test_cold_import_orders_and_deferred_catalogue_import_remain_acyclic(self) -> None:
+        modules = ["evidence_gate", "admission", "maintenance", "release_evidence", "docs_observations"]
+        root = Path(__file__).resolve().parents[1]
+        program = (
+            "import importlib,json,sys;sys.path.insert(0,sys.argv[1]);"
+            "[importlib.import_module('scripts.'+name) for name in json.loads(sys.argv[2])];"
+            "from scripts.maintenance import _runtime_authority_view;"
+            "assert _runtime_authority_view({'tests':{}},'docker',{'status':'passed'})=={'status':'passed'};print('ok')"
+        )
+        for index in range(len(modules)):
+            order = modules[index:] + modules[:index]
+            for selected in (order, list(reversed(order))):
+                with self.subTest(order=selected):
+                    result = subprocess.run(  # noqa: S603 - fixed data-only import order regression.
+                        [sys.executable, "-I", "-B", "-c", program, str(root), json.dumps(selected)],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout.strip(), "ok")

@@ -81,6 +81,7 @@ class RuntimeContext:
         self.observations: list[dict[str, Any]] = []
         self.runtime_deadline: float | None = None
         self.runtime_phase = "single"
+        self.oom_accounting_mode = "qualification"
         self.runtime_disk_budget: IsolatedStoreDiskBudget | None = None
         self.image_ref = f"localhost/{image}:runtime-{os.getpid()}-{uuid.uuid4().hex}"
         self._fixture_archives: dict[int, tuple[BinaryIO, Path, tuple[int, int], str, int]] = {}
@@ -1055,6 +1056,130 @@ def _phase_error(evidence: dict[str, Any], error: BaseException, *, key: str = "
         evidence[key + "Traceback"] = details
 
 
+def _private_systemd_accounting(metadata: dict[str, Any], engine: str) -> bool:
+    profile = metadata.get("tests", {}).get("docker", {})
+    return engine == "docker" and profile.get("launcher") == "systemd" and profile.get("mode") == "rootless"
+
+
+def _focused_runtime_request(args: argparse.Namespace, metadata: dict[str, Any], engine: str) -> str:
+    selected = getattr(args, "focused_runtime", "none")
+    if selected not in {"none", "witness-diagnostic", "mandatory-accounting"}:
+        raise ProbeError("unknown focused runtime selection")
+    if selected == "none":
+        return selected
+    expected = "qualification" if selected == "mandatory-accounting" else "diagnostic"
+    if (
+        getattr(args, "oom_accounting_mode", "qualification") != expected
+        or metadata.get("name") != "docker-29-conformance-rootless"
+        or not _private_systemd_accounting(metadata, engine)
+        or os.environ.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
+        or os.environ.get("GITHUB_REF") != "refs/heads/TheRealBecks/issue527"
+        or os.environ.get("GITHUB_JOB") != "smoke-build"
+        or getattr(args, "active_userns_stage", None) is None
+    ):
+        raise ProbeError("focused runtime context, mode or required prerequisite is unavailable")
+    return selected
+
+
+def _export_phase_prerequisite(plan: _DockerPhasePlan, ctx: RuntimeContext, result: dict[str, Any]) -> None:
+    scoped = getattr(ctx.backend, "scoped_profile", None)
+    if scoped is not None:
+        result["scopedProfile"] = scoped.evidence
+    if scoped is None and getattr(plan.args, "active_userns_stage", None) is None:
+        return
+    actual = result.get("scopedProfile")
+    true_fields = (
+        "cleanOwnerVerified",
+        "ownerTerminationVerified",
+        "custodyDisposed",
+        "ownerReady",
+        "guestAbsenceVerified",
+        "taskAbsenceVerified",
+        "scopeAbsenceVerified",
+        "profileAbsenceVerified",
+    )
+    false_fields = ("retained", "readerPending", "childPending")
+    if (
+        not isinstance(actual, dict)
+        or actual.get("qualification") != "experimental-candidate-only"
+        or actual.get("state") != "closed"
+        or not all(actual.get(key) is True for key in true_fields)
+        or not all(actual.get(key) is False for key in false_fields)
+    ):
+        raise ProbeError("required scoped prerequisite evidence is missing, unknown or incomplete")
+
+
+def _finish_phase_authority(plan: _DockerPhasePlan, ctx: RuntimeContext | None, result: dict[str, Any]) -> None:
+    result["qualification"] = "none"
+    if ctx is None:
+        return
+    applicable = _private_systemd_accounting(plan.metadata, ctx.outer_engine)
+    result["oomAccountingRequired"] = applicable
+    successful = result["status"] == "passed" and result["cleanupVerified"] is True
+    if applicable:
+        ledger = getattr(ctx.backend, "oom_ledger", None)
+        result["oomAccountingStatus"] = (
+            "complete"
+            if successful
+            and result.get("oomAccountingMode") == "qualification"
+            and ledger is not None
+            and ledger.finalized is True
+            else "incomplete"
+        )
+        actual = result.get("scopedProfile")
+        result["prerequisiteAuthority"] = (
+            "experimental-candidate-only"
+            if isinstance(actual, dict) and actual.get("qualification") == "experimental-candidate-only"
+            else "unavailable"
+        )
+        # No maintained normal prerequisite exists for this selected private route.
+        # Workload/accounting success cannot manufacture native authority.
+        return
+    if (
+        successful
+        and result.get("oomAccountingMode") == "qualification"
+        and result.get("focusedRuntime", "none") == "none"
+        and "scopedProfile" not in result
+        and getattr(plan.args, "active_userns_stage", None) is None
+    ):
+        result["qualification"] = "complete"
+
+
+def _finish_pair_authority(evidence: dict[str, Any]) -> None:
+    evidence["qualification"] = "none"
+    phases = evidence["phases"]
+    successful = (
+        evidence["status"] == "passed"
+        and len(phases) == 2
+        and all(phase.get("status") == "passed" and phase.get("cleanupVerified") is True for phase in phases)
+    )
+    coherent = all(
+        phase.get("oomAccountingMode") == evidence["oomAccountingMode"]
+        and phase.get("focusedRuntime") == evidence["focusedRuntime"]
+        for phase in phases
+    )
+    accounting = evidence["oomAccountingRequired"]
+    if accounting:
+        complete = successful and coherent and all(phase.get("oomAccountingStatus") == "complete" for phase in phases)
+        evidence["oomAccountingStatus"] = "complete" if complete else "incomplete"
+    if not successful or not coherent:
+        for phase in phases:
+            phase["qualification"] = "none"
+            if phase.get("oomAccountingRequired") is True:
+                phase["oomAccountingStatus"] = "incomplete"
+        return
+    if (
+        not accounting
+        and evidence["focusedRuntime"] == "none"
+        and evidence["oomAccountingMode"] == "qualification"
+        and all(phase.get("qualification") == "complete" for phase in phases)
+    ):
+        evidence["qualification"] = "complete"
+    else:
+        for phase in phases:
+            phase["qualification"] = "none"
+
+
 def _execute_docker_phase(plan: _DockerPhasePlan) -> dict[str, Any]:
     started = time.monotonic()
     result: dict[str, Any] = {
@@ -1064,6 +1189,7 @@ def _execute_docker_phase(plan: _DockerPhasePlan) -> dict[str, Any]:
         "observations": [],
         "cleanupVerified": False,
         "architecture": plan.architecture,
+        "qualification": "none",
     }
     ctx: RuntimeContext | None = None
     try:
@@ -1084,13 +1210,18 @@ def _execute_docker_phase(plan: _DockerPhasePlan) -> dict[str, Any]:
             plan.cancellation.defer_interrupts = False
         result["checks"], result["observations"] = ctx.checks, ctx.observations
         ctx.runtime_phase = plan.phase.value
+        ctx.oom_accounting_mode = getattr(plan.args, "oom_accounting_mode", "qualification")
+        if ctx.oom_accounting_mode not in {"qualification", "diagnostic"}:
+            raise ProbeError("unknown OOM lifecycle execution mode")
+        result["oomAccountingMode"] = ctx.oom_accounting_mode
+        result["focusedRuntime"] = _focused_runtime_request(plan.args, plan.metadata, ctx.outer_engine)
         ctx.runtime_deadline = plan.deadline
         ctx.bind_guest_profile(plan.metadata["tests"]["docker"])
         result["outerRuntime"] = ctx.prepare()
         if plan.cancellation.cancelled:
             raise KeyboardInterrupt
         _docker_phase_work(plan, ctx, result)
-        result["status"] = "passed"
+        result["status"] = "pending" if getattr(ctx.backend, "oom_ledger", None) is not None else "passed"
     except (Exception, KeyboardInterrupt) as error:
         if isinstance(error, KeyboardInterrupt):
             plan.cancellation.cancelled = True
@@ -1103,14 +1234,23 @@ def _execute_docker_phase(plan: _DockerPhasePlan) -> dict[str, Any]:
                 try:
                     ctx.cleanup()
                     result["cleanupVerified"] = True
+                    if result["status"] == "pending":
+                        if not ctx.backend.oom_ledger.finalized:
+                            raise ProbeError("mandatory parent OOM accounting was not finalized")
+                        result["status"] = "passed"
                 except (Exception, KeyboardInterrupt) as error:
                     if isinstance(error, KeyboardInterrupt):
                         plan.cancellation.cancelled = True
                     _phase_error(result, error, key="cleanupError")
         finally:
             plan.cancellation.defer_interrupts = False
-        if ctx is not None and getattr(ctx.backend, "scoped_profile", None) is not None:
-            result["scopedProfile"] = ctx.backend.scoped_profile.evidence
+        if ctx is not None:
+            try:
+                _export_phase_prerequisite(plan, ctx, result)
+            except (Exception, KeyboardInterrupt) as error:
+                if isinstance(error, KeyboardInterrupt):
+                    plan.cancellation.cancelled = True
+                _phase_error(result, error, key="cleanupError")
         finished = time.monotonic()
         result["durationSeconds"] = round(finished - started, 3)
         if plan.cancellation.cancelled:
@@ -1121,6 +1261,7 @@ def _execute_docker_phase(plan: _DockerPhasePlan) -> dict[str, Any]:
             not result["checks"] or any(check.get("status") != "passed" for check in result["checks"])
         ):
             _phase_error(result, ProbeError("Docker phase has failed, skipped or unknown admission checks"))
+        _finish_phase_authority(plan, ctx, result)
     return _public_timeout_evidence(ctx, result)
 
 
@@ -1140,6 +1281,8 @@ def _docker_phase_work(plan: _DockerPhasePlan, ctx: RuntimeContext, result: dict
             budget.checkpoint()
             plan.archive.verify()
             result["imageIdentity"] = identity
+            if getattr(ctx.backend, "oom_ledger", None) is not None:
+                ctx.backend.oom_ledger.bind_image(identity)
             result["archiveSnapshot"] = {"fdPinned": True, "identity": list(plan.archive.identity)}
             if plan.expected_identity is not None and identity != plan.expected_identity:
                 raise ProbeError("control and enforcement OCI archive identities differ")
@@ -1175,6 +1318,98 @@ def _docker_phase_work(plan: _DockerPhasePlan, ctx: RuntimeContext, result: dict
         ctx.runtime_disk_budget = None
 
 
+def _write_pair_evidence(path: Path, evidence: dict[str, Any], deadline: float) -> None:
+    """Publish once; retire the private anchor with its owning evidence namespace.
+
+    Successful publication intentionally has two names for one inode. The one
+    hidden, mode-0700 custody directory remains until runner/temporary-directory
+    evidence cleanup. One deterministic slot per public basename retains failed
+    custody too; retries refuse an existing report or slot without accumulating
+    candidates. Consumers and uploads select only the public JSON name.
+    """
+    # Finish the data descriptor before publication. Keep one private inode
+    # anchor with the report, so a late namespace operation can invalidate that
+    # inode without reopening the public pathname or retrying an uncertain FD.
+    directory: Path | None = None
+    candidate: Path | None = None
+    identity: tuple[int, int] | None = None
+    recovery_attempted = False
+
+    def invalidate() -> None:
+        nonlocal recovery_attempted
+        if recovery_attempted or candidate is None or identity is None:
+            raise ProbeError("pair evidence inode retirement is uncertain; no current completion authority")
+        recovery_attempted = True
+        descriptor = os.open(candidate, os.O_WRONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            actual = os.fstat(descriptor)
+            if (actual.st_dev, actual.st_ino) != identity or not stat.S_ISREG(actual.st_mode):
+                raise ProbeError("private pair evidence inode changed; no current completion authority")
+            os.ftruncate(descriptor, 0)
+            body = (json.dumps(evidence, indent=2) + "\n").encode()
+            if os.write(descriptor, body) != len(body):
+                raise OSError("short failed systemd pair evidence write")
+        finally:
+            # On Linux an errored close may already have retired/reused this
+            # number. Attempt exactly once, including on the failure path.
+            os.close(descriptor)
+
+    try:
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            raise FileExistsError("systemd pair evidence already exists; it is not this producer's new report")
+        directory = path.parent / f".runtime-evidence-{uuid.uuid5(uuid.NAMESPACE_URL, path.name).hex}"
+        try:
+            directory.mkdir(mode=0o700)
+        except FileExistsError as error:
+            raise FileExistsError(
+                "private pair evidence custody already exists; no current completion authority"
+            ) from error
+        # Never match recursive consumers' runtime-evidence JSON patterns.
+        candidate = directory / "record"
+        with candidate.open("xb", buffering=0) as record:
+            actual = os.fstat(record.fileno())
+            identity = (actual.st_dev, actual.st_ino)
+            body = (json.dumps(evidence, indent=2) + "\n").encode()
+            if record.write(body) != len(body):
+                raise OSError("short systemd pair evidence write")
+            record.flush()
+        if time.monotonic() >= deadline:
+            _phase_error(evidence, ProbeError("systemd Docker pair evidence retirement exceeded original deadline"))
+            _finish_pair_authority(evidence)
+            invalidate()
+        # Exclusive publication preserves historical reports and unrelated
+        # replacement sentinels. A failed producer cannot claim either as new.
+        os.link(candidate, path, follow_symlinks=False)
+        if time.monotonic() >= deadline and not recovery_attempted:
+            _phase_error(evidence, ProbeError("systemd Docker pair evidence publication exceeded original deadline"))
+            _finish_pair_authority(evidence)
+            invalidate()
+    except (Exception, KeyboardInterrupt) as error:
+        _phase_error(evidence, error, key="cleanupError")
+        _finish_pair_authority(evidence)
+        uncertain: BaseException | None = None
+        if candidate is not None and not recovery_attempted:
+            try:
+                invalidate()
+            except (Exception, KeyboardInterrupt) as retirement_error:
+                _phase_error(evidence, retirement_error, key="cleanupError")
+                uncertain = retirement_error
+        elif candidate is not None:
+            uncertain = error
+        # Never delete through a failed writer's directory pathname. Its inode,
+        # candidate name or contents may have been replaced. Retain custody for
+        # owning evidence-namespace cleanup, even when no public name exists.
+        if uncertain is not None:
+            raise ProbeError(
+                "pair evidence retirement is uncertain; failed producer has no current authority"
+            ) from uncertain
+        raise
+
+
 def _run_systemd_pair(
     args: argparse.Namespace, metadata: dict[str, Any], evidence: dict[str, Any], *, use_sudo: bool
 ) -> dict[str, Any]:
@@ -1185,6 +1420,12 @@ def _run_systemd_pair(
     source: tempfile.TemporaryDirectory[str] | None = None
     archive: _ArchiveSnapshot | None = None
     evidence["phases"] = []
+    evidence["oomAccountingMode"] = getattr(args, "oom_accounting_mode", "qualification")
+    evidence["qualification"] = "none"
+    evidence["focusedRuntime"] = getattr(args, "focused_runtime", "none")
+    evidence["oomAccountingRequired"] = _private_systemd_accounting(
+        metadata, select_outer_engine(getattr(args, "outer_engine", "podman"), "docker")
+    )
     if getattr(args, "active_userns_stage", None) is not None:
         evidence["scopedProfileRequired"] = True
     evidence["observations"] = []
@@ -1247,7 +1488,7 @@ def _run_systemd_pair(
                         evidence[key] = list(result[key]) if key == "additionalErrors" else result[key]
                 break
         if len(evidence["phases"]) == 2 and all(phase["status"] == "passed" for phase in evidence["phases"]):
-            evidence["status"] = "passed"
+            evidence["status"] = "passed" if evidence["oomAccountingMode"] == "qualification" else "diagnostic-complete"
     except (Exception, KeyboardInterrupt) as error:
         _phase_error(evidence, error)
     finally:
@@ -1258,23 +1499,23 @@ def _run_systemd_pair(
         except (Exception, KeyboardInterrupt) as error:
             _phase_error(evidence, error, key="cleanupError")
         finally:
-            try:
-                if archive is not None:
-                    archive.close()
-                if source is not None:
-                    source.cleanup()
-            except (Exception, KeyboardInterrupt) as error:
-                _phase_error(evidence, error, key="cleanupError")
+            for resource, method in ((archive, "close"), (source, "cleanup")):
+                try:
+                    if resource is not None:
+                        getattr(resource, method)()
+                except (Exception, KeyboardInterrupt) as error:
+                    _phase_error(evidence, error, key="cleanupError")
             if cancellation.cancelled:
                 _phase_error(evidence, KeyboardInterrupt("systemd Docker pair cancelled"))
             finished = time.monotonic()
             evidence["durationSeconds"] = round(finished - started, 3)
             if finished >= deadline:
                 _phase_error(evidence, ProbeError("systemd Docker pair wall-time budget exhausted"))
+            _finish_pair_authority(evidence)
             try:
                 evidence_path = Path(args.evidence)
                 evidence_path.parent.mkdir(parents=True, exist_ok=True)
-                evidence_path.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+                _write_pair_evidence(evidence_path, evidence, deadline)
             finally:
                 for kind, handler in previous.items():
                     signal.signal(kind, handler)
@@ -1335,6 +1576,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     selection = getattr(args, "outer_engine", "podman")
     profile_name, profile = next(iter(profiles.items()))
     outer_engine = select_outer_engine(selection, profile_name)
+    _focused_runtime_request(args, metadata, outer_engine)
+    execution_mode = getattr(args, "oom_accounting_mode", "qualification")
+    if execution_mode not in {"qualification", "diagnostic"} or (
+        execution_mode == "diagnostic" and (outer_engine != "docker" or profile.get("launcher") != "systemd")
+    ):
+        raise ProbeError("OOM diagnostic mode requires the explicitly selected Docker systemd fixture")
     evidence["host"]["outerEngineSelection"] = selection
     if outer_engine == "docker" and args.archive is None:
         raise ProbeError("private Docker backend requires an explicit OCI archive, not an ambient image reference")
@@ -1460,6 +1707,10 @@ def main() -> int:
         default="podman",
         help="outer runtime policy; local default is Podman, profile selection is explicit",
     )
+    parser.add_argument(
+        "--focused-runtime", choices=("none", "witness-diagnostic", "mandatory-accounting"), default="none"
+    )
+    parser.add_argument("--oom-accounting-mode", choices=("qualification", "diagnostic"), default="qualification")
     parser.add_argument("--active-userns-stage", help=argparse.SUPPRESS)
     parser.add_argument("--evidence", required=True)
     parser.add_argument("--allow-privileged", action="store_true")
