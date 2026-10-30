@@ -925,3 +925,27 @@ existing command timeout, work deadline and cleanup reserve, without renewal.
 Unavailable observations remain unknown. Capture cannot overwrite the failed
 collection stage, establish controller completion, identify an OOM cause or
 change strict shutdown and cleanup requirements.
+
+The witness archive barrier is confined to that diagnostic actor. CREATE and
+rootfs/mount/marker preflight precede START, so preflight consumes the original
+work allowance without starting the C alarm. New root-level witness markers
+avoid the private tmpfs filesystem-view boundary; legacy allocator paths remain
+unchanged. Single PUT outcomes are never retried when uncertain. HEAD metadata
+is visibility evidence, not controller completion or OOM attribution.
+
+The guarded outer guest carries bounded HTTP through its existing Docker CLI;
+no final-guest curl, Python, target exec or new runtime authority is required.
+Decoder and CLI stderr have separate bounded regular files and exact empty-file
+custody proof. Shared deadline, complete framing, actual process outcomes and
+cleanup must all succeed before a response is usable. The distinct held HTTP
+response role cannot replace the image archive or become command stdin. Existing
+runtime-input ownership already covers the two changed Python modules, while
+the signed/pinned image and payload toolchain retains its existing update policy.
+Source research and offline shell/protocol tests do not qualify native support.
+
+Image and response stream custody also binds the original private directory's
+identity, owner, mode and nonsymlink type. Held directory descriptors anchor
+fixed-name allocation and are checked around I/O; directory substitution cannot
+rebind a stream. Invalid response limits refuse before reads. The root observer's
+private copy uses the absolute witness end without changing original runtime or
+backend deadlines. Its timestamp validation makes no freshness or cause claim.

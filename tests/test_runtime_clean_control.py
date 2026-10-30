@@ -478,7 +478,7 @@ class CleanControlTests(unittest.TestCase):
     def test_partial_constructor_failure_removes_only_its_exact_pre_native_store(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = Path(directory) / "partial-store"
-            store.mkdir()
+            store.mkdir(mode=0o700)
             original = Path.mkdir
 
             def mkdir(path: Path, *args: object, **kwargs: object) -> None:
@@ -497,6 +497,36 @@ class CleanControlTests(unittest.TestCase):
             native.assert_not_called()
             self.assertFalse(store.exists())
             self.assertTrue(Path(directory).exists())
+
+    def test_constructor_refuses_unverified_directory_without_backend_or_deletion(self) -> None:
+        for kind in ("nonprivate", "symlink"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                target = Path(directory) / "target"
+                target.mkdir(mode=0o700)
+                sentinel = target / "keep"
+                sentinel.write_bytes(b"retained unrelated data")
+                store = target
+                if kind == "nonprivate":
+                    store.chmod(0o755)
+                else:
+                    store = Path(directory) / "store"
+                    store.symlink_to(target, target_is_directory=True)
+                with (
+                    patch("scripts.runtime_tests.tempfile.mkdtemp", return_value=str(store)),
+                    patch("scripts.runtime_tests.PodmanBackend") as podman,
+                    patch("scripts.runtime_tests.DockerBackend") as docker,
+                    patch("scripts.runtime_tests.subprocess.run") as native,
+                    patch("scripts.runtime_tests.shutil.rmtree") as deletion,
+                    self.assertRaisesRegex(ProbeError, "directory ownership"),
+                ):
+                    REAL_CONTEXT(image="fixture", architecture="amd64", timeout=45, use_sudo=False)
+                podman.assert_not_called()
+                docker.assert_not_called()
+                native.assert_not_called()
+                deletion.assert_not_called()
+                self.assertEqual(sentinel.read_bytes(), b"retained unrelated data")
+                self.assertTrue(store.exists())
+                self.assertEqual(store.is_symlink(), kind == "symlink")
 
 
 if __name__ == "__main__":

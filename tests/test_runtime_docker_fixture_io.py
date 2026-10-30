@@ -27,6 +27,7 @@ class DockerFixtureIO(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.ctx = RuntimeContext.__new__(RuntimeContext)
         self.ctx.directory = Path(directory.name)
+        self.ctx._bind_fixture_directory()
         self.ctx._fixture_archives = {}
         self.ctx.timeout = 5
         self.ctx.checks = []
@@ -101,13 +102,19 @@ class DockerFixtureIO(unittest.TestCase):
             run.assert_not_called()
         with self.ctx.private_fixture_archive() as archive:
             original = os.fstat(archive.fileno())
+            real_fstat, descriptor = os.fstat, archive.fileno()
             for change in ({"st_mode": stat.S_IFREG | 0o644}, {"st_uid": os.geteuid() + 1}, {"st_nlink": 2}):
                 values = {
                     name: getattr(original, name) for name in ("st_dev", "st_ino", "st_mode", "st_uid", "st_nlink")
                 } | change
                 with (
                     self.subTest(change=change),
-                    patch("scripts.runtime_tests.os.fstat", return_value=SimpleNamespace(**values)),
+                    patch(
+                        "scripts.runtime_tests.os.fstat",
+                        side_effect=lambda fd, _values=values: (
+                            SimpleNamespace(**_values) if fd == descriptor else real_fstat(fd)
+                        ),
+                    ),
                     patch("scripts.runtime_tests.subprocess.run") as run,
                     self.assertRaisesRegex(ProbeError, "ownership changed"),
                 ):
@@ -286,6 +293,211 @@ class DockerFixtureIO(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs, {"capture_output": True, "text": True, "check": False, "timeout": 5})
         self.assertEqual(self.ctx.checks[-1]["stdout"], "ok")
         self.assertEqual(self.ctx.checks[-1]["stderr"], "detail")
+
+    def test_response_role_is_distinct_and_cannot_enter_any_input_or_image_load_route(self) -> None:
+        with self.ctx.private_fixture_archive() as image, self.ctx.private_witness_response() as response:
+            image.write(PAYLOAD)
+            image.seek(3)
+            original = os.fstat(image.fileno())
+            self.ctx.command(
+                "private response", [sys.executable, "-c", "import os;os.write(1,b'HTTP bytes')"], stdout=response
+            )
+            self.assertEqual(self.ctx.read_witness_response(response, 100), b"HTTP bytes")
+            self.ctx.reset_witness_response(response)
+            self.assertEqual(self.ctx.read_witness_response(response, 100), b"")
+            response.write(PAYLOAD)
+            response.seek(0)
+            for action in (
+                lambda: self.ctx.command("denied input", ["must-not-run"], stdin=response),
+                lambda: self.ctx.podman("denied indirect input", "exec", CONTAINER, stdin=response),
+                lambda: self.ctx.load_fixture_archive("denied image load", CONTAINER, response),
+                lambda: self.ctx.command("denied duplex", ["must-not-run"], stdin=image, stdout=response),
+            ):
+                with self.assertRaises(ProbeError), patch("scripts.runtime_tests.subprocess.run") as run:
+                    action()
+                run.assert_not_called()
+            self.assertEqual(image.tell(), 3)
+            self.assertEqual(os.fstat(image.fileno()).st_ino, original.st_ino)
+            image.seek(0)
+            self.assertEqual(image.read(), PAYLOAD)
+            self.assertNotIn("HTTP bytes", json.dumps(self.ctx.checks))
+
+    def test_response_custody_is_rechecked_before_after_reset_and_read(self) -> None:
+        with self.ctx.private_witness_response() as response:
+            response.write(b"private")
+            with self.assertRaises(ProbeError):
+                self.ctx.read_witness_response(response, 2)
+            path = self.ctx.directory / "docker-native-witness-response.bin"
+            path.rename(self.ctx.directory / "old-response")
+            path.write_bytes(b"replacement")
+            for action in (
+                lambda: self.ctx.reset_witness_response(response),
+                lambda: self.ctx.read_witness_response(response, 100),
+                lambda: self.ctx.command("stale response", ["must-not-run"], stdout=response),
+            ):
+                with self.assertRaises(ProbeError):
+                    action()
+            response.seek(0)
+            self.assertEqual(response.read(), b"private")
+        with self.assertRaises(ProbeError):
+            self.ctx.read_witness_response(response, 100)
+
+    def test_stream_factory_rejects_unrecognised_roles_before_creating_any_file(self) -> None:
+        for role in ("unknown", "../image", "/outside", "response/child", None):
+            with self.subTest(role=role), self.assertRaises(ProbeError), self.ctx._private_fixture_stream(role):
+                self.fail("unrecognised role accepted")
+        self.assertEqual(list(self.ctx.directory.iterdir()), [])
+
+    def test_invalid_response_limits_do_not_seek_or_read(self) -> None:
+        with self.ctx.private_witness_response() as response:
+            response.write(b"private-response")
+            offset = response.tell()
+            with (
+                patch.object(response, "seek", wraps=response.seek) as seek,
+                patch.object(response, "read", wraps=response.read) as read,
+            ):
+                for limit in (-2, -1, True, False, None, "2", 1.5, 32769, 2**62):
+                    with self.subTest(limit=limit), self.assertRaises(ProbeError):
+                        self.ctx.read_witness_response(response, limit)
+                seek.assert_not_called()
+                read.assert_not_called()
+            self.assertEqual(response.tell(), offset)
+
+    def assert_directory_refusal(self, alteration: str) -> None:
+        directory = self.ctx.directory
+        retained = directory.with_name(directory.name + ".retained")
+        with self.ctx.private_fixture_archive() as image, self.ctx.private_witness_response() as response:
+            image.write(PAYLOAD)
+            image.seek(3)
+            response.write(b"retained-response")
+            handles = [self.ctx._fixture_archives[id(stream)][4] for stream in (image, response)]
+            if alteration == "mode":
+                directory.chmod(0o755)
+            else:
+                directory.rename(retained)
+                if alteration == "replacement":
+                    directory.mkdir(mode=0o700)
+                elif alteration == "symlink":
+                    directory.symlink_to(retained, target_is_directory=True)
+            try:
+                actions = (
+                    lambda: self.ctx.reset_witness_response(response),
+                    lambda: self.ctx.read_witness_response(response, 100),
+                    lambda: self.ctx.command("changed output parent", ["must-not-run"], stdout=response),
+                    lambda: self.ctx.command("changed input parent", ["must-not-run"], stdin=image),
+                    lambda: self.ctx.load_fixture_archive("changed image parent", CONTAINER, image),
+                )
+                with patch("scripts.runtime_tests.subprocess.run") as run:
+                    for action in actions:
+                        with self.assertRaises(ProbeError):
+                            action()
+                    run.assert_not_called()
+                with (
+                    patch("scripts.runtime_tests.os.open", wraps=os.open) as opening,
+                    self.assertRaises(ProbeError),
+                    self.ctx.private_witness_response(),
+                ):
+                    self.fail("changed directory accepted")
+                opening.assert_not_called()
+                self.assertEqual(image.tell(), 3)
+                self.assertEqual(os.pread(image.fileno(), len(PAYLOAD), 0), PAYLOAD)
+                self.assertEqual(os.pread(response.fileno(), 100, 0), b"retained-response")
+                if alteration == "replacement":
+                    self.assertEqual(list(directory.iterdir()), [])
+            finally:
+                if alteration == "mode":
+                    directory.chmod(0o700)
+                else:
+                    if directory.is_symlink():
+                        directory.unlink()
+                    elif directory.exists():
+                        directory.rmdir()
+                    retained.rename(directory)
+        for descriptor in handles:
+            with self.assertRaises(OSError):
+                os.fstat(descriptor)
+
+    def test_directory_mode_rename_replacement_and_symlink_refuse_all_stream_io(self) -> None:
+        for alteration in ("mode", "rename", "replacement", "symlink"):
+            with self.subTest(alteration=alteration):
+                # Factories deliberately retain files until store cleanup, so each
+                # case uses a fresh bound directory rather than rebinding one.
+                directory = tempfile.TemporaryDirectory(prefix="directory-custody-")
+                self.addCleanup(directory.cleanup)
+                ctx = self.ctx
+                self.ctx = RuntimeContext.__new__(RuntimeContext)
+                self.ctx.__dict__.update(ctx.__dict__)
+                self.ctx.__dict__.pop("_fixture_directory_identity")
+                self.ctx.__dict__.pop("_fixture_directory_path")
+                self.ctx.directory, self.ctx._fixture_archives = Path(directory.name), {}
+                self.ctx._bind_fixture_directory()
+                self.assert_directory_refusal(alteration)
+                self.ctx = ctx
+
+    def test_parent_substitution_during_open_refuses_before_file_allocation(self) -> None:
+        directory = self.ctx.directory
+        retained = directory.with_name(directory.name + ".retained")
+        real_open = os.open
+        descriptors = []
+
+        def substitute(path: object, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+            if path == directory and dir_fd is None:
+                directory.rename(retained)
+                directory.mkdir(mode=0o700)
+            descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+            descriptors.append(descriptor)
+            return descriptor
+
+        try:
+            with (
+                patch("scripts.runtime_tests.os.open", side_effect=substitute),
+                self.assertRaises(ProbeError),
+                self.ctx.private_fixture_archive(),
+            ):
+                self.fail("replaced parent accepted")
+            self.assertEqual(list(directory.iterdir()), [])
+            self.assertEqual(list(retained.iterdir()), [])
+            for descriptor in descriptors:
+                with self.assertRaises(OSError):
+                    os.fstat(descriptor)
+        finally:
+            directory.rmdir()
+            retained.rename(directory)
+
+    def test_directory_rebinding_and_changed_uid_are_rejected(self) -> None:
+        observed = self.ctx.directory.lstat()
+        changed = SimpleNamespace(
+            st_dev=observed.st_dev, st_ino=observed.st_ino, st_uid=os.geteuid() + 1, st_mode=observed.st_mode
+        )
+        with self.assertRaises(ProbeError):
+            self.ctx._bind_fixture_directory()
+        with (
+            patch.object(Path, "lstat", return_value=changed),
+            self.assertRaises(ProbeError),
+            self.ctx.private_fixture_archive(),
+        ):
+            self.fail("changed directory owner accepted")
+        self.assertEqual(list(self.ctx.directory.iterdir()), [])
+
+    def test_directory_change_during_response_read_is_rejected_after_io(self) -> None:
+        with self.ctx.private_fixture_archive() as image, self.ctx.private_witness_response() as response:
+            image.write(PAYLOAD)
+            image.seek(3)
+            response.write(b"response")
+            read = response.read
+
+            def change(size: int) -> bytes:
+                value = read(size)
+                self.ctx.directory.chmod(0o755)
+                return value
+
+            try:
+                with patch.object(response, "read", side_effect=change), self.assertRaises(ProbeError):
+                    self.ctx.read_witness_response(response, 100)
+                self.assertEqual(image.tell(), 3)
+                self.assertEqual(os.pread(image.fileno(), len(PAYLOAD), 0), PAYLOAD)
+            finally:
+                self.ctx.directory.chmod(0o700)
 
 
 if __name__ == "__main__":

@@ -82,7 +82,7 @@ class RuntimeEntrypointTests(unittest.TestCase):
         self.addCleanup(signal.signal, signal.SIGTERM, original_sigterm)
         with tempfile.TemporaryDirectory() as directory:
             store = Path(directory) / "owned-store"
-            store.mkdir()
+            store.mkdir(mode=0o700)
             evidence_path = Path(directory) / "evidence.json"
             argv = [
                 "scripts.runtime_tests",

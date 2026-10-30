@@ -42,11 +42,13 @@ from scripts.runtime_resource_budgets import STORE_LIMIT_BYTES, IsolatedStoreDis
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+    from contextlib import AbstractContextManager
     from typing import BinaryIO
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TIMEOUT = 45
 MAX_LOG = 4000
+MAX_WITNESS_RESPONSE_BYTES = 32768
 CONTROL_SECONDS = 300
 SYSTEMD_PAIR_SECONDS = 900
 
@@ -71,6 +73,7 @@ class RuntimeContext:
         self.architecture = architecture
         self.timeout = timeout
         self.directory = Path(tempfile.mkdtemp(prefix="strukturpiloten-runtime-"))
+        self._bind_fixture_directory()
         self.containers: list[str] = []
         self.run_containers: set[str] = set()
         self.container_launchers: dict[str, str] = {}
@@ -80,7 +83,7 @@ class RuntimeContext:
         self.runtime_phase = "single"
         self.runtime_disk_budget: IsolatedStoreDiskBudget | None = None
         self.image_ref = f"localhost/{image}:runtime-{os.getpid()}-{uuid.uuid4().hex}"
-        self._fixture_archives: dict[int, tuple[BinaryIO, Path, tuple[int, int]]] = {}
+        self._fixture_archives: dict[int, tuple[BinaryIO, Path, tuple[int, int], str, int]] = {}
         self._sudo = ["sudo", "-n"] if use_sudo else []
         self.outer_engine = outer_engine
         self.backend = (
@@ -142,27 +145,104 @@ class RuntimeContext:
             return self.backend.command_prefix(self.timeout if timeout is None else timeout)
         return self._podman
 
-    @contextmanager
-    def private_fixture_archive(self) -> Iterator[BinaryIO]:
-        """Hold the sole parent-owned fixture inode without reopening its pathname."""
-        path = self.directory / "docker-native-fixture.tar"
-        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(descriptor, "w+b", buffering=0) as archive:
-            observed = os.fstat(archive.fileno())
-            self._fixture_archives[id(archive)] = (archive, path, (observed.st_dev, observed.st_ino))
-            try:
-                self._fixture_descriptor(archive)
-                yield archive
-            finally:
-                self._fixture_archives.pop(id(archive))
+    def private_fixture_archive(self) -> AbstractContextManager[BinaryIO]:
+        """Hold the image TAR separately from diagnostic response bytes."""
+        return self._private_fixture_stream("image")
 
-    def _fixture_descriptor(self, archive: BinaryIO) -> int:
+    def private_witness_response(self) -> AbstractContextManager[BinaryIO]:
+        """One distinct, output-only response inode for the optional witness."""
+        return self._private_fixture_stream("response")
+
+    def _private_directory_identity(self, observed: os.stat_result) -> tuple[int, int, int]:
+        if (
+            not stat.S_ISDIR(observed.st_mode)
+            or observed.st_uid != os.geteuid()
+            or stat.S_IMODE(observed.st_mode) != 0o700
+        ):
+            raise ProbeError("private fixture directory ownership is unverified")
+        return observed.st_dev, observed.st_ino, observed.st_uid
+
+    def _bind_fixture_directory(self) -> None:
+        if "_fixture_directory_identity" in vars(self):
+            raise ProbeError("private fixture directory cannot be rebound")
+        self._fixture_directory_identity = self._private_directory_identity(self.directory.lstat())
+        self._fixture_directory_path = self.directory
+
+    def _verify_fixture_directory(self, descriptor: int | None = None) -> None:
+        expected = vars(self).get("_fixture_directory_identity")
+        if expected is None or self.directory != vars(self).get("_fixture_directory_path"):
+            raise ProbeError("private fixture directory binding is unavailable")
+        try:
+            named = self._private_directory_identity(self.directory.lstat())
+            held = expected if descriptor is None else self._private_directory_identity(os.fstat(descriptor))
+        except OSError, ValueError:
+            raise ProbeError("private fixture directory custody changed") from None
+        if named != expected or held != expected:
+            raise ProbeError("private fixture directory identity changed")
+
+    @contextmanager
+    def _private_fixture_stream(self, role: str) -> Iterator[BinaryIO]:
+        filenames = {"image": "docker-native-fixture.tar", "response": "docker-native-witness-response.bin"}
+        if not isinstance(role, str) or role not in filenames:
+            raise ProbeError("unknown private fixture stream role")
+        self._verify_fixture_directory()
+        directory = os.open(self.directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            self._verify_fixture_directory(directory)
+            descriptor = os.open(
+                filenames[role], os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory
+            )
+            try:
+                archive = os.fdopen(descriptor, "w+b", buffering=0)
+            except BaseException:
+                os.close(descriptor)
+                raise
+            with archive:
+                self._verify_fixture_directory(directory)
+                observed = os.fstat(archive.fileno())
+                path = self.directory / filenames[role]
+                self._fixture_archives[id(archive)] = (
+                    archive,
+                    path,
+                    (observed.st_dev, observed.st_ino),
+                    role,
+                    directory,
+                )
+                try:
+                    self._fixture_descriptor(archive, role=role)
+                    yield archive
+                finally:
+                    self._fixture_archives.pop(id(archive))
+        finally:
+            os.close(directory)
+
+    def reset_witness_response(self, response: BinaryIO) -> None:
+        self._fixture_descriptor(response, role="response")
+        response.seek(0)
+        response.truncate(0)
+        self._fixture_descriptor(response, role="response")
+
+    def read_witness_response(self, response: BinaryIO, limit: int) -> bytes:
+        if type(limit) is not int or not 0 <= limit <= MAX_WITNESS_RESPONSE_BYTES:
+            raise ProbeError("witness response limit is unsupported")
+        self._fixture_descriptor(response, role="response")
+        response.seek(0)
+        result = response.read(limit + 1)
+        self._fixture_descriptor(response, role="response")
+        if len(result) > limit:
+            raise ProbeError("witness response exceeded its byte bound")
+        return result
+
+    def _fixture_descriptor(self, archive: BinaryIO, *, role: str = "image") -> int:
         entry = self._fixture_archives.get(id(archive))
-        if entry is None or entry[0] is not archive:
+        if entry is None or entry[0] is not archive or entry[3] != role:
             raise ProbeError("binary fixture stream is not an owned held descriptor")
         try:
             descriptor = archive.fileno()
-            observed, named = os.fstat(descriptor), entry[1].lstat()
+            self._verify_fixture_directory(entry[4])
+            observed = os.fstat(descriptor)
+            named = os.stat(entry[1].name, dir_fd=entry[4], follow_symlinks=False)
+            self._verify_fixture_directory(entry[4])
         except OSError, ValueError:
             raise ProbeError("binary fixture descriptor ownership is unverified") from None
         if (
@@ -176,6 +256,12 @@ class RuntimeContext:
             raise ProbeError("binary fixture descriptor ownership changed")
         return descriptor
 
+    def _fixture_output_descriptor(self, output: BinaryIO) -> int:
+        entry = self._fixture_archives.get(id(output))
+        if entry is None or entry[3] not in {"image", "response"}:
+            raise ProbeError("binary output stream role unavailable")
+        return self._fixture_descriptor(output, role=entry[3])
+
     def _fixture_stream_options(self, stdin: BinaryIO | None, stdout: BinaryIO | None) -> dict[str, Any]:
         if stdin is None and stdout is None:
             return {"capture_output": True}
@@ -183,7 +269,7 @@ class RuntimeContext:
             raise ProbeError("binary fixture command requires one stream direction")
         return {
             "stdin": self._fixture_descriptor(stdin) if stdin is not None else subprocess.DEVNULL,
-            "stdout": self._fixture_descriptor(stdout) if stdout is not None else subprocess.DEVNULL,
+            "stdout": self._fixture_output_descriptor(stdout) if stdout is not None else subprocess.DEVNULL,
             "stderr": subprocess.DEVNULL,
         }
 

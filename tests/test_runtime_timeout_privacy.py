@@ -127,6 +127,7 @@ class TimeoutProviderPrivacy(unittest.TestCase):
         self.assertEqual(str(caught.exception), f"bounded observation: exit 1: {REDACTED}:" + "x" * 980)
         with tempfile.TemporaryDirectory() as directory:
             ctx.directory, ctx._fixture_archives = Path(directory), {}
+            ctx._bind_fixture_directory()
             payload = PRIVATE_PATH.encode("utf-8") + b"\x00\xff"
 
             def export(command: list[str], **options: object) -> subprocess.CompletedProcess[str]:

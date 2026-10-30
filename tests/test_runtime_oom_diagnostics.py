@@ -286,7 +286,7 @@ class OomDiagnosticTests(unittest.TestCase):
         for failure in ("inspect", "collector", "unknown"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
                 store = Path(directory) / "store"
-                store.mkdir()
+                store.mkdir(mode=0o700)
                 with patch("scripts.runtime_tests.tempfile.mkdtemp", return_value=str(store)):
                     ctx = runtime_tests.RuntimeContext(image="fixture", architecture="amd64", timeout=5, use_sudo=False)
                 ctx.containers.append(CONTAINER)

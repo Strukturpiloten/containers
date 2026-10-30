@@ -20,7 +20,6 @@ from unittest.mock import MagicMock, patch
 from scripts.runtime_docker_systemd import (
     HIERARCHY_READBACK_COMMAND,
     JOURNAL_BOUNDARY_COMMAND,
-    LEAF_WITNESS_AWAIT_COMMAND,
     LEAF_WITNESS_FAILURE_LOG_COMMAND,
     LEAF_WITNESS_FAILURE_STATE_COMMAND,
     LEAF_WITNESS_STAGES,
@@ -34,14 +33,15 @@ from scripts.runtime_docker_systemd import (
     _hierarchy_evidence,
     _journal_boundary_evidence,
     _leaf_witness_association,
-    _leaf_witness_await_result,
     _leaf_witness_failure_capture,
     _leaf_witness_failure_protocol,
     _leaf_witness_failure_state,
     _leaf_witness_needed,
+    _leaf_witness_observe,
     _leaf_witness_public,
     _leaf_witness_records,
     _leaf_witness_retained_after,
+    _leaf_witness_snapshot_root,
     _memory_association,
     _memory_probe_result,
     _memory_values,
@@ -1896,44 +1896,105 @@ class LeafWitnessProtocolTests(unittest.TestCase):
         self.assertFalse(_leaf_witness_needed(MagicMock(outer_engine="docker", observations=[]), MagicMock()))
 
     def test_driver_preserves_original_deadline_private_checks_and_exact_cleanup(self) -> None:
-        ctx = MagicMock(runtime_deadline=time.monotonic() + 100, observations=[], checks=[], image_ref="private-image")
-        ctx.backend.command_timeout.return_value = 10
-        service = _hierarchy_evidence(hierarchy_fixture(), kind="service", mode="rootful", unit="docker.service")
-        ctx.checks.append(service)
-        original_checks = copy.deepcopy(ctx.checks)
-        deadline = ctx.runtime_deadline
-        outputs = {
-            "start diagnostic-only leaf memory witness": "a" * 64,
-            "read private leaf witness protocol": self.protocol(),
-            "release diagnostic leaf and await actual after": "leaf-witness-await=after-observed",
-            "rebind live diagnostic controller": memory_association_fixture(),
-            "wait diagnostic controller completion": "0",
-        }
-        ctx.exec.side_effect = lambda name, *_args: outputs.get(name, "")
-        with (
-            patch("scripts.runtime_docker_systemd._leaf_witness_bind", return_value=self.association()),
-            patch("scripts.runtime_docker_systemd._leaf_witness_retained_after"),
-            patch("scripts.runtime_docker_systemd._leaf_witness_snapshot_root", side_effect=self.roots()),
-            patch("scripts.runtime_docker_systemd.time.monotonic_ns", side_effect=[3, 4]),
-        ):
-            _collect_leaf_memory_witness(ctx, MagicMock(), "owned", "rootful")
+        ctx = self.driver_context()
+        original_checks, deadline = copy.deepcopy(ctx.checks), ctx.runtime_deadline
+        self.collect_driver(ctx=ctx)
         self.assertEqual(ctx.runtime_deadline, deadline)
         self.assertEqual(ctx.checks, original_checks)
         result = ctx.observations[-1]
         self.assertEqual(result["availability"], "observed")
-        self.assertEqual(result["authority"], "observation-only")
         self.assertEqual(result["controllerCompletion"], "observation-complete")
         self.assertEqual(result["cleanup"], "verified")
-        names = [call.args[0] for call in ctx.exec.call_args_list]
-        self.assertLess(names.index("rebind live diagnostic controller"), names.index("finish diagnostic leaf hold"))
-        cleanup = next(
-            call.args
-            for call in ctx.exec.call_args_list
-            if call.args[0] == "remove and read back exact diagnostic leaf"
-        )
+        cleanup = ctx.exec.call_args_list[-1].args
         self.assertIn("a" * 64, cleanup)
         self.assertIn('docker rm --force "$cid"', cleanup[4])
         self.assertNotIn("prune", cleanup[4])
+
+    def assert_archive_cancellation(self, stage: str) -> None:
+        ctx = self.driver_context()
+        ctx.backend.command_timeout.side_effect = lambda value: value
+        ctx.containers = ["b" * 64]
+        cancellation = KeyboardInterrupt("PRIVATE /proc/4789/root/operand")
+        outputs = {
+            "read diagnostic archive API range": '{"ApiVersion":"1.56","MinAPIVersion":"1.40"}',
+            "pin actual diagnostic witness image": "sha256:" + "c" * 64,
+            "create diagnostic-only leaf memory witness": "a" * 64,
+            "start diagnostic-only leaf memory witness": "a" * 64,
+        }
+
+        def execute(name: str, *_args: object, **_kwargs: object) -> str:
+            if (stage == "create" and name.startswith("create diagnostic")) or (
+                stage == "start" and name.startswith("start diagnostic")
+            ):
+                raise cancellation
+            return outputs.get(name, "")
+
+        ctx.exec.side_effect = execute
+
+        def rpc(_session: object, method: str, *_args: object) -> tuple[int, dict]:
+            if method == "PUT":
+                raise cancellation
+            return 404, {}
+
+        with (
+            patch("scripts.runtime_docker_systemd._LeafWitnessArchive.inspect"),
+            patch("scripts.runtime_docker_systemd._LeafWitnessArchive.rpc", autospec=True, side_effect=rpc),
+            patch("scripts.runtime_docker_systemd._leaf_witness_bind", return_value=self.association()),
+            patch("scripts.runtime_docker_systemd._leaf_witness_snapshot_root", return_value=self.roots()[0]),
+            self.assertRaises(KeyboardInterrupt) as caught,
+        ):
+            _collect_leaf_memory_witness(ctx, MagicMock(), "b" * 64, "rootful")
+        self.assertIs(caught.exception, cancellation)
+        result = ctx.observations[-1]
+        self.assertEqual(result["enteredStage"], "release-await-after" if stage == "put" else "launch")
+        self.assertEqual(result["completedStage"], "root-before" if stage == "put" else "room-check")
+        self.assertEqual(result["cleanup"], "verified")
+        cleanup = ctx.exec.call_args_list[-1].args
+        self.assertEqual(cleanup[0], "remove and read back exact diagnostic leaf")
+        self.assertEqual(cleanup[-2], "" if stage == "create" else "a" * 64)
+        self.assertIn('test "$cid" = "$2"', cleanup[4])
+        self.assertNotIn("PRIVATE", json.dumps(result))
+        self.assertNotIn("4789", json.dumps(result))
+
+    def test_actual_archive_create_start_and_put_cancellation_keep_owned_cleanup(self) -> None:
+        for stage in ("create", "start", "put"):
+            with self.subTest(stage=stage):
+                self.assert_archive_cancellation(stage)
+
+    def test_delayed_root_observer_entry_launches_no_command_after_absolute_end(self) -> None:
+        ctx = self.driver_context()
+        ctx.outer_engine, ctx.containers, ctx.runtime_deadline = "docker", ["b" * 64], 200
+        archive = self.driver_session(ctx, {})
+        archive.guest, archive.end = "b" * 64, 100
+        archive.create.side_effect = None
+        archive.create.return_value = "a" * 64
+        clock = [99]
+        stop = KeyboardInterrupt()
+        observed = []
+
+        def delayed(observer: object, role: str) -> dict:
+            observed.append(observer.ctx.runtime_deadline)
+            clock[0] = 101
+            _leaf_witness_snapshot_root(observer, role)
+            raise stop
+
+        with (
+            patch("scripts.runtime_docker_systemd._leaf_witness_bind", return_value=self.association()),
+            patch("scripts.runtime_docker_systemd._leaf_witness_snapshot_root", side_effect=delayed),
+            patch("scripts.runtime_docker_systemd.time.monotonic", side_effect=lambda: clock[0]),
+            self.assertRaises(KeyboardInterrupt) as caught,
+        ):
+            _leaf_witness_observe(archive)
+        self.assertIs(caught.exception, stop)
+        self.assertEqual(observed, [100])
+        ctx.podman.assert_not_called()
+        ctx.command.assert_not_called()
+        ctx.exec.assert_not_called()
+        self.assertEqual(ctx.observations[-1]["availability"], "timeout")
+        self.assertEqual(ctx.runtime_deadline, 200)
+        self.assertEqual(archive.ctx.runtime_deadline, 200)
+        self.assertEqual(ctx.timeout, 45)
+        self.assertEqual(archive.ctx.timeout, 45)
 
     def test_primary_result_only_triggers_extra_actor_for_already_known_outer_marker_true(self) -> None:
         for marker in (False, None, True):
@@ -1992,12 +2053,9 @@ class LeafWitnessProtocolTests(unittest.TestCase):
         ctx.exec.assert_not_called()
         self.assertEqual(ctx.observations[-1]["availability"], "unavailable")
         self.assertEqual(ctx.observations[-1]["cleanup"], "not-created")
-        ctx.runtime_deadline = time.monotonic() + 100
-        ctx.backend.command_timeout.return_value = 10
-        ctx.exec.side_effect = ProbeError("PRIVATE-PROC-PATH-PID-OPERAND")
-        _collect_leaf_memory_witness(ctx, MagicMock(), "owned", "rootful")
+        ctx = self.driver_context()
+        self.collect_driver(ctx=ctx, fail_at=("launch", "cleanup"), failure=ProbeError("PRIVATE-PROC-PATH-PID-OPERAND"))
         self.assertNotIn("PRIVATE-PROC-PATH-PID-OPERAND", json.dumps(ctx.observations))
-        self.assertEqual(ctx.checks, [])
         self.assertEqual(ctx.observations[-1]["cleanup"], "unavailable")
 
     def driver_context(self) -> MagicMock:
@@ -2009,6 +2067,42 @@ class LeafWitnessProtocolTests(unittest.TestCase):
             _hierarchy_evidence(hierarchy_fixture(), kind="service", mode="rootful", unit="docker.service")
         )
         return ctx
+
+    def driver_session(self, ctx: MagicMock, record: dict) -> MagicMock:
+        archive = MagicMock()
+        archive.original, archive.ctx = ctx, copy.copy(ctx)
+        archive.ctx.checks = []
+        archive.budget, archive.guest, archive.mode = MagicMock(), "owned", "rootful"
+        archive.record = record
+        archive.endpoint = "unix:///var/run/docker.sock"
+        archive.custody, archive.workload = False, None
+        archive.remaining.return_value = 100
+        archive.end = ctx.runtime_deadline
+
+        def create() -> str:
+            archive.custody = True
+            result = ctx.exec("start diagnostic-only leaf memory witness")
+            if not re.fullmatch(r"[a-f0-9]{64}", result):
+                raise ProbeError
+            archive.workload = result
+            return result
+
+        def await_after() -> None:
+            result = ctx.exec("release diagnostic leaf and await actual after")
+            choices = {
+                "leaf-witness-await=" + token: token for token in ("after-observed", "poll-exhausted", "release-failed")
+            }
+            if result not in choices:
+                raise ProbeError
+            archive.record["awaitResult"] = choices[result]
+            if choices[result] != "after-observed":
+                raise ProbeError
+
+        archive.create.side_effect = create
+        archive.await_after.side_effect = await_after
+        archive.command.side_effect = lambda name, *args: ctx.exec(name, "owned", "docker", *args)
+        archive.finish.side_effect = lambda: ctx.exec("finish diagnostic leaf hold")
+        return archive
 
     def collect_driver(
         self,
@@ -2043,6 +2137,7 @@ class LeafWitnessProtocolTests(unittest.TestCase):
             for name, value in overrides.items():
                 commands[name] = (commands[name][0] if name in commands else name, value)
         ctx.exec.side_effect = lambda name, *_args, **_kwargs: operation(*commands[name])
+
         roots = iter(self.roots())
 
         def project(*args: object) -> dict:
@@ -2050,6 +2145,10 @@ class LeafWitnessProtocolTests(unittest.TestCase):
             return _leaf_witness_public(*args)
 
         with (
+            patch(
+                "scripts.runtime_docker_systemd._LeafWitnessArchive",
+                side_effect=lambda *args: self.driver_session(ctx, args[-1]),
+            ),
             patch(
                 "scripts.runtime_docker_systemd._leaf_witness_room", side_effect=lambda _ctx: operation("room-check")
             ),
@@ -2201,35 +2300,6 @@ class LeafWitnessFailureDiagnosticsTests(unittest.TestCase):
             "read private diagnostic leaf failure log": self.failure(),
         }
 
-    def test_real_await_shell_returns_closed_outcomes_without_nonzero_stdout_loss(self) -> None:
-        shell, touch = shutil.which("sh"), shutil.which("touch")
-        self.assertIsNotNone(shell)
-        self.assertIsNotNone(touch)
-        for result in ("release-failed", "after-observed", "poll-exhausted"):
-            with self.subTest(result=result), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
-                trigger = root / "start"
-                if result == "release-failed":
-                    (root / "touch").write_text("#!/bin/sh\nexit 1\n")
-                    (root / "touch").chmod(0o700)
-                else:
-                    (root / "touch").symlink_to(touch)
-                (root / "sleep").write_text("#!/bin/sh\nexit 0\n")
-                (root / "sleep").chmod(0o700)
-                if result == "after-observed":
-                    Path(str(trigger) + ".after").touch()
-                output = subprocess.run(  # noqa: S603 — authored shell with only task-owned temporary files.
-                    [shell, "-euc", LEAF_WITNESS_AWAIT_COMMAND, "--", str(os.getpid()), str(trigger)],
-                    env={**os.environ, "PATH": temporary},
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    timeout=2,
-                )
-                self.assertEqual(output.returncode, 0)
-                self.assertEqual(output.stdout, "leaf-witness-await=" + result + "\n")
-                self.assertEqual(trigger.exists(), result != "release-failed")
-
     def test_real_capture_shell_caps_bytes_and_requires_successful_cli_receipt(self) -> None:
         shell, head = shutil.which("sh"), shutil.which("head")
         self.assertIsNotNone(shell)
@@ -2271,20 +2341,6 @@ class LeafWitnessFailureDiagnosticsTests(unittest.TestCase):
                         else:
                             with self.assertRaises((ProbeError, ValueError)):
                                 parser(output.stdout.strip())
-
-    def test_await_parser_accepts_exactly_one_closed_token(self) -> None:
-        for result in ("release-failed", "after-observed", "poll-exhausted"):
-            self.assertEqual(_leaf_witness_await_result("leaf-witness-await=" + result), result)
-        for raw in (
-            "",
-            "leaf-witness-await=unknown",
-            "leaf-witness-await=after-observed\nleaf-witness-await=poll-exhausted",
-            "leaf-witness-await=after-observed\n",
-            "PRIVATE operand: leaf-witness-await=poll-exhausted",
-            "x" * 65537,
-        ):
-            with self.subTest(raw=raw[:60]), self.assertRaises(ProbeError):
-                _leaf_witness_await_result(raw)
 
     def test_state_requires_exact_id_name_closed_fields_and_actual_types(self) -> None:
         self.assertEqual(

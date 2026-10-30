@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import json
@@ -12,10 +13,15 @@ import math
 import re
 import shutil
 import signal as signals
+import tarfile
 import time
-from contextlib import contextmanager
+import uuid
+from contextlib import ExitStack, contextmanager
+from datetime import datetime
+from http import HTTPStatus
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 from scripts.runtime_docker_systemd_guard import PLACEMENT_GUARD, USER_MANAGER, guarded_command  # noqa: F401 - preserve public re-exports.
 from scripts.runtime_errors import ProbeError
@@ -24,6 +30,7 @@ from scripts.runtime_resource_budgets import verify_outer_container_limits
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
+    from typing import BinaryIO
 
     from scripts.runtime_resource_budgets import IsolatedStoreDiskBudget
     from scripts.runtime_tests import RuntimeContext
@@ -789,10 +796,28 @@ def verify_runtime(ctx: RuntimeContext) -> None:
     )
 
 
-def _exec(ctx: RuntimeContext, budget: IsolatedStoreDiskBudget, container: str, name: str, *args: str) -> str:
+def _exec(
+    ctx: RuntimeContext,
+    budget: IsolatedStoreDiskBudget,
+    container: str,
+    name: str,
+    *args: str,
+    timeout: float | None = None,
+) -> str:
     budget.checkpoint()
-    result = ctx.exec(name, container, *args)
+    end = vars(ctx).get("_leaf_protocol_end")
+    allowance = timeout
+    if end is not None:
+        allowance = (
+            min(allowance, _leaf_archive_remaining(ctx, end))
+            if allowance is not None
+            else _leaf_archive_remaining(ctx, end)
+        )
+    options = {} if allowance is None else {"timeout": allowance}
+    result = ctx.exec(name, container, *args, **options)
     budget.checkpoint()
+    if end is not None:
+        _leaf_archive_remaining(ctx, end)
     return result
 
 
@@ -1535,13 +1560,6 @@ LEAF_WITNESS_FAILURE_STAGES = frozenset(
         "finish-gate",
     }
 )
-LEAF_WITNESS_AWAIT_COMMAND = (
-    "base=/proc/$1/root$2; "
-    'if ! touch "$base"; then printf "leaf-witness-await=release-failed\n"; exit 0; fi; '
-    'n=0; while test "$n" -lt 80; do '
-    'if test -f "$base.after"; then printf "leaf-witness-await=after-observed\n"; exit 0; fi; '
-    'n=$((n+1)); sleep 0.1; done; printf "leaf-witness-await=poll-exhausted\n"'
-)
 LEAF_WITNESS_FAILURE_STATE_COMMAND = (
     "{ if docker inspect --format '"
     '{"id":{{json .Id}},"name":{{json .Name}},"state":{'
@@ -1957,11 +1975,13 @@ def _leaf_witness_bind(
                 "bind diagnostic controller and direct child",
                 "sh",
                 "-euc",
-                LEAF_WITNESS_ASSOCIATION_COMMAND,
+                'endpoint=$4; docker() { command docker --host "$endpoint" --tls=false --tlsverify=false "$@"; }; '
+                + LEAF_WITNESS_ASSOCIATION_COMMAND,
                 "--",
                 hierarchy["controlGroup"],
                 candidate[0],
                 workload,
+                vars(collection).get("_leaf_witness_endpoint", "unix:///var/run/docker.sock"),
             )
             associations.append(_leaf_witness_association(raw, hierarchy, service))
         except ProbeError:
@@ -1978,46 +1998,29 @@ def _leaf_witness_cleanup(collection: RuntimeContext, container: str, workload: 
         container,
         "sh",
         "-euc",
+        "endpoint=$1; nonce=$2; image=$3; mode=$4; shift 4; "
+        'docker() { command docker --host "$endpoint" --tls=false --tlsverify=false "$@"; }; '
         'cid=$(head -c 65 "$1"); test "${#cid}" -eq 64; '
         'case "$cid" in *[!a-f0-9]*) exit 1;; esac; '
         'test -z "$2" || test "$cid" = "$2"; '
         'test "$(docker inspect --format {{.Name}} "$cid")" = "/$3"; '
+        'test -z "$nonce" || test "$(docker inspect --format '
+        "'{{index .Config.Labels \"org.strukturpiloten.witness\"}}' "
+        '"$cid")" = "$nonce"; '
+        'test -z "$image" || test "$(docker inspect --format {{.Image}} "$cid")" = "$image"; '
+        'test -z "$mode" || test "$(docker inspect --format '
+        "'{{index .Config.Labels \"org.strukturpiloten.witness-mode\"}}' "
+        '"$cid")" = "$mode"; '
         'docker rm --force "$cid"; ! docker inspect "$cid" >/dev/null 2>&1',
         "--",
-        LEAF_WITNESS_CIDFILE,
+        vars(collection).get("_leaf_witness_endpoint", "unix:///var/run/docker.sock"),
+        vars(collection).get("_leaf_witness_nonce", ""),
+        vars(collection).get("_leaf_witness_image", ""),
+        vars(collection).get("_leaf_witness_mode", ""),
+        vars(collection).get("_leaf_witness_cidfile", LEAF_WITNESS_CIDFILE),
         workload or "",
         LEAF_WITNESS_NAME,
     )
-
-
-def _leaf_witness_launch(collection: RuntimeContext, budget: IsolatedStoreDiskBudget, container: str) -> str:
-    workload = _exec(
-        collection,
-        budget,
-        container,
-        "start diagnostic-only leaf memory witness",
-        "docker",
-        "run",
-        "--detach",
-        "--name",
-        LEAF_WITNESS_NAME,
-        "--cidfile",
-        LEAF_WITNESS_CIDFILE,
-        "--memory",
-        str(MEMORY_BYTES),
-        "--memory-swap",
-        str(MEMORY_BYTES),
-        "--pids-limit",
-        str(INNER_PIDS),
-        collection.image_ref,
-        "docker-resource-probe",
-        "memory-witness",
-        "--wait-for-start",
-        RESOURCE_START_FILE,
-    )
-    if not re.fullmatch(r"[a-f0-9]{64}", workload):
-        _leaf_witness_require("witness exact owned CID missing", condition=False)
-    return workload
 
 
 def _leaf_witness_cleanup_record(
@@ -2040,41 +2043,6 @@ def _leaf_witness_stage(record: dict[str, Any], stage: str) -> Iterator[None]:
     record["enteredStage"] = stage
     yield
     record["completedStage"] = stage
-
-
-def _leaf_witness_await_result(raw: str) -> str:
-    choices = {
-        "leaf-witness-await=release-failed": "release-failed",
-        "leaf-witness-await=after-observed": "after-observed",
-        "leaf-witness-await=poll-exhausted": "poll-exhausted",
-    }
-    if raw not in choices:
-        raise ProbeError("witness await result unavailable")
-    return choices[raw]
-
-
-def _leaf_witness_await(
-    collection: RuntimeContext,
-    budget: IsolatedStoreDiskBudget,
-    container: str,
-    controller: str,
-    record: dict[str, Any],
-) -> None:
-    raw = _exec(
-        collection,
-        budget,
-        container,
-        "release diagnostic leaf and await actual after",
-        "sh",
-        "-euc",
-        LEAF_WITNESS_AWAIT_COMMAND,
-        "--",
-        controller,
-        RESOURCE_START_FILE,
-    )
-    record["awaitResult"] = _leaf_witness_await_result(raw)
-    if record["awaitResult"] != "after-observed":
-        raise ProbeError("witness actual after not observed")
 
 
 def _leaf_witness_unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -2162,7 +2130,18 @@ def _leaf_witness_failure_command(
     allowance = min(remaining, reserved)
     if not math.isfinite(allowance) or allowance <= 0:
         raise ProbeError("witness failure capture allowance unavailable")
-    raw = collection.exec(command[0], probe[0], "sh", "-euc", command[1], "--", probe[1], timeout=allowance)
+    raw = collection.exec(
+        command[0],
+        probe[0],
+        "sh",
+        "-euc",
+        'endpoint=$2; docker() { command docker --host "$endpoint" --tls=false --tlsverify=false "$@"; }; '
+        + command[1],
+        "--",
+        probe[1],
+        vars(collection).get("_leaf_witness_endpoint", "unix:///var/run/docker.sock"),
+        timeout=allowance,
+    )
     budget.checkpoint()
     if time.monotonic() > deadline:
         raise ProbeError("witness failure capture returned late")
@@ -2225,6 +2204,574 @@ def _leaf_witness_failure_capture(
         return
 
 
+# Version-bound, witness-only archive protocol; never used for admission or the legacy probe.
+LEAF_WITNESS_START = "/boxferry-leaf-witness-start"
+LEAF_WITNESS_HTTP_BYTES = 32768
+LEAF_WITNESS_REQUEST_BYTES = 4096
+LEAF_WITNESS_API = "1.40"
+LEAF_WITNESS_GO_TYPE = 0x8F280000
+LEAF_WITNESS_BRIDGE = r"""
+umask 077
+scratch=$(busybox mktemp -d /tmp/boxferry-witness.XXXXXX) || exit 1
+cleanup() {
+    busybox rm -f "$scratch/input" "$scratch/decode.err" "$scratch/cli.err" "$scratch/proof" &&
+    busybox rmdir "$scratch"
+}
+trap 'cleanup >/dev/null 2>&1' EXIT
+limits() {
+    ulimit -Sc 0 && ulimit -Hc 0 && test "$(ulimit -Sc)" = 0 && test "$(ulimit -Hc)" = 0 || return 1
+    ulimit -Sf "$1" && ulimit -Hf "$1" && test "$(ulimit -Sf)" = "$1" && test "$(ulimit -Hf)" = "$1"
+}
+identity() {
+    held=$(busybox stat -Lc '%d:%i:%u:%a:%h:%f' "/proc/self/fd/$2") || return 1
+    case "$held" in *:0:600:1:8180) ;; *) return 1;; esac
+    test "$(busybox stat -c '%d:%i:%u:%a:%h:%f' "$1")" = "$held" || return 1
+    test -z "$3" || test "$held" = "$3"
+}
+empty() { identity "$1" "$2" "$3" && test "$(busybox stat -Lc %s "/proc/self/fd/$2")" = 0; }
+fail() { cleanup >/dev/null 2>&1; trap - EXIT; printf '\nBFW1 FAIL %s\n' "$1"; exit 0; }
+limits 16 || fail setup
+set -C
+exec 3>"$scratch/decode.err" 4>"$scratch/cli.err" 5>"$scratch/input" 7>"$scratch/proof" || fail setup
+set +C
+identity "$scratch/decode.err" 3 '' || fail custody
+decode_identity=$held
+identity "$scratch/cli.err" 4 '' || fail custody
+cli_identity=$held
+identity "$scratch/input" 5 '' || fail custody
+input_identity=$held
+identity "$scratch/proof" 7 '' || fail custody
+proof_identity=$held
+decode_status=0
+( limits 16 && printf %s "$1" | busybox base64 -d >&5 2>&3 ) || decode_status=$?
+test "$decode_status" = 0 || fail decode
+empty "$scratch/decode.err" 3 "$decode_identity" || fail decode-stderr
+identity "$scratch/input" 5 "$input_identity" || fail custody
+test "$(busybox stat -Lc %s /proc/self/fd/5)" = "$3" || fail decode
+exec 6<"$scratch/input" || fail custody
+identity "$scratch/input" 6 "$input_identity" || fail custody
+produce() {
+    cli_status=0
+    ( exec 7>&-; limits 1 || exit 125;
+      docker --host "$2" --tls=false --tlsverify=false system dial-stdio <&6 2>&4 ) || cli_status=$?
+    test "$cli_status" = 0 || { printf cli >&7; return 0; }
+    empty "$scratch/cli.err" 4 "$cli_identity" || { printf cli-stderr >&7; return 0; }
+    empty "$scratch/decode.err" 3 "$decode_identity" || { printf decode-stderr >&7; return 0; }
+    identity "$scratch/input" 6 "$input_identity" || { printf custody >&7; return 0; }
+    printf complete >&7
+}
+produce "$@" | busybox head -c 32641
+identity "$scratch/proof" 7 "$proof_identity" || fail producer
+proof_size=$(busybox stat -Lc %s /proc/self/fd/7) || fail producer
+test "$proof_size" -gt 0 && test "$proof_size" -le 32 || fail producer
+proof=$(busybox cat "$scratch/proof") || fail producer
+identity "$scratch/proof" 7 "$proof_identity" || fail producer
+test "$proof_size" = "${#proof}" || fail producer
+case "$proof" in complete) ;; cli|cli-stderr|decode-stderr|custody) fail "$proof";; *) fail producer;; esac
+cleanup >/dev/null 2>&1 || fail cleanup
+trap - EXIT
+printf '\nBFW1 OK complete\n'
+"""
+LEAF_WITNESS_BRIDGE_COMMAND = LEAF_WITNESS_BRIDGE
+
+
+class _LeafArchiveError(ProbeError):
+    def __init__(self, reason: str) -> None:
+        super().__init__("witness archive unavailable")
+        self.reason = reason
+
+
+def _leaf_archive_require(reason: str, *, condition: bool) -> None:
+    if not condition:
+        raise _LeafArchiveError(reason)
+
+
+def _leaf_archive_endpoint(mode: str) -> str:
+    endpoints = {"rootless": "unix:///run/user/1000/docker.sock", "rootful": "unix:///var/run/docker.sock"}
+    _leaf_archive_require("mode", condition=mode in endpoints)
+    return endpoints[mode]
+
+
+def _leaf_archive_remaining(ctx: RuntimeContext, end: float) -> float:
+    now = time.monotonic()
+    remaining = min(end - now, ctx.timeout, ctx.runtime_deadline - now)
+    _leaf_archive_require("deadline", condition=math.isfinite(remaining) and remaining > 0)
+    try:
+        reserved = ctx.backend.command_timeout(remaining)
+    except Exception as error:
+        raise _LeafArchiveError("deadline") from error
+    _leaf_archive_require(
+        "deadline", condition=type(reserved) in {int, float} and math.isfinite(reserved) and reserved > 0
+    )
+    result = min(remaining, reserved)
+    _leaf_archive_require("deadline", condition=math.isfinite(result) and result > 0)
+    return result
+
+
+def _leaf_archive_end(ctx: RuntimeContext) -> float:
+    _leaf_archive_require(
+        "deadline",
+        condition=all(type(v) in {int, float} and math.isfinite(v) for v in (ctx.timeout, ctx.runtime_deadline)),
+    )
+    now = time.monotonic()
+    reserved = ctx.backend.command_timeout(ctx.timeout)
+    _leaf_archive_require(
+        "deadline", condition=type(reserved) in {int, float} and math.isfinite(reserved) and reserved > 0
+    )
+    return min(now + ctx.timeout, ctx.runtime_deadline, now + reserved)
+
+
+def _leaf_archive_api(value: object) -> tuple[int, int]:
+    _leaf_archive_require(
+        "api-version", condition=isinstance(value, str) and re.fullmatch(r"[1-9][0-9]*\.[0-9]+", value) is not None
+    )
+    major, minor = str(value).split(".")
+    return int(major), int(minor)
+
+
+def _leaf_archive_tar(marker: str) -> bytes:
+    _leaf_archive_require("marker", condition=marker in {LEAF_WITNESS_START, LEAF_WITNESS_START + ".finish"})
+    info = tarfile.TarInfo(marker[1:])
+    info.mode, info.uid, info.gid, info.mtime, info.size = 0o600, 0, 0, 0, 0
+    return info.tobuf(format=tarfile.USTAR_FORMAT) + bytes(1024)
+
+
+def _leaf_archive_request(method: str, target: str, body: bytes = b"") -> bytes:
+    _leaf_archive_require(
+        "request", condition=method in {"HEAD", "PUT"} and re.fullmatch(r"/[A-Za-z0-9_.%/?=&-]+", target) is not None
+    )
+    header = f"{method} {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {len(body)}\r\n"
+    if method == "PUT":
+        header += "Content-Type: application/x-tar\r\n"
+    result = (header + "\r\n").encode("ascii") + body
+    _leaf_archive_require("request", condition=len(result) <= LEAF_WITNESS_REQUEST_BYTES)
+    return result
+
+
+def _leaf_archive_http(raw: bytes, method: str) -> tuple[int, dict[str, str], bytes]:
+    _leaf_archive_require("response-size", condition=len(raw) <= LEAF_WITNESS_HTTP_BYTES)
+    response, separator, receipt = raw.rpartition(b"\nBFW1 ")
+    failure = re.fullmatch(rb"FAIL (setup|decode|decode-stderr|cli|cli-stderr|custody|cleanup|producer)\n", receipt)
+    if separator and failure is not None:
+        raise _LeafArchiveError("bridge-" + failure[1].decode("ascii"))
+    _leaf_archive_require("bridge", condition=separator != b"" and receipt == b"OK complete\n")
+    _leaf_archive_require("response-size", condition=len(response) <= LEAF_WITNESS_HTTP_BYTES - 128)
+    header, separator, body = response.partition(b"\r\n\r\n")
+    _leaf_archive_require("http-framing", condition=separator != b"" and len(header) <= MAX_ALLOCATOR_TELEMETRY)
+    lines = header.split(b"\r\n")
+    status = re.fullmatch(rb"HTTP/1\.[01] ([1-5][0-9]{2}) [\x20-\x7e]*", lines[0])
+    _leaf_archive_require("http-framing", condition=status is not None and len(lines) <= MAX_CGROUP_DEPTH)
+    headers: dict[str, str] = {}
+    for line in lines[1:]:
+        key, sep, value = line.partition(b":")
+        _leaf_archive_require(
+            "http-header",
+            condition=sep != b""
+            and len(line) <= LEAF_WITNESS_FAILURE_STATE_BYTES
+            and re.fullmatch(rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+", key) is not None
+            and re.fullmatch(rb"[\x20-\x7e]*", value) is not None,
+        )
+        name = key.decode("ascii").lower()
+        _leaf_archive_require("http-header", condition=name not in headers)
+        headers[name] = value.decode("ascii").strip()
+    _leaf_archive_require(
+        "http-framing",
+        condition="transfer-encoding" not in headers
+        and "trailer" not in headers
+        and headers.get("content-encoding", "identity").lower() == "identity",
+    )
+    length = headers.get("content-length")
+    if length is not None:
+        _leaf_archive_require("http-framing", condition=re.fullmatch(r"[0-9]{1,20}", length) is not None)
+    _leaf_archive_require(
+        "http-framing", condition=not body if method == "HEAD" else length is None or int(length) == len(body)
+    )
+    return int(status[1]), headers, body
+
+
+def _leaf_archive_timestamp(value: object) -> None:
+    _leaf_archive_require(
+        "after-stat",
+        condition=isinstance(value, str)
+        and re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]"
+            r"(?:\.[0-9]{1,9})?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])",
+            value,
+        )
+        is not None,
+    )
+    try:
+        datetime.fromisoformat(value)
+    except ValueError as error:
+        raise _LeafArchiveError("after-stat") from error
+
+
+def _leaf_archive_after(headers: dict[str, str]) -> None:
+    encoded = headers.get("x-docker-container-path-stat", "")
+    _leaf_archive_require("after-stat", condition=0 < len(encoded) <= LEAF_WITNESS_FAILURE_STATE_BYTES)
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+        value = json.loads(raw, object_pairs_hook=_leaf_witness_unique_object)
+    except (ValueError, UnicodeError, ProbeError) as error:
+        raise _LeafArchiveError("after-stat") from error
+    _leaf_archive_require(
+        "after-stat",
+        condition=isinstance(value, dict) and value.keys() == {"name", "size", "mode", "mtime", "linkTarget"},
+    )
+    _leaf_archive_require(
+        "after-stat",
+        condition=value["name"] == (LEAF_WITNESS_START + ".after")[1:]
+        and type(value["size"]) is int
+        and value["size"] == 0
+        and type(value["mode"]) is int
+        and 0 <= value["mode"] < 2**32
+        and value["mode"] & LEAF_WITNESS_GO_TYPE == 0
+        and value["mode"] & ~(0xFFF80000 | 0o777) == 0
+        and value["linkTarget"] == ""
+        and isinstance(value["mtime"], str)
+        and re.fullmatch(r"[0-9T:.+Z-]{1,64}", value["mtime"]) is not None,
+    )
+    _leaf_archive_timestamp(value["mtime"])
+
+
+class _LeafWitnessArchive:
+    def __init__(
+        self,
+        ctx: RuntimeContext,
+        budget: IsolatedStoreDiskBudget,
+        probe: tuple[str, str],
+        response: BinaryIO,
+        record: dict[str, Any],
+    ) -> None:
+        self.original, self.budget = ctx, budget
+        self.ctx = copy.copy(ctx)
+        self.ctx.checks = []
+        self.guest, self.mode = probe
+        self.endpoint = _leaf_archive_endpoint(self.mode)
+        vars(self.ctx)["_leaf_witness_endpoint"] = self.endpoint
+        self.end = _leaf_archive_end(ctx)
+        self.phase_end = self.end
+        vars(self.ctx)["_leaf_protocol_end"] = self.end
+        self.response, self.record = response, record
+        self.nonce, self.image, self.workload = uuid.uuid4().hex, "", None
+        self.custody = False
+        self.cidfile = LEAF_WITNESS_CIDFILE + "." + self.nonce
+        vars(self.ctx).update(
+            _leaf_witness_nonce=self.nonce, _leaf_witness_mode=self.mode, _leaf_witness_cidfile=self.cidfile
+        )
+        record["archive"] = {
+            "operation": "initialise",
+            "reason": "unavailable",
+            "preflight": False,
+            "release": "unavailable",
+        }
+
+    def remaining(self) -> float:
+        return _leaf_archive_remaining(self.ctx, min(self.end, self.phase_end))
+
+    def command(self, name: str, *args: str) -> str:
+        return _exec(
+            self.ctx,
+            self.budget,
+            self.guest,
+            name,
+            "docker",
+            "--host",
+            self.endpoint,
+            "--tls=false",
+            "--tlsverify=false",
+            *args,
+            timeout=self.remaining(),
+        )
+
+    def rpc(self, method: str, marker: str, body: bytes = b"") -> tuple[int, dict[str, str]]:
+        _leaf_archive_require(
+            "identity",
+            condition=isinstance(self.workload, str) and re.fullmatch(r"[a-f0-9]{64}", self.workload) is not None,
+        )
+        _leaf_archive_require(
+            "identity",
+            condition=self.guest in self.ctx.containers and re.fullmatch(r"[a-f0-9]{64}", self.guest) is not None,
+        )
+        target = f"/v{LEAF_WITNESS_API}/containers/{self.workload}/archive?path=" + quote(marker, safe="")
+        if method == "PUT":
+            target += "&noOverwriteDirNonDir=1"
+        self.remaining()
+        request = _leaf_archive_request(method, target, body)
+        self.record["archive"].pop("httpStatus", None)
+        self.record["archive"]["request"] = method.lower()
+        self.ctx.reset_witness_response(self.response)
+        self.budget.checkpoint()
+        self.ctx.podman(
+            "private diagnostic archive exchange",
+            "exec",
+            self.guest,
+            *getattr(self.ctx, "exec_guard", ()),
+            "/bin/dash",
+            "-eu",
+            "-c",
+            LEAF_WITNESS_BRIDGE_COMMAND,
+            "--",
+            base64.b64encode(request).decode("ascii"),
+            self.endpoint,
+            str(len(request)),
+            timeout=self.remaining(),
+            stdout=self.response,
+        )
+        self.budget.checkpoint()
+        self.remaining()
+        raw = self.ctx.read_witness_response(self.response, LEAF_WITNESS_HTTP_BYTES)
+        status, headers, response_body = _leaf_archive_http(raw, method)
+        self.remaining()
+        self.record["archive"]["httpStatus"] = status
+        _leaf_archive_require("http-status", condition=status in {200, 404})
+        _leaf_archive_require("http-framing", condition=not response_body)
+        return status, headers
+
+    def inspect(self, *, running: bool) -> None:
+        raw = self.command("bind diagnostic archive identity", "inspect", "--format", "{{json .}}", str(self.workload))
+        _leaf_archive_require("inspect-size", condition=len(raw.encode()) <= MAX_MEMORY_READBACK)
+        value = json.loads(raw, object_pairs_hook=_leaf_witness_unique_object)
+        _leaf_archive_require(
+            "identity",
+            condition=isinstance(value, dict)
+            and all(isinstance(value.get(key), dict) for key in ("Config", "State", "HostConfig")),
+        )
+        labels = value["Config"].get("Labels")
+        _leaf_archive_require("identity", condition=isinstance(labels, dict))
+        _leaf_archive_require(
+            "identity",
+            condition=value.get("Id") == self.workload
+            and value.get("Name") == "/" + LEAF_WITNESS_NAME
+            and value.get("Image") == self.image
+            and labels.get("org.strukturpiloten.witness") == self.nonce
+            and labels.get("org.strukturpiloten.witness-mode") == self.mode
+            and value.get("State", {}).get("Running") is running
+            and value.get("Config", {}).get("Cmd")
+            == ["docker-resource-probe", "memory-witness", "--wait-for-start", LEAF_WITNESS_START],
+        )
+        config = value.get("HostConfig", {})
+        _leaf_archive_require(
+            "rootfs", condition=config.get("ReadonlyRootfs") is False and "Tmpfs" in config and "Mounts" in value
+        )
+        mounts, tmpfs = value["Mounts"], config["Tmpfs"]
+        _leaf_archive_require(
+            "mounts",
+            condition=(mounts is None or isinstance(mounts, list)) and (tmpfs is None or isinstance(tmpfs, dict)),
+        )
+        destinations = [entry["Destination"] for entry in (mounts or [])] + list(tmpfs or {})
+        for destination in destinations:
+            _leaf_archive_require(
+                "mounts",
+                condition=isinstance(destination, str)
+                and destination.startswith("/")
+                and "//" not in destination
+                and ".." not in destination.split("/")
+                and "." not in destination.split("/"),
+            )
+            _leaf_archive_require(
+                "mounts",
+                condition=all(
+                    not (
+                        destination == "/"
+                        or marker == destination.rstrip("/")
+                        or marker.startswith(destination.rstrip("/") + "/")
+                    )
+                    for marker in (LEAF_WITNESS_START, LEAF_WITNESS_START + ".after", LEAF_WITNESS_START + ".finish")
+                ),
+            )
+        if not running:
+            _leaf_archive_require("identity", condition=value.get("State", {}).get("Status") == "created")
+        self.remaining()
+
+    def create(self) -> str:
+        self.record["archive"]["operation"] = "image"
+        version = json.loads(
+            self.command("read diagnostic archive API range", "version", "--format", "{{json .Server}}")
+        )
+        _leaf_archive_require(
+            "api-version",
+            condition=_leaf_archive_api(version.get("MinAPIVersion"))
+            <= _leaf_archive_api(LEAF_WITNESS_API)
+            <= _leaf_archive_api(version.get("ApiVersion")),
+        )
+        self.image = self.command(
+            "pin actual diagnostic witness image", "image", "inspect", "--format", "{{.Id}}", self.ctx.image_ref
+        )
+        _leaf_archive_require("image", condition=re.fullmatch(r"sha256:[a-f0-9]{64}", self.image) is not None)
+        vars(self.ctx)["_leaf_witness_image"] = self.image
+        self.record["archive"]["operation"] = "create-custody"
+        _exec(
+            self.ctx,
+            self.budget,
+            self.guest,
+            "verify fresh diagnostic CID file",
+            "sh",
+            "-euc",
+            'test ! -e "$1"; test ! -L "$1"',
+            "--",
+            self.cidfile,
+        )
+        self.record["archive"]["operation"] = "create"
+        self.custody = True
+        workload = self.command(
+            "create diagnostic-only leaf memory witness",
+            "create",
+            "--name",
+            LEAF_WITNESS_NAME,
+            "--cidfile",
+            self.cidfile,
+            "--label",
+            "org.strukturpiloten.witness=" + self.nonce,
+            "--label",
+            "org.strukturpiloten.witness-mode=" + self.mode,
+            "--memory",
+            str(MEMORY_BYTES),
+            "--memory-swap",
+            str(MEMORY_BYTES),
+            "--pids-limit",
+            str(INNER_PIDS),
+            self.image,
+            "docker-resource-probe",
+            "memory-witness",
+            "--wait-for-start",
+            LEAF_WITNESS_START,
+        )
+        _leaf_archive_require("create-cid", condition=re.fullmatch(r"[a-f0-9]{64}", workload) is not None)
+        self.workload = workload
+        self.record["archive"]["operation"] = "preflight"
+        self.inspect(running=False)
+        for marker in (LEAF_WITNESS_START, LEAF_WITNESS_START + ".after", LEAF_WITNESS_START + ".finish"):
+            status, _ = self.rpc("HEAD", marker)
+            _leaf_archive_require("marker-exists", condition=status == HTTPStatus.NOT_FOUND)
+        self.inspect(running=False)
+        self.record["archive"]["preflight"] = True
+        self.record["archive"]["operation"] = "start"
+        _leaf_witness_room(self.original)
+        _leaf_archive_require("start-room", condition=self.remaining() >= LEAF_WITNESS_SECONDS)
+        result = self.command("start diagnostic-only leaf memory witness", "start", workload)
+        _leaf_archive_require("start-uncertain", condition=result == workload)
+        self.inspect(running=True)
+        return workload
+
+    def put(self, marker: str) -> None:
+        status, _ = self.rpc("PUT", "/", _leaf_archive_tar(marker))
+        _leaf_archive_require("put-uncertain", condition=status == HTTPStatus.OK)
+
+    def await_after(self) -> None:
+        self.phase_end = min(self.end, time.monotonic() + 8)
+        self.record["archive"]["operation"] = "release"
+        self.put(LEAF_WITNESS_START)
+        self.record["archive"]["release"] = "extracted"
+        self.record["archive"]["operation"] = "await-after"
+        await_end = self.phase_end
+        for _ in range(80):
+            self.remaining()
+            _leaf_archive_require("await-deadline", condition=time.monotonic() < await_end)
+            self.inspect(running=True)
+            status, headers = self.rpc("HEAD", LEAF_WITNESS_START + ".after")
+            self.inspect(running=True)
+            _leaf_archive_require("await-deadline", condition=time.monotonic() <= await_end)
+            if status == HTTPStatus.OK:
+                _leaf_archive_after(headers)
+                self.remaining()
+                self.record["awaitResult"] = "after-observed"
+                self.phase_end = self.end
+                return
+            time.sleep(min(0.1, self.remaining(), max(0, await_end - time.monotonic())))
+        self.record["awaitResult"] = "poll-exhausted"
+        raise _LeafArchiveError("await-deadline")
+
+    def finish(self) -> None:
+        self.record["archive"]["operation"] = "finish"
+        self.put(LEAF_WITNESS_START + ".finish")
+        self.record["archive"]["reason"] = "complete"
+
+
+def _leaf_witness_observe(archive: _LeafWitnessArchive) -> None:
+    ctx, collection, budget, container, mode, record = (
+        archive.original,
+        archive.ctx,
+        archive.budget,
+        archive.guest,
+        archive.mode,
+        archive.record,
+    )
+    with _leaf_witness_stage(record, "launch"):
+        workload = archive.create()
+    with _leaf_witness_stage(record, "bind"):
+        association = _leaf_witness_bind(collection, budget, container, (mode, workload), _retained_service(ctx, mode))
+        controller = str(association["allocator"]["pid"])
+    with _leaf_witness_stage(record, "root-before"):
+        observer_ctx = copy.copy(collection)
+        observer_ctx.runtime_deadline = min(observer_ctx.runtime_deadline, archive.end)
+        observer_ctx.timeout = archive.remaining()
+        observer = OomDiagnostics(observer_ctx, container)
+        roots = [_leaf_witness_snapshot_root(observer, "root-before")]
+    with _leaf_witness_stage(record, "release-await-after"):
+        window = [time.monotonic_ns()]
+        archive.await_after()
+    with _leaf_witness_stage(record, "log-read"):
+        output = archive.command("read private leaf witness protocol", "logs", workload)
+    with _leaf_witness_stage(record, "controller-rebind"):
+        after_raw = _exec(
+            collection,
+            budget,
+            container,
+            "rebind live diagnostic controller",
+            "sh",
+            "-euc",
+            'endpoint=$4; docker() { command docker --host "$endpoint" --tls=false --tlsverify=false "$@"; }; '
+            + MEMORY_ASSOCIATION_COMMAND,
+            "--",
+            association["allocator"]["group"],
+            controller,
+            workload,
+            archive.endpoint,
+        )
+        after_association, _ = _association_records(after_raw)
+        if any(after_association[key] != association[key] for key in after_association):
+            _leaf_witness_require("witness controller or mount changed after child reap", condition=False)
+    with _leaf_witness_stage(record, "retained-hierarchy"):
+        after_hierarchy = _exec(
+            collection,
+            budget,
+            container,
+            "verify diagnostic leaf retained only controller",
+            "sh",
+            "-euc",
+            HIERARCHY_READBACK_COMMAND,
+            "--",
+            "scope",
+            mode,
+            "docker-" + workload + ".scope",
+        )
+        _leaf_witness_retained_after(after_hierarchy, association)
+    with _leaf_witness_stage(record, "root-after"):
+        window.append(time.monotonic_ns())
+        observer_ctx.timeout = archive.remaining()
+        roots.append(_leaf_witness_snapshot_root(observer, "root-after"))
+        archive.remaining()
+    with _leaf_witness_stage(record, "projection-validation"):
+        public = _leaf_witness_public(output, association, roots, window)
+        archive.remaining()
+        record.update(public)
+    with _leaf_witness_stage(record, "finish-hold"):
+        archive.finish()
+    with _leaf_witness_stage(record, "wait-completion"):
+        completion = archive.command("wait diagnostic controller completion", "wait", workload)
+        record["controllerCompletion"] = "observation-complete" if completion == "0" else "failed"
+        if completion != "0":
+            record["availability"] = "unavailable"
+
+
+def _leaf_witness_close_response(stack: ExitStack, record: dict[str, Any]) -> None:
+    try:
+        stack.close()
+    except Exception:  # noqa: BLE001 — keep the original failure/cancellation and close-status refusal.
+        record["availability"] = "unavailable"
+
+
 def _collect_leaf_memory_witness(
     ctx: RuntimeContext, budget: IsolatedStoreDiskBudget, container: str, mode: str
 ) -> None:
@@ -2251,93 +2798,25 @@ def _collect_leaf_memory_witness(
         "cleanup": "not-created",
         "limits": "separate non-atomic observation; no victim-cause or native qualification authority",
     }
-    collection = copy.copy(ctx)
-    collection.checks = []
-    workload, launched = None, False
+    archive = None
+    stack = ExitStack()
     try:
         with _leaf_witness_stage(record, "room-check"):
             _leaf_witness_room(ctx)
-        with _leaf_witness_stage(record, "launch"):
-            launched = True
-            workload = _leaf_witness_launch(collection, budget, container)
-        with _leaf_witness_stage(record, "bind"):
-            association = _leaf_witness_bind(
-                collection, budget, container, (mode, workload), _retained_service(ctx, mode)
-            )
-            controller = str(association["allocator"]["pid"])
-        with _leaf_witness_stage(record, "root-before"):
-            observer = OomDiagnostics(ctx, container)
-            roots = [_leaf_witness_snapshot_root(observer, "root-before")]
-        with _leaf_witness_stage(record, "release-await-after"):
-            window = [time.monotonic_ns()]
-            _leaf_witness_await(collection, budget, container, controller, record)
-        with _leaf_witness_stage(record, "log-read"):
-            output = _exec(
-                collection, budget, container, "read private leaf witness protocol", "docker", "logs", workload
-            )
-        with _leaf_witness_stage(record, "controller-rebind"):
-            after_raw = _exec(
-                collection,
-                budget,
-                container,
-                "rebind live diagnostic controller",
-                "sh",
-                "-euc",
-                MEMORY_ASSOCIATION_COMMAND,
-                "--",
-                association["allocator"]["group"],
-                controller,
-                workload,
-            )
-            after_association, _ = _association_records(after_raw)
-            if any(after_association[key] != association[key] for key in after_association):
-                _leaf_witness_require("witness controller or mount changed after child reap", condition=False)
-        with _leaf_witness_stage(record, "retained-hierarchy"):
-            after_hierarchy = _exec(
-                collection,
-                budget,
-                container,
-                "verify diagnostic leaf retained only controller",
-                "sh",
-                "-euc",
-                HIERARCHY_READBACK_COMMAND,
-                "--",
-                "scope",
-                mode,
-                "docker-" + workload + ".scope",
-            )
-            _leaf_witness_retained_after(after_hierarchy, association)
-        with _leaf_witness_stage(record, "root-after"):
-            window.append(time.monotonic_ns())
-            roots.append(_leaf_witness_snapshot_root(observer, "root-after"))
-        with _leaf_witness_stage(record, "projection-validation"):
-            record.update(_leaf_witness_public(output, association, roots, window))
-        with _leaf_witness_stage(record, "finish-hold"):
-            _exec(
-                collection,
-                budget,
-                container,
-                "finish diagnostic leaf hold",
-                "sh",
-                "-euc",
-                "touch /proc/$1/root$2.finish",
-                "--",
-                controller,
-                RESOURCE_START_FILE,
-            )
-        with _leaf_witness_stage(record, "wait-completion"):
-            completion = _exec(
-                collection, budget, container, "wait diagnostic controller completion", "docker", "wait", workload
-            )
-            record["controllerCompletion"] = "observation-complete" if completion == "0" else "failed"
-            if completion != "0":
-                record["availability"] = "unavailable"
-    except Exception:  # noqa: BLE001 — optional diagnostic errors never replace the original failure.
+        response = stack.enter_context(ctx.private_witness_response())
+        archive = _LeafWitnessArchive(ctx, budget, (container, mode), response, record)
+        _leaf_witness_observe(archive)
+    except Exception as error:  # noqa: BLE001 — optional diagnostics never replace the original native failure.
         record["availability"] = "unavailable"
-        _leaf_witness_failure_capture(collection, budget, container, workload, record)
+        record.setdefault("archive", {"operation": "initialise"})["reason"] = (
+            error.reason if isinstance(error, _LeafArchiveError) else "unavailable"
+        )
+        if archive is not None:
+            _leaf_witness_failure_capture(archive.ctx, budget, container, archive.workload, record)
     finally:
-        if launched:
-            _leaf_witness_cleanup_record(collection, container, workload, record)
+        if archive is not None and archive.custody:
+            _leaf_witness_cleanup_record(archive.ctx, container, archive.workload, record)
+        _leaf_witness_close_response(stack, record)
         ctx.observations.append(record)
 
 

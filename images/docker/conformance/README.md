@@ -211,6 +211,66 @@ remain unavailable. Capture progress never replaces the original collection
 stages or establishes controller completion. Raw logs and OCI operands remain
 private; existing success and mandatory allocator protocols are unchanged.
 
+The witness alone uses rootfs markers `/boxferry-leaf-witness-start`, `.after`
+and `.finish`; the mandatory allocator retains its legacy `/tmp` barrier.
+The driver creates one stopped, nonce-labelled container from the actual loaded
+image ID, then verifies its exact CID, name, command, mode, writable-rootfs
+configuration and absence of covering mounts or tmpfs. All three marker entries
+must be absent, using actual archive HEAD HTTP status with the same stopped
+container bound before and after the reads. Any entry, including a dangling
+symlink, refuses startup. Preflight finishes before starting the C controller.
+
+Start and finish are single uncompressed archive PUTs containing one canonical
+empty regular file. HEAD of the C-produced after marker acknowledges visibility
+only when its exact name, zero size, Go regular-file mode and empty link target
+are observed. Complete C telemetry, retained process/cgroup identity, counters,
+root sampling and controller wait remain mandatory. An uncertain PUT may already
+have changed the filesystem; it aborts without retry. No barrier operation execs
+another process inside the bounded inner leaf. Archive workers and filesystem
+writes can still perturb accounting; this is not a zero-perturbation claim.
+
+The existing Docker CLI bridges raw HTTP only through the guarded outer guest
+and the explicit mode-specific Unix endpoint. This deliberately uses the hidden
+`system dial-stdio` command reviewed at CLI 29.9.2 revision
+`a82e528901260c8df6073311379eac65f92db204`; Engine archive filesystem-view and
+HEAD lstat behavior were reviewed at
+`0367cbeb49b9d98cb0b4f51e95f7b54b4803e76c`. Both upstream sources are Apache-2.0;
+no source was copied or redistributed. Future payload updates must review this
+consumer under the existing manual payload-update policy. No new download,
+software pin or Renovate manager is introduced.
+
+Host code supplies bounded base64 request bytes and parses a distinct held
+response inode. The active image TAR's bytes, inode and offset remain untouched;
+response-role descriptors cannot enter any image-load or stdin route. Read limits
+are validated before seeking or reading. Both stream roles retain a directory FD,
+bind its identity at private-directory creation, and verify the named and held
+parent's UID, mode 0700 and directory type before and after I/O. Allocation uses
+fixed names relative to that FD; renamed, replaced or symlinked parents refuse
+further I/O without rebinding or touching the active image TAR. The
+selected guest `/bin/dash` sets and verifies both soft and hard file-size limits
+in the actual decoder and CLI ancestor, with core dumps disabled. Dash's
+[documented file-size unit](https://manpages.debian.org/trixie/dash/dash.1.en.html#ulimit)
+is 512 bytes: request preparation has the larger bound, while separate CLI stderr
+is capped at one block. Empty-stderr proof pairs the held regular inode and name,
+UID, mode, link count and exact zero size. Setup, decoder, CLI, custody or cleanup
+failure cannot produce the success receipt. The supervisor validates a separate
+held completion file and appends its receipt outside the bounded stdout pipeline;
+producer death cannot turn HTTP payload into a trusted receipt. Complete HTTP
+framing and the independently appended receipt are required; neither CLI nor `head` exit zero is HTTP success.
+
+One protocol end is anchored before create from the existing command timeout,
+work deadline and preserved backend cleanup reserve. Preflight never renews it;
+full ten-second room must remain before START. The existing eight-second await
+window additionally includes PUT, every implicit CLI ping, HEAD poll and sleep.
+Late parsing, transport uncertainty or incomplete framing stays unavailable.
+Only the root observer copy receives the absolute protocol end as a tighter
+runtime deadline, so delayed entry cannot renew its allowance. The original
+context and backend deadlines remain unchanged. HEAD stat timestamps require a
+valid bounded RFC3339 calendar value; they establish no freshness or OOM cause.
+The separate R15 failure capture retains its existing two-second cap under the
+original work deadline and reserve. Closed archive operation/reason facts retain
+where the protocol stopped without exposing requests, responses or operands.
+
 One nonrenewable ten-second controller alarm covers all gates, allocation and
 after hold, within the existing original work deadline and cleanup reserve.
 Insufficient time, controller death, group killing, missing after data, changed
