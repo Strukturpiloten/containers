@@ -87,16 +87,60 @@ class WorkflowConfigurationTests(unittest.TestCase):
         packages = {match.group("depName") for match in re.finditer(pattern, source)}
         self.assertTrue({"actions/deploy-pages", "actions/upload-pages-artifact"} <= packages)
 
-    def test_python_runtime_and_project_updates_share_a_reviewed_group(self) -> None:
+    def test_python_runtime_and_project_updates_share_an_automatic_group(self) -> None:
         config = json.loads((engine._repo_root() / ".github/renovate.json").read_text())
         manager = next(item for item in config["customManagers"] if item.get("datasourceTemplate") == "python-version")
         pattern = manager["matchStrings"][0].replace("(?<", "(?P<")
         self.assertEqual(re.search(pattern, 'PYTHON_VERSION: "3.14"').group("currentValue"), "3.14")
+        self.assertEqual(re.search(pattern, 'PYTHON_VERSION: "3.14.10"').group("currentValue"), "3.14.10")
         self.assertEqual(manager["depNameTemplate"], "python")
         self.assertEqual(manager["versioningTemplate"], "python")
         rule = next(item for item in config["packageRules"] if item.get("matchDatasources") == ["python-version"])
         self.assertEqual(rule["matchPackageNames"], ["python"])
-        self.assertFalse(rule["automerge"])
+        self.assertEqual(rule["groupName"], "Python runtime")
+        self.assertTrue(rule.get("automerge", config["automerge"]))
+        self.assertEqual(rule["recreateWhen"], "always")
+        self.assertEqual(rule["rangeStrategy"], "bump")
+
+    def test_python_release_filter_waits_for_patch_four_on_new_lines(self) -> None:
+        config = json.loads((engine._repo_root() / ".github/renovate.json").read_text())
+        rule = next(item for item in config["packageRules"] if item.get("matchDatasources") == ["python-version"])
+        for current, accepted, rejected in (
+            (
+                "3.14",
+                ("3.14.1", "3.14.10", "3.15.4", "3.15.9", "3.15.10", "3.16.4", "4.0.4"),
+                ("3.15", "3.15.0", "3.15.1", "3.15.2", "3.15.3", "3.15.4rc1", "3.16.0", "4.0.0"),
+            ),
+            ("3.15", ("3.15.5", "3.16.4", "3.16.10"), ("3.16.1", "3.16.3", "3.16.4a1", "3.16.4.dev1")),
+        ):
+            major, minor = current.split(".")
+            pattern = rule["allowedVersions"][1:-1].replace("{{major}}", major).replace("{{minor}}", minor)
+            for version in accepted:
+                with self.subTest(current=current, accepted=version):
+                    self.assertIsNotNone(re.fullmatch(pattern, version))
+            for version in rejected:
+                with self.subTest(current=current, rejected=version):
+                    self.assertIsNone(re.fullmatch(pattern, version))
+
+    def test_repository_python_pin_is_exact_and_mature(self) -> None:
+        # Required CI also runs against the combined merge-queue tree. This blocks
+        # stale Python PRs even if their earlier PR checks were already green.
+        version = load_config(engine._repo_root())["PYTHON_VERSION"]
+        self.assertRegex(version, r"^\d+\.\d+\.\d+$")
+        self.assertGreaterEqual(int(version.split(".")[2]), 4)
+
+    def test_all_dependency_updates_inherit_checked_platform_automerge(self) -> None:
+        config = json.loads((engine._repo_root() / ".github/renovate.json").read_text())
+        self.assertTrue(config["automerge"])
+        self.assertEqual(config["automergeType"], "pr")
+        self.assertEqual(config["automergeStrategy"], "squash")
+        self.assertTrue(config["platformAutomerge"])
+        self.assertTrue(config["ignoreUnstable"])
+        for rule in [config, *config["packageRules"]]:
+            with self.subTest(rule=rule.get("description", "default")):
+                self.assertTrue(rule.get("automerge", config["automerge"]))
+                self.assertFalse(rule.get("ignoreTests", False))
+                self.assertNotEqual(rule.get("requiredStatusChecks"), [])
 
 
 if __name__ == "__main__":

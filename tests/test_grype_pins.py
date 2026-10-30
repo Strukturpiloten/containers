@@ -69,7 +69,7 @@ class GrypePinTests(unittest.TestCase):
         ]
         self.assertEqual(len(rules), 1)
         self.assertEqual(rules[0]["groupName"], "Grype scanner archives")
-        self.assertFalse(rules[0]["automerge"])
+        self.assertTrue(rules[0].get("automerge", config["automerge"]))
 
 
 if __name__ == "__main__":

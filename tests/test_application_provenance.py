@@ -70,7 +70,7 @@ class ApplicationProvenanceTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertIsNone(re.search(file_pattern, path.as_posix()))
 
-    def test_php_version_managers_match_both_images_and_require_review(self) -> None:
+    def test_php_version_managers_match_both_images_and_inherit_automerge(self) -> None:
         config = json.loads(Path(".github/renovate.json").read_text(encoding="utf-8"))
         versions = {
             "PHP_APCU_VERSION": "5.1.28",
@@ -90,13 +90,8 @@ class ApplicationProvenanceTests(unittest.TestCase):
                     self.assertIsNotNone(match)
                     self.assertEqual(match.group("currentValue"), version)
                     self.assertTrue(re.search(manager["managerFilePatterns"][0][1:-1], path.as_posix()))
-        review_rule = next(
-            rule
-            for rule in config["packageRules"]
-            if rule.get("description", "").startswith("PHP extension and Composer")
-        )
-        self.assertFalse(review_rule["automerge"])
-        self.assertEqual(len(review_rule["matchPackageNames"]), 4)
+        self.assertTrue(config["automerge"])
+        self.assertFalse(any(rule.get("automerge") is False for rule in config["packageRules"]))
 
     def test_existing_digest_and_patch_automerge_policy_is_preserved(self) -> None:
         config = json.loads(Path(".github/renovate.json").read_text(encoding="utf-8"))

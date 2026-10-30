@@ -25,7 +25,9 @@ Renovate updates canonical tool/runner values and the corresponding literals in
 generated workflow YAML in the same dependency update. Its custom template
 manager tracks major-only, minor and full action tags with their commit digests,
 alongside the native manager's generated-workflow references. Python interpreter
-updates share a reviewed group with project requirements and the lockfile.
+updates share an automatic group with project requirements and the lockfile.
+The canonical interpreter uses a full patch version so release maturity can be
+checked before a new Python line is adopted.
 
 ## Completing Renovate updates automatically
 
@@ -38,8 +40,8 @@ The workflow checks out only the trusted default branch and installs its locked
 dependencies. `scripts.renovate_updates` reads immutable Git objects from a PR;
 it never checks out or imports PR code. It previews the PR combined with current
 `main`, regenerates the maintenance catalogue and workflows, synchronizes action
-pin updates between templates and outputs, and aligns the canonical interpreter
-when a Python requirement and matching lockfile have changed. Template changes
+pin updates between templates and outputs, and verifies that a Python migration
+includes a matching interpreter, project requirement and lockfile. Template changes
 must match trusted `main` except for literal action tags and commit hashes.
 
 When generated changes are necessary, one completion commit incorporates that
@@ -57,7 +59,7 @@ runs. `gitIgnoredAuthors` allows Renovate to replace the completion bot's commit
 when it updates its own branch; human edits retain Renovate's usual protection.
 Mend-hosted post-upgrade commands are not required.
 
-Freshness checks, Required CI, the merge queue and dependency review policies
+Freshness checks, Required CI, the merge queue and dependency version policies
 remain enforced. A successful completion run establishes generated-file
 consistency; image builds, runtime tests and admission checks still decide whether
 a dependency update can merge.
@@ -116,8 +118,29 @@ missing Docker/Podman compatibility lines and proposes verified Docker Engine
 updates. Renovate continues maintaining existing Podman patch lines and pinned
 base-image digests.
 
-Compatible patch and digest updates use Renovate's existing, narrowly scoped
-automerge rules. A native GitHub merge queue removes the repeated rebase race:
+All eligible Renovate updates use platform auto-merge, including major, minor,
+patch, digest and pin updates. This applies to actions and their templates,
+Python packages, PHP extensions, Composer, scanners and other managed tools.
+Declared image compatibility lines and allowed version ranges still constrain
+which releases Renovate proposes. New Docker/Podman compatibility images are
+tracked by the upstream release monitor; auto-merge does not create new images.
+
+Python keeps receiving stable patches on its existing line. A new release line
+becomes eligible only at patch level 4 or later: 3.15.0 through 3.15.3 are excluded,
+whereas 3.15.4 and later stable patches qualify. The same rule applies to future
+lines (for example, 3.16.4). Prereleases and floating candidate versions do not
+qualify. The `allowedVersions` filter is evaluated against full upstream release
+versions; it is not a delay measured in days. The Python group can be recreated
+after a premature PR is closed, so a later eligible release is not suppressed.
+
+Python migrations must include the exact interpreter pin, matching project minor
+line and lockfile. Renovate bumps the project's lower bound to the eligible
+release (for example, `>=3.15.4, <3.16`) while keeping one supported minor line.
+The completion helper verifies patch-specific bounds and rejects immature migrations, and a
+Required CI regression check rejects non-exact or pre-patch-4 runtime pins in the
+combined queue tree, including stale PRs that passed checks before this policy.
+
+A native GitHub merge queue removes the repeated rebase race:
 after one PR merges, GitHub tests the next queued candidate against the new
 `main`, without waiting for another Renovate execution. Renovate's platform
 automerge adds eligible PRs to the queue. Real conflicts and failed checks still
