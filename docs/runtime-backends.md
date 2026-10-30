@@ -943,6 +943,30 @@ runtime-input ownership already covers the two changed Python modules, while
 the signed/pinned image and payload toolchain retains its existing update policy.
 Source research and offline shell/protocol tests do not qualify native support.
 
+The witness-only bridge synchronously preloads a single validated request
+(maximum 4096 bytes) into a fresh private FIFO before CLI launch. Its `0700`
+scratch directory and FIFO are identity-bound. Linux's selected AMD64/ARM64
+minimum one-page FIFO capacity supports that bound; `PIPE_BUF` is not treated as
+capacity. A supervisor-held read/write keeper prevents premature stdin EOF;
+the CLI receives a distinct read-only descriptor and inherits neither keeper
+nor completion-proof writer. The reviewed CLI supports response-first exit
+while stdin stays open. The supervisor retains the keeper through actual CLI
+completion, verifies custody and exact cleanup, and only then emits the trusted
+receipt. No background request writer, new dependency, host setting or renewed
+deadline is introduced; original work allowance and cleanup reserve still apply.
+
+After CLI completion, the supervisor closes its keeper and requires a bounded
+FIFO residual read to reach EOF with actual success and no remaining request
+bytes, including NUL bytes. A complete HTTP response alone cannot acknowledge an
+incomplete request transfer to CLI stdin.
+
+Finite stdin EOF can half-close the CLI's socket and cancel Go HTTP request
+context, allowing Engine's error wrapper to emit 499. The retained native HEAD
+499 does not identify the handler error or prove which event canceled that
+request. Source review and inert lifetime tests establish the transport contract;
+a new native run is still required. A 499 remains unavailable witness evidence,
+and no witness result changes original allocator admission or OOM/refusal checks.
+
 The six witness CLI routes retain their explicit reviewed Unix endpoint and
 `--tls=false`, without an explicit `--tlsverify` flag. Source review of Docker
 CLI 29.9.2 at

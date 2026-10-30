@@ -2211,28 +2211,52 @@ LEAF_WITNESS_API = "1.40"
 LEAF_WITNESS_GO_TYPE = 0x8F280000
 LEAF_WITNESS_BRIDGE = r"""
 umask 077
-scratch=$(busybox mktemp -d /tmp/boxferry-witness.XXXXXX) || exit 1
-cleanup() {
-    busybox rm -f "$scratch/input" "$scratch/decode.err" "$scratch/cli.err" "$scratch/proof" &&
-    busybox rmdir "$scratch"
+scratch=$(busybox mktemp -d /tmp/boxferry-witness.XXXXXX 2>/dev/null) || exit 1
+scratch_identity=''
+fifo_identity=''
+directory() {
+    held=$(busybox stat -Lc '%d:%i:%u:%a:%h:%f' /proc/$$/fd/9 7>&- 8>&-) || return 1
+    case "$held" in *:0:700:*:41c0) ;; *) return 1;; esac
+    test "$(busybox stat -c '%d:%i:%u:%a:%h:%f' "$scratch" 7>&- 8>&-)" = "$held" || return 1
+    test -z "$scratch_identity" || test "$held" = "$scratch_identity"
 }
-trap 'cleanup >/dev/null 2>&1' EXIT
+cleanup() {
+    directory || return 1
+    if test -n "$fifo_identity"; then
+      test "$(busybox stat -c '%d:%i:%u:%a:%h:%f' "$scratch/stream" 7>&- 8>&-)" = "$fifo_identity" || return 1
+    fi
+    exec 0<&- 8>&-
+    if test -n "$fifo_identity"; then
+      busybox rm -f "$scratch/stream" || return 1
+      test ! -e "$scratch/stream" && test ! -L "$scratch/stream" || return 1
+    fi
+    busybox rm -f "$scratch/input" "$scratch/decode.err" "$scratch/cli.err" "$scratch/proof" &&
+    busybox rmdir "$scratch" && test ! -e "$scratch" && test ! -L "$scratch"
+}
+trap 'cleanup >/dev/null 2>&1 || :' EXIT
 limits() {
     ulimit -Sc 0 && ulimit -Hc 0 && test "$(ulimit -Sc)" = 0 && test "$(ulimit -Hc)" = 0 || return 1
     ulimit -Sf "$1" && ulimit -Hf "$1" && test "$(ulimit -Sf)" = "$1" && test "$(ulimit -Hf)" = "$1"
 }
 identity() {
-    held=$(busybox stat -Lc '%d:%i:%u:%a:%h:%f' "/proc/self/fd/$2") || return 1
-    case "$held" in *:0:600:1:8180) ;; *) return 1;; esac
-    test "$(busybox stat -c '%d:%i:%u:%a:%h:%f' "$1")" = "$held" || return 1
+    held=$(busybox stat -Lc '%d:%i:%u:%a:%h:%f' "/proc/$$/fd/$2" 7>&- 8>&-) || return 1
+    case "$held" in *:0:600:1:"${4:-8180}") ;; *) return 1;; esac
+    test "$(busybox stat -c '%d:%i:%u:%a:%h:%f' "$1" 7>&- 8>&-)" = "$held" || return 1
     test -z "$3" || test "$held" = "$3"
 }
-empty() { identity "$1" "$2" "$3" && test "$(busybox stat -Lc %s "/proc/self/fd/$2")" = 0; }
-fail() { cleanup >/dev/null 2>&1; trap - EXIT; printf '\nBFW1 FAIL %s\n' "$1"; exit 0; }
+empty() { identity "$1" "$2" "$3" && test "$(busybox stat -Lc %s "/proc/$$/fd/$2" 7>&- 8>&-)" = 0; }
+fail() { cleanup >/dev/null 2>&1 || :; trap - EXIT; printf '\nBFW1 FAIL %s\n' "$1"; exit 0; }
+exec 9<"$scratch" || fail setup
+directory 2>/dev/null || fail custody
+scratch_identity=$held
 limits 16 || fail setup
+case "$3" in ''|*[!0-9]*) fail decode;; esac
+test "$3" -gt 0 && test "$3" -le 4096 || fail decode
 set -C
 exec 3>"$scratch/decode.err" 4>"$scratch/cli.err" 5>"$scratch/input" 7>"$scratch/proof" || fail setup
 set +C
+# Keep setup and shell diagnostics in the bounded private decoder channel.
+exec 2>&3
 identity "$scratch/decode.err" 3 '' || fail custody
 decode_identity=$held
 identity "$scratch/cli.err" 4 '' || fail custody
@@ -2242,31 +2266,61 @@ input_identity=$held
 identity "$scratch/proof" 7 '' || fail custody
 proof_identity=$held
 decode_status=0
-( limits 16 && printf %s "$1" | busybox base64 -d >&5 2>&3 ) || decode_status=$?
+( exec 7>&-; limits 16 && printf %s "$1" | busybox base64 -d >&5 2>&3 ) || decode_status=$?
 test "$decode_status" = 0 || fail decode
 empty "$scratch/decode.err" 3 "$decode_identity" || fail decode-stderr
 identity "$scratch/input" 5 "$input_identity" || fail custody
-test "$(busybox stat -Lc %s /proc/self/fd/5)" = "$3" || fail decode
+test "$(busybox stat -Lc %s /proc/$$/fd/5 7>&- 8>&-)" = "$3" || fail decode
 exec 6<"$scratch/input" || fail custody
 identity "$scratch/input" 6 "$input_identity" || fail custody
+# Linux's fresh FIFO has at least one 4096-byte page on the selected AMD64/ARM64
+# profile. Preload only this bounded request; PIPE_BUF is not a capacity claim.
+busybox mkfifo -m 600 "$scratch/stream" || fail setup
+fifo_identity=$(busybox stat -c '%d:%i:%u:%a:%h:%f' "$scratch/stream" 7>&-) || fail custody
+case "$fifo_identity" in *:0:600:1:1180) ;; *) fail custody;; esac
+exec 8<>"$scratch/stream" || fail setup
+identity "$scratch/stream" 8 "$fifo_identity" 1180 || fail custody
+exec 0<"$scratch/stream" || fail setup
+identity "$scratch/stream" 0 "$fifo_identity" 1180 || fail custody
+preload_status=0
+( exec 7>&- 8>&-; limits 16 && busybox cat <&6 ) >&8 2>&3 || preload_status=$?
+test "$preload_status" = 0 || fail decode
+empty "$scratch/decode.err" 3 "$decode_identity" || fail decode-stderr
+identity "$scratch/input" 6 "$input_identity" || fail custody
+identity "$scratch/stream" 0 "$fifo_identity" 1180 || fail custody
+directory || fail custody
 produce() {
     cli_status=0
-    ( exec 7>&-; limits 1 || exit 125;
-      docker --host "$2" --tls=false system dial-stdio <&6 2>&4 ) || cli_status=$?
+    ( exec 7>&- 8>&- 3>&- 5>&- 6<&- 9<&-; limits 1 || exit 125;
+      docker --host "$2" --tls=false system dial-stdio 2>&4 ) || cli_status=$?
     test "$cli_status" = 0 || { printf cli >&7; return 0; }
     empty "$scratch/cli.err" 4 "$cli_identity" || { printf cli-stderr >&7; return 0; }
     empty "$scratch/decode.err" 3 "$decode_identity" || { printf decode-stderr >&7; return 0; }
     identity "$scratch/input" 6 "$input_identity" || { printf custody >&7; return 0; }
+    identity "$scratch/stream" 0 "$fifo_identity" 1180 || { printf custody >&7; return 0; }
+    directory || { printf custody >&7; return 0; }
     printf complete >&7
 }
-produce "$@" | busybox head -c 32641
+# Only this supervisor retains the keeper through actual CLI completion. The
+# reviewed CLI can exit response-first while its read-only stdin remains open.
+( exec 8>&-; produce "$@" ) | ( exec 7>&- 8>&- 3>&- 4>&- 5>&- 6<&- 9<&-; busybox head -c 32641 )
 identity "$scratch/proof" 7 "$proof_identity" || fail producer
-proof_size=$(busybox stat -Lc %s /proc/self/fd/7) || fail producer
+proof_size=$(busybox stat -Lc %s /proc/$$/fd/7 7>&- 8>&-) || fail producer
 test "$proof_size" -gt 0 && test "$proof_size" -le 32 || fail producer
-proof=$(busybox cat "$scratch/proof") || fail producer
+proof=$(busybox cat "$scratch/proof" 7>&- 8>&-) || fail producer
 identity "$scratch/proof" 7 "$proof_identity" || fail producer
 test "$proof_size" = "${#proof}" || fail producer
 case "$proof" in complete) ;; cli|cli-stderr|decode-stderr|custody) fail "$proof";; *) fail producer;; esac
+# Do not accept a response from a CLI that left request bytes unread. Only now
+# release the keeper, so the bounded residual check reaches EOF without a pump.
+empty "$scratch/decode.err" 3 "$decode_identity" || fail decode-stderr
+identity "$scratch/stream" 0 "$fifo_identity" 1180 || fail custody
+exec 8>&-
+drain_status=0
+( exec 7>&-; limits 16 && busybox cat <&0 >&3 ) || drain_status=$?
+test "$drain_status" = 0 || fail custody
+empty "$scratch/decode.err" 3 "$decode_identity" || fail custody
+identity "$scratch/stream" 0 "$fifo_identity" 1180 || fail custody
 cleanup >/dev/null 2>&1 || fail cleanup
 trap - EXIT
 printf '\nBFW1 OK complete\n'

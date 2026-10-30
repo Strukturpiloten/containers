@@ -780,7 +780,9 @@ class BridgeShellTests(unittest.TestCase):
             message = "failed to restore test process child custody"
             raise AssertionError(message)
 
-    def owned_shell(self, command: list[str], environment: dict[str, str]) -> tuple[bytes, bytes, int]:
+    def owned_shell(
+        self, command: list[str], environment: dict[str, str], *, timeout: float = 5
+    ) -> tuple[bytes, bytes, int]:
         # Retain the leader as a zombie until signalling its exact session/group;
         # its reserved PID cannot be reused. Reap only this group's adopted children.
         with (
@@ -794,7 +796,7 @@ class BridgeShellTests(unittest.TestCase):
             ) as process,
         ):
             try:
-                end = time.monotonic() + 5
+                end = time.monotonic() + timeout
                 while os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None:
                     self.assertLess(time.monotonic(), end, "owned bridge failed to terminate")
                     time.sleep(0.01)
@@ -816,13 +818,23 @@ class BridgeShellTests(unittest.TestCase):
             output.seek(0)
             return output.read(32770), error, process.returncode
 
-    def run_bridge(self, mode: str = "ok", *, script: str = LEAF_WITNESS_BRIDGE_COMMAND) -> tuple[bytes, bool]:
+    def run_bridge(
+        self,
+        mode: str = "ok",
+        *,
+        script: str = LEAF_WITNESS_BRIDGE_COMMAND,
+        request: bytes | None = None,
+        timeout: float = 5,
+    ) -> tuple[bytes, bool]:
         shell = shutil.which("dash") or shutil.which("sh")
         self.assertIsNotNone(shell)
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             called = root / "called"
-            tools = {name: shutil.which(name) for name in ("mktemp", "stat", "base64", "rm", "rmdir", "head", "cat")}
+            tools = {
+                name: shutil.which(name)
+                for name in ("mktemp", "stat", "base64", "rm", "rmdir", "head", "cat", "mkfifo")
+            }
             self.assertTrue(all(tools.values()))
             busybox = root / "busybox"
             busybox.write_text(
@@ -831,7 +843,24 @@ class BridgeShellTests(unittest.TestCase):
                 + "\nimport os,sys\n"
                 + "tools="
                 + repr(tools)
-                + "\nargs=sys.argv[1:]\n"
+                + "\nargs=sys.argv[1:];mode=os.environ['TEST_MODE']\n"
+                + "if args[0]=='cat' and len(args)==1 and mode=='preload-stall': __import__('time').sleep(20)\n"
+                + "if args[0]=='cat' and len(args)==1 and mode in ('drain-stall','drain-status'):\n"
+                + " if os.readlink('/proc/self/fd/0').endswith('/stream'):\n"
+                + "  if mode=='drain-status': sys.exit(7)\n"
+                + "  __import__('time').sleep(20)\n"
+                + "if args[0]=='mkfifo' and mode=='fifo-create-failure': sys.exit(1)\n"
+                + "if args[0]=='mkfifo' and mode=='fifo-type': open(args[-1],'wb').close();sys.exit(0)\n"
+                + "if args[0]=='cat' and len(args)==1 and mode=='writer-failure': sys.exit(7)\n"
+                + "if args[0]=='cat' and len(args)==1 and mode=='writer-status':\n"
+                + " os.write(1,os.read(0,4096));sys.exit(7)\n"
+                + "if args[0]=='cat' and len(args)==1 and mode=='writer-flood': os.write(2,b'x'*20000)\n"
+                + "if args[0]=='cat' and len(args)==1 and mode=='writer-input-replace':\n"
+                + " os.write(1,os.read(0,4096));path=os.readlink('/proc/self/fd/0');os.unlink(path)\n"
+                + " open(path,'wb').close();sys.exit(0)\n"
+                + "if args[0]=='cat' and len(args)==1 and mode=='writer-stderr': os.write(2,b'private writer error')\n"
+                + "if args[0]=='rm' and mode=='cleanup-failure': sys.exit(1)\n"
+                + "if args[0] in ('rm','rmdir') and mode=='cleanup-noop': sys.exit(0)\n"
                 + "if args[0]=='mktemp': args[-1]=os.environ['TEST_ROOT']+'/scratch.XXXXXX'\n"
                 + "os.execv(tools[args[0]],args)\n"
             )
@@ -840,14 +869,42 @@ class BridgeShellTests(unittest.TestCase):
             docker.write_text(
                 "#!"
                 + sys.executable
-                + "\nimport os,sys,resource,signal\n"
+                + "\nimport fcntl,os,sys,resource,select,signal,stat\n"
                 + "mode=os.environ['TEST_MODE']\n"
+                + "if mode=='cli-stall': __import__('time').sleep(20)\n"
                 + "assert sys.argv[1:]==['--host','unix:///private.sock','--tls=false','system','dial-stdio']\n"
                 + "open(os.environ['TEST_CALLED'],'wb').write(b'x')\n"
                 + "soft,hard=resource.getrlimit(resource.RLIMIT_FSIZE)\n"
                 + "assert 0<soft<=1024 and soft==hard\n"
                 + "assert resource.getrlimit(resource.RLIMIT_CORE)==(0,0)\n"
-                + "data=sys.stdin.buffer.read(4096);assert data.startswith(b'HEAD ')\n"
+                + "assert stat.S_ISFIFO(os.fstat(0).st_mode)\n"
+                + "assert fcntl.fcntl(0,fcntl.F_GETFL)&os.O_ACCMODE==os.O_RDONLY\n"
+                + "for entry in os.listdir('/proc/self/fd'):\n"
+                + " try: fd=int(entry);target=os.readlink('/proc/self/fd/'+entry)\n"
+                + " except FileNotFoundError: continue\n"
+                + " assert not target.endswith('/proof')\n"
+                + " assert fd==0 or not target.endswith('/stream')\n"
+                + "data=b''\n"
+                + "while not data.endswith(b'\\r\\n\\r\\n'):\n"
+                + " chunk=os.read(0,1);assert chunk and len(data)<4096;data+=chunk\n"
+                + "headers=data.split(b'\\r\\n')\n"
+                + "lengths=[int(h.split(b':',1)[1]) for h in headers if h.startswith(b'Content-Length:')]\n"
+                + "assert len(lengths)==1;remaining=lengths[0]\n"
+                + "if mode=='early-response':\n"
+                + " os.write(1,b'HTTP/1.1 200 OK\\r\\nContent-Length: 0\\r\\n\\r\\n');sys.exit(0)\n"
+                + "while remaining:\n"
+                + " chunk=os.read(0,min(7,remaining));assert chunk;data+=chunk;remaining-=len(chunk)\n"
+                + "assert len(data)<=4096 and data==open(os.environ['TEST_REQUEST'],'rb').read()\n"
+                + "assert not select.select([0],[],[],0.02)[0], 'stdin EOF before response'\n"
+                + "if mode in ('fifo-missing','fifo-replace','fifo-symlink','input-replace','proof-replace'):\n"
+                + " path=os.readlink('/proc/self/fd/0');parent=os.path.dirname(path)\n"
+                + " if mode=='input-replace': path=parent+'/input'\n"
+                + " if mode=='proof-replace': path=parent+'/proof'\n"
+                + " os.unlink(path)\n"
+                + " if mode=='fifo-replace': os.mkfifo(path,0o600)\n"
+                + " if mode=='fifo-symlink': os.symlink('/dev/null',path)\n"
+                + " if mode in ('input-replace','proof-replace'): open(path,'wb').close()\n"
+                + "if mode=='response-stall': __import__('time').sleep(20)\n"
                 + "if mode=='signal': os.kill(os.getpid(),signal.SIGTERM)\n"
                 + "if mode=='producer-death':\n"
                 + " os.write(1,b'HTTP/1.1 200 OK\\r\\nContent-Length: 0\\r\\n\\r\\n\\nBFW1 OK complete\\n');"
@@ -868,13 +925,18 @@ class BridgeShellTests(unittest.TestCase):
                 + " if mode=='symlink': os.symlink('/dev/null',path)\n"
                 + " if mode=='replace': open(path,'wb').close()\n"
                 + "os.write(1,b'HTTP/1.1 200 OK\\r\\nContent-Length: 0\\r\\n\\r\\n')\n"
+                + "assert not select.select([0],[],[],0.02)[0], 'stdin EOF before CLI exit'\n"
                 + "sys.exit(1 if mode=='lost-status' else 0)\n"
             )
             docker.chmod(0o700)
-            request = _leaf_archive_request("HEAD", "/v1.40/containers/" + CID + "/archive?path=%2Fmarker")
+            if request is None:
+                request = _leaf_archive_request("HEAD", "/v1.40/containers/" + CID + "/archive?path=%2Fmarker")
+            request_path = root / "request"
+            request_path.write_bytes(request)
             encoded = base64.b64encode(request).decode() if mode != "decoder" else "%%%"
             uid = str(os.geteuid())
-            script = script.replace("*:0:600:1:8180", "*:" + uid + ":600:1:8180")
+            script = script.replace("*:0:600:1:", "*:" + uid + ":600:1:")
+            script = script.replace("*:0:700:", "*:" + uid + ":700:")
             raw, error, status = self.owned_shell(
                 [shell, "-eu", "-c", script, "--", encoded, "unix:///private.sock", str(len(request))],
                 {
@@ -882,18 +944,101 @@ class BridgeShellTests(unittest.TestCase):
                     "PATH": temporary,
                     "TEST_ROOT": temporary,
                     "TEST_CALLED": str(called),
+                    "TEST_REQUEST": str(request_path),
                     "TEST_MODE": mode,
                 },
+                timeout=timeout,
             )
             self.assertEqual(status, 0, error)
+            self.assertEqual(error, b"")
             self.assertLessEqual(len(raw), 32769)
             self.assertEqual(list(root.glob("**/core*")), [])
+            if mode in {"ok", "writer-failure", "writer-stderr", "fifo-create-failure", "fifo-type"}:
+                self.assertEqual(list(root.glob("scratch.*")), [])
             return raw, called.exists()
 
     def test_real_shell_ancestor_limits_and_empty_stderr_allow_complete_receipt(self) -> None:
         raw, called = self.run_bridge()
         self.assertTrue(called)
         self.assertEqual(_leaf_archive_http(raw, "HEAD")[0], 200)
+
+    def test_exact_maximum_binary_request_is_preloaded_and_cli_exits_without_eof(self) -> None:
+        maximum = 4096
+        body = bytes(range(256)) * 16
+        for size in range(maximum + 1):
+            request = (
+                b"PUT /archive HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n"
+                + f"Content-Length: {size}\r\n\r\n".encode()
+                + body[:size]
+            )
+            if len(request) == maximum:
+                break
+        else:
+            self.fail("independent maximum-size request was not constructed")
+        self.assertIn(b"\x00", request)
+        raw, called = self.run_bridge(request=request)
+        self.assertTrue(called)
+        self.assertEqual(_leaf_archive_http(raw, "PUT")[0], 200)
+        raw, called = self.run_bridge(request=request + b"x")
+        self.assertFalse(called)
+        self.assertTrue(raw.endswith(b"BFW1 FAIL decode\n"))
+
+    def test_eof_readwrite_stdin_or_inherited_keeper_and_proof_cannot_pass_contract(self) -> None:
+        for script in (
+            LEAF_WITNESS_BRIDGE_COMMAND.replace('( exec 8>&-; produce "$@" )', 'exec 8>&-; ( produce "$@" )'),
+            LEAF_WITNESS_BRIDGE_COMMAND.replace('exec 0<"$scratch/stream"', 'exec 0<>"$scratch/stream"'),
+            LEAF_WITNESS_BRIDGE_COMMAND.replace('( exec 8>&-; produce "$@" )', '( produce "$@" )').replace(
+                "exec 7>&- 8>&- 3>&-", "exec 7>&- 3>&-"
+            ),
+            LEAF_WITNESS_BRIDGE_COMMAND.replace("exec 7>&- 8>&- 3>&-", "exec 8>&- 3>&-"),
+        ):
+            with self.subTest(script=script[-100:]):
+                raw, called = self.run_bridge(script=script)
+                self.assertTrue(called)
+                with self.assertRaises(_LeafArchiveError):
+                    _leaf_archive_http(raw, "HEAD")
+
+    def test_stalled_preload_and_cli_are_killed_with_only_task_owned_children(self) -> None:
+        for mode in ("preload-stall", "cli-stall", "response-stall", "drain-stall"):
+            with self.subTest(mode=mode), self.assertRaisesRegex(AssertionError, "owned bridge failed to terminate"):
+                self.run_bridge(mode, timeout=1)
+
+    def test_complete_http_with_unread_binary_request_bytes_cannot_complete(self) -> None:
+        request = b"PUT /archive HTTP/1.1\r\nContent-Length: 3\r\n\r\n\x00\x00\x00"
+        raw, called = self.run_bridge("early-response", request=request)
+        self.assertTrue(called)
+        self.assertIn(b"HTTP/1.1 200 OK", raw)
+        with self.assertRaises(_LeafArchiveError) as caught:
+            _leaf_archive_http(raw, "PUT")
+        self.assertEqual(caught.exception.reason, "bridge-custody")
+
+    def test_fifo_open_failures_prevent_cli_and_cannot_emit_success(self) -> None:
+        for statement in ('exec 8<>"$scratch/stream"', 'exec 0<"$scratch/stream"'):
+            with self.subTest(statement=statement):
+                raw, called = self.run_bridge(script=LEAF_WITNESS_BRIDGE_COMMAND.replace(statement, "false"))
+                self.assertFalse(called)
+                self.assertTrue(raw.endswith(b"BFW1 FAIL setup\n"))
+
+    def test_fifo_setup_preload_status_stderr_and_cleanup_fail_closed(self) -> None:
+        for mode, called_expected, reason in (
+            ("fifo-create-failure", False, "setup"),
+            ("fifo-type", False, "custody"),
+            ("writer-failure", False, "decode"),
+            ("writer-status", False, "decode"),
+            ("writer-flood", False, "decode-stderr"),
+            ("writer-input-replace", False, "custody"),
+            ("writer-stderr", False, "decode-stderr"),
+            ("drain-status", True, "custody"),
+            ("cleanup-failure", True, "cleanup"),
+            ("cleanup-noop", True, "cleanup"),
+        ):
+            with self.subTest(mode=mode):
+                raw, called = self.run_bridge(mode)
+                self.assertEqual(called, called_expected)
+                with self.assertRaises(_LeafArchiveError) as caught:
+                    _leaf_archive_http(raw, "HEAD")
+                self.assertEqual(caught.exception.reason, "bridge-" + reason)
+                self.assertNotIn(b"private writer error", raw)
 
     def test_stderr_http_flood_exit_signal_and_replaced_files_cannot_forge_success(self) -> None:
         for mode in (
@@ -905,6 +1050,11 @@ class BridgeShellTests(unittest.TestCase):
             "symlink",
             "replace",
             "producer-death",
+            "fifo-missing",
+            "fifo-replace",
+            "fifo-symlink",
+            "input-replace",
+            "proof-replace",
         ):
             with self.subTest(mode=mode):
                 raw, called = self.run_bridge(mode)
@@ -933,9 +1083,7 @@ class BridgeShellTests(unittest.TestCase):
             _leaf_archive_http(raw, "HEAD")
 
     def test_limits_in_detached_subshell_cannot_masquerade_as_cli_ancestor_limits(self) -> None:
-        bad_scope = LEAF_WITNESS_BRIDGE_COMMAND.replace(
-            "( exec 7>&-; limits 1 || exit 125;", "( exec 7>&-; (limits 1) || exit 125;"
-        )
+        bad_scope = LEAF_WITNESS_BRIDGE_COMMAND.replace("; limits 1 || exit 125;", "; (limits 1) || exit 125;")
         raw, called = self.run_bridge(script=bad_scope)
         self.assertTrue(called)
         with self.assertRaises(_LeafArchiveError):

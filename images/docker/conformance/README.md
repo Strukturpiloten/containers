@@ -239,6 +239,30 @@ no source was copied or redistributed. Future payload updates must review this
 consumer under the existing manual payload-update policy. No new download,
 software pin or Renovate manager is introduced.
 
+The archive bridge preloads one validated request of at most 4096 bytes into
+an identity-bound FIFO in its private `0700` scratch directory before launching
+the CLI. On the selected Linux AMD64/ARM64 profile, a fresh FIFO has at least
+one 4096-byte page of capacity; this bound does not rely on `PIPE_BUF`. Only the
+supervisor retains the read/write keeper. The CLI receives a separately opened
+read-only FIFO descriptor and can exit when the response completes while stdin
+remains open, as supported by the reviewed CLI's response-first path. Actual
+preload and CLI status, separate bounded empty stderr, outside-producer completion
+proof, inode custody and verified cleanup remain required before a trusted
+receipt. Setup, transfer and cleanup share the original absolute deadline and
+reserve; no input writer runs in the background.
+
+After CLI completion, the supervisor closes its keeper and requires a bounded
+FIFO residual read to reach EOF with actual success and no remaining request
+bytes, including NUL bytes. A complete HTTP response alone cannot acknowledge an
+incomplete request transfer to CLI stdin.
+
+Finite-file stdin can otherwise cause CLI write-half closure and cancellation
+of a Go HTTP request context. The retained native preflight HEAD response was
+499; its underlying handler error and cancellation cause were not measured.
+This source-backed correction does not establish that native failure's cause or
+qualify the witness. HTTP 499 remains rejected, and original allocator admission
+and OOM/refusal requirements remain unchanged.
+
 All six witness CLI routes use the explicit reviewed Unix endpoint and
 `--tls=false` without an explicit `--tlsverify` flag. At that exact CLI revision,
 `cli/flags/options.go` enables TLS for an explicitly supplied verification flag
