@@ -2549,10 +2549,8 @@ class _LeafWitnessArchive:
             == ["docker-resource-probe", "memory-witness", "--wait-for-start", LEAF_WITNESS_START],
         )
         config = value.get("HostConfig", {})
-        _leaf_archive_require(
-            "rootfs", condition=config.get("ReadonlyRootfs") is False and "Tmpfs" in config and "Mounts" in value
-        )
-        mounts, tmpfs = value["Mounts"], config["Tmpfs"]
+        _leaf_archive_require("rootfs", condition=config.get("ReadonlyRootfs") is False and "Mounts" in value)
+        mounts, tmpfs = value["Mounts"], config.get("Tmpfs", {})
         _leaf_archive_require(
             "mounts",
             condition=(mounts is None or isinstance(mounts, list)) and (tmpfs is None or isinstance(tmpfs, dict)),

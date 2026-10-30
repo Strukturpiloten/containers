@@ -254,6 +254,19 @@ redistributed. Historical test version/API/image facts are not new operational
 pins. Existing runtime-input and manual Docker payload/Renovate ownership remain
 unchanged; no extra manager, environment fallback or runtime authority is added.
 
+The exact Engine 29.9.2 HostConfig and CLI 29.9.2 vendored inspect type mark
+`Tmpfs` as `omitempty`; the JSON template does not restore that empty optional
+map. The driver accepts its absence as empty while still requiring an actual
+HostConfig object, explicit `ReadonlyRootfs: false`, and separate top-level
+Mounts evidence. Existing explicit-null/type allowances, unsafe destinations,
+covering mount/Tmpfs rejection, identity bookends, deadlines and cleanup remain
+unchanged. Versioned Moby/CLI Apache-2.0 and Go 1.26.10 BSD-3-Clause JSON source
+references are retained in private R18 provenance; no oracle code is copied or
+translated. The authored wire fixture is not a native inspect capture. Native
+40998114033's preflight/rootfs reason and verified cleanup do not identify the
+failed conjunct or prove an unsafe rootfs cause. This normalization and its
+hermetic tests do not qualify native behavior or add a software pin/manager.
+
 Host code supplies bounded base64 request bytes and parses a distinct held
 response inode. The active image TAR's bytes, inode and offset remain untouched;
 response-role descriptors cannot enter any image-load or stdin route. Read limits

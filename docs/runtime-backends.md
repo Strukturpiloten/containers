@@ -969,6 +969,28 @@ No environment fallback, endpoint discovery, runtime authority, software pin or
 Renovate consumer changes: the existing runtime-input ownership and manually
 reviewed Docker payload/update policy continue to own this consumer.
 
+The rootfs inspect contract separately permits omitted `HostConfig.Tmpfs` as an
+empty optional map. Exact Engine 29.9.2
+[`HostConfig`](https://github.com/moby/moby/blob/0367cbeb49b9d98cb0b4f51e95f7b54b4803e76c/api/types/container/hostconfig.go#L448)
+marks `Tmpfs` with `omitempty`, while `ReadonlyRootfs` is an unomitted boolean.
+CLI 29.9.2's corresponding vendored type and standard JSON template helper
+preserve this omission even for `inspect --format '{{json .}}'`. Linux inspect
+still emits its separate top-level `Mounts` list. Only absent Tmpfs defaults to
+empty: HostConfig must be an object, ReadonlyRootfs must remain explicitly false,
+and top-level Mounts must be present. Existing null/type policy, mount coverage,
+path, stopped/current identity, deadline and cleanup checks are unchanged.
+
+Engine/CLI source references use the exact revisions above under Apache-2.0;
+Go 1.26.10's
+[`encoding/json` omission semantics](https://github.com/golang/go/blob/go1.26.10/src/encoding/json/encode.go#L96)
+are BSD-3-Clause. Private R18
+research retains versioned links/provenance, and the test wire fixture is authored
+from those semantics, not copied source or a captured inspect object. The later
+native run 40998114033 records preflight/rootfs rejection and verified cleanup,
+but no full inspect or failing-conjunct facts. Neither missing Tmpfs nor an unsafe
+native rootfs cause has been observed. A native rerun is still necessary. These
+versioned references introduce no operational pin or Renovate ownership change.
+
 Image and response stream custody also binds the original private directory's
 identity, owner, mode and nonsymlink type. Held directory descriptors anchor
 fixed-name allocation and are checked around I/O; directory substitution cannot

@@ -347,6 +347,125 @@ class ArchiveProtocolTests(unittest.TestCase):
             "Mounts": [],
         }
 
+    def stopped_source_wire(self, session: _LeafWitnessArchive) -> str:
+        """Return an authored Engine/CLI 29.9.2 shape, not a native capture."""
+        # Engine 0367cbeb / CLI a82e5289 serialize the empty optional Tmpfs
+        # map with omitempty, but emit ReadonlyRootfs=false and Linux Mounts=[].
+        # Synthetic identities bind this fixture to the current test session.
+        return (
+            (
+                '{"Id":"@cid@","Name":"/docker-native-limit-memory-witness","Image":"@image@",'
+                '"Config":{"Labels":{"org.strukturpiloten.witness":"@nonce@",'
+                '"org.strukturpiloten.witness-mode":"rootless"},'
+                '"Cmd":["docker-resource-probe","memory-witness","--wait-for-start",'
+                '"/boxferry-leaf-witness-start"]},"State":{"Running":false,"Status":"created"},'
+                '"HostConfig":{"ReadonlyRootfs":false},"Mounts":[]}'
+            )
+            .replace("@cid@", CID)
+            .replace("@image@", IMAGE)
+            .replace("@nonce@", session.nonce)
+        )
+
+    def test_source_versioned_wire_accepts_only_absent_empty_tmpfs_normalization(self) -> None:
+        session = self.session()
+        omitted = self.stopped_source_wire(session)
+        explicit = omitted.replace('"ReadonlyRootfs":false', '"ReadonlyRootfs":false,"Tmpfs":{}')
+        for wire in (omitted, explicit):
+            with self.subTest(wire=wire), patch.object(session, "command", return_value=wire):
+                session.inspect(running=False)
+        self.assertNotIn("Tmpfs", json.loads(omitted)["HostConfig"])
+        self.assertEqual(json.loads(omitted)["Mounts"], [])
+
+    def test_optional_tmpfs_keeps_existing_null_and_noncovering_mount_policy(self) -> None:
+        session = self.session()
+        for tmpfs, mounts in (
+            (None, []),
+            ({}, None),
+            (None, None),
+            ({"/safe-other": "rw", "/boxferry-leaf-witness-start-neighbor": "rw"}, [{"Destination": "/unrelated"}]),
+        ):
+            value = json.loads(self.stopped_source_wire(session))
+            value["HostConfig"]["Tmpfs"], value["Mounts"] = tmpfs, mounts
+            with (
+                self.subTest(tmpfs=tmpfs, mounts=mounts),
+                patch.object(session, "command", return_value=json.dumps(value)),
+            ):
+                session.inspect(running=False)
+
+    def test_source_wire_requires_explicit_readonly_mounts_and_owned_identity(self) -> None:
+        session = self.session()
+        variants = []
+        for readonly in (True, None, 0, "false"):
+            value = json.loads(self.stopped_source_wire(session))
+            value["HostConfig"]["ReadonlyRootfs"] = readonly
+            variants.append(value)
+        for parent, key in ((None, "HostConfig"), ("HostConfig", "ReadonlyRootfs"), (None, "Mounts")):
+            value = json.loads(self.stopped_source_wire(session))
+            del (value[parent] if parent else value)[key]
+            variants.append(value)
+        for host in (None, [], "", False):
+            value = json.loads(self.stopped_source_wire(session))
+            value["HostConfig"] = host
+            variants.append(value)
+        for field, replacement in (("Id", "d" * 64), ("Image", "sha256:" + "e" * 64), ("Name", "/foreign")):
+            value = json.loads(self.stopped_source_wire(session))
+            value[field] = replacement
+            variants.append(value)
+        value = json.loads(self.stopped_source_wire(session))
+        value["Config"]["Labels"]["org.strukturpiloten.witness"] = "foreign-nonce"
+        variants.append(value)
+        value = json.loads(self.stopped_source_wire(session))
+        value["Config"]["Cmd"] = ["sh"]
+        variants.append(value)
+        value = json.loads(self.stopped_source_wire(session))
+        del value["Mounts"]
+        value["HostConfig"]["Mounts"] = []
+        variants.append(value)
+        value = json.loads(self.stopped_source_wire(session))
+        value["State"] = {"Running": False, "Status": "exited"}
+        variants.append(value)
+        for value in variants:
+            with (
+                self.subTest(value=value),
+                patch.object(session, "command", return_value=json.dumps(value)),
+                self.assertRaises(_LeafArchiveError),
+            ):
+                session.inspect(running=False)
+
+    def test_source_wire_rejects_present_wrong_types_and_both_covering_mount_sources(self) -> None:
+        session = self.session()
+        variants = []
+        for field in ("Tmpfs", "Mounts"):
+            for malformed in ([], "", 0, False) if field == "Tmpfs" else ({}, "", 0, False):
+                value = json.loads(self.stopped_source_wire(session))
+                (value["HostConfig"] if field == "Tmpfs" else value)[field] = malformed
+                variants.append(value)
+        for destination in (
+            "/",
+            "/boxferry-leaf-witness-start",
+            "/boxferry-leaf-witness-start.after",
+            "/boxferry-leaf-witness-start.finish",
+            "/boxferry-leaf-witness-start/",
+            "/../bad",
+            "/./bad",
+            "//bad",
+            "relative",
+        ):
+            for field in ("Tmpfs", "Mounts"):
+                value = json.loads(self.stopped_source_wire(session))
+                if field == "Tmpfs":
+                    value["HostConfig"]["Tmpfs"] = {destination: "rw"}
+                else:
+                    value["Mounts"] = [{"Destination": destination}]
+                variants.append(value)
+        for value in variants:
+            with (
+                self.subTest(value=value),
+                patch.object(session, "command", return_value=json.dumps(value)),
+                self.assertRaises(_LeafArchiveError),
+            ):
+                session.inspect(running=False)
+
     def test_tar_is_one_canonical_empty_root_regular_member_without_extensions(self) -> None:
         for marker in (LEAF_WITNESS_START, LEAF_WITNESS_START + ".finish"):
             body = _leaf_archive_tar(marker)
@@ -463,7 +582,7 @@ class ArchiveProtocolTests(unittest.TestCase):
             [
                 {**good, "HostConfig": {"ReadonlyRootfs": True, "Tmpfs": {}}},
                 {**good, "HostConfig": {"ReadonlyRootfs": 0, "Tmpfs": {}}},
-                {**good, "HostConfig": {"ReadonlyRootfs": False}},
+                {**good, "HostConfig": {"Tmpfs": {}}},
                 {**good, "HostConfig": {"ReadonlyRootfs": False, "Tmpfs": {"/": ""}}},
             ]
         )
