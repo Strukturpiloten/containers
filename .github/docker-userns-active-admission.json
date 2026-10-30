@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "consumer": "containers-ubuntu26-userns-active",
   "purpose": "scoped-prerequisite-attempt",
   "qualification": "none",
@@ -23,7 +23,7 @@
     "kind": "reviewed-active-source-predicate-not-observation-created-authority",
     "date": "2026-10-30",
     "evidenceRun": "41102914835",
-    "limits": "Maintained attempt limited to verified full/manual AMD64 or ARM64 context and its complete reviewed per-architecture cohort; actual native completion is separate. Historical diagnostic ARM observation/refusal and experimental results remain nonqualifying.",
+    "limits": "Maintained attempts admit only verified full/manual or bounded docker-rootless-qualification/manual contexts, preserving the actual selected profile and complete per-architecture cohort. Admission is not native success or repository/full/release proof. Diagnostic purpose and ARM observation/refusal remain nonqualifying.",
     "renovate": "Managed pins remain in docker-userns-policy-source.json; source/parser/helper changes require coordinated manual re-admission; no automatic runner fingerprints",
     "armCohort": "Deliberately selected bounded ARM compatibility hypothesis after source/ABI review; exact root-owned preinstalled tools use the existing OS-tool trust exception, not vendor checksums or VM attestation. Historical ImageVersion 20261026.168.1 and startup header 20261025.167.1 differ; no independent image/package manifest was established. Native owner/load/attachment/C/OOM/cleanup acceptance remains required."
   },
@@ -37,17 +37,20 @@
     "measuredPostExec": false,
     "requirement": "Fresh actor namespace opens before invoking the held reviewed parser; no claim of post-exec parser namespace measurement"
   },
-  "revision": "containers527-maintained-native-v1",
+  "revision": "containers527-maintained-bounded-v1",
   "maintainedContext": {
     "repository": "Strukturpiloten/containers",
     "workflow": ".github/workflows/ci.yml",
     "event": "workflow_dispatch",
     "ref": "event-selected-manual-ref",
-    "validationProfile": "full",
     "job": "smoke-build",
     "image": "docker-29-conformance-rootless",
     "imageOS": "ubuntu26",
-    "imageVersion": "same-job-bound-provenance-not-vm-attestation"
+    "imageVersion": "same-job-bound-provenance-not-vm-attestation",
+    "validationProfiles": [
+      "full",
+      "docker-rootless-qualification"
+    ]
   },
   "maintainedArchitectures": {
     "amd64": "maintained-prerequisite",

@@ -186,3 +186,16 @@ class MaintainedPrerequisiteCatalogueTests(unittest.TestCase):
                 self.assertNotEqual(
                     report["images"][0]["runtimeCoverage"]["arm64"]["docker"].get("nativeAuthority"), "ordinary"
                 )
+
+    def test_bounded_ordinary_native_facts_are_per_image_and_do_not_imply_registry_proof(self) -> None:
+        for architecture in ("amd64", "arm64"):
+            image = self.image(architecture)
+            runtime = maintained_runtime(architecture, "docker-rootless-qualification")
+            report = catalogue([image], runtime_results={image["name"]: [runtime]})
+            self.assertEqual(
+                report["images"][0]["runtimeCoverage"][architecture]["docker"]["nativeAuthority"], "ordinary"
+            )
+            self.assertEqual(report["images"][0]["registry"]["status"], "unknown")
+            del runtime["phases"][1]["scopedProfile"]
+            report = catalogue([image], runtime_results={image["name"]: [runtime]})
+            self.assertEqual(report["images"][0]["runtimeCoverage"][architecture]["docker"]["nativeAuthority"], "none")

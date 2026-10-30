@@ -183,7 +183,7 @@ existing issue527 context. An experimental AMD64 result may report operation
 passed and accounting complete while phase and aggregate qualification stay
 none. ARM still observes/refuses load.
 
-The existing full/manual `ci.yml` route admits a maintained AMD64 or ARM64 prerequisite
+The existing `ci.yml` full and bounded qualification manual profiles admit a maintained AMD64 or ARM64 prerequisite
 attempt on repository-owned GitHub-hosted Linux for this fixture and its private
 outer Docker backend. Root derives the purpose and selected manual ref from the
 fixed event and connected candidate source proof, with candidate/workflow/checkout
@@ -198,9 +198,11 @@ of the consumer environment. PR/push/merge/schedule/publication/local activation
 remain unadmitted. Diagnostic ARM still observes/refuses; maintained ARM uses
 its own held parser/interpreter, ABI/features and namespace predicate under the
 existing preinstalled-tool trust exception. Reported ImageVersion is same-job
-provenance, not VM/vendor binary attestation. The full matrix is unchanged;
-source admission for both architectures claims no native success or publication
-permission.
+provenance, not VM/vendor binary attestation. The full matrix is unchanged. The bounded
+`docker-rootless-qualification` profile selects only this fixture, both
+architectures and their payloads, with a distinct aggregate check that cannot
+satisfy full `Required CI`. Actual selected profile is bound in the root/native
+context. Source admission claims no native success or publication permission.
 
 The opt-in repository-owned `memory-witness` mode runs as inner PID1 with one
 bounded allocator child in the same 32 MiB, zero-swap, 16-PID leaf. It reads and

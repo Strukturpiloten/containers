@@ -194,11 +194,12 @@ def workflow_context(
     candidate: str = "a" * 40,
     architecture: str = "amd64",
     requested: str | None = None,
+    profile: str = "full",
 ) -> dict[str, str]:
     """Independently author the two supported workflow envelopes; never execute them."""
     maintained = purpose == "maintained-prerequisite"
     selected = "refs/heads/reviewed-manual" if maintained else "refs/heads/TheRealBecks/issue527"
-    profile = "full" if maintained else "docker-rootless-diagnostic"
+    profile = profile if maintained else "docker-rootless-diagnostic"
     admission = Path(__file__).resolve().parents[1] / ".github/docker-userns-active-admission.json"
     return {
         "candidate": candidate,
@@ -219,7 +220,7 @@ def workflow_context(
         "validationProfile": profile,
         "validationProfileRequested": profile if requested is None else requested,
         "purpose": purpose,
-        "admissionRevision": "containers527-maintained-native-v1",
+        "admissionRevision": "containers527-maintained-bounded-v1",
         "admissionSha256": hashlib.sha256(admission.read_bytes()).hexdigest(),
     }
 
@@ -258,7 +259,16 @@ def scoped_receipt(
     architecture: str = "amd64",
 ) -> dict:
     """Build complete root facts independently of producer/receipt formatter code."""
-    context = workflow_context(purpose=purpose, candidate=candidate, requested=requested, architecture=architecture)
+    profile = (
+        "docker-rootless-qualification"
+        if purpose == "maintained-prerequisite"
+        and requested is not None
+        and requested.lower() == "docker-rootless-qualification"
+        else "full"
+    )
+    context = workflow_context(
+        purpose=purpose, candidate=candidate, requested=requested, architecture=architecture, profile=profile
+    )
     admission = json.loads(
         (Path(__file__).resolve().parents[1] / ".github/docker-userns-active-admission.json").read_text()
     )

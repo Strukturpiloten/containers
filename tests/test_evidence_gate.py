@@ -76,7 +76,7 @@ SCAN = {
 }
 
 
-def maintained_runtime(architecture: str = "amd64") -> dict:
+def maintained_runtime(architecture: str = "amd64", profile: str = "full") -> dict:
     """Build archived native results with independent root and accounting facts."""
     result = copy.deepcopy(RUNTIME)
     result["architecture"] = architecture
@@ -103,7 +103,9 @@ def maintained_runtime(architecture: str = "amd64") -> dict:
     result["imageIdentity"] = identity
     result["phases"] = []
     for name in ("clean-control", "enforcement"):
-        scoped = scoped_receipt(purpose="maintained-prerequisite", phase=name, architecture=architecture)
+        scoped = scoped_receipt(
+            purpose="maintained-prerequisite", phase=name, architecture=architecture, requested=profile
+        )
         result["phases"].append(
             {
                 "phase": name,

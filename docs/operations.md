@@ -32,6 +32,30 @@ A push to `main` selects changed images and their reverse dependencies; the dail
 
 See [runtime backends](runtime-backends.md) for the explicit CI profile policy, local Podman default, private Docker prerequisites, evidence and publication boundary.
 
+For a bounded ordinary qualification attempt on a reviewed exact source ref,
+select the existing manual profile below after the source reviews and gates:
+
+```sh
+gh workflow run ci.yml --repo Strukturpiloten/containers --ref your-reviewed-branch -f validation_profile=docker-rootless-qualification
+```
+
+This selects only `docker-29-conformance-rootless` on AMD64 and ARM64, its two
+payload entries and two smoke entries through the existing planner and build
+Action. An exact-plan guard rejects future reverse-dependency expansion,
+missing entries or drift before matrix outputs are published. Budgets and
+concurrency limits are unchanged. The effective focus is `none` and the workload
+is ordinary qualification; leave the raw focused input at its default.
+`mandatory-accounting` is refused outside the experimental diagnostic profile.
+
+Its check is **Docker fixture qualification (bounded)**, even if planning fails.
+It never creates a successful or skipped `Required CI` check and does not prove
+full-matrix validation or release/publication eligibility. Admission and a plan
+preview are requests for work, not passing native results. Both actual native
+phases, original accounting, cleanup and authenticated stage disposal must pass
+before ordinary per-image native authority exists. Read the resulting exact
+source/run/attempt/profile and native artifacts; no source-only qualification is
+inferred. The `full` default continues to select the broad ordinary matrix.
+
 For a manual, non-publishing diagnosis of the Docker rootless conformance fixture
 on the admitted issue527 source branch, dispatch the existing CI workflow:
 
@@ -55,14 +79,14 @@ or publication gates. There is no image publication. The default manual profile
 is `full`; PR and merge-queue runs always ignore this input and retain their
 ordinary selection. Use the full gates before merging or publishing.
 
-The existing full/manual route additionally admits a maintained scoped
+The full and bounded qualification manual profiles admit a maintained scoped
 prerequisite attempt for the Docker rootless conformance fixture on reviewed
 AMD64 or ARM64 GitHub-hosted Linux, with its complete reviewed cohort. It binds the exact selected branch/tag ref and source,
 run, attempt and producing job; both native phases, original accounting, cleanup
 and stage disposal must complete before ordinary native authority is recorded.
 The raw default focused input does not select a diagnostic workload in full mode.
 This does not enable PR/push/merge/schedule/publication/local callers. Diagnostic
-ARM still observes/refuses; maintained full/manual ARM may attempt the same
+ARM still observes/refuses; maintained manual ARM may attempt the same
 strict lifecycle after its per-architecture preflight. Full still selects the
 complete matrix, and source support alone cannot make that matrix pass. No native success or publication permission follows from
 admission or offline checks. See the [scoped prerequisite contract](runtime-backends.md#scoped-issue527-prerequisite-and-experimental-candidate).

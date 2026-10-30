@@ -668,16 +668,17 @@ timed-out validation attempts remain nonpasses.
 
 The `containers-ubuntu26-userns-active` contract admits a maintained AMD64 or ARM64
 prerequisite attempt only through the existing `ci.yml` `workflow_dispatch`
-with the full validation profile, `smoke-build`, the declared
+with `full` or `docker-rootless-qualification`, `smoke-build`, the declared
 `docker-29-conformance-rootless` fixture, and its private outer Docker backend.
 The runner must be repository-owned GitHub-hosted Linux with the complete reviewed cohort
 selected for that architecture. Candidate, workflow source and checkout must be identical. The fixed
 root bootstrap derives the purpose and exact branch/tag ref from the dispatch
 event and verifies the corresponding workflow ref and connected admission blob;
-unprivileged labels cannot select authority. The full selector keeps
+unprivileged labels cannot select authority. Both ordinary selectors keep
 `focused_runtime=none` and workload mode `qualification`, even though the raw
-workflow input defaults to `witness-diagnostic`. There is no additional mode,
-workflow, architecture filter or change to the full matrix.
+workflow input defaults to `witness-diagnostic`. The bounded profile selects exactly this fixture and both architectures; it has
+its own check/concurrency class and cannot satisfy full `Required CI`. The full
+matrix, original workload and budgets are unchanged.
 
 The existing diagnostic route remains restricted to
 `validation_profile=docker-rootless-diagnostic` on
@@ -691,7 +692,13 @@ unchanged. Admission itself records `qualification: none`; it permits an attempt
 not native qualification, release or publication permission.
 
 Bootstrap transport/stage, native lease records, scoped receipts and disposal
-acknowledgments use schema 2. The existing closed helper-file list stays at
+acknowledgments use schema 2. Admission uses schema 3: its maintained policy
+contains the exact `validationProfiles` allowset `full` and
+`docker-rootless-qualification`, while each actual context/receipt retains one
+canonical profile and the exact raw request. Unknown, duplicate, delimited or
+contradictory allowsets refuse in both helper and fixed root bootstrap. Prior
+revision artifacts cannot be relabelled or replayed into this admission.
+The existing closed helper-file list stays at
 schema 1. Every native binding authenticates purpose, admission revision/digest,
 and the digest of the complete workflow context. Every root RPC checks those
 bindings and its immutable bootstrap commitment. Both phases must agree on that
@@ -719,7 +726,7 @@ Actual actor preflight reads the fixed AppArmor-enabled, restricted-userns and
 maximum-userns scalar files. The legacy `unprivileged_userns_clone` control must
 be `1` or explicitly absent with ENOENT; unreadable, malformed, disabled, or
 changed controls refuse. Diagnostic ARM remains observation-only and refuses
-load; maintained full/manual ARM uses its own complete finite cohort.
+load; maintained manual ARM uses its own complete finite cohort.
 
 `ImageVersion` is the workflow-reported per-job provenance value. It is frozen
 once and compared exactly across bootstrap, phase custody, receipts and evidence
@@ -999,7 +1006,7 @@ refuse before build/runtime; there is no fallback. The frozen privileged context
 uses the same versioned purpose/admission binding. ARM retains its actual observation/load
 refusal, even if the AMD64 accounting experiment succeeds.
 
-For the admitted full/manual AMD64 and ARM64 routes, actual host/profile readback, both
+For the admitted ordinary manual AMD64 and ARM64 profiles, actual host/profile readback, both
 native phases, their original mandatory accounting outcomes, complete cleanup,
 and all late checks are required before phase and aggregate
 `qualification=complete`. Missing stage or receipt refuses before native work;

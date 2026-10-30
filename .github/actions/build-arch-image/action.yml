@@ -115,7 +115,7 @@ runs:
         FOCUSED_RUNTIME: ${{ inputs.focused-runtime }}
         VALIDATION_PROFILE: ${{ github.event.inputs.validation_profile }}
         TRUSTED_RUNTIME: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-        ACTIVE_USERNS_CONTEXT: ${{ github.repository == 'Strukturpiloten/containers' && github.event_name == 'workflow_dispatch' && github.job == 'smoke-build' && runner.os == 'Linux' && runner.environment == 'github-hosted' && ((github.event.inputs.validation_profile == 'docker-rootless-diagnostic' && github.ref == 'refs/heads/TheRealBecks/issue527') || ((github.event.inputs.validation_profile == '' || github.event.inputs.validation_profile == 'full') && (fromJSON(inputs.entry).arch == 'amd64' || fromJSON(inputs.entry).arch == 'arm64'))) }}
+        ACTIVE_USERNS_CONTEXT: ${{ github.repository == 'Strukturpiloten/containers' && github.event_name == 'workflow_dispatch' && github.job == 'smoke-build' && runner.os == 'Linux' && runner.environment == 'github-hosted' && ((github.event.inputs.validation_profile == 'docker-rootless-diagnostic' && github.ref == 'refs/heads/TheRealBecks/issue527') || ((github.event.inputs.validation_profile == '' || github.event.inputs.validation_profile == 'full' || github.event.inputs.validation_profile == 'docker-rootless-qualification') && (fromJSON(inputs.entry).arch == 'amd64' || fromJSON(inputs.entry).arch == 'arm64'))) }}
         ACTIVE_CANDIDATE: ${{ github.sha }}
         ACTIVE_WORKFLOW: ${{ github.workflow_sha }}
         ACTIVE_RUN: ${{ github.run_id }}
@@ -126,7 +126,9 @@ runs:
 
           CONSUMER = 'containers-ubuntu26-userns-active'
           SOURCE_MANIFEST_SHA256 = '7f6693f40311617e4854f8c6a35cbe13b3afdd3d7a8bef58978397ba1178dbd8'
-          ADMISSION_REVISION = 'containers527-maintained-native-v1'
+          ADMISSION_SCHEMA = 3
+          MAINTAINED_PROFILES = ('full', 'docker-rootless-qualification')
+          ADMISSION_REVISION = 'containers527-maintained-bounded-v1'
           EXPERIMENTAL_PURPOSE = 'experimental-candidate'
           MAINTAINED_PURPOSE = 'maintained-prerequisite'
           CLOSED_FILES = (
@@ -163,7 +165,7 @@ runs:
                   raise ValueError('active-root-bootstrap-refused')
 
           def validation_profile(value):
-              require(type(value) is str and value.isascii() and value.lower() in {'', 'full', 'docker-rootless-diagnostic'})
+              require(type(value) is str and value.isascii() and value.lower() in {'', *MAINTAINED_PROFILES, 'docker-rootless-diagnostic'})
               return value.lower() or 'full'
 
           def selected_manual_ref(value: object) -> str:
@@ -186,7 +188,7 @@ runs:
               focused = inputs.get("focused_runtime", "witness-diagnostic")
               if type(focused) is not str or focused not in {"witness-diagnostic", "mandatory-accounting"}:
                   require(False)
-              if canonical == "full":
+              if canonical in MAINTAINED_PROFILES:
                   if (
                       "inputs" not in event
                       or focused != "witness-diagnostic"
@@ -292,13 +294,20 @@ runs:
               exact(admission, ('schemaVersion', 'consumer', 'purpose', 'qualification', 'sourceManifestSha256',
                                'context', 'cohorts', 'architectures', 'policyNamespace', 'parserExecutionNamespace',
                                'review', 'revision', 'maintainedContext', 'maintainedArchitectures'))
-              require(type(admission['schemaVersion']) is int and admission['schemaVersion'] == 2
+              require(type(admission['schemaVersion']) is int and admission['schemaVersion'] == ADMISSION_SCHEMA
                       and admission['consumer'] == CONSUMER and admission['purpose'] == 'scoped-prerequisite-attempt'
                       and admission['qualification'] == 'none' and admission['revision'] == ADMISSION_REVISION)
               policy = admission['maintainedContext'] if trusted['purpose'] == MAINTAINED_PURPOSE else admission['context']
               require(policy['repository'] == trusted['repository'] and policy['event'] == trusted['event']
                       and policy['workflow'] == '.github/workflows/ci.yml' and policy['job'] == trusted['job']
-                      and policy['image'] == trusted['image'] and policy['validationProfile'] == trusted['validationProfile'])
+                      and policy['image'] == trusted['image'])
+              common = ('repository', 'workflow', 'event', 'ref', 'job', 'image', 'imageOS', 'imageVersion')
+              if trusted['purpose'] == MAINTAINED_PURPOSE:
+                  exact(policy, (*common, 'validationProfiles'))
+                  require(policy['validationProfiles'] == list(MAINTAINED_PROFILES) and trusted['validationProfile'] in policy['validationProfiles'])
+              else:
+                  exact(policy, (*common, 'validationProfile'))
+                  require(policy['validationProfile'] == trusted['validationProfile'] == 'docker-rootless-diagnostic')
               require(policy['ref'] == ('event-selected-manual-ref' if trusted['purpose'] == MAINTAINED_PURPOSE else trusted['ref']))
               require(admission['maintainedArchitectures'] == {'amd64': MAINTAINED_PURPOSE, 'arm64': MAINTAINED_PURPOSE})
               require(type(admission['cohorts']) is dict and set(admission['cohorts']) == {'amd64', 'arm64'})

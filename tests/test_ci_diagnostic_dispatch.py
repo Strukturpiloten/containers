@@ -120,6 +120,7 @@ class DiagnosticDispatchTests(unittest.TestCase):
                             "diagnostic_only": "false",
                             "runtime_mode": "qualification",
                             "focused_runtime": "none",
+                            "validation_profile": "full",
                         },
                     )
 
@@ -127,7 +128,7 @@ class DiagnosticDispatchTests(unittest.TestCase):
         dispatch = self.workflow[True]["workflow_dispatch"]["inputs"]["validation_profile"]
         self.assertEqual(dispatch["type"], "choice")
         self.assertEqual(dispatch["default"], "full")
-        self.assertEqual(dispatch["options"], ["full", "docker-rootless-diagnostic"])
+        self.assertEqual(dispatch["options"], ["full", "docker-rootless-qualification", "docker-rootless-diagnostic"])
         self.assertEqual(self.selector["env"]["VALIDATION_PROFILE"], "${{ inputs.validation_profile || 'full' }}")
         for profile in ("", dispatch["default"], "FULL", "FuLl"):
             with self.subTest(profile=profile):
@@ -141,6 +142,7 @@ class DiagnosticDispatchTests(unittest.TestCase):
                         "diagnostic_only": "false",
                         "runtime_mode": "qualification",
                         "focused_runtime": "none",
+                        "validation_profile": "full",
                     },
                 )
 
@@ -159,6 +161,7 @@ class DiagnosticDispatchTests(unittest.TestCase):
                         "diagnostic_only": "true",
                         "runtime_mode": "diagnostic",
                         "focused_runtime": "witness-diagnostic",
+                        "validation_profile": "docker-rootless-diagnostic",
                     },
                 )
                 self.assertEqual(render_workflow_value(requested, event="workflow_dispatch", profile=profile), "true")
@@ -197,6 +200,7 @@ class DiagnosticDispatchTests(unittest.TestCase):
                 "diagnostic_only": "true",
                 "runtime_mode": "diagnostic",
                 "focused_runtime": "witness-diagnostic",
+                "validation_profile": "docker-rootless-diagnostic",
             },
         )
         steps = self.jobs["plan"]["steps"]
@@ -264,9 +268,8 @@ class DiagnosticDispatchTests(unittest.TestCase):
     def test_diagnostic_context_cannot_report_required_ci_even_when_plan_fails(self) -> None:
         aggregate = self.jobs["required-ci"]
         self.assertEqual(
-            aggregate["name"],
-            "${{ github.event_name == 'workflow_dispatch' && inputs.validation_profile == 'docker-rootless-diagnostic' "
-            "&& 'Docker fixture diagnostic (not Required CI)' || 'Required CI' }}",
+            render_workflow_value(aggregate["name"], event="workflow_dispatch", profile="docker-rootless-diagnostic"),
+            "Docker fixture diagnostic (not Required CI)",
         )
         self.assertNotIn("needs.plan", aggregate["name"])
         self.assertEqual(aggregate["if"], "${{ always() }}")
@@ -277,6 +280,8 @@ class DiagnosticDispatchTests(unittest.TestCase):
     def test_aggregate_preserves_failures_and_refuses_missing_outputs(self) -> None:
         script = self.jobs["required-ci"]["steps"][0]["run"]
         baseline = {
+            "SELECTED_PROFILE": "full",
+            "REQUESTED_PROFILE": "full",
             "DIAGNOSTIC_ONLY": "false",
             "REQUESTED_DIAGNOSTIC_ONLY": "false",
             "HAS_BUILDS": "true",
@@ -288,7 +293,15 @@ class DiagnosticDispatchTests(unittest.TestCase):
         }
         cases = [
             ({}, True),
-            ({"DIAGNOSTIC_ONLY": "true", "REQUESTED_DIAGNOSTIC_ONLY": "true"}, True),
+            (
+                {
+                    "DIAGNOSTIC_ONLY": "true",
+                    "REQUESTED_DIAGNOSTIC_ONLY": "true",
+                    "SELECTED_PROFILE": "docker-rootless-diagnostic",
+                    "REQUESTED_PROFILE": "docker-rootless-diagnostic",
+                },
+                True,
+            ),
             ({"DIAGNOSTIC_ONLY": "true"}, False),
             ({"REQUESTED_DIAGNOSTIC_ONLY": "true"}, False),
             (
@@ -305,6 +318,8 @@ class DiagnosticDispatchTests(unittest.TestCase):
                 {
                     "DIAGNOSTIC_ONLY": "true",
                     "REQUESTED_DIAGNOSTIC_ONLY": "true",
+                    "SELECTED_PROFILE": "docker-rootless-diagnostic",
+                    "REQUESTED_PROFILE": "docker-rootless-diagnostic",
                     "HAS_BUILDS": "false",
                     "SMOKE_RESULT": "skipped",
                 },
@@ -322,7 +337,16 @@ class DiagnosticDispatchTests(unittest.TestCase):
             for value in ("failure", "cancelled", "skipped", "")
         )
         cases.extend(
-            ({"DIAGNOSTIC_ONLY": "true", "REQUESTED_DIAGNOSTIC_ONLY": "true", key: value}, False)
+            (
+                {
+                    "DIAGNOSTIC_ONLY": "true",
+                    "REQUESTED_DIAGNOSTIC_ONLY": "true",
+                    "SELECTED_PROFILE": "docker-rootless-diagnostic",
+                    "REQUESTED_PROFILE": "docker-rootless-diagnostic",
+                    key: value,
+                },
+                False,
+            )
             for key in ("VALIDATE_RESULT", "PLAN_RESULT", "SMOKE_RESULT", "PAYLOAD_RESULT")
             for value in ("failure", "cancelled", "skipped", "")
         )
@@ -344,6 +368,11 @@ class DiagnosticDispatchTests(unittest.TestCase):
         concurrency = self.workflow["concurrency"]
         expected_groups = {
             "full": ("", "full", "FULL", "FuLl"),
+            "qualification": (
+                "docker-rootless-qualification",
+                "DOCKER-ROOTLESS-QUALIFICATION",
+                "Docker-Rootless-Qualification",
+            ),
             "diagnostic": ("docker-rootless-diagnostic", "DOCKER-ROOTLESS-DIAGNOSTIC", "Docker-Rootless-Diagnostic"),
             "invalid": (
                 "unknown",
@@ -363,7 +392,7 @@ class DiagnosticDispatchTests(unittest.TestCase):
                     group = render_workflow_value(concurrency["group"], event="workflow_dispatch", profile=profile)
                     self.assertEqual(group, f"validate-containers-workflow_dispatch-{mode}-refs/heads/candidate")
                     groups[mode] = group.casefold()
-        self.assertEqual(len(set(groups.values())), 3)
+        self.assertEqual(len(set(groups.values())), 4)
         for event in ("pull_request", "push", "merge_group", "workflow_call"):
             for profiles in expected_groups.values():
                 for profile in profiles:
@@ -414,6 +443,7 @@ class DiagnosticDispatchTests(unittest.TestCase):
                 "diagnostic_only": "true",
                 "runtime_mode": "qualification",
                 "focused_runtime": "mandatory-accounting",
+                "validation_profile": "docker-rootless-diagnostic",
             },
         )
         self.assertEqual(self.selection["qualification"], "none")
@@ -564,17 +594,21 @@ uv() {
 }
 if true; then
 """
-        for architecture, fault in (
-            (architecture, fault)
+        for architecture, profile, fault in (
+            (architecture, profile, fault)
             for architecture in ("amd64", "arm64")
+            for profile in ("full", "docker-rootless-qualification")
             for fault in (None, "runtime", "invalid-ack", "fallback-failure")
         ):
-            with self.subTest(architecture=architecture, fault=fault), tempfile.TemporaryDirectory() as directory:
+            with (
+                self.subTest(architecture=architecture, profile=profile, fault=fault),
+                tempfile.TemporaryDirectory() as directory,
+            ):
                 root_path = Path(directory)
                 (root_path / "runtime-evidence").mkdir()
                 fixture = root_path / "fixture.json"
                 events = root_path / "events"
-                record = maintained_runtime(architecture)
+                record = maintained_runtime(architecture, profile)
                 if fault in {"invalid-ack", "fallback-failure"}:
                     record["stageDisposal"]["stageDisposed"] = False
                 fixture.write_text(json.dumps(record))
@@ -594,7 +628,7 @@ if true; then
                         "TEST_DISPOSAL_EXIT": "1" if fault == "fallback-failure" else "0",
                         "IMAGE_NAME": record["image"],
                         "IMAGE_ARCH": architecture,
-                        "VALIDATION_PROFILE": "full",
+                        "VALIDATION_PROFILE": profile,
                         "IMAGE_PATH": "unused.tar",
                         "PYTHON_VERSION": "3.14",
                         "FOCUSED_RUNTIME": "none",

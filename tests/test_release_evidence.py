@@ -511,7 +511,7 @@ if __name__ == "__main__":
 
 
 class MaintainedPrerequisiteReleaseConsumerTests(unittest.TestCase):
-    def validate(self, runtime: dict, architecture: str = "amd64") -> None:
+    def validate(self, runtime: dict, architecture: str = "amd64", missing: str | None = None) -> None:
         identity = maintained_runtime(architecture)["imageIdentity"]
         scan = {
             "image": "ghcr.io/strukturpiloten/docker-29-conformance-rootless",
@@ -551,9 +551,11 @@ class MaintainedPrerequisiteReleaseConsumerTests(unittest.TestCase):
                 run_id="1",
                 execution_attempt=2,
                 architecture_digests={architecture: identity["manifestDigest"]},
-                published={architecture: {"configDigest": identity["configDigest"]}},
+                published={}
+                if missing == "publication"
+                else {architecture: {"configDigest": identity["configDigest"]}},
                 runtime=[runtime],
-                scans=[scan],
+                scans=[] if missing == "scan" else [scan],
             )
 
     def test_native_facts_are_recognized_without_publishing(self) -> None:
@@ -569,3 +571,11 @@ class MaintainedPrerequisiteReleaseConsumerTests(unittest.TestCase):
         for fault, runtime in maintained_mutations("arm64"):
             with self.subTest(fault=fault), self.assertRaises(ReleaseEvidenceError):
                 self.validate(runtime, "arm64")
+
+    def test_bounded_native_facts_do_not_replace_separate_publication_and_scan_evidence(self) -> None:
+        for architecture in ("amd64", "arm64"):
+            runtime = maintained_runtime(architecture, "docker-rootless-qualification")
+            self.validate(runtime, architecture)
+            for missing in ("publication", "scan"):
+                with self.subTest(architecture=architecture, missing=missing), self.assertRaises(ReleaseEvidenceError):
+                    self.validate(runtime, architecture, missing)

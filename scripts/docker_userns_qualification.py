@@ -27,7 +27,9 @@ LEGACY_CLONE = Path("/proc/sys/kernel/unprivileged_userns_clone")
 MAX_NAMESPACES = 2**63 - 1
 CONSUMER = "containers-ubuntu26-userns-active"
 PREREQUISITE_SCHEMA = 2
-ADMISSION_REVISION = "containers527-maintained-native-v1"
+ADMISSION_SCHEMA = 3
+ADMISSION_REVISION = "containers527-maintained-bounded-v1"
+MAINTAINED_PROFILES = ("full", "docker-rootless-qualification")
 EXPERIMENTAL_PURPOSE = "experimental-candidate"
 MAINTAINED_PURPOSE = "maintained-prerequisite"
 WORKFLOW = "Strukturpiloten/containers/.github/workflows/ci.yml"
@@ -153,7 +155,11 @@ def _scalar(raw: bytes) -> int:
 
 def validation_profile(value: object) -> str:
     """Canonicalize only the workflow's known ASCII choices; preserve raw evidence separately."""
-    if type(value) is not str or not value.isascii() or value.lower() not in {"", "full", "docker-rootless-diagnostic"}:
+    if (
+        type(value) is not str
+        or not value.isascii()
+        or value.lower() not in {"", *MAINTAINED_PROFILES, "docker-rootless-diagnostic"}
+    ):
         _refuse("context")
     return value.lower() or "full"
 
@@ -179,7 +185,7 @@ def event_scope(event: object) -> tuple[str, str]:
     focused = inputs.get("focused_runtime", "witness-diagnostic")
     if type(focused) is not str or focused not in {"witness-diagnostic", "mandatory-accounting"}:
         _refuse("context")
-    if canonical == "full":
+    if canonical in MAINTAINED_PROFILES:
         if (
             "inputs" not in event
             or focused != "witness-diagnostic"
@@ -247,7 +253,7 @@ def admission_document(raw: bytes) -> dict:
             "maintainedArchitectures",
         }
         or type(value["schemaVersion"]) is not int
-        or value["schemaVersion"] != PREREQUISITE_SCHEMA
+        or value["schemaVersion"] != ADMISSION_SCHEMA
         or value["consumer"] != CONSUMER
         or value["purpose"] != "scoped-prerequisite-attempt"
         or value["qualification"] != "none"
@@ -268,17 +274,20 @@ def admission_document(raw: bytes) -> dict:
         "imageVersion",
     }
     for name in ("context", "maintainedContext"):
+        expected_keys = (
+            context_keys if name == "context" else (context_keys - {"validationProfile"}) | {"validationProfiles"}
+        )
         if (
             type(value[name]) is not dict
-            or set(value[name]) != context_keys
-            or any(type(item) is not str for item in value[name].values())
+            or set(value[name]) != expected_keys
+            or any(type(item) is not str for key, item in value[name].items() if key != "validationProfiles")
         ):
             _refuse("admission")
     if (
         value["context"]["ref"] != "refs/heads/TheRealBecks/issue527"
         or value["context"]["validationProfile"] != "docker-rootless-diagnostic"
         or value["maintainedContext"]["ref"] != "event-selected-manual-ref"
-        or value["maintainedContext"]["validationProfile"] != "full"
+        or value["maintainedContext"]["validationProfiles"] != list(MAINTAINED_PROFILES)
     ):
         _refuse("admission")
     _validate_cohorts(value["cohorts"])
@@ -373,13 +382,14 @@ def validate_workflow_context(context: dict[str, str], admission: dict, admissio
         or context["imageVersionKind"] != "workflow-reported-provenance-not-vm-attestation"
         or re.fullmatch(r"[0-9]{8}\.[0-9]+\.[0-9]+", context["imageVersion"]) is None
         or canonical != context["validationProfile"]
-        or canonical != expected["validationProfile"]
+        or (purpose == EXPERIMENTAL_PURPOSE and canonical != expected["validationProfile"])
     ):
         _refuse("context")
 
     if purpose == MAINTAINED_PURPOSE:
         if (
-            canonical != "full"
+            canonical not in MAINTAINED_PROFILES
+            or canonical not in expected["validationProfiles"]
             or expected["ref"] != "event-selected-manual-ref"
             or admission["maintainedArchitectures"].get(context["architecture"]) != MAINTAINED_PURPOSE
         ):

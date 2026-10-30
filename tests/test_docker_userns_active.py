@@ -64,10 +64,12 @@ def literal_namespace() -> dict[str, object]:
 class SyntheticProof:
     """Construct an independently framed finite Git object DAG without Git writes."""
 
-    def __init__(self) -> None:
+    def __init__(self, admission_raw: bytes | None = None) -> None:
         """Use inert SDK sources and explicit fixture manifest authority."""
         self.objects: dict[str, dict[str, str]] = {}
         self.files = {name: (ROOT / name).read_bytes() for name in producer.FILES}
+        if admission_raw is not None:
+            self.files[producer.ADMISSION] = admission_raw
         self.sdk = {
             "scripts/native-runner-apparmor.py": b"inert builder",
             "scripts/native_outer_diagnostic_capture.py": b"inert capture",
@@ -95,6 +97,7 @@ class SyntheticProof:
             "commit", f"tree {tree}\nauthor Fixture <fixture@example.invalid> 1 +0000\n\nfixture\n".encode()
         )
         self.context = workflow_context(candidate=self.candidate)
+        self.context["admissionSha256"] = active.digest(self.files[producer.ADMISSION])
 
     def add(self, kind: str, raw: bytes) -> str:
         identifier = hashlib.sha1(
@@ -471,6 +474,16 @@ class QualificationEvidence(unittest.TestCase):
                 self.assertRaises(evidence_gate.EvidenceError),
             ):
                 evidence_gate._scoped_phase(record, phase)
+
+    def test_experimental_production_consumer_still_refuses_foreign_current_ci_source(self) -> None:
+        from scripts import evidence_gate  # noqa: PLC0415
+
+        record, phase = self.fixture()
+        with (
+            patch.dict(os.environ, {"GITHUB_SHA": "f" * 40}, clear=True),
+            self.assertRaises(evidence_gate.EvidenceError),
+        ):
+            evidence_gate._scoped_phase(record, phase)
 
     def test_explicit_requirement_cannot_pass_missing_scoped_receipt(self) -> None:
         from scripts import evidence_gate  # noqa: PLC0415

@@ -898,6 +898,8 @@ class PhaseExecutionTests(unittest.TestCase):
                     "GITHUB_JOB": "smoke-build",
                     "GITHUB_RUN_ID": "1",
                     "GITHUB_RUN_ATTEMPT": "2",
+                    "GITHUB_SHA": "a" * 40,
+                    "ImageVersion": "20261026.180.1" if case.architecture == "amd64" else "20261026.168.1",
                 },
             ),
             patch("scripts.runtime_tests.time.monotonic", side_effect=lambda: clock[0]),
@@ -910,6 +912,29 @@ class PhaseExecutionTests(unittest.TestCase):
             result = runtime_tests._execute_docker_phase(plan)
         self.assertEqual(control.call_count + enforcement.call_count, context.probe_calls)
         return result, context, budget, archive, events
+
+    def test_authored_experimental_fixtures_bind_their_own_context_under_hosted_ci(self) -> None:
+        ambient = {
+            "GITHUB_SHA": "f" * 40,
+            "GITHUB_WORKFLOW_SHA": "f" * 40,
+            "GITHUB_RUN_ID": "999",
+            "GITHUB_RUN_ATTEMPT": "9",
+            "GITHUB_JOB": "validate",
+            "ImageVersion": "20270101.999.9",
+        }
+        with patch.dict(os.environ, ambient):
+            for phase in (DockerProbePhase.CLEAN_CONTROL, DockerProbePhase.ENFORCEMENT):
+                result, *_rest = self.execute(
+                    _PhaseCase(engine="docker", ledger=True, stage="owned-stage", phase=phase)
+                )
+                self.assertEqual(result["status"], "passed")
+                self.assertEqual(result["qualification"], "none")
+                self.assertEqual(result["scopedProfile"]["binding"]["candidate"], "a" * 40)
+            self.assertEqual(os.environ["GITHUB_SHA"], ambient["GITHUB_SHA"])
+            self.assertEqual(dict(os.environ)["ImageVersion"], ambient["ImageVersion"])
+            pair, _events = PairAuthorityTests().pair()
+            self.assertEqual(pair["status"], "passed")
+            self.assertEqual(pair["qualification"], "none")
 
     def test_nonledger_podman_and_direct_routes_execute_exactly_once_inside_budget(self) -> None:
         for engine, launcher, phase in (
