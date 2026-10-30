@@ -1,4 +1,4 @@
-"""Regression checks for Docker image base extraction and Renovate grouping."""
+"""Regression checks for Docker/Podman base extraction and Renovate grouping."""
 
 from __future__ import annotations
 
@@ -31,14 +31,13 @@ def _matches_path(patterns: list[str], path: str) -> bool:
     return any(re.search(pattern[1:-1], path) is not None for pattern in patterns)
 
 
-def _matching_group_rules(
+def _matching_rules(
     rules: list[dict], path: str, package: str, current_value: str, update_type: str = "digest"
 ) -> list[dict]:
     return [
         rule
         for rule in rules
-        if rule.get("groupName")
-        and ("matchFileNames" not in rule or _matches_path(rule["matchFileNames"], path))
+        if ("matchFileNames" not in rule or _matches_path(rule["matchFileNames"], path))
         and package in rule.get("matchPackageNames", [package])
         and package in rule.get("matchDepNames", [package])
         and ("matchCurrentValue" not in rule or re.search(rule["matchCurrentValue"][1:-1], current_value))
@@ -46,6 +45,12 @@ def _matching_group_rules(
         and "custom.regex" in rule.get("matchManagers", ["custom.regex"])
         and "docker" in rule.get("matchDatasources", ["docker"])
     ]
+
+
+def _matching_group_rules(
+    rules: list[dict], path: str, package: str, current_value: str, update_type: str = "digest"
+) -> list[dict]:
+    return [rule for rule in _matching_rules(rules, path, package, current_value, update_type) if rule.get("groupName")]
 
 
 class DockerRenovateTests(unittest.TestCase):
@@ -164,6 +169,102 @@ class DockerRenovateTests(unittest.TestCase):
                 image = metadata["build"]["args"]["DISTRO_IMAGE"]["value"]
                 package = image.split(":", 1)[0]
                 self.assertEqual(_matching_group_rules(self.rules, path, package, other_version), [])
+
+    def test_podman_centos_stream_10_pair_uses_the_unique_external_image_manager(self) -> None:
+        manager = next(
+            item
+            for item in self.managers
+            if item["description"] == "Track external pinned container image tags and digests in container metadata"
+        )
+        extraction = re.compile(manager["matchStrings"][0].replace("(?<", "(?P<"))
+        bases = set()
+        for mode in MODES:
+            path = f"images/podman/podman-centos-stream-10-{mode}/container.yaml"
+            with self.subTest(mode=mode):
+                source = (ROOT / path).read_text(encoding="utf-8")
+                base = yaml.safe_load(source)["build"]["args"]["DISTRO_IMAGE"]["value"]
+                bases.add(base)
+                managers = [item for item in self.managers if _matches_path(item["managerFilePatterns"], path)]
+                self.assertEqual(managers, [manager])
+                matches = list(extraction.finditer(source))
+                self.assertEqual(len(matches), 1)
+                self.assertEqual(matches[0].group("depName"), "quay.io/centos/centos")
+                self.assertEqual(matches[0].group("currentValue"), "stream10")
+                self.assertRegex(matches[0].group("currentDigest"), r"^sha256:[a-f0-9]{64}$")
+                self.assertEqual(matches[0].group("currentDigest"), base.split("@", 1)[1])
+                self.assertEqual(
+                    base,
+                    f"{matches[0].group('depName')}:{matches[0].group('currentValue')}@{matches[0].group('currentDigest')}",
+                )
+        self.assertEqual(len(bases), 1)
+
+    def test_podman_centos_stream_10_digest_group_is_scoped_to_both_existing_modes(self) -> None:
+        group_name = "Podman CentOS Stream 10 distro base"
+        for mode in MODES:
+            path = f"images/podman/podman-centos-stream-10-{mode}/container.yaml"
+            with self.subTest(mode=mode):
+                matches = _matching_group_rules(self.rules, path, "quay.io/centos/centos", "stream10")
+                self.assertEqual([rule["groupName"] for rule in matches], [group_name])
+                group = matches[0]
+                self.assertEqual(group["matchManagers"], ["custom.regex"])
+                self.assertEqual(group["matchDatasources"], ["docker"])
+                self.assertEqual(group["matchPackageNames"], ["quay.io/centos/centos"])
+                self.assertEqual(group["matchCurrentValue"], "/^stream10$/")
+                self.assertEqual(group["matchUpdateTypes"], ["digest"])
+                for other in ("stream9", "stream100", "other-tag"):
+                    self.assertEqual(_matching_group_rules(self.rules, path, "quay.io/centos/centos", other), [])
+                self.assertEqual(_matching_group_rules(self.rules, path, "quay.io/centos/other", "stream10"), [])
+                for other_path in (
+                    f"images/podman/podman-centos-stream-9-{mode}/container.yaml",
+                    f"images/docker/docker-fedora-44-{mode}/container.yaml",
+                ):
+                    self.assertFalse(_matches_path(group["matchFileNames"], other_path))
+                for update_type in ("major", "minor", "patch"):
+                    self.assertEqual(
+                        _matching_group_rules(self.rules, path, "quay.io/centos/centos", "stream10", update_type), []
+                    )
+
+    def test_podman_centos_stream_10_digest_group_preserves_ci_controlled_update_policy(self) -> None:
+        digest_rule = next(
+            rule
+            for rule in self.rules
+            if rule["description"] == "Squash-merge pinned container digest updates after required CI"
+        )
+        for mode in MODES:
+            path = f"images/podman/podman-centos-stream-10-{mode}/container.yaml"
+            with self.subTest(mode=mode):
+                applied = _matching_rules(self.rules, path, "quay.io/centos/centos", "stream10")
+                self.assertIn(digest_rule, applied)
+                policy = dict(self.config)
+                for rule in applied:
+                    policy.update(rule)
+                self.assertEqual(policy["groupName"], "Podman CentOS Stream 10 distro base")
+                self.assertTrue(policy["automerge"])
+                self.assertEqual(policy["automergeType"], "pr")
+                self.assertEqual(policy["automergeStrategy"], "squash")
+                self.assertTrue(policy["platformAutomerge"])
+                self.assertFalse(policy.get("enabled") is False)
+                self.assertFalse(policy.get("ignoreTests") is True)
+                self.assertNotEqual(policy.get("requiredStatusChecks"), [])
+                self.assertEqual(
+                    policy.get("dependencyDashboardApproval"), self.config.get("dependencyDashboardApproval")
+                )
+                group = _matching_group_rules(self.rules, path, "quay.io/centos/centos", "stream10")[0]
+                for setting in (
+                    "automerge",
+                    "automergeType",
+                    "automergeStrategy",
+                    "platformAutomerge",
+                    "dependencyDashboardApproval",
+                    "ignoreTests",
+                    "requiredStatusChecks",
+                ):
+                    self.assertNotIn(setting, group)
+                for update_type in ("major", "minor", "patch"):
+                    frozen = dict(self.config)
+                    for rule in _matching_rules(self.rules, path, "quay.io/centos/centos", "stream10", update_type):
+                        frozen.update(rule)
+                    self.assertFalse(frozen["enabled"])
 
     def test_source_fedora_minimal_keeps_its_separate_group(self) -> None:
         path = "images/podman/podman-5.4-rootful/container.yaml"
