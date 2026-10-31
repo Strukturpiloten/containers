@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 4,
+  "schemaVersion": 5,
   "consumer": "containers-ubuntu26-userns-active",
   "purpose": "scoped-prerequisite-attempt",
   "qualification": "none",
@@ -37,7 +37,7 @@
     "measuredPostExec": false,
     "requirement": "Fresh actor namespace opens before invoking the held reviewed parser; no claim of post-exec parser namespace measurement"
   },
-  "revision": "containers527-maintained-callers-v1",
+  "revision": "containers442-direct-diagnostic-v1",
   "maintainedContext": {
     "repository": "Strukturpiloten/containers",
     "image": "docker-29-conformance-rootless",
@@ -137,5 +137,29 @@
       "refPolicy": "event-selected-manual-ref",
       "selector": "publication-default"
     }
+  },
+  "directContext": {
+    "repository": "Strukturpiloten/containers",
+    "workflow": ".github/workflows/ci.yml",
+    "event": "workflow_dispatch",
+    "ref": "refs/heads/TheRealBecks/issue442-direct-startup-20261031",
+    "job": "smoke-build",
+    "validationProfile": "docker-direct-rootless-diagnostic",
+    "purpose": "direct-startup-diagnostic",
+    "qualification": "none",
+    "rows": [
+      {
+        "image": "docker-20.10-rootless",
+        "architecture": "amd64"
+      },
+      {
+        "image": "docker-26-rootless",
+        "architecture": "arm64"
+      }
+    ],
+    "diagnosticVariant": "direct-uid1000-profiled-b",
+    "launcher": "direct",
+    "expectedUid": "1000",
+    "diagnosticArm": "B"
   }
 }

@@ -234,7 +234,7 @@ def workflow_context(
         "validationProfile": profile,
         "validationProfileRequested": profile if requested is None else requested,
         "purpose": purpose,
-        "admissionRevision": "containers527-maintained-callers-v1",
+        "admissionRevision": "containers442-direct-diagnostic-v1",
         "admissionSha256": hashlib.sha256(admission.read_bytes()).hexdigest(),
     }
 
@@ -311,7 +311,7 @@ def scoped_receipt(
         imageVersion=context["imageVersion"],
     )
     return {
-        "schemaVersion": 3,
+        "schemaVersion": 4,
         "consumer": "containers-ubuntu26-userns-active",
         "purpose": purpose,
         "qualification": "maintained-prerequisite"
@@ -365,7 +365,7 @@ def scoped_receipt(
 def stage_disposal(scoped: dict) -> dict:
     """Only the same immutable stage's disposal can finish a maintained pair."""
     return {
-        "schemaVersion": 3,
+        "schemaVersion": 4,
         "consumer": "containers-ubuntu26-userns-active",
         "stageDisposed": True,
         "purpose": scoped["purpose"],

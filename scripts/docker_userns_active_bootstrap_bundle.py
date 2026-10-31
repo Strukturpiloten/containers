@@ -18,6 +18,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+from scripts import docker_direct_startup_contract as direct
 from scripts import docker_userns_active as diagnostic
 from scripts import docker_userns_bootstrap_bundle as git
 from scripts import docker_userns_policy_source as source
@@ -43,6 +44,10 @@ FILES = (
     "scripts/__init__.py",
     "scripts/docker_userns_active.py",
     "scripts/docker_userns_qualification.py",
+    "scripts/docker_direct_startup_contract.py",
+    "scripts/docker_direct_startup_gate.py",
+    "scripts/docker_direct_startup_active.py",
+    "scripts/docker_direct_startup_observations.py",
     "scripts/docker_runner_security.py",
     "scripts/docker_userns_custody_child.py",
     "scripts/docker_userns_policy_source.py",
@@ -164,7 +169,7 @@ def context(
             "run": environment["GITHUB_RUN_ID"],
             "attempt": environment["GITHUB_RUN_ATTEMPT"],
             "job": identity["job"],
-            "image": "docker-29-conformance-rootless",
+            "image": environment.get("IMAGE_NAME", "docker-29-conformance-rootless"),
             "architecture": architecture,
         }
     phase("producer-event-path")
@@ -178,6 +183,13 @@ def context(
     require(type(event) is dict)
     phase("producer-choice")
     caller = caller_context(event, identity)
+    image = "docker-29-conformance-rootless"
+    extra = {}
+    if caller["purpose"] == direct.PURPOSE:
+        image = environment.get("IMAGE_NAME", "")
+        direct.finite_tuple(image, architecture)
+        extra = {key: direct.admission_context()[key] for key in direct.CONTEXT_FIELDS}
+
     admission_raw = (ROOT / ADMISSION).read_bytes()
     admission = admission_document(admission_raw)
     result = {
@@ -185,10 +197,11 @@ def context(
         "workflow": selected,
         "checkout": selected,
         **caller,
+        **extra,
         "run": environment["GITHUB_RUN_ID"],
         "attempt": environment["GITHUB_RUN_ATTEMPT"],
         "architecture": architecture,
-        "image": "docker-29-conformance-rootless",
+        "image": image,
         "imageOS": expected["ImageOS"],
         "imageVersion": version,
         "imageVersionKind": "workflow-reported-provenance-not-vm-attestation",

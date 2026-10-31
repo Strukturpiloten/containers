@@ -27,6 +27,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import yaml
@@ -1337,6 +1338,28 @@ def _docker_phase_work(plan: _DockerPhasePlan, ctx: RuntimeContext, result: dict
         ctx.runtime_disk_budget = None
 
 
+def _fail_pair_publication(evidence: dict[str, Any], error: BaseException, *, key: str = "cleanupError") -> None:
+    """Revoke authority for each publisher shape before touching its owned inode."""
+    evidence["status"] = "failed"
+    evidence["qualification"] = "none"
+    if (
+        evidence.get("consumer") == "containers-direct-rootless-startup-diagnostic"
+        and evidence.get("purpose") == "direct-startup-diagnostic"
+    ):
+        evidence["publicationFailure"] = "evidence-publication-failed"
+        if "conclusion" in evidence:
+            evidence["conclusion"] = "inconclusive"
+        return
+    try:
+        _phase_error(evidence, error, key=key)
+        _finish_pair_authority(evidence)
+    except Exception, KeyboardInterrupt:
+        evidence["publicationFailure"] = "authority-finalization-failed"
+    finally:
+        evidence["status"] = "failed"
+        evidence["qualification"] = "none"
+
+
 def _write_pair_evidence(path: Path, evidence: dict[str, Any], deadline: float) -> None:
     """Publish once; retire the private anchor with its owning evidence namespace.
 
@@ -1397,25 +1420,26 @@ def _write_pair_evidence(path: Path, evidence: dict[str, Any], deadline: float) 
                 raise OSError("short systemd pair evidence write")
             record.flush()
         if time.monotonic() >= deadline:
-            _phase_error(evidence, ProbeError("systemd Docker pair evidence retirement exceeded original deadline"))
-            _finish_pair_authority(evidence)
+            _fail_pair_publication(
+                evidence, ProbeError("systemd Docker pair evidence retirement exceeded original deadline"), key="error"
+            )
             invalidate()
         # Exclusive publication preserves historical reports and unrelated
         # replacement sentinels. A failed producer cannot claim either as new.
         os.link(candidate, path, follow_symlinks=False)
         if time.monotonic() >= deadline and not recovery_attempted:
-            _phase_error(evidence, ProbeError("systemd Docker pair evidence publication exceeded original deadline"))
-            _finish_pair_authority(evidence)
+            _fail_pair_publication(
+                evidence, ProbeError("systemd Docker pair evidence publication exceeded original deadline"), key="error"
+            )
             invalidate()
     except (Exception, KeyboardInterrupt) as error:
-        _phase_error(evidence, error, key="cleanupError")
-        _finish_pair_authority(evidence)
+        _fail_pair_publication(evidence, error)
         uncertain: BaseException | None = None
         if candidate is not None and not recovery_attempted:
             try:
                 invalidate()
             except (Exception, KeyboardInterrupt) as retirement_error:
-                _phase_error(evidence, retirement_error, key="cleanupError")
+                _fail_pair_publication(evidence, retirement_error)
                 uncertain = retirement_error
         elif candidate is not None:
             uncertain = error
@@ -1602,6 +1626,22 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     selection = getattr(args, "outer_engine", "podman")
     profile_name, profile = next(iter(profiles.items()))
     outer_engine = select_outer_engine(selection, profile_name)
+    if getattr(args, "direct_startup_diagnostic", False):
+        from scripts.docker_direct_startup_runtime import run_pair  # noqa: PLC0415 - separate closed diagnostic dispatch.
+
+        return run_pair(
+            args,
+            metadata,
+            architecture,
+            use_sudo=use_sudo,
+            services=SimpleNamespace(
+                Context=RuntimeContext,
+                Archive=_ArchiveSnapshot,
+                Cancellation=_PairCancellation,
+                Budget=IsolatedStoreDiskBudget,
+                publish=_write_pair_evidence,
+            ),
+        )
     _focused_runtime_request(args, metadata, outer_engine)
     execution_mode = getattr(args, "oom_accounting_mode", "qualification")
     if execution_mode not in {"qualification", "diagnostic"} or (
@@ -1744,10 +1784,15 @@ def main() -> int:
         help="outer runtime policy; local default is Podman, profile selection is explicit",
     )
     parser.add_argument(
-        "--focused-runtime", choices=("none", "witness-diagnostic", "mandatory-accounting"), default="none"
+        "--focused-runtime",
+        choices=("none", "witness-diagnostic", "mandatory-accounting", "direct-startup-diagnostic"),
+        default="none",
     )
     parser.add_argument("--oom-accounting-mode", choices=("qualification", "diagnostic"), default="qualification")
     parser.add_argument("--active-userns-stage", help=argparse.SUPPRESS)
+    parser.add_argument("--direct-startup-diagnostic", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--direct-started-ns", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--direct-deadline-ns", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--evidence", required=True)
     parser.add_argument("--allow-privileged", action="store_true")
     parser.add_argument("--skip-nested", action="store_true")
@@ -1760,6 +1805,16 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _signal_interrupt)
     evidence = run(args)
     print(json.dumps({key: evidence[key] for key in ("image", "architecture", "profile", "status")}, sort_keys=True))
+    if args.direct_startup_diagnostic:
+        return (
+            0
+            if (
+                evidence.get("status") == "diagnostic-complete"
+                and evidence.get("qualification") == "none"
+                and evidence.get("purpose") == "direct-startup-diagnostic"
+            )
+            else 1
+        )
     if evidence["status"] != "passed":
         print(evidence.get("error", "runtime check failed"), file=sys.stderr)
         return 1

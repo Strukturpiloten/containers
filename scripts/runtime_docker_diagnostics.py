@@ -24,6 +24,7 @@ import subprocess
 import sys
 import time
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -330,6 +331,13 @@ def _read_query(process: subprocess.Popen[bytes], deadline: float, limit: int = 
     return output
 
 
+@dataclass(frozen=True)
+class _QueryOptions:
+    limit: int = BYTE_LIMIT
+    pass_fds: tuple[int, ...] = ()
+    merge_stderr: bool = False
+
+
 def _spawn_query(
     arguments: list[str],
     work_deadline: float,
@@ -337,6 +345,18 @@ def _spawn_query(
     timeout_executable: str | None,
     *,
     pass_fds: tuple[int, ...] = (),
+) -> subprocess.Popen[bytes]:
+    return _spawn_query_process(
+        arguments, work_deadline, remaining, timeout_executable, _QueryOptions(pass_fds=pass_fds)
+    )
+
+
+def _spawn_query_process(
+    arguments: list[str],
+    work_deadline: float,
+    remaining: float,
+    timeout_executable: str | None,
+    options: _QueryOptions,
 ) -> subprocess.Popen[bytes]:
     if remaining <= 0.05:
         raise _UnavailableError("budget-exhausted")
@@ -351,8 +371,8 @@ def _spawn_query(
         [timeout_executable, "--signal=KILL", f"{work}s", *arguments],
         start_new_session=True,
         stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        **({"pass_fds": pass_fds} if pass_fds else {}),
+        stderr=subprocess.STDOUT if options.merge_stderr else subprocess.DEVNULL,
+        **({"pass_fds": options.pass_fds} if options.pass_fds else {}),
     )
 
 
@@ -364,19 +384,63 @@ def _query_capture(
     limit: int = BYTE_LIMIT,
     pass_fds: tuple[int, ...] = (),
 ) -> dict[str, Any]:
+    return _query_capture_options(
+        arguments, deadline, timeout_executable, _QueryOptions(limit=limit, pass_fds=pass_fds)
+    )
+
+
+def capture_owned_logs(
+    arguments: list[str],
+    deadline: float,
+    timeout_executable: str,
+    *,
+    pass_fds: tuple[int, ...] = (),
+) -> dict[str, Any]:
+    """Merge only owned Docker log streams; preserve all reader/drain bounds."""
+    return _query_capture_options(
+        arguments, deadline, timeout_executable, _QueryOptions(merge_stderr=True, pass_fds=pass_fds)
+    )
+
+
+def _start_query(
+    arguments: list[str],
+    work_deadline: float,
+    remaining: float,
+    timeout_executable: str | None,
+    options: _QueryOptions,
+) -> subprocess.Popen[bytes]:
+    if options.merge_stderr:
+        return _spawn_query_process(arguments, work_deadline, remaining, timeout_executable, options)
+    return _spawn_query(
+        arguments,
+        work_deadline,
+        remaining,
+        timeout_executable,
+        **({"pass_fds": options.pass_fds} if options.pass_fds else {}),
+    )
+
+
+def _query_capture_options(
+    arguments: list[str],
+    deadline: float,
+    timeout_executable: str | None,
+    options: _QueryOptions,
+) -> dict[str, Any]:
     remaining = deadline - time.monotonic()
     # Prepay cleanup and protocol transmission inside the one original budget.
     work_deadline = deadline - min(2.0, remaining * 0.6)
     try:
-        process = _spawn_query(
-            arguments, work_deadline, remaining, timeout_executable, **({"pass_fds": pass_fds} if pass_fds else {})
-        )
+        process = _start_query(arguments, work_deadline, remaining, timeout_executable, options)
     except _UnavailableError as error:
         return {"status": str(error), "teardownVerified": True}
     raw = b""
     status = "query-unavailable"
     try:
-        raw = _read_query(process, work_deadline) if limit == BYTE_LIMIT else _read_query(process, work_deadline, limit)
+        raw = (
+            _read_query(process, work_deadline)
+            if options.limit == BYTE_LIMIT
+            else _read_query(process, work_deadline, options.limit)
+        )
         status = "available"
     except _UnavailableError as error:
         status = str(error)

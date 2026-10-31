@@ -15,6 +15,7 @@ on:
           - full
           - docker-rootless-qualification
           - docker-rootless-diagnostic
+          - docker-direct-rootless-diagnostic
       focused_runtime:
         description: Nonqualifying focused workload (only on the issue527 diagnostic route)
         type: choice
@@ -24,7 +25,7 @@ on:
           - mandatory-accounting
 
 concurrency:
-  group: validate-containers-${{ github.event_name }}-${{ github.event_name != 'workflow_dispatch' && 'full' || inputs.validation_profile == 'docker-rootless-diagnostic' && 'diagnostic' || inputs.validation_profile == 'docker-rootless-qualification' && 'qualification' || (inputs.validation_profile == '' || inputs.validation_profile == 'full') && 'full' || 'invalid' }}-${{ github.ref }}
+  group: validate-containers-${{ github.event_name }}-${{ github.event_name != 'workflow_dispatch' && 'full' || inputs.validation_profile == 'docker-direct-rootless-diagnostic' && 'direct-startup-diagnostic' || inputs.validation_profile == 'docker-rootless-diagnostic' && 'diagnostic' || inputs.validation_profile == 'docker-rootless-qualification' && 'qualification' || (inputs.validation_profile == '' || inputs.validation_profile == 'full') && 'full' || 'invalid' }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions: {}
@@ -608,6 +609,15 @@ jobs:
                 fi
                 test "${requested_runtime}" = witness-diagnostic || { echo "Focused accounting requires diagnostic scope." >&2; exit 1; }
                 ;;
+              docker-direct-rootless-diagnostic)
+                test "${GITHUB_REF}" = refs/heads/TheRealBecks/issue442-direct-startup-20261031 && test "${GITHUB_JOB}" = plan &&
+                  test "${requested_runtime}" = witness-diagnostic || { echo "Direct diagnostic context refused." >&2; exit 1; }
+                scope=direct-startup-diagnostic
+                diagnostic_only=true
+                focused_runtime=direct-startup-diagnostic
+                selected_profile=docker-direct-rootless-diagnostic
+                authority=none
+                ;;
               docker-rootless-diagnostic)
                 test "${GITHUB_REF}" = refs/heads/TheRealBecks/issue527 && test "${GITHUB_JOB}" = plan || {
                   echo "Focused runtime context refused." >&2; exit 1;
@@ -633,11 +643,17 @@ jobs:
           BEFORE: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || '' }}
           BUILD_SCOPE: ${{ steps.mode.outputs.scope }}
           BUILD_TARGET: ${{ steps.mode.outputs.target }}
+          SELECTED_PROFILE: ${{ steps.mode.outputs.validation_profile }}
           REF_NAME: ${{ github.head_ref || github.ref_name }}
           SOURCE_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
 
+          if [ "${SELECTED_PROFILE}" = docker-direct-rootless-diagnostic ]; then
+            uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.docker_direct_startup_plan \
+              --output build-plan.json --event-name "${GITHUB_EVENT_NAME}" --ref-name "${REF_NAME}" \
+              --source-revision "${SOURCE_SHA}" --default-branch "${{ github.event.repository.default_branch }}"
+          else
           uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine plan \
             --event-name "${GITHUB_EVENT_NAME}" \
             --ref-name "${REF_NAME}" \
@@ -647,6 +663,7 @@ jobs:
             --scope "${BUILD_SCOPE}" \
             --target "${BUILD_TARGET}" \
             --output build-plan.json
+          fi
       - name: Assert selected CI scope
         shell: bash
         env:
@@ -681,7 +698,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ "${DIAGNOSTIC_ONLY}" = "true" ]; then
+          if [ "${SELECTED_PROFILE}" = docker-direct-rootless-diagnostic ]; then
+            {
+              echo '## Direct-rootless startup diagnostic'
+              echo 'qualification:none; Docker 20.10 rootless AMD64 and Docker 26 rootless ARM64 only.'
+              echo 'Instrumented A/B observations cannot satisfy Required CI, native support, release or publication gates or attribute a host denial cause.'
+            } >> "$GITHUB_STEP_SUMMARY"
+          elif [ "${DIAGNOSTIC_ONLY}" = "true" ]; then
             {
               echo '## Nonqualifying Docker fixture experiment'
               printf 'Selected focused workload: %s; native qualification remains none.\n' "${FOCUSED_RUNTIME}"
@@ -746,12 +769,12 @@ jobs:
         with:
           entry: ${{ toJSON(matrix) }}
           upload-archive: "false"
-          use-published-dependency-fallback: "true"
+          use-published-dependency-fallback: ${{ needs.plan.outputs.validation_profile != 'docker-direct-rootless-diagnostic' && 'true' || 'false' }}
           oom-accounting-mode: ${{ needs.plan.outputs.runtime_mode }}
           focused-runtime: ${{ needs.plan.outputs.focused_runtime }}
 
   required-ci:
-    name: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_profile == 'docker-rootless-qualification' && 'Docker fixture qualification (bounded)' || github.event_name == 'workflow_dispatch' && inputs.validation_profile == 'docker-rootless-diagnostic' && 'Docker fixture diagnostic (not Required CI)' || 'Required CI' }}
+    name: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_profile == 'docker-direct-rootless-diagnostic' && 'Direct-rootless startup diagnostic (qualification:none)' || github.event_name == 'workflow_dispatch' && inputs.validation_profile == 'docker-rootless-qualification' && 'Docker fixture qualification (bounded)' || github.event_name == 'workflow_dispatch' && inputs.validation_profile == 'docker-rootless-diagnostic' && 'Docker fixture diagnostic (not Required CI)' || 'Required CI' }}
     if: ${{ always() }}
     needs:
       - validate
@@ -767,9 +790,9 @@ jobs:
         shell: bash
         env:
           SELECTED_PROFILE: ${{ needs.plan.outputs.validation_profile }}
-          REQUESTED_PROFILE: ${{ github.event_name != 'workflow_dispatch' && 'full' || inputs.validation_profile == 'docker-rootless-diagnostic' && 'docker-rootless-diagnostic' || inputs.validation_profile == 'docker-rootless-qualification' && 'docker-rootless-qualification' || (inputs.validation_profile == '' || inputs.validation_profile == 'full') && 'full' || 'invalid' }}
+          REQUESTED_PROFILE: ${{ github.event_name != 'workflow_dispatch' && 'full' || inputs.validation_profile == 'docker-direct-rootless-diagnostic' && 'docker-direct-rootless-diagnostic' || inputs.validation_profile == 'docker-rootless-diagnostic' && 'docker-rootless-diagnostic' || inputs.validation_profile == 'docker-rootless-qualification' && 'docker-rootless-qualification' || (inputs.validation_profile == '' || inputs.validation_profile == 'full') && 'full' || 'invalid' }}
           DIAGNOSTIC_ONLY: ${{ needs.plan.outputs.diag_only }}
-          REQUESTED_DIAGNOSTIC_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_profile == 'docker-rootless-diagnostic' }}
+          REQUESTED_DIAGNOSTIC_ONLY: ${{ github.event_name == 'workflow_dispatch' && (inputs.validation_profile == 'docker-rootless-diagnostic' || inputs.validation_profile == 'docker-direct-rootless-diagnostic') }}
           HAS_BUILDS: ${{ needs.plan.outputs.has_builds }}
           HAS_PAYLOADS: ${{ needs.plan.outputs.has_payloads }}
           PAYLOAD_RESULT: ${{ needs.payloads.result }}
@@ -779,12 +802,16 @@ jobs:
         run: |
           set -euo pipefail
 
+          if [ "${REQUESTED_PROFILE}" = docker-direct-rootless-diagnostic ]; then
+            echo 'Direct-rootless startup diagnostic; qualification:none; missing or failed evidence remains nonqualifying.' >> "$GITHUB_STEP_SUMMARY"
+            printf '%s\n' '{"schemaVersion":1,"consumer":"containers-direct-rootless-startup-diagnostic","purpose":"direct-startup-diagnostic","qualification":"none","status":"failed","reason":"jobs-or-pair-evidence-incomplete"}' > "${RUNNER_TEMP}/direct-startup-aggregate.json"
+          fi
           if [ "${VALIDATE_RESULT}" != "success" ] || [ "${PLAN_RESULT}" != "success" ]; then
             echo "Validation or build planning did not succeed." >&2
             exit 1
           fi
           case "${REQUESTED_PROFILE}" in
-            full|docker-rootless-qualification|docker-rootless-diagnostic) ;;
+            full|docker-rootless-qualification|docker-rootless-diagnostic|docker-direct-rootless-diagnostic) ;;
             *) echo "Unknown manual validation profile cannot satisfy Required CI." >&2; exit 1 ;;
           esac
           if [ "${SELECTED_PROFILE}" != "${REQUESTED_PROFILE}" ]; then
@@ -792,7 +819,7 @@ jobs:
             exit 1
           fi
           expected_diagnostic=false
-          if [ "${REQUESTED_PROFILE}" = docker-rootless-diagnostic ]; then expected_diagnostic=true; fi
+          if [ "${REQUESTED_PROFILE}" = docker-rootless-diagnostic ] || [ "${REQUESTED_PROFILE}" = docker-direct-rootless-diagnostic ]; then expected_diagnostic=true; fi
           if [ "${REQUESTED_DIAGNOSTIC_ONLY}" != "${expected_diagnostic}" ]; then
             echo "Requested profile classifications disagree." >&2
             exit 1
@@ -808,7 +835,7 @@ jobs:
               exit 1
               ;;
           esac
-          if [ "${REQUESTED_PROFILE}" = docker-rootless-qualification ] && { [ "${HAS_BUILDS}" != true ] || [ "${HAS_PAYLOADS}" != true ]; }; then
+          if { [ "${REQUESTED_PROFILE}" = docker-rootless-qualification ] || [ "${REQUESTED_PROFILE}" = docker-direct-rootless-diagnostic ]; } && { [ "${HAS_BUILDS}" != true ] || [ "${HAS_PAYLOADS}" != true ]; }; then
             echo "Bounded qualification requires both exact image and payload matrices." >&2
             exit 1
           fi
@@ -831,3 +858,41 @@ jobs:
           else
             echo "Required repository checks passed."
           fi
+
+      - name: Check out direct diagnostic validator
+        if: github.event_name == 'workflow_dispatch' && inputs.validation_profile == 'docker-direct-rootless-diagnostic'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install uv for direct diagnostic aggregate
+        if: github.event_name == 'workflow_dispatch' && inputs.validation_profile == 'docker-direct-rootless-diagnostic'
+        uses: ./.github/actions/setup-uv
+        with:
+          version: ${{ env.UV_VERSION }}
+      - name: Download direct diagnostic pair reports
+        if: github.event_name == 'workflow_dispatch' && inputs.validation_profile == 'docker-direct-rootless-diagnostic'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: 'direct-startup-pair-*'
+          path: ${{ runner.temp }}/direct-startup-pairs
+      - name: Validate both nonqualifying direct startup pairs
+        if: github.event_name == 'workflow_dispatch' && inputs.validation_profile == 'docker-direct-rootless-diagnostic'
+        shell: bash
+        env:
+          CANDIDATE: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.docker_direct_startup_aggregate \
+            --directory "${RUNNER_TEMP}/direct-startup-pairs" --candidate "${CANDIDATE}" \
+            --run "${RUN_ID}" --attempt "${RUN_ATTEMPT}" --output "${RUNNER_TEMP}/direct-startup-aggregate.json"
+          echo 'Both instrumented direct-startup pairs completed; qualification:none; no host-denial attribution or rollout authority.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain direct startup diagnostic aggregate
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.validation_profile == 'docker-direct-rootless-diagnostic'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: direct-startup-diagnostic-aggregate
+          path: ${{ runner.temp }}/direct-startup-aggregate.json
+          if-no-files-found: error
+          retention-days: 7

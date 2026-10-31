@@ -31,12 +31,24 @@ runs:
         FOCUSED_RUNTIME: ${{ inputs.focused-runtime }}
         OOM_ACCOUNTING_MODE: ${{ inputs.oom-accounting-mode }}
         IMAGE_NAME: ${{ fromJSON(inputs.entry).name }}
+        IMAGE_ARCH: ${{ fromJSON(inputs.entry).arch }}
         VALIDATION_PROFILE: ${{ github.event.inputs.validation_profile }}
       run: |
         set -euo pipefail
         case "${OOM_ACCOUNTING_MODE}" in qualification|diagnostic) ;; *) exit 1 ;; esac
         case "${FOCUSED_RUNTIME}" in
           none) ;;
+          direct-startup-diagnostic)
+            test "${GITHUB_EVENT_NAME}" = workflow_dispatch &&
+              test "${GITHUB_REF}" = refs/heads/TheRealBecks/issue442-direct-startup-20261031 &&
+              test "${GITHUB_JOB}" = smoke-build &&
+              test "${VALIDATION_PROFILE,,}" = docker-direct-rootless-diagnostic &&
+              test "${OOM_ACCOUNTING_MODE}" = qualification || { echo "Direct diagnostic context refused." >&2; exit 1; }
+            case "${IMAGE_NAME}:${IMAGE_ARCH}" in
+              docker-20.10-rootless:amd64|docker-26-rootless:arm64) ;;
+              *) echo "Direct diagnostic image tuple refused." >&2; exit 1 ;;
+            esac
+            ;;
           witness-diagnostic|mandatory-accounting)
             test "${GITHUB_EVENT_NAME}" = workflow_dispatch &&
               test "${GITHUB_REF}" = refs/heads/TheRealBecks/issue527 && test "${GITHUB_JOB}" = smoke-build &&
@@ -110,12 +122,14 @@ runs:
       env:
         IMAGE_ARCH: ${{ steps.build.outputs.arch }}
         IMAGE_NAME: ${{ steps.build.outputs.image_name }}
+        SELECTED_IMAGE_NAME: ${{ fromJSON(inputs.entry).name }}
+        SELECTED_IMAGE_ARCH: ${{ fromJSON(inputs.entry).arch }}
         IMAGE_PATH: ${{ steps.build.outputs.archive_path }}
         OOM_ACCOUNTING_MODE: ${{ inputs.oom-accounting-mode }}
         FOCUSED_RUNTIME: ${{ inputs.focused-runtime }}
         VALIDATION_PROFILE: ${{ github.event.inputs.validation_profile }}
         TRUSTED_RUNTIME: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-        ACTIVE_USERNS_CONTEXT: ${{ github.repository == 'Strukturpiloten/containers' && runner.os == 'Linux' && runner.environment == 'github-hosted' && (fromJSON(inputs.entry).arch == 'amd64' || fromJSON(inputs.entry).arch == 'arm64') && ((startsWith(github.workflow_ref, 'Strukturpiloten/containers/.github/workflows/ci.yml@') && github.job == 'smoke-build' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository) || (github.event_name == 'merge_group' && github.event.action == 'checks_requested') || (github.event_name == 'workflow_dispatch' && (github.event.inputs.validation_profile == '' || github.event.inputs.validation_profile == 'full' || github.event.inputs.validation_profile == 'docker-rootless-qualification' || (github.event.inputs.validation_profile == 'docker-rootless-diagnostic' && github.ref == 'refs/heads/TheRealBecks/issue527'))))) || (startsWith(github.workflow_ref, 'Strukturpiloten/containers/.github/workflows/publish-images.yml@') && github.job == 'build' && ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.deleted == false) || (github.event_name == 'schedule' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'))) }}
+        ACTIVE_USERNS_CONTEXT: ${{ github.repository == 'Strukturpiloten/containers' && runner.os == 'Linux' && runner.environment == 'github-hosted' && (fromJSON(inputs.entry).arch == 'amd64' || fromJSON(inputs.entry).arch == 'arm64') && ((startsWith(github.workflow_ref, 'Strukturpiloten/containers/.github/workflows/ci.yml@') && github.job == 'smoke-build' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository) || (github.event_name == 'merge_group' && github.event.action == 'checks_requested') || (github.event_name == 'workflow_dispatch' && (github.event.inputs.validation_profile == '' || github.event.inputs.validation_profile == 'full' || github.event.inputs.validation_profile == 'docker-rootless-qualification' || (github.event.inputs.validation_profile == 'docker-rootless-diagnostic' && github.ref == 'refs/heads/TheRealBecks/issue527') || (github.event.inputs.validation_profile == 'docker-direct-rootless-diagnostic' && github.ref == 'refs/heads/TheRealBecks/issue442-direct-startup-20261031'))))) || (startsWith(github.workflow_ref, 'Strukturpiloten/containers/.github/workflows/publish-images.yml@') && github.job == 'build' && ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.deleted == false) || (github.event_name == 'schedule' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'))) }}
         ACTIVE_CANDIDATE: ${{ github.sha }}
         ACTIVE_WORKFLOW: ${{ github.workflow_sha }}
         ACTIVE_RUN: ${{ github.run_id }}
@@ -131,12 +145,18 @@ runs:
 
           CONSUMER = 'containers-ubuntu26-userns-active'
           SOURCE_MANIFEST_SHA256 = '7f6693f40311617e4854f8c6a35cbe13b3afdd3d7a8bef58978397ba1178dbd8'
-          ADMISSION_SCHEMA = 4
+          ADMISSION_SCHEMA = 5
           MAINTAINED_PROFILES = ('full', 'docker-rootless-qualification')
-          ADMISSION_REVISION = 'containers527-maintained-callers-v1'
+          ADMISSION_REVISION = 'containers442-direct-diagnostic-v1'
+          DIRECT_PROFILE = 'docker-direct-rootless-diagnostic'
+          DIRECT_PURPOSE = 'direct-startup-diagnostic'
+          DIRECT_REF = 'refs/heads/TheRealBecks/issue442-direct-startup-20261031'
+          DIRECT_ROWS = (('docker-20.10-rootless', 'amd64'), ('docker-26-rootless', 'arm64'))
+          DIRECT_CONTEXT = {'repository': 'Strukturpiloten/containers', 'workflow': '.github/workflows/ci.yml', 'event': 'workflow_dispatch', 'ref': 'refs/heads/TheRealBecks/issue442-direct-startup-20261031', 'job': 'smoke-build', 'validationProfile': 'docker-direct-rootless-diagnostic', 'purpose': 'direct-startup-diagnostic', 'qualification': 'none', 'rows': [{'image': 'docker-20.10-rootless', 'architecture': 'amd64'}, {'image': 'docker-26-rootless', 'architecture': 'arm64'}], 'diagnosticVariant': 'direct-uid1000-profiled-b', 'launcher': 'direct', 'expectedUid': '1000', 'diagnosticArm': 'B'}
+          DIRECT_FIELDS = ('diagnosticVariant', 'launcher', 'expectedUid', 'diagnosticArm')
           EXPERIMENTAL_PURPOSE = 'experimental-candidate'
           MAINTAINED_PURPOSE = 'maintained-prerequisite'
-          PREREQUISITE_SCHEMA = 3
+          PREREQUISITE_SCHEMA = 4
           REPOSITORY = 'Strukturpiloten/containers'
           CI_WORKFLOW = '.github/workflows/ci.yml'
           PUBLICATION_WORKFLOW = '.github/workflows/publish-images.yml'
@@ -147,6 +167,7 @@ runs:
           MAINTAINED_CALLERS = {'ci-pr': {'workflow': '.github/workflows/ci.yml', 'event': 'pull_request', 'job': 'smoke-build', 'refPolicy': 'pr-merge', 'selector': 'automatic-full'}, 'ci-merge-group': {'workflow': '.github/workflows/ci.yml', 'event': 'merge_group', 'job': 'smoke-build', 'refPolicy': 'queue-head', 'selector': 'automatic-full'}, 'ci-manual': {'workflow': '.github/workflows/ci.yml', 'event': 'workflow_dispatch', 'job': 'smoke-build', 'refPolicy': 'event-selected-manual-ref', 'selector': 'manual-ci'}, 'publication-push': {'workflow': '.github/workflows/publish-images.yml', 'event': 'push', 'job': 'build', 'refPolicy': 'main-push', 'selector': 'publication-default'}, 'publication-schedule': {'workflow': '.github/workflows/publish-images.yml', 'event': 'schedule', 'job': 'build', 'refPolicy': 'main-schedule', 'selector': 'publication-default'}, 'publication-manual': {'workflow': '.github/workflows/publish-images.yml', 'event': 'workflow_dispatch', 'job': 'build', 'refPolicy': 'event-selected-manual-ref', 'selector': 'publication-default'}}
           CLOSED_FILES = (
               'scripts/__init__.py', 'scripts/docker_userns_active.py', 'scripts/docker_userns_qualification.py',
+              'scripts/docker_direct_startup_contract.py', 'scripts/docker_direct_startup_gate.py', 'scripts/docker_direct_startup_active.py', 'scripts/docker_direct_startup_observations.py',
               'scripts/docker_runner_security.py', 'scripts/docker_userns_custody_child.py',
               'scripts/docker_userns_policy_source.py', 'scripts/docker_userns_custody.py',
               'scripts/docker_userns_hosted.py', 'scripts/docker_userns_dryparse.py',
@@ -179,7 +200,7 @@ runs:
                   raise ValueError('active-root-bootstrap-refused')
 
           def validation_profile(value):
-              require(type(value) is str and value.isascii() and value.lower() in {'', *MAINTAINED_PROFILES, 'docker-rootless-diagnostic'})
+              require(type(value) is str and value.isascii() and value.lower() in {'', *MAINTAINED_PROFILES, 'docker-rootless-diagnostic', DIRECT_PROFILE})
               return value.lower() or 'full'
 
           def selected_manual_ref(value: object) -> str:
@@ -202,6 +223,12 @@ runs:
               focused = inputs.get("focused_runtime", "witness-diagnostic")
               if type(focused) is not str or focused not in {"witness-diagnostic", "mandatory-accounting"}:
                   require(False)
+              if canonical == DIRECT_PROFILE:
+                  require(not (set(inputs) - {"validation_profile", "focused_runtime"})
+                          and focused == "witness-diagnostic" and type(event.get("repository")) is dict
+                          and event["repository"].get("full_name") == REPOSITORY
+                          and event.get("workflow") == CI_WORKFLOW and event.get("ref") == DIRECT_REF)
+                  return DIRECT_PURPOSE, DIRECT_REF
               if canonical in MAINTAINED_PROFILES:
                   if (
                       "inputs" not in event
@@ -446,7 +473,7 @@ runs:
               require(type(value['schemaVersion']) is int and value['schemaVersion'] == PREREQUISITE_SCHEMA and value['consumer'] == CONSUMER)
               context = exact(value['context'], ('candidate', 'workflow', 'checkout', 'repository', 'event', 'ref', 'job',
                   'run', 'attempt', 'architecture', 'image', 'imageOS', 'imageVersion', 'imageVersionKind',
-                  'validationProfile', 'validationProfileRequested', 'workflowRef', 'purpose', 'admissionRevision', 'admissionSha256', *CALLER_FACT_KEYS))
+                  'validationProfile', 'validationProfileRequested', 'workflowRef', 'purpose', 'admissionRevision', 'admissionSha256', *CALLER_FACT_KEYS, *(DIRECT_FIELDS if trusted['purpose'] == DIRECT_PURPOSE else ())))
               require(type(value['objects']) is list and 1 <= len(value['objects']) <= 48)
               objects, used, total = {}, set(), 0
               for item in value['objects']:
@@ -500,23 +527,30 @@ runs:
               admission = json.loads(admission_raw, object_pairs_hook=unique)
               exact(admission, ('schemaVersion', 'consumer', 'purpose', 'qualification', 'sourceManifestSha256',
                                'context', 'cohorts', 'architectures', 'policyNamespace', 'parserExecutionNamespace',
-                               'review', 'revision', 'maintainedContext', 'maintainedArchitectures', 'maintainedCallers'))
+                               'review', 'revision', 'maintainedContext', 'maintainedArchitectures', 'maintainedCallers', 'directContext'))
               require(type(admission['schemaVersion']) is int and admission['schemaVersion'] == ADMISSION_SCHEMA
                       and admission['consumer'] == CONSUMER and admission['purpose'] == 'scoped-prerequisite-attempt'
                       and admission['qualification'] == 'none' and admission['revision'] == ADMISSION_REVISION)
               require(admission['maintainedCallers'] == MAINTAINED_CALLERS)
-              policy = admission['maintainedContext'] if trusted['purpose'] == MAINTAINED_PURPOSE else admission['context']
-              require(policy['repository'] == trusted['repository'] and policy['image'] == trusted['image'])
-              if trusted['purpose'] == MAINTAINED_PURPOSE:
-                  exact(policy, ('repository', 'image', 'imageOS', 'imageVersion', 'validationProfiles'))
-                  require(policy['validationProfiles'] == list(MAINTAINED_PROFILES) and trusted['validationProfile'] in policy['validationProfiles'])
-                  caller = admission['maintainedCallers'][trusted['caller']]
-                  require((caller['workflow'], caller['event'], caller['job']) == (trusted['workflowPath'], trusted['event'], trusted['job']))
+              require(admission['directContext'] == DIRECT_CONTEXT)
+              if trusted['purpose'] == DIRECT_PURPOSE:
+                  require(trusted['caller'] == 'ci-manual' and trusted['workflowPath'] == CI_WORKFLOW
+                          and (trusted['image'], trusted['architecture']) in DIRECT_ROWS
+                          and all(trusted[key] == DIRECT_CONTEXT[key] for key in
+                                  ('repository', 'event', 'ref', 'job', 'validationProfile', *DIRECT_FIELDS)))
               else:
-                  exact(policy, ('repository', 'workflow', 'event', 'ref', 'job', 'image', 'imageOS', 'imageVersion', 'validationProfile'))
-                  require(trusted['caller'] == 'ci-manual' and policy['workflow'] == trusted['workflowPath'] == CI_WORKFLOW
-                          and policy['event'] == trusted['event'] and policy['job'] == trusted['job']
-                          and policy['ref'] == trusted['ref'] and policy['validationProfile'] == trusted['validationProfile'] == 'docker-rootless-diagnostic')
+                  policy = admission['maintainedContext'] if trusted['purpose'] == MAINTAINED_PURPOSE else admission['context']
+                  require(policy['repository'] == trusted['repository'] and policy['image'] == trusted['image'])
+                  if trusted['purpose'] == MAINTAINED_PURPOSE:
+                      exact(policy, ('repository', 'image', 'imageOS', 'imageVersion', 'validationProfiles'))
+                      require(policy['validationProfiles'] == list(MAINTAINED_PROFILES) and trusted['validationProfile'] in policy['validationProfiles'])
+                      caller = admission['maintainedCallers'][trusted['caller']]
+                      require((caller['workflow'], caller['event'], caller['job']) == (trusted['workflowPath'], trusted['event'], trusted['job']))
+                  else:
+                      exact(policy, ('repository', 'workflow', 'event', 'ref', 'job', 'image', 'imageOS', 'imageVersion', 'validationProfile'))
+                      require(trusted['caller'] == 'ci-manual' and policy['workflow'] == trusted['workflowPath'] == CI_WORKFLOW
+                              and policy['event'] == trusted['event'] and policy['job'] == trusted['job']
+                              and policy['ref'] == trusted['ref'] and policy['validationProfile'] == trusted['validationProfile'] == 'docker-rootless-diagnostic')
               require(admission['maintainedArchitectures'] == {'amd64': MAINTAINED_PURPOSE, 'arm64': MAINTAINED_PURPOSE})
               require(type(admission['cohorts']) is dict and set(admission['cohorts']) == {'amd64', 'arm64'})
               trusted['admissionRevision'] = admission['revision']
@@ -549,10 +583,10 @@ runs:
                   os.close(descriptor)
 
           def main():
-              require(os.getuid() == os.geteuid() == 0 and len(sys.argv) == 17)
+              require(os.getuid() == os.geteuid() == 0 and len(sys.argv) == 19)
               require(sys.implementation.name == 'cpython' and tuple(sys.version_info) == (3, 14, 4, 'final', 0)
                   and sys.flags.isolated == 1 and sys.flags.no_site == 1 and sys.dont_write_bytecode)
-              handoff, candidate, workflow, checkout, run, attempt, architecture, image_version, uid, gid, deadline, repository, event_name, event_ref, workflow_ref, job = sys.argv[1:]
+              handoff, candidate, workflow, checkout, run, attempt, architecture, image_version, uid, gid, deadline, repository, event_name, event_ref, workflow_ref, job, image, arm = sys.argv[1:]
               uid, gid, deadline = int(uid), int(gid), int(deadline)
               require(uid > 0 and gid > 0 and time.monotonic_ns() < deadline <= time.monotonic_ns() + 1800_000_000_000)
               require(re.fullmatch(r'[0-9a-f]{40}', candidate) and candidate == workflow == checkout)
@@ -563,8 +597,16 @@ runs:
                           'job': job, 'candidate': candidate}
               DIAGNOSTIC['phase'] = 'bootstrap-context'
               derived = caller_context(event, identity)
-              trusted = {'candidate': candidate, 'workflow': workflow, 'checkout': checkout, **derived,
-                  'run': run, 'attempt': attempt, 'architecture': architecture, 'image': 'docker-29-conformance-rootless',
+              extra = {}
+              if derived['purpose'] == DIRECT_PURPOSE:
+                  require((image, architecture) in DIRECT_ROWS and arm == 'B')
+                  require(deadline <= time.monotonic_ns() + 900_000_000_000)
+                  extra = {key: DIRECT_CONTEXT[key] for key in DIRECT_FIELDS}
+              else:
+                  require(image == 'docker-29-conformance-rootless' and arm == '')
+
+              trusted = {'candidate': candidate, 'workflow': workflow, 'checkout': checkout, **derived, **extra,
+                  'run': run, 'attempt': attempt, 'architecture': architecture, 'image': image,
                   'imageOS': {'amd64': 'ubuntu26', 'arm64': 'ubuntu26-arm64'}[architecture], 'imageVersion': image_version,
                   'imageVersionKind': 'workflow-reported-provenance-not-vm-attestation'}
               DIAGNOSTIC['context'] = {key: trusted[key] for key in ('candidate', 'run', 'attempt', 'job', 'image', 'architecture')}
@@ -604,6 +646,9 @@ runs:
                   raise SystemExit(1) from None
       run: |
         set -euo pipefail
+        test "${IMAGE_NAME}" = "${SELECTED_IMAGE_NAME}" && test "${IMAGE_ARCH}" = "${SELECTED_IMAGE_ARCH}" || {
+          echo "Selected runtime image tuple differs from build output." >&2; exit 1;
+        }
 
         mkdir -p "${RUNNER_TEMP}/runtime-evidence"
         runtime_args=()
@@ -613,6 +658,17 @@ runs:
         esac
         case "${FOCUSED_RUNTIME}" in
           none) ;;
+          direct-startup-diagnostic)
+            test "${GITHUB_EVENT_NAME}" = workflow_dispatch &&
+              test "${GITHUB_REF}" = refs/heads/TheRealBecks/issue442-direct-startup-20261031 &&
+              test "${GITHUB_JOB}" = smoke-build &&
+              test "${VALIDATION_PROFILE,,}" = docker-direct-rootless-diagnostic &&
+              test "${OOM_ACCOUNTING_MODE}" = qualification || { echo "Direct diagnostic context refused." >&2; exit 1; }
+            case "${IMAGE_NAME}:${IMAGE_ARCH}" in
+              docker-20.10-rootless:amd64|docker-26-rootless:arm64) ;;
+              *) echo "Direct diagnostic image tuple refused." >&2; exit 1 ;;
+            esac
+            ;;
           witness-diagnostic|mandatory-accounting)
             test "${VALIDATION_PROFILE,,}" = docker-rootless-diagnostic &&
               test "${ACTIVE_USERNS_CONTEXT}" = true && test "${IMAGE_NAME}" = docker-29-conformance-rootless &&
@@ -630,16 +686,29 @@ runs:
           runtime_args+=(--allow-privileged)
         fi
         active_stage=""
-        if [ "${ACTIVE_USERNS_CONTEXT}" = "true" ] && [ "${IMAGE_NAME}" = "docker-29-conformance-rootless" ]; then
+        direct_started_ns=""
+        direct_deadline_ns=""
+        if [ "${FOCUSED_RUNTIME}" = direct-startup-diagnostic ]; then
+          direct_started_ns="$(/usr/bin/python3 -I -B -S -c 'import time;print(time.monotonic_ns())')"
+          direct_deadline_ns="$((direct_started_ns + 900000000000))"
+          runtime_args+=(--direct-startup-diagnostic --direct-started-ns "${direct_started_ns}" --direct-deadline-ns "${direct_deadline_ns}")
+        fi
+        if [ "${ACTIVE_USERNS_CONTEXT}" = "true" ] && { [ "${IMAGE_NAME}" = "docker-29-conformance-rootless" ] || [ "${FOCUSED_RUNTIME}" = direct-startup-diagnostic ]; }; then
           readonly FIXED_ACTIVE_ROOT_BOOTSTRAP
           active_checkout="$(git rev-parse HEAD)"
           test "${ACTIVE_CANDIDATE}" = "${ACTIVE_WORKFLOW}"
           test "${ACTIVE_CANDIDATE}" = "${active_checkout}"
+          active_arm=""
+        if [ "${FOCUSED_RUNTIME}" = direct-startup-diagnostic ]; then
+          active_deadline="${direct_deadline_ns}"
+          active_arm=B
+        else
           active_deadline="$(/usr/bin/python3 -I -B -S -c 'import time;print(time.monotonic_ns()+1800000000000)')"
+        fi
           active_handoff="${RUNNER_TEMP}/docker-userns-active-${IMAGE_ARCH}.json"
           active_failure="${RUNNER_TEMP}/runtime-evidence/${IMAGE_NAME}-${IMAGE_ARCH}-userns-failure.json"
-          /usr/bin/python3 -I -B -S -c 'import json,sys; value={"schemaVersion":1,"kind":"active-qualification-failure","actor":"workflow","operation":"producer","phase":"producer-launch","reason":"execution-unverified","cleanupAuthority":False,"context":{"candidate":sys.argv[2],"run":sys.argv[3],"attempt":sys.argv[4],"job":sys.argv[6],"image":"docker-29-conformance-rootless","architecture":sys.argv[5],"phase":None}};open(sys.argv[1],"x").write(json.dumps(value)+"\n")' \
-            "${active_failure}" "${ACTIVE_CANDIDATE}" "${ACTIVE_RUN}" "${ACTIVE_ATTEMPT}" "${IMAGE_ARCH}" "${ACTIVE_JOB}"
+          /usr/bin/python3 -I -B -S -c 'import json,sys; value={"schemaVersion":1,"kind":"active-qualification-failure","actor":"workflow","operation":"producer","phase":"producer-launch","reason":"execution-unverified","cleanupAuthority":False,"context":{"candidate":sys.argv[2],"run":sys.argv[3],"attempt":sys.argv[4],"job":sys.argv[6],"image":sys.argv[7],"architecture":sys.argv[5],"phase":None}};open(sys.argv[1],"x").write(json.dumps(value)+"\n")' \
+            "${active_failure}" "${ACTIVE_CANDIDATE}" "${ACTIVE_RUN}" "${ACTIVE_ATTEMPT}" "${IMAGE_ARCH}" "${ACTIVE_JOB}" "${IMAGE_NAME}"
           uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.docker_userns_active_bootstrap_bundle \
             --architecture "${IMAGE_ARCH}" --output "${active_handoff}" --failure-output "${active_failure}"
           /usr/bin/python3 -I -B -S -c 'import json,sys; p=sys.argv[1];value=json.load(open(p));value.update(actor="workflow",operation="bootstrap",phase="bootstrap-launch",reason="execution-unverified");open(p,"w").write(json.dumps(value)+"\n")' "${active_failure}"
@@ -648,7 +717,7 @@ runs:
             "${active_handoff}" "${ACTIVE_CANDIDATE}" "${ACTIVE_WORKFLOW}" "${active_checkout}" \
             "${ACTIVE_RUN}" "${ACTIVE_ATTEMPT}" "${IMAGE_ARCH}" "${ImageVersion}" \
             "$(id -u)" "$(id -g)" "${active_deadline}" \
-            "${ACTIVE_REPOSITORY}" "${ACTIVE_EVENT}" "${ACTIVE_REF}" "${ACTIVE_WORKFLOW_REF}" "${ACTIVE_JOB}")"; then
+            "${ACTIVE_REPOSITORY}" "${ACTIVE_EVENT}" "${ACTIVE_REF}" "${ACTIVE_WORKFLOW_REF}" "${ACTIVE_JOB}" "${IMAGE_NAME}" "${active_arm}")"; then
             :
           else
             printf '%s' "${active_stage}" | uv run --frozen --python "${PYTHON_VERSION}" python -c 'import json,sys;from pathlib import Path;from scripts.docker_userns_active import valid_failure;raw=sys.stdin.buffer.read(8193);value=json.loads(raw) if len(raw)<=8192 and raw else None;sys.exit(1) if not valid_failure(value) or value["actor"]!="root-bootstrap" else Path(sys.argv[1]).write_bytes(raw)' "${active_failure}" || true
@@ -663,7 +732,23 @@ runs:
             if [ -n "${active_stage}" ] && ! sudo -n /usr/bin/timeout --signal=TERM --kill-after=1s 20s \
               /usr/bin/python3.14 -I -B -S "${active_stage}/scripts/docker_userns_active.py" \
               dispose-stage "${active_stage}"; then
-              active_status=1
+              if [ "${FOCUSED_RUNTIME}" = direct-startup-diagnostic ]; then
+              if /usr/bin/python3 -I -B -S - "${RUNNER_TEMP}/runtime-evidence/${IMAGE_NAME}-${IMAGE_ARCH}-cleanup-failure.json" "${active_status}" <<'PY_CLEANUP'
+        import json, sys
+        from pathlib import Path
+        try:
+            original = int(sys.argv[2])
+            if not 0 <= original <= 255:
+                raise ValueError
+            value = {"schemaVersion": 1, "consumer": "containers-direct-rootless-startup-diagnostic", "purpose": "direct-startup-diagnostic", "qualification": "none", "status": "failed", "reason": "stage-disposal-unverified", "originalExitCode": original}
+            with Path(sys.argv[1]).open("x") as output:
+                output.write(json.dumps(value) + "\n")
+        except (OSError, ValueError):
+            raise SystemExit(1) from None
+        PY_CLEANUP
+              then :; fi
+            fi
+              if [ "${active_status}" -eq 0 ]; then active_status=1; fi
             fi
             exit "${active_status}"
           }
@@ -704,10 +789,53 @@ runs:
         require_ordinary_runtime_authority(record, profile, configuration)
         PY_AUTHORITY
           active_stage=""
+        elif [ "${FOCUSED_RUNTIME}" = direct-startup-diagnostic ]; then
+          uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.docker_direct_startup_aggregate \
+            --pair "${RUNNER_TEMP}/runtime-evidence/${IMAGE_NAME}-${IMAGE_ARCH}.json" \
+            --image "${SELECTED_IMAGE_NAME}" --architecture "${SELECTED_IMAGE_ARCH}" \
+            --candidate "${ACTIVE_CANDIDATE}" --run "${ACTIVE_RUN}" --attempt "${ACTIVE_ATTEMPT}" \
+            --output "${RUNNER_TEMP}/direct-pair-check-${IMAGE_ARCH}.json"
+          active_stage=""
         fi
 
+    - name: Retain a closed direct diagnostic fallback when no pair was produced
+      id: direct-report-retention
+      if: always() && inputs.focused-runtime == 'direct-startup-diagnostic'
+      shell: bash
+      env:
+        IMAGE_NAME: ${{ fromJSON(inputs.entry).name }}
+        IMAGE_ARCH: ${{ fromJSON(inputs.entry).arch }}
+      run: |
+        set -euo pipefail
+        mkdir -m 700 "${RUNNER_TEMP}/direct-startup-pair-export"
+        uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.docker_direct_startup_aggregate \
+          --retain-pair "${RUNNER_TEMP}/runtime-evidence/${IMAGE_NAME}-${IMAGE_ARCH}.json" \
+          --image "${IMAGE_NAME}" --architecture "${IMAGE_ARCH}" \
+          --candidate "${GITHUB_SHA}" --run "${GITHUB_RUN_ID}" --attempt "${GITHUB_RUN_ATTEMPT}" \
+          --output "${RUNNER_TEMP}/direct-startup-pair-export/${IMAGE_NAME}-${IMAGE_ARCH}.json"
+    - name: Upload one closed direct diagnostic pair report
+      if: always() && inputs.focused-runtime == 'direct-startup-diagnostic' && steps.direct-report-retention.outcome == 'success'
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: direct-startup-pair-${{ fromJSON(inputs.entry).name }}-${{ fromJSON(inputs.entry).arch }}
+        path: ${{ runner.temp }}/direct-startup-pair-export/${{ fromJSON(inputs.entry).name }}-${{ fromJSON(inputs.entry).arch }}.json
+        if-no-files-found: error
+        retention-days: 7
+    - name: Upload separate nonqualifying direct host observations
+      if: always() && inputs.focused-runtime == 'direct-startup-diagnostic' && steps.build.outcome == 'success'
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: direct-startup-host-${{ steps.build.outputs.image_name }}-${{ steps.build.outputs.arch }}
+        path: |
+          ${{ runner.temp }}/runtime-evidence/${{ steps.build.outputs.image_name }}-${{ steps.build.outputs.arch }}-direct-host-before.json
+          ${{ runner.temp }}/runtime-evidence/${{ steps.build.outputs.image_name }}-${{ steps.build.outputs.arch }}-direct-host-between.json
+          ${{ runner.temp }}/runtime-evidence/${{ steps.build.outputs.image_name }}-${{ steps.build.outputs.arch }}-direct-host-after.json
+          ${{ runner.temp }}/runtime-evidence/${{ steps.build.outputs.image_name }}-${{ steps.build.outputs.arch }}-userns-failure.json
+          ${{ runner.temp }}/runtime-evidence/${{ steps.build.outputs.image_name }}-${{ steps.build.outputs.arch }}-cleanup-failure.json
+        if-no-files-found: error
+        retention-days: 7
     - name: Upload runtime evidence
-      if: always() && steps.build.outcome == 'success'
+      if: always() && inputs.focused-runtime != 'direct-startup-diagnostic' && steps.build.outcome == 'success'
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
         name: ${{ steps.build.outputs.image_name }}-${{ steps.build.outputs.arch }}-runtime-evidence

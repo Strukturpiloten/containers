@@ -28,6 +28,7 @@ from scripts.runtime_docker_diagnostics import qualify_gnu_timeout
 from scripts.runtime_oom_diagnostics import MAX_BYTES, SNAPSHOT_SECONDS, DockerOomLedger, _docker_hash, _parent_validate
 
 if TYPE_CHECKING:
+    from scripts.docker_direct_startup_client import GateClient
     from scripts.docker_userns_active_client import ActiveClient
     from scripts.runtime_tests import RuntimeContext
 
@@ -64,6 +65,7 @@ class DockerBackend:
         self.watchdog: str | None = None
         self.diagnostic_reader_pending = False
         self.scoped_profile: ActiveClient | None = None
+        self.direct_gate: GateClient | None = None
         self._gnu_timeout_provider: tuple[str, str, str] | None = None
 
     @staticmethod
@@ -642,11 +644,11 @@ class DockerBackend:
         self.scoped_profile.prepare()
 
     def scoped_run_options(self, options: tuple[str, ...]) -> tuple[str, ...]:
-        """Qualify only the one owned detached systemd guest in this phase."""
+        """Qualify only the one owned detached admitted guest in this phase."""
         if self.scoped_profile is None:
             return options
         if any("apparmor=" in option for option in options):
-            raise DockerBackendError("systemd guest cannot override the qualified scoped profile")
+            raise DockerBackendError("admitted guest cannot override the qualified scoped profile")
         return (*options, *self.scoped_profile.create_options())
 
     @staticmethod
@@ -864,7 +866,7 @@ class DockerBackend:
 
     def _cleanup_resources(self, ctx: RuntimeContext) -> list[str]:
         """Close scoped custody before touching endpoint dependencies."""
-        if self.scoped_profile is None:
+        if self.scoped_profile is None and self.direct_gate is None:
             return self._ordinary_resource_cleanup(ctx)
         failures: list[str] = []
         if self.ready:
@@ -872,6 +874,11 @@ class DockerBackend:
                 self._remove_containers(ctx)
             except Exception as error:  # noqa: BLE001 - still attempt the independently owned scoped cleanup.
                 failures.append(str(error))
+            if self.direct_gate is not None and self.direct_gate.arm == "A":
+                try:
+                    self.direct_gate.close_control()
+                except Exception as error:
+                    raise DockerBackendError("direct gate cleanup unverified; retaining private runtime") from error
             if self.scoped_profile is not None:
                 try:
                     self.scoped_profile.close()

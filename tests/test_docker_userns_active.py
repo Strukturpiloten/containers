@@ -116,7 +116,7 @@ class SyntheticProof:
 
     def value(self) -> dict[str, object]:
         return {
-            "schemaVersion": 3,
+            "schemaVersion": 4,
             "consumer": active.CONSUMER,
             "context": self.context,
             "objects": list(self.objects.values()),
@@ -346,7 +346,7 @@ class NamespaceAndActor(unittest.TestCase):
         for raw in labels:
             with self.subTest(raw=raw), tempfile.TemporaryDirectory() as temporary:
                 port = active.RootPort.__new__(active.RootPort)
-                port.binding, port.modules, port.admission = binding(), SimpleNamespace(), {}
+                port.binding, port.modules, port.admission = binding(), SimpleNamespace(qualification=qualification), {}
                 port.store = SimpleNamespace(path=Path(temporary))
                 port.record = {"profileName": name}
                 port.daemon, port.commit = Mock(), Mock()
@@ -2194,6 +2194,8 @@ class ARMReportedProvenance(unittest.TestCase):
                         environment["GITHUB_REF"],
                         environment["GITHUB_WORKFLOW_REF"],
                         environment["GITHUB_JOB"],
+                        "docker-29-conformance-rootless",
+                        "",
                     ],
                     implementation=SimpleNamespace(name="cpython"),
                     version_info=(3, 14, 4, "final", 0),
@@ -2949,6 +2951,8 @@ class MaintainedBootstrapContract(unittest.TestCase):
                 proof.context["ref"],
                 proof.context["workflowRef"],
                 proof.context["job"],
+                proof.context["image"],
+                "B" if proof.context["purpose"] == "direct-startup-diagnostic" else "",
             ],
             implementation=SimpleNamespace(name="cpython"),
             version_info=(3, 14, 4, "final", 0),
@@ -3151,7 +3155,7 @@ class MaintainedRootBindingContract(unittest.TestCase):
         )
         for fault, native in mutations:
             record = {
-                "schemaVersion": 3,
+                "schemaVersion": 4,
                 "binding": asdict(native),
                 "bindingSha256": native.digest(),
                 "bootstrapSha256": active.digest(b"bootstrap"),

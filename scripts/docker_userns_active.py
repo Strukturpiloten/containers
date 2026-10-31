@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from scripts.docker_userns_qualification import NativeBinding, State
 
 CONSUMER = "containers-ubuntu26-userns-active"
-PREREQUISITE_SCHEMA = 3
+PREREQUISITE_SCHEMA = 4
 ROOT = Path("/run")
 PREFIX = "containers-userns-active."
 MAX_STATE = 32768
@@ -58,6 +58,10 @@ FILES = (
     "scripts/__init__.py",
     "scripts/docker_userns_active.py",
     "scripts/docker_userns_qualification.py",
+    "scripts/docker_direct_startup_contract.py",
+    "scripts/docker_direct_startup_gate.py",
+    "scripts/docker_direct_startup_active.py",
+    "scripts/docker_direct_startup_observations.py",
     "scripts/docker_runner_security.py",
     "scripts/docker_userns_custody_child.py",
     "scripts/docker_userns_policy_source.py",
@@ -197,6 +201,14 @@ FAILURE_OPERATIONS = frozenset(
         "producer",
         "bootstrap",
         "observe-arm",
+        "direct-control-prepare",
+        "direct-control-create",
+        "direct-gate-prepare",
+        "direct-control-bind",
+        "direct-preflight",
+        "direct-observe",
+        "direct-release",
+        "direct-control-close",
     }
 )
 FAILURE_CONTEXT = ("candidate", "run", "attempt", "job", "image", "architecture", "phase")
@@ -299,10 +311,24 @@ def failure_context(value: dict[str, Any], phase: str | None = None) -> dict[str
         and all(
             type(context[key]) is str and re.fullmatch(r"[1-9][0-9]{0,19}", context[key]) for key in ("run", "attempt")
         )
+        and type(context["job"]) is str
         and context["job"] in {"smoke-build", "build"}
-        and context["image"] == "docker-29-conformance-rootless"
-        and context["architecture"] in {"amd64", "arm64"}
-        and phase in {None, "clean-control", "enforcement"}
+        and type(context["image"]) is str
+        and type(context["architecture"]) is str
+        and (phase is None or type(phase) is str)
+        and (
+            (
+                context["image"] == "docker-29-conformance-rootless"
+                and context["architecture"] in {"amd64", "arm64"}
+                and phase in {None, "clean-control", "enforcement"}
+            )
+            or (
+                (context["image"], context["architecture"])
+                in {("docker-20.10-rootless", "amd64"), ("docker-26-rootless", "arm64")}
+                and context["job"] == "smoke-build"
+                and phase in {None, "direct-control", "direct-profiled"}
+            )
+        )
     ):
         return None
     return context
@@ -576,6 +602,7 @@ def verify_stage(stage: Path) -> dict[str, Any]:
 def dependencies(stage: Path) -> SimpleNamespace:
     """Import only after immutable root staging has been independently verified."""
     sys.path.insert(0, str(stage))
+    from scripts import docker_direct_startup_active as gate  # noqa: PLC0415
     from scripts import docker_userns_custody_child as child  # noqa: PLC0415
     from scripts import docker_userns_dryparse as compiler  # noqa: PLC0415
     from scripts import docker_userns_hosted as host  # noqa: PLC0415
@@ -584,7 +611,13 @@ def dependencies(stage: Path) -> SimpleNamespace:
     from scripts import runtime_docker_diagnostics as capture  # noqa: PLC0415
 
     return SimpleNamespace(
-        child=child, compiler=compiler, host=host, source=source, qualification=qualification, capture=capture
+        child=child,
+        compiler=compiler,
+        host=host,
+        source=source,
+        qualification=qualification,
+        capture=capture,
+        gate=gate,
     )
 
 
@@ -844,7 +877,7 @@ def compile_worker(bootstrap: dict[str, Any], modules: SimpleNamespace, director
 
 def proc_bytes(directory: int, leaf: str, limit: int = 8192) -> bytes:
     """Read a fixed leaf through one held proc directory, with cap-plus-one enforcement."""
-    require(leaf in {"stat", "status", "cgroup", "cmdline", "attr/apparmor/current"})
+    require(leaf in {"stat", "status", "cgroup", "cmdline", "attr/apparmor/current", "uid_map", "gid_map"})
     descriptor = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory)
     try:
         require(stat.S_ISREG(os.fstat(descriptor).st_mode))
@@ -856,7 +889,7 @@ def proc_bytes(directory: int, leaf: str, limit: int = 8192) -> bytes:
 
 
 def task_snapshot(directory: int, pid: int, uid: int = 0) -> dict[str, Any]:
-    """Bind a live root main task without splitting its parenthesized comm incorrectly."""
+    """Bind a live main task without splitting its parenthesized comm incorrectly."""
     filesystem_magic(directory, 0x9FA0)
     raw = proc_bytes(directory, "stat")
     opening, closing = raw.find(b"("), raw.rfind(b")")
@@ -937,7 +970,7 @@ class RootPort:
     ) -> None:
         """Consume only an already authenticated stage and phase record."""
         self.stage, self.bootstrap, self.modules, self.store, self.record = stage, bootstrap, modules, store, record
-        self.binding = modules.qualification.NativeBinding(**record["binding"])
+        self.binding = modules.qualification.native_binding(record["binding"])
         self.binding.validate()
         raw = root_bytes(stage / ".github/docker-userns-active-admission.json")
         self.admission = modules.qualification.admission_document(raw)
@@ -982,11 +1015,17 @@ class RootPort:
 
     def query(self, arguments: list[str], *, pass_fds: tuple[int, ...] = ()) -> bytes:
         """Reuse the owned query group, original deadline and affirmative drain protocol."""
+        return RootPort._owned_query(self, arguments, self.modules.capture._query_capture, pass_fds=pass_fds)  # noqa: SLF001 - preserve reviewed ownership/drain semantics.
+
+    def _owned_query(
+        self, arguments: list[str], capture: Callable[..., dict[str, Any]], *, pass_fds: tuple[int, ...] = ()
+    ) -> bytes:
+        """Share durable reader ownership between ordinary queries and owned log streams."""
         end = self.binding.deadline_ns if self.cleanup else self.work_until
         check(end)
         self.record["readerPending"] = True
         self.commit()
-        protocol = self.modules.capture._query_capture(  # noqa: SLF001 - preserve reviewed ownership/drain semantics.
+        protocol = capture(
             ["/usr/bin/env", "-i", "PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C", *arguments],
             end / 1_000_000_000,
             self.provider,
@@ -1002,25 +1041,34 @@ class RootPort:
         return raw
 
     def docker(self, *arguments: str) -> bytes:
-        """Use only the exact private socket and a root-owned empty CLI configuration."""
+        """Use only the exact private socket and root-owned empty CLI configuration."""
+        return self.query(self.docker_arguments(*arguments))
+
+    def docker_logs(self, container: str) -> bytes:
+        """Capture both owned log streams with one overflow sentinel and unchanged bounds."""
+        require(type(container) is str and re.fullmatch(r"[0-9a-f]{64}", container) is not None)
+        return RootPort._owned_query(
+            self, self.docker_arguments("logs", "--tail", "65", container), self.modules.capture.capture_owned_logs
+        )
+
+    def docker_arguments(self, *arguments: str) -> list[str]:
+        """Build only the existing exact private endpoint command vocabulary."""
         directory = self.record["daemonDirectory"]
         require(re.fullmatch(re.escape(PRIVATE_RUNTIME_PREFIX) + r"[A-Za-z0-9_-]{8,32}", directory))
-        return self.query(
-            [
-                "/usr/bin/env",
-                "-i",
-                "PATH=/usr/sbin:/usr/bin:/sbin:/bin",
-                "LANG=C",
-                "LC_ALL=C",
-                "/usr/bin/docker",
-                "--config",
-                str(self.store.path / "cli"),
-                "--host",
-                "unix://" + directory + "/docker.sock",
-                "--tls=false",
-                *arguments,
-            ]
-        )
+        return [
+            "/usr/bin/env",
+            "-i",
+            "PATH=/usr/sbin:/usr/bin:/sbin:/bin",
+            "LANG=C",
+            "LC_ALL=C",
+            "/usr/bin/docker",
+            "--config",
+            str(self.store.path / "cli"),
+            "--host",
+            "unix://" + directory + "/docker.sock",
+            "--tls=false",
+            *arguments,
+        ]
 
     def daemon(self) -> None:
         """Rebind the exact rootful private daemon before every subject operation."""
@@ -1175,6 +1223,11 @@ class RootPort:
                 or (
                     binding.purpose == self.modules.qualification.MAINTAINED_PURPOSE
                     and self.admission["maintainedArchitectures"].get(binding.architecture) == "maintained-prerequisite"
+                )
+                or (
+                    binding.purpose == self.modules.qualification.direct.PURPOSE
+                    and type(binding) is self.modules.qualification.direct.DirectDiagnosticBinding
+                    and self.admission["directContext"] == self.modules.qualification.direct.admission_context()
                 )
             ),
         )
@@ -1365,6 +1418,8 @@ class RootPort:
 
     def bind_subject(self, container: str, binding: NativeBinding) -> None:
         """Verify before/after through one held task and exact container incarnation."""
+        direct = type(binding) is self.modules.qualification.direct.DirectDiagnosticBinding
+        expected_uid = 1000 if direct else 0
         self.point("subject")
         self.daemon()
         namespace = namespace_snapshot(self.modules, self.admission)
@@ -1374,10 +1429,14 @@ class RootPort:
         descriptor = os.open(f"/proc/{pid}", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
         pidfd = os.pidfd_open(pid)
         try:
-            first = task_snapshot(descriptor, pid)
+            first = task_snapshot(descriptor, pid, expected_uid)
             expected = "0::/" + binding.runtime_slice + "/docker-" + container + ".scope"
             require(
-                re.fullmatch(re.escape(expected) + r"(?:/[A-Za-z0-9_.@:-]+)*\n", first["cgroup"])
+                (
+                    first["cgroup"] == expected + "\n"
+                    if direct
+                    else re.fullmatch(re.escape(expected) + r"(?:/[A-Za-z0-9_.@:-]+)*\n", first["cgroup"])
+                )
                 and not any(part in {".", ".."} for part in first["cgroup"].split("/"))
             )
             raw = proc_bytes(descriptor, "attr/apparmor/current", 4096)
@@ -1397,7 +1456,7 @@ class RootPort:
             require(
                 match
                 and not select.select([pidfd], [], [], 0)[0]
-                and task_snapshot(descriptor, pid) == first
+                and task_snapshot(descriptor, pid, expected_uid) == first
                 and proc_bytes(descriptor, "attr/apparmor/current", 4096) == raw
                 and namespace_snapshot(self.modules, self.admission) == namespace
             )
@@ -1786,6 +1845,8 @@ class RootPort:
         self.finish_owner("owner")
         self.record["ownerTerminationVerified"] = True
         self.commit()
+        if "directGate" in self.record and not self.record.get("directGateDisposed"):
+            self.modules.gate.remove_gate(self, sys.modules[__name__])
         known = {
             "lock",
             "state.json",
@@ -2031,7 +2092,20 @@ def new_record(
 ) -> dict[str, Any]:
     """Bind a phase to its actual unprivileged coordinator and private runtime."""
     require(set(request) == {"binding", "daemonDirectory", "timeoutExecutable", "coordinatorPid"})
-    binding = modules.qualification.NativeBinding(**request["binding"])
+    binding = modules.qualification.native_binding(request["binding"])
+    return bound_record((bootstrap, modules), request, name, binding, progress=progress)
+
+
+def bound_record(
+    source: tuple[dict[str, Any], SimpleNamespace],
+    request: dict[str, Any],
+    name: str,
+    binding: NativeBinding,
+    *,
+    progress: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Bind source and coordinator identity without performing policy operations."""
+    bootstrap, modules = source
     binding.validate()
     context = bootstrap["context"]
     require(
@@ -2094,7 +2168,9 @@ def receipt(port: RootPort) -> dict[str, Any]:
         "schemaVersion": PREREQUISITE_SCHEMA,
         "consumer": CONSUMER,
         "qualification": (
-            "maintained-prerequisite"
+            "none"
+            if port.binding.purpose == port.modules.qualification.direct.PURPOSE
+            else "maintained-prerequisite"
             if port.binding.purpose == port.modules.qualification.MAINTAINED_PURPOSE
             else "experimental-candidate-only"
         ),
@@ -2596,7 +2672,24 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "operation",
-        choices=("prepare", "create-intent", "bind", "close", "compile", "owner", "dispose-stage", "observe-arm"),
+        choices=(
+            "prepare",
+            "create-intent",
+            "bind",
+            "close",
+            "compile",
+            "owner",
+            "dispose-stage",
+            "observe-arm",
+            "direct-control-prepare",
+            "direct-control-create",
+            "direct-gate-prepare",
+            "direct-control-bind",
+            "direct-preflight",
+            "direct-observe",
+            "direct-release",
+            "direct-control-close",
+        ),
     )
     parser.add_argument("stage", type=Path)
     parser.add_argument("name", nargs="?", default="new")
@@ -2647,7 +2740,11 @@ def main() -> int:
             }
         else:
             with stage_lock(args.stage):
-                result = root_rpc(args.stage, bootstrap, modules, args)
+                result = (
+                    modules.gate.rpc(sys.modules[__name__], (args.stage, bootstrap, modules), args)
+                    if args.operation.startswith("direct-")
+                    else root_rpc(args.stage, bootstrap, modules, args)
+                )
         sys.stdout.buffer.write(encoded(result))
     except (Exception, KeyboardInterrupt) as error:  # noqa: BLE001 - serialize only the closed journal, never raw failures.
         result = (

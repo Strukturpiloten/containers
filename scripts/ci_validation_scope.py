@@ -10,13 +10,14 @@ from pathlib import Path
 from typing import Any
 
 from scripts import build_payloads, container_engine
+from scripts import docker_direct_startup_contract as direct
 from scripts.docker_userns_qualification import QualificationError, validation_profile
 
 TARGET = "docker-29-conformance-rootless"
 PAYLOAD = "docker-29-payload"
 MANIFEST = "images/docker/upstream/29/payload.yaml"
 BOUNDED = "docker-rootless-qualification"
-PROFILES = {"full", "docker-rootless-diagnostic", BOUNDED}
+PROFILES = {"full", "docker-rootless-diagnostic", BOUNDED, direct.PROFILE}
 ARCHITECTURES = ("amd64", "arm64")
 
 
@@ -49,6 +50,7 @@ def _selection(selection: dict, context: Context) -> None:
     )
     focused = selection.get("focusedRuntimeRequested")
     diagnostic = requested == "docker-rootless-diagnostic"
+    direct_diagnostic = requested == direct.PROFILE
     _need(type(focused) is str and focused in {"witness-diagnostic", "mandatory-accounting"}, "Unknown focused input.")
     _need(diagnostic or focused == "witness-diagnostic", "Focused accounting requires diagnostic scope.")
     _need(
@@ -56,9 +58,9 @@ def _selection(selection: dict, context: Context) -> None:
         == {
             "validationProfile": requested,
             "focusedRuntimeRequested": focused,
-            "focusedRuntime": focused if diagnostic else "none",
+            "focusedRuntime": focused if diagnostic else direct.PURPOSE if direct_diagnostic else "none",
             "oomAccountingMode": "diagnostic" if diagnostic and focused == "witness-diagnostic" else "qualification",
-            "qualification": "none" if diagnostic else "pending",
+            "qualification": "none" if diagnostic or direct_diagnostic else "pending",
         },
         "Selection artifact is incomplete or contradictory.",
     )
@@ -186,7 +188,15 @@ def validate_plan(plan: object, selection: object, context: Context) -> dict:
         "validationProfile" not in plan or plan["validationProfile"] == context.selected_profile,
         "Build-plan profile was relabelled.",
     )
-    if context.selected_profile == BOUNDED:
+    if context.selected_profile == direct.PROFILE:
+        from scripts import docker_direct_startup_plan  # noqa: PLC0415 - keep the general planner unchanged.
+
+        try:
+            docker_direct_startup_plan.validate_plan(plan, context)
+        except direct.DirectDiagnosticError:
+            reason = "Direct diagnostic plan differs from its exact manual contract."
+            raise ScopeError(reason) from None
+    elif context.selected_profile == BOUNDED:
         _bounded(plan, context)
     return {**plan, "validationProfile": context.selected_profile}
 

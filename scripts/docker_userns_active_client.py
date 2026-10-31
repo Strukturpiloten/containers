@@ -11,15 +11,16 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
 
+from scripts import docker_direct_startup_contract as direct
 from scripts import docker_userns_active as protocol
 from scripts import docker_userns_custody_child as child
 from scripts.docker_userns_active_bootstrap_bundle import context
 from scripts.docker_userns_qualification import (
     PREREQUISITE_SCHEMA,
     SCOPED_RECEIPT_KEYS,
-    NativeBinding,
     QualificationError,
     context_digest,
+    native_binding,
     validate_stage_disposal,
 )
 
@@ -40,25 +41,28 @@ class ActiveClient:
         self.ctx, self.stage = ctx, Path(stage)
         self.provenance = context(dict(os.environ), ctx.architecture)
         backend = ctx.backend
-        self.binding = NativeBinding(
-            candidate=os.environ.get("GITHUB_SHA", ""),
-            run=os.environ.get("GITHUB_RUN_ID", ""),
-            attempt=os.environ.get("GITHUB_RUN_ATTEMPT", ""),
-            job=os.environ.get("GITHUB_JOB", ""),
-            architecture=ctx.architecture,
-            phase=ctx.runtime_phase,
-            image=ctx.name,
-            archive_sha256=identity["archiveSha256"],
-            manifest_digest=identity["manifestDigest"],
-            config_digest=identity["configDigest"],
-            owner=backend.owner,
-            runtime_slice=backend.slice,
-            slice_identity=backend.slice_identity,
-            deadline_ns=int(ctx.runtime_deadline * 1_000_000_000),
-            purpose=self.provenance["purpose"],
-            admission_sha256=self.provenance["admissionSha256"],
-            workflow_context_sha256=context_digest(self.provenance),
-        )
+        fields = {
+            "candidate": os.environ.get("GITHUB_SHA", ""),
+            "run": os.environ.get("GITHUB_RUN_ID", ""),
+            "attempt": os.environ.get("GITHUB_RUN_ATTEMPT", ""),
+            "job": os.environ.get("GITHUB_JOB", ""),
+            "architecture": ctx.architecture,
+            "phase": ctx.runtime_phase,
+            "image": ctx.name,
+            "archive_sha256": identity["archiveSha256"],
+            "manifest_digest": identity["manifestDigest"],
+            "config_digest": identity["configDigest"],
+            "owner": backend.owner,
+            "runtime_slice": backend.slice,
+            "slice_identity": backend.slice_identity,
+            "deadline_ns": int(ctx.runtime_deadline * 1_000_000_000),
+            "purpose": self.provenance["purpose"],
+            "admission_sha256": self.provenance["admissionSha256"],
+            "workflow_context_sha256": context_digest(self.provenance),
+        }
+        if self.provenance["purpose"] == direct.PURPOSE:
+            fields.update(variant=direct.VARIANT, launcher="direct", expected_uid="1000", arm="B")
+        self.binding = native_binding(fields)
         self.binding.validate()
         self.name = "new"
         self.evidence: dict[str, Any] = {}
@@ -137,7 +141,9 @@ class ActiveClient:
             or (self.evidence and value["bootstrapSha256"] != self.evidence.get("bootstrapSha256"))
             or value.get("qualification")
             != (
-                "maintained-prerequisite"
+                "none"
+                if type(self.binding) is direct.DirectDiagnosticBinding
+                else "maintained-prerequisite"
                 if self.binding.purpose == "maintained-prerequisite"
                 else "experimental-candidate-only"
             )
@@ -238,7 +244,10 @@ class ActiveClient:
 
     def dispose_stage(self) -> dict[str, Any]:
         """Finish the existing root stage before maintained pair publication."""
-        if self.binding.purpose != "maintained-prerequisite" or self.binding.phase != "enforcement":
+        if not (
+            (self.binding.purpose == "maintained-prerequisite" and self.binding.phase == "enforcement")
+            or (type(self.binding) is direct.DirectDiagnosticBinding and self.binding.phase == "direct-profiled")
+        ):
             reason = "maintained final phase is required for stage disposal"
             raise ValueError(reason)
         remaining = (self.binding.deadline_ns - time.monotonic_ns()) / 1_000_000_000
