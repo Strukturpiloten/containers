@@ -353,3 +353,159 @@ class ClosedSubjectFailureTransport(unittest.TestCase):
         ):
             with self.subTest(mutation=mutation):
                 self.assertFalse(active.valid_failure(receipt | mutation))
+
+
+class ClosedSubjectProfileExtension(unittest.TestCase):
+    def test_legacy_extended_child_combinations_and_direct_digest_projection_stay_nonqualifying(self) -> None:
+        from scripts import docker_direct_startup_aggregate as aggregate  # noqa: PLC0415
+        from scripts import docker_direct_startup_client as client  # noqa: PLC0415
+        from scripts import docker_userns_custody_child as child  # noqa: PLC0415
+        from tests.test_docker_userns_active import subject_profile_failure  # noqa: PLC0415
+
+        for extended in (False, True):
+            for child_build in (False, True):
+                with self.subTest(extended=extended, child_build=child_build):
+                    receipt = subject_profile_failure()
+                    if not extended:
+                        receipt.pop("subjectProfile")
+                    if child_build:
+                        receipt["childBuild"] = {
+                            "lifetime": child.Lifetime.UNKNOWN.value,
+                            "work": None,
+                            "status": None,
+                            "guard": None,
+                        }
+                    self.assertTrue(active.valid_failure(receipt, child=child))
+                    projected = client.project_failure(receipt, "B")
+                    self.assertEqual(aggregate.validate_failure(projected), projected)
+                    self.assertNotIn("subjectProfile", projected)
+                    self.assertEqual(projected["rootReceiptSha256"], active.digest(contract.canonical(receipt)))
+                    self.assertFalse(projected["cleanupAuthority"])
+                    self.assertEqual(projected["qualification"], "none")
+
+    def test_closed_extension_rejects_bad_types_keys_hashes_enums_and_impossible_claims(self) -> None:
+        import copy  # noqa: PLC0415
+
+        from tests.test_docker_userns_active import subject_profile_failure  # noqa: PLC0415
+
+        mutations = [
+            ("schemaVersion", True),
+            ("originOperation", "close"),
+            ("source", "PRIVATE"),
+            ("bytes", -1),
+            ("bytes", 4097),
+            ("bytes", True),
+            ("sha256", "A" * 64),
+            ("framing", "PRIVATE"),
+            ("labelKind", "PRIVATE"),
+            ("expectedName", "PRIVATE"),
+            ("mode", "PRIVATE"),
+            ("executableKind", "PRIVATE"),
+            ("sameExecutable", "PRIVATE"),
+            ("postchecks", []),
+            ("postchecksComplete", 1),
+            ("foreignLabelMatchesExecutableBasename", 1),
+            ("raw", "PRIVATE"),
+            ("expectedName", "exact"),
+            ("sameExecutable", "mismatch"),
+            ("executableKind", "other"),
+            ("mode", "other"),
+        ]
+        for key, bad in mutations:
+            with self.subTest(key=key, bad=bad):
+                receipt = subject_profile_failure()
+                receipt["subjectProfile"][key] = bad
+                self.assertFalse(active.valid_failure(receipt))
+        for bad in (None, [], "PRIVATE", {"raw": "PRIVATE"}):
+            receipt = subject_profile_failure()
+            receipt["subjectProfile"] = bad
+            self.assertFalse(active.valid_failure(receipt))
+        for key in subject_profile_failure()["subjectProfile"]:
+            receipt = subject_profile_failure()
+            receipt["subjectProfile"].pop(key)
+            self.assertFalse(active.valid_failure(receipt))
+        for state in ("mismatch", "unavailable", "deadline", "cancelled", "not-attempted", True, "PRIVATE"):
+            receipt = subject_profile_failure()
+            receipt["subjectProfile"]["postchecks"]["incarnation"] = state
+            self.assertFalse(active.valid_failure(receipt))
+        receipt = subject_profile_failure()
+        receipt["subjectProfile"]["postchecks"]["PRIVATE"] = "match"
+        self.assertFalse(active.valid_failure(receipt))
+        oversized = copy.deepcopy(receipt)
+        oversized["subjectProfile"]["raw"] = "x" * active.MAX_FAILURE
+        self.assertFalse(active.valid_failure(oversized))
+
+    def test_stopped_or_identity_unverified_postchecks_cannot_claim_later_task_reads(self) -> None:
+        from tests.test_docker_userns_active import subject_profile_failure  # noqa: PLC0415
+
+        for name, state in (
+            ("taskAlive", "unavailable"),
+            ("taskAlive", "deadline"),
+            ("taskReadback", "mismatch"),
+            ("profileReadback", "cancelled"),
+            ("namespaceReadback", "deadline"),
+        ):
+            with self.subTest(name=name, state=state):
+                receipt = subject_profile_failure()
+                facts = receipt["subjectProfile"]
+                facts.update(
+                    postchecksComplete=False,
+                    executableKind="unavailable",
+                    sameExecutable="not-attempted",
+                    foreignLabelMatchesExecutableBasename=None,
+                )
+                facts["postchecks"][name] = state
+                self.assertFalse(active.valid_failure(receipt))
+
+    def test_provenance_and_original_refusal_are_required_for_every_extended_envelope(self) -> None:
+        from tests.test_docker_userns_active import subject_profile_failure  # noqa: PLC0415
+
+        for key, bad in (
+            ("actor", "client"),
+            ("operation", "prepare"),
+            ("phase", "daemon"),
+            ("reason", "unexpected"),
+            ("comparisons", {"subject-profile": True}),
+            ("retained", False),
+            ("sourceVerified", False),
+            ("bindingVerified", False),
+            ("context", None),
+            ("reportingLease", None),
+            ("reportingLease", "PRIVATE"),
+            ("sourceManifestSha256", None),
+            ("bindingSha256", None),
+            ("cleanupAuthority", True),
+        ):
+            with self.subTest(key=key):
+                self.assertFalse(active.valid_failure(subject_profile_failure() | {key: bad}))
+        self.assertTrue(active.valid_failure(subject_profile_failure() | {"operation": "close"}))
+
+    def test_malformed_internal_extension_is_omitted_without_replacing_first_error(self) -> None:
+        from tests.test_docker_userns_active import binding, subject_profile_fixture  # noqa: PLC0415
+
+        progress = {
+            "actor": "root",
+            "operation": "bind",
+            "binding": binding(),
+            "sourceVerified": True,
+            "sourceManifestSha256": active.SOURCE_MANIFEST_SHA256,
+            "lease": "f" * 32,
+            "record": {
+                "retained": True,
+                "diagnostic": {"phase": "subject-profile", "comparisons": {"subject-profile": False}},
+            },
+        }
+        for malformed in (
+            None,
+            [],
+            {"raw": "PRIVATE"},
+            subject_profile_fixture() | {"mode": []},
+            subject_profile_fixture() | {"postchecks": None},
+        ):
+            with self.subTest(malformed=malformed):
+                progress["record"]["subjectProfile"] = malformed
+                receipt = active.failure_receipt(progress, active.RefusedError("PRIVATE"))
+                self.assertTrue(active.valid_failure(receipt))
+                self.assertEqual((receipt["phase"], receipt["reason"]), ("subject-profile", "refused"))
+                self.assertNotIn("subjectProfile", receipt)
+                self.assertNotIn("PRIVATE", json.dumps(receipt))

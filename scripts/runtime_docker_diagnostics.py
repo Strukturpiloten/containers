@@ -25,6 +25,7 @@ import sys
 import time
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -36,6 +37,7 @@ if TYPE_CHECKING:
 DIAGNOSTIC_SECONDS = 5
 BYTE_LIMIT = 64 * 1024
 JOURNAL_RECORD_LIMIT = 64
+MEMORY_EVENT_RECORD_LIMIT = 16
 PROTOCOL_LIMIT = 96 * 1024
 GUEST_BYTE_LIMIT = 2048
 GUEST_RECORD_LIMIT = 1024
@@ -808,6 +810,269 @@ def _guest_owned_capture(
     return {"status": "available", "teardownVerified": True}
 
 
+def _event_timestamp(value: object) -> int:
+    if not isinstance(value, str):
+        raise _UnavailableError("invalid-fields")
+    match = re.fullmatch(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d{1,9}))?Z", value)
+    if match is None:
+        raise _UnavailableError("invalid-fields")
+    seconds = int(datetime.fromisoformat(match[1]).replace(tzinfo=UTC).timestamp())
+    return seconds * 1_000_000_000 + int((match[2] or "").ljust(9, "0"))
+
+
+def _memory_event_projection(raw: bytes, workload: str, started: int, cutoff: int) -> dict[str, Any]:
+    """Project Engine logging order only; retained history cannot prove completeness."""
+    if len(raw) > BYTE_LIMIT:
+        raise _UnavailableError("byte-limit")
+    lines = raw.splitlines()
+    if len(lines) > MEMORY_EVENT_RECORD_LIMIT:
+        raise _UnavailableError("record-limit")
+    records = []
+    for line in lines:
+        event = json.loads(line, object_pairs_hook=_unique_object)
+        actor = event.get("Actor") if isinstance(event, dict) else None
+        action = event.get("Action") if isinstance(event, dict) else None
+        timestamp = event.get("timeNano") if isinstance(event, dict) else None
+        if (
+            not isinstance(actor, dict)
+            or actor.get("ID") != workload
+            or event.get("id", workload) != workload
+            or event.get("Type") != "container"
+            or action not in {"oom", "die"}
+            or event.get("status", action) != action
+            or type(timestamp) is not int
+            or not started <= timestamp <= cutoff
+            or type(event.get("time")) is not int
+            or event["time"] != timestamp // 1_000_000_000
+        ):
+            raise _UnavailableError("invalid-fields")
+        attributes = actor.get("Attributes")
+        if not isinstance(attributes, dict):
+            raise _UnavailableError("invalid-fields")
+        record = {"id": workload, "type": "container", "action": action, "timeNano": timestamp}
+        if action == "die":
+            exit_code = attributes.get("exitCode")
+            if not isinstance(exit_code, str) or re.fullmatch(r"[0-9]{1,3}", exit_code) is None or int(exit_code) > 255:
+                raise _UnavailableError("invalid-fields")
+            record["exitCode"] = int(exit_code)
+        records.append(record)
+    actions = [record["action"] for record in records]
+    times = [record["timeNano"] for record in records]
+    paired = len(records) == 2 and set(actions) == {"oom", "die"} and times[0] < times[1]
+    return {
+        "availability": "observed" if paired else "partial",
+        "order": "-before-".join(actions) if paired else "unresolved",
+        "records": records,
+        "historyCompleteness": "unknown",
+        "orderingAuthority": "engine-logging-only",
+    }
+
+
+def _memory_event_arguments(directory: Path, request: list[str], *command: str) -> list[str]:
+    _, container, _, mode, workload, *_ = request
+    contract = _guest_guard_contract()
+    inspect = _worker_arguments(directory, ["inspect", container])
+    endpoint = {"rootless": "unix:///run/user/1000/docker.sock", "rootful": "unix:///var/run/docker.sock"}[mode]
+    environment = ["env"]
+    for variable in (
+        "DOCKER_HOST",
+        "DOCKER_CONTEXT",
+        "DOCKER_CONFIG",
+        "DOCKER_API_VERSION",
+        "DOCKER_TLS",
+        "DOCKER_TLS_VERIFY",
+        "DOCKER_CERT_PATH",
+    ):
+        environment.extend(("-u", variable))
+    docker = [*environment, "docker", "--host", endpoint, "--tls=false"]
+    if command:
+        arguments = [*docker, *command]
+    else:
+        identity = '{"id":{{json .Id}},"startedAt":{{json .State.StartedAt}}}'
+        script = (
+            shlex.join([*docker, "inspect", "--format", identity, workload])
+            + "; "
+            + shlex.join([*docker, "info", "--format", "{{json .SystemTime}}"])
+        )
+        arguments = ["sh", "-euc", script]
+    return [*inspect[:-4], "exec", container, *contract["guarded_command"](*arguments)]
+
+
+def _memory_event_bounds(raw: bytes, request: list[str], before: int, after: int) -> tuple[int, int]:
+    lines = raw.splitlines()
+    if len(lines) != 2:
+        raise _UnavailableError("invalid-fields")
+    observed = json.loads(lines[0], object_pairs_hook=_unique_object)
+    clock = _event_timestamp(json.loads(lines[1]))
+    started, cutoff = _event_timestamp(request[5]), int(request[6])
+    if observed != {"id": request[4], "startedAt": request[5]} or not 0 < started <= cutoff < before <= clock <= after:
+        raise _UnavailableError("invalid-fields")
+    # A regressed clock cannot turn --until into a future stream endpoint.
+    if time.time_ns() <= cutoff:
+        raise _UnavailableError("invalid-fields")
+    return started, cutoff
+
+
+def _memory_event_result(projection: dict[str, Any], cutoff: int, deadline: float) -> dict[str, Any]:
+    if time.time_ns() <= cutoff or time.monotonic() >= deadline:
+        raise _UnavailableError("timeout")
+    return {
+        "status": "available",
+        "teardownVerified": True,
+        "data": base64.b64encode(json.dumps(projection).encode()).decode("ascii"),
+    }
+
+
+def _memory_event_capture(
+    directory: Path, request: list[str], deadline: float, timeout_executable: str
+) -> dict[str, Any]:
+    """One fixed past query, with the caller's prepaid deadline including all drains."""
+    if (
+        len(request) != 7
+        or re.fullmatch(r"[0-9a-f]{64}", request[1]) is None
+        or re.fullmatch(r"[0-9a-f]{32}", request[2]) is None
+        or request[3] not in {"rootless", "rootful"}
+        or re.fullmatch(r"[0-9a-f]{64}", request[4]) is None
+        or re.fullmatch(r"[0-9]{1,20}", request[6]) is None
+    ):
+        return {"status": "invalid-fields", "teardownVerified": True}
+    drained = False
+    try:
+        owned = _guest_owned_capture(directory, request[1], request[2], deadline, timeout_executable)
+        drained = owned.get("teardownVerified") is True
+        if owned.get("status") != "available" or owned.get("teardownVerified") is not True:
+            return owned
+        identity_arguments = _memory_event_arguments(directory, request)
+        before = time.time_ns()
+        drained = False
+        identity = _query_capture(identity_arguments, deadline, timeout_executable)
+        drained = identity.get("teardownVerified") is True
+        after = time.time_ns()
+        if identity.get("status") != "available" or identity.get("teardownVerified") is not True:
+            return identity
+        started, cutoff = _memory_event_bounds(
+            base64.b64decode(identity["data"], validate=True), request, before, after
+        )
+        until = f"{cutoff // 1_000_000_000}.{cutoff % 1_000_000_000:09d}"
+        arguments = _memory_event_arguments(
+            directory,
+            request,
+            "events",
+            "--since",
+            request[5],
+            "--until",
+            until,
+            "--filter",
+            "type=container",
+            "--filter",
+            "container=" + request[4],
+            "--filter",
+            "event=oom",
+            "--filter",
+            "event=die",
+            "--format",
+            "{{json .}}",
+        )
+        query_started = time.monotonic()
+        drained = False
+        capture = _query_capture(arguments, deadline, timeout_executable)
+        drained = capture.get("teardownVerified") is True
+        query_finished = time.monotonic()
+        if capture.get("status") != "available" or capture.get("teardownVerified") is not True:
+            return capture
+        projection = _memory_event_projection(
+            base64.b64decode(capture["data"], validate=True), request[4], started, cutoff
+        )
+        projection.update(
+            {
+                "eventQueryStartedMonotonic": query_started,
+                "eventQueryFinishedMonotonic": query_finished,
+                "clockValidation": "daemon-realtime-bracketed",
+            }
+        )
+        # All parsing and projection remain inside the original absolute budget.
+        return _memory_event_result(projection, cutoff, deadline)
+    except Exception as error:  # noqa: BLE001 - raw identity, clock and event errors stay private.
+        status = str(error) if isinstance(error, _UnavailableError) else "invalid-fields"
+        return {"status": status, "teardownVerified": drained}
+
+
+def memory_event_deadline(ctx: RuntimeContext, kind: str = "memory") -> float | None:
+    """Prepay the existing slice before wait; never renew it after enforcement."""
+    if kind != "memory":
+        return None
+    try:
+        now = time.monotonic()
+        if any(
+            type(value) not in {int, float} or not math.isfinite(value) for value in (ctx.timeout, ctx.runtime_deadline)
+        ):
+            return None
+        remaining = min(ctx.timeout, ctx.runtime_deadline - now)
+        remaining = min(remaining, ctx.backend.command_timeout(remaining))
+        return min(now + DIAGNOSTIC_SECONDS, now + remaining)
+    except Exception:  # noqa: BLE001 - diagnostics have no qualification authority.
+        return None
+
+
+def observe_memory_events(
+    ctx: RuntimeContext,
+    container: str,
+    probe: tuple[str, str, str],
+    state: dict[str, Any] | None,
+    deadline: float | None,
+) -> None:
+    """Record finite before-removal observations without changing the primary result."""
+    from scripts.runtime_docker_backend import DockerBackend  # noqa: PLC0415 - keep standalone worker imports bounded.
+
+    mode, kind, workload = probe
+    if kind != "memory" or not isinstance(getattr(ctx, "backend", None), DockerBackend):
+        return
+    record: dict[str, Any] = {
+        "name": "inner memory Docker event observation",
+        "authority": "observation-only",
+        "availability": "unavailable",
+        "reason": "budget-exhausted",
+        "historyCompleteness": "unknown",
+    }
+    try:
+        if deadline is None or deadline - time.monotonic() <= 0.05:
+            return
+        if (
+            re.fullmatch(r"[0-9a-f]{64}", workload) is None
+            or not isinstance(state, dict)
+            or not isinstance(state.get("StartedAt"), str)
+        ):
+            record["reason"] = "invalid-fields"
+            return
+        started = state["StartedAt"]
+        cutoff = time.time_ns() - 1
+        if not 0 < _event_timestamp(started) <= cutoff:
+            record["reason"] = "invalid-fields"
+            return
+        record.update(
+            {
+                "id": workload,
+                "since": started,
+                "untilNano": cutoff,
+                "queryStartedMonotonic": time.monotonic(),
+            }
+        )
+        request = ["guest-memory-events", container, ctx.backend.owner, mode, workload, started, str(cutoff)]
+        raw = _capture(ctx.backend, request, deadline)
+        projection = json.loads(raw, object_pairs_hook=_unique_object)
+        record.update(projection)
+        record.pop("reason", None)
+    except _UnavailableError as error:
+        record["reason"] = str(error)
+    except KeyboardInterrupt:
+        record["reason"] = "interrupted"
+    except Exception:  # noqa: BLE001 - observation never replaces the original failure or exports raw errors.
+        record["reason"] = "query-unavailable"
+    finally:
+        record["queryFinishedMonotonic"] = time.monotonic()
+        ctx.observations.append(record)
+
+
 def _guest_query_capture(
     directory: Path, request: list[str], deadline: float, timeout_executable: str
 ) -> dict[str, Any]:
@@ -1308,6 +1573,8 @@ def main() -> None:
             or not 0 < deadline - time.monotonic() <= 5
         ):
             result = {"status": "query-unavailable", "teardownVerified": False}
+        elif args.request[0] == "guest-memory-events":
+            result = _memory_event_capture(args.directory, args.request, deadline, str(args.timeout_executable))
         elif args.request[0] in {"guest-systemd", "guest-startup-log", "guest-unit-configuration"}:
             result = _guest_query_capture(args.directory, args.request, deadline, str(args.timeout_executable))
         else:

@@ -9,6 +9,7 @@ import hashlib
 import io
 import json
 import os
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -3973,3 +3974,542 @@ class MaintainedAMD64Observation(unittest.TestCase):
         self.assertNotIn("|| true", script[start:stop])
         self.assertNotIn("exit 0", script[start:stop])
         self.assertIn("set -euo pipefail", script)
+
+
+def subject_profile_fixture() -> dict:
+    """Build the complete public diagnostic independently of the private collector."""
+    return {
+        "schemaVersion": 1,
+        "originOperation": "bind",
+        "source": "held-task-attr/apparmor/current",
+        "bytes": len(b"rootlesskit (unconfined)\n"),
+        "sha256": hashlib.sha256(b"rootlesskit (unconfined)\n").hexdigest(),
+        "framing": "single-ascii-lf",
+        "labelKind": "single-named",
+        "expectedName": "absent",
+        "mode": "unconfined",
+        "postchecks": {
+            "taskAlive": "match",
+            "taskReadback": "match",
+            "profileReadback": "match",
+            "namespaceReadback": "match",
+            "incarnation": "match",
+        },
+        "postchecksComplete": True,
+        "executableKind": "rootlesskit",
+        "sameExecutable": "match",
+        "foreignLabelMatchesExecutableBasename": True,
+    }
+
+
+def subject_profile_failure() -> dict:
+    """Extend an otherwise real source/binding-verified retained root failure fixture."""
+    value = bound_root_failure()
+    value.update(operation="bind", phase="subject-profile", comparisons={"subject-profile": False}, readerPending=False)
+    value["subjectProfile"] = subject_profile_fixture()
+    return value
+
+
+class SubjectLabelClassification(unittest.TestCase):
+    @staticmethod
+    def cases() -> list:
+        """Return independent byte fixtures and closed expected facts."""
+        expected = b"private-expected-canary"
+        return [
+            (expected + b" (unconfined)\n", "single-ascii-lf", "single-named", "exact", "unconfined"),
+            (expected + b" (enforce)\n", "single-ascii-lf", "single-named", "exact", "enforce"),
+            (expected + b" (complain)\n", "single-ascii-lf", "single-named", "exact", "complain"),
+            (expected + b" (PRIVATE_UNKNOWN_MODE)\n", "single-ascii-lf", "single-named", "exact", "other"),
+            (b"unconfined\n", "single-ascii-lf", "bare-unconfined", "absent", "unconfined"),
+            (b"foreign-private-canary (prompt)\n", "single-ascii-lf", "single-named", "absent", "prompt"),
+            (b"prefix-" + expected + b"-suffix (enforce)\n", "single-ascii-lf", "single-named", "absent", "enforce"),
+            (expected + b"//&foreign (mixed)\n", "single-ascii-lf", "stack-marker", "component", "mixed"),
+            (b":ns://" + expected + b" (kill)\n", "single-ascii-lf", "namespace-marker", "component", "kill"),
+            (
+                b":ns://foreign//&" + expected + b" (allow)\n",
+                "single-ascii-lf",
+                "namespace-and-stack-markers",
+                "component",
+                "allow",
+            ),
+            (b"foreign//&prefix-" + expected + b" (enforce)\n", "single-ascii-lf", "stack-marker", "absent", "enforce"),
+            (b"foreign:colon (enforce)\n", "single-ascii-lf", "unparsed", "unparsed", "unparsed"),
+            (b":ns:// (enforce)\n", "single-ascii-lf", "unparsed", "unparsed", "unparsed"),
+            (b"foreign (enforce)\r\n", "other", "unparsed", "unparsed", "unparsed"),
+            (b"foreign\n (enforce)\n", "other", "unparsed", "unparsed", "unparsed"),
+            (b"foreign\x00 (enforce)\n", "other", "unparsed", "unparsed", "unparsed"),
+            (b"\xff (enforce)\n", "non-ascii", "unparsed", "unparsed", "unparsed"),
+            (b"", "other", "unparsed", "unparsed", "unparsed"),
+            (b"x" * 4095 + b"\n", "single-ascii-lf", "unparsed", "unparsed", "unparsed"),
+        ]
+
+    def test_raw_framing_name_boundaries_markers_and_modes_are_independently_expected(self) -> None:
+        expected = b"private-expected-canary"
+        for raw, framing, kind, relation, mode in self.cases():
+            with self.subTest(raw=raw[:80]):
+                result = active.subject_label(raw, expected)
+                self.assertEqual(
+                    result, {"framing": framing, "labelKind": kind, "expectedName": relation, "mode": mode}
+                )
+                self.assertNotIn("private-", json.dumps(result))
+                self.assertNotIn("PRIVATE_UNKNOWN_MODE", json.dumps(result))
+
+
+class SubjectRefusalObservation(unittest.TestCase):
+    def event(self, case: SimpleNamespace, name: str) -> None:
+        case.events.append(name)
+        if case.options.get("failure") == name:
+            effect = case.options.get("effect", "unavailable")
+            if effect == "unavailable":
+                raise PermissionError(13, PRIVATE)
+            if effect == "cancelled":
+                raise KeyboardInterrupt
+            if effect == "deadline":
+                case.now[0] = case.port.work_until
+
+    def proc(self, case: SimpleNamespace, leaf: str, limit: int) -> bytes:
+        if leaf == "stat":
+            case.stat_reads += 1
+            name = "taskReadback" if case.stat_reads > 1 else "task-initial"
+            self.event(case, name)
+            ticks = 2 if case.options.get("failure") == name and case.options.get("effect") == "mismatch" else 1
+            return b"123 (fixture task) S " + b"0 " * 18 + str(ticks).encode() + b"\n"
+        if leaf == "status":
+            uid = b"1001" if case.options.get("initialUid") else b"0"
+            return b"Pid:\t123\nTgid:\t123\nUid:\t" + (uid + b"\t") * 4 + b"\n"
+        if leaf == "cgroup":
+            return (
+                "0::/"
+                + case.port.binding.runtime_slice
+                + "/docker-"
+                + case.cid
+                + ".scope"
+                + ("-foreign" if case.options.get("initialCgroup") else "")
+                + "\n"
+            ).encode()
+        self.assertEqual(leaf, "attr/apparmor/current")
+        case.label_reads += 1
+        name = "profileReadback" if case.label_reads > 1 else "label-initial"
+        self.event(case, name)
+        raw = case.options.get("secondLabel", case.raw) if case.label_reads > 1 else case.raw
+        active.require(len(raw) <= limit)
+        return raw
+
+    def inspect(self, case: SimpleNamespace, cid: str) -> dict:
+        self.assertEqual(cid, case.cid)
+        case.inspect_reads += 1
+        name = "incarnation" if case.inspect_reads > 1 else "inspect-initial"
+        self.event(case, name)
+        if case.inspect_reads > 1:
+            case.port.point("image")  # Nested readers must never replace the primary failure phase.
+            if case.options.get("query"):
+                case.port.query(["inert-private-inspect", cid])
+        return {
+            "State": {
+                "Pid": 123,
+                "Running": True,
+                "StartedAt": "changed"
+                if case.options.get("failure") == name and case.options.get("effect") == "mismatch"
+                else "fixed",
+            }
+        }
+
+    def namespace(self, case: SimpleNamespace) -> dict:
+        case.namespace_reads += 1
+        name = "namespaceReadback" if case.namespace_reads > 1 else "namespace-initial"
+        self.event(case, name)
+        return {
+            "name": "changed"
+            if case.options.get("failure") == name and case.options.get("effect") == "mismatch"
+            else "original"
+        }
+
+    @contextmanager
+    def fixture(
+        self, raw: bytes = b"rootlesskit (unconfined)\n", options: dict | None = None
+    ) -> Iterator[SimpleNamespace]:
+        with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
+            port = active.RootPort.__new__(active.RootPort)
+            port.binding, port.modules, port.admission = binding(), SimpleNamespace(qualification=qualification), {}
+            port.store = SimpleNamespace(path=Path(temporary), write=Mock())
+            port.work_until, port.cleanup, port.provider, port.durable = (
+                100,
+                False,
+                "/usr/bin/timeout",
+                ("create-intent", None),
+            )
+            port.record = {"state": "create-intent", "profileName": "private-expected-canary"}
+            port.record.update((options or {}).get("flags", {}))
+            port.guard, port.persist, port.remove_subject, port.unload, port.dispose = (
+                Mock(),
+                Mock(),
+                Mock(),
+                Mock(),
+                Mock(),
+            )
+            port.daemon = lambda: port.point("daemon")
+            case = SimpleNamespace(
+                port=port,
+                cid="a" * 64,
+                raw=raw,
+                options=options or {},
+                events=[],
+                now=[1],
+                stat_reads=0,
+                label_reads=0,
+                inspect_reads=0,
+                namespace_reads=0,
+                exe_fds=[],
+                closed=[],
+                budgets=[],
+                task_fd=10001,
+                pidfd=10002,
+                stat_calls={},
+            )
+            port.inspect = Mock(side_effect=lambda cid: self.inspect(case, cid))
+            port.modules.capture = SimpleNamespace(_query_capture=Mock(return_value={"teardownVerified": False}))
+            case.lease = qualification.ProfileLease(port.binding, port)
+            case.lease.state = qualification.State.CREATE_INTENT
+            self.patch_kernel(stack, case)
+            if case.options.get("write"):
+                stack.enter_context(patch.object(active, "write_leaf", side_effect=OSError(5, PRIVATE)))
+            if case.options.get("commit"):
+                port.store.write.side_effect = [OSError(5, PRIVATE)]
+            if case.options.get("secondaryCommit"):
+                port.store.write.side_effect = [None, OSError(5, PRIVATE), None]
+            yield case
+
+    def held_proc(self, case: SimpleNamespace, descriptor: int, leaf: str, limit: int) -> bytes:
+        """Require every label/task read to use the original proc descriptor."""
+        self.assertEqual(descriptor, case.task_fd)
+        return self.proc(case, leaf, limit)
+
+    def executable_metadata(self, case: SimpleNamespace, descriptor: int) -> object:
+        if descriptor not in case.exe_fds:
+            return case.original_fstat(descriptor)
+        self.event(case, "exeStat")
+        case.stat_calls[descriptor] = case.stat_calls.get(descriptor, 0) + 1
+        return SimpleNamespace(
+            st_dev=1,
+            st_ino=9
+            if case.options.get("exeChanged")
+            and len(case.exe_fds) >= case.later_sample
+            and descriptor == case.exe_fds[-1]
+            else 2,
+            st_uid=0,
+            st_gid=0,
+            st_mode=(stat.S_IFDIR if case.options.get("exeDirectory") else stat.S_IFREG) | 0o555,
+            st_nlink=1,
+            st_size=12,
+            st_mtime_ns=1,
+            st_ctime_ns=2 if case.options.get("exeMetadataChanged") and case.stat_calls[descriptor] > 1 else 1,
+        )
+
+    def observation_budget(self, case: SimpleNamespace, deadline: int) -> None:
+        self.assertEqual(deadline, case.port.work_until)
+        case.budgets.append(deadline)
+        if len(case.budgets) == case.options.get("stopAtBudget"):
+            case.events.append("budget-stop")
+            if case.options.get("cancelBudget"):
+                raise KeyboardInterrupt
+            case.now[0] = deadline
+        case.original_budget(deadline)
+
+    def patch_kernel(self, stack: ExitStack, case: SimpleNamespace) -> None:
+        original_open, original_close = os.open, os.close
+        case.original_fstat, case.original_budget, case.later_sample = os.fstat, active.subject_observation_budget, 3
+
+        def opened(path: object, flags: int, *args: object, **kwargs: object) -> int:
+            if path == "/proc/123":
+                return case.task_fd
+            if path == b"exe":
+                self.assertEqual((flags, kwargs), (os.O_PATH | os.O_CLOEXEC, {"dir_fd": case.task_fd}))
+                self.event(case, "exeOpen")
+                descriptor = case.pidfd + 1 + len(case.exe_fds)
+                case.exe_fds.append(descriptor)
+                return descriptor
+            self.assertTrue(str(path).startswith(str(case.port.store.path)))
+            return original_open(path, flags, *args, **kwargs)
+
+        def closed(descriptor: int) -> None:
+            if descriptor in [case.task_fd, case.pidfd, *case.exe_fds]:
+                case.closed.append(descriptor)
+            else:
+                original_close(descriptor)
+
+        def link(path: bytes, *, dir_fd: int) -> bytes:
+            self.assertEqual((path, dir_fd), (b"exe", case.task_fd))
+            self.event(case, "exeLink")
+            return case.options.get("exeLink", b"/usr/bin/rootlesskit")
+
+        def alive(*_args: object) -> tuple:
+            self.event(case, "taskAlive")
+            return (
+                ([case.pidfd], [], [])
+                if case.options.get("failure") == "taskAlive" and case.options.get("effect") == "mismatch"
+                else ([], [], [])
+            )
+
+        patches = [
+            patch.object(active.os, "open", side_effect=opened),
+            patch.object(active.os, "close", side_effect=closed),
+            patch.object(active.os, "fstat", side_effect=lambda descriptor: self.executable_metadata(case, descriptor)),
+            patch.object(active.os, "readlink", side_effect=link),
+            patch.object(active.os, "pidfd_open", return_value=case.pidfd, create=True),
+            patch.object(active, "filesystem_magic"),
+            patch.object(
+                active,
+                "proc_bytes",
+                side_effect=lambda descriptor, leaf, limit=8192: self.held_proc(case, descriptor, leaf, limit),
+            ),
+            patch.object(active, "namespace_snapshot", side_effect=lambda *_args: self.namespace(case)),
+            patch.object(active.select, "select", side_effect=alive),
+            patch.object(active.time, "monotonic_ns", side_effect=lambda: case.now[0]),
+            patch.object(
+                active,
+                "subject_observation_budget",
+                side_effect=lambda deadline: self.observation_budget(case, deadline),
+            ),
+        ]
+        for replacement in patches:
+            stack.enter_context(replacement)
+
+    def refuse(self, case: SimpleNamespace) -> dict:
+        with self.assertRaises(active.RefusedError) as error:
+            case.lease.bind(case.cid)
+        self.assertIs(case.lease.state, qualification.State.RETAINED)
+        self.assertNotIn("subject", case.port.record)
+        self.assertEqual(case.port.record["diagnostic"]["phase"], "subject-profile")
+        self.assertIs(case.port.record["diagnostic"]["comparisons"]["subject-profile"], False)  # noqa: FBT003 - exact Boolean wire invariant.
+        for forbidden in (case.port.remove_subject, case.port.unload, case.port.dispose, case.port.persist):
+            forbidden.assert_not_called()
+        self.assertEqual(set(case.exe_fds), set(case.closed) - {case.task_fd, case.pidfd})
+        result = active.failure_receipt(
+            {
+                "actor": "root",
+                "operation": "bind",
+                "record": case.port.record,
+                "binding": case.port.binding,
+                "sourceVerified": True,
+                "sourceManifestSha256": active.SOURCE_MANIFEST_SHA256,
+                "lease": "f" * 32,
+            },
+            error.exception,
+        )
+        self.assertTrue(active.valid_failure(result))
+        self.assertEqual(result["reason"], "refused")
+        self.assertNotIn("private-expected-canary", json.dumps(result))
+        self.assertNotIn(PRIVATE, json.dumps(result))
+        return result
+
+    def test_raw_label_matrix_keeps_exact_acceptance_private_bytes_and_public_closed_facts(self) -> None:
+        for raw, framing, kind, relation, mode in SubjectLabelClassification.cases():
+            with self.subTest(raw=raw[:80]), self.fixture(raw) as case:
+                if raw == b"private-expected-canary (unconfined)\n":
+                    case.lease.bind(case.cid)
+                    self.assertNotIn("subjectProfile", case.port.record)
+                    continue
+                facts = self.refuse(case)["subjectProfile"]
+                self.assertEqual(
+                    {key: facts[key] for key in ("framing", "labelKind", "expectedName", "mode")},
+                    {"framing": framing, "labelKind": kind, "expectedName": relation, "mode": mode},
+                )
+                private = case.port.store.path / "profile-mismatch.bin"
+                self.assertEqual(private.read_bytes(), raw)
+                self.assertEqual(stat.S_IMODE(private.stat().st_mode), 0o400)
+                self.assertEqual((facts["bytes"], facts["sha256"]), (len(raw), hashlib.sha256(raw).hexdigest()))
+        with self.fixture(b"x" * (active.SUBJECT_LABEL_LIMIT + 1)) as case:
+            with self.assertRaises(active.RefusedError):
+                case.lease.bind(case.cid)
+            self.assertNotIn("subjectProfile", case.port.record)
+            self.assertNotIn("taskAlive", case.events)
+
+    def test_preexisting_uncertain_flags_stop_every_optional_read(self) -> None:
+        for key in ("readerPending", "childPending", "durabilityUnknown"):
+            for value in (True, None, "unknown"):
+                with self.subTest(key=key, value=value), self.fixture(options={"flags": {key: value}}) as case:
+                    facts = self.refuse(case)["subjectProfile"]
+                    self.assertEqual(set(facts["postchecks"].values()), {"not-attempted"})
+                    self.assertEqual(case.budgets, [])
+                    self.assertFalse(case.exe_fds)
+
+    def test_complete_refusal_observation_order_same_task_and_retained_close(self) -> None:
+        with self.fixture() as case:
+            result = self.refuse(case)
+            self.assertEqual(result["subjectProfile"], subject_profile_fixture())
+            reads = [event for event in case.events if event in active.SUBJECT_POSTCHECKS]
+            self.assertEqual(reads, list(active.SUBJECT_POSTCHECKS))
+            events, observation = list(case.events), copy.deepcopy(result["subjectProfile"])
+            with self.assertRaises(qualification.QualificationError):
+                case.lease.close()
+            self.assertEqual(case.events, events)
+            close = active.failure_receipt(
+                {
+                    "actor": "root",
+                    "operation": "close",
+                    "record": case.port.record,
+                    "binding": case.port.binding,
+                    "sourceVerified": True,
+                    "sourceManifestSha256": active.SOURCE_MANIFEST_SHA256,
+                    "lease": "f" * 32,
+                },
+                active.RefusedError(),
+            )
+            self.assertEqual(close["subjectProfile"], observation)
+            self.assertTrue(active.valid_failure(close))
+
+    def test_each_postcheck_mismatch_unavailable_and_task_dependency_short_circuit(self) -> None:
+        for name in active.SUBJECT_POSTCHECKS:
+            for effect in ("mismatch", "unavailable"):
+                with (
+                    self.subTest(name=name, effect=effect),
+                    self.fixture(
+                        options={
+                            "failure": name,
+                            "effect": effect,
+                            "secondLabel": b"other (enforce)\n"
+                            if name == "profileReadback" and effect == "mismatch"
+                            else b"rootlesskit (unconfined)\n",
+                        }
+                    ) as case,
+                ):
+                    result = self.refuse(case)
+                    facts = result["subjectProfile"]
+                    self.assertEqual(facts["postchecks"][name], effect)
+                    self.assertFalse(facts["postchecksComplete"])
+                    self.assertIsNone(facts["foreignLabelMatchesExecutableBasename"])
+                    if name in {"taskAlive", "taskReadback"}:
+                        self.assertEqual(facts["postchecks"]["profileReadback"], "not-attempted")
+                        self.assertFalse(case.exe_fds)
+                    self.assertEqual(facts["postchecks"]["incarnation"], effect if name == "incarnation" else "match")
+
+    def test_second_correct_label_never_repairs_initial_mismatch(self) -> None:
+        with self.fixture(options={"secondLabel": b"private-expected-canary (unconfined)\n"}) as case:
+            result = self.refuse(case)
+            self.assertEqual(result["subjectProfile"]["postchecks"]["profileReadback"], "mismatch")
+            self.assertIsNone(result["subjectProfile"]["foreignLabelMatchesExecutableBasename"])
+
+    def test_deadline_and_cancellation_before_and_after_each_bounded_read_stop_without_renewal(self) -> None:
+        with self.fixture() as baseline:
+            self.refuse(baseline)
+            budgets = len(baseline.budgets)
+        for cancel in (False, True):
+            for index in range(1, budgets + 1):
+                with (
+                    self.subTest(cancel=cancel, budget=index),
+                    self.fixture(options={"stopAtBudget": index, "cancelBudget": cancel}) as case,
+                ):
+                    result = self.refuse(case)
+                    self.assertEqual(len(case.budgets), index)
+                    self.assertIn(
+                        "cancelled" if cancel else "deadline", result["subjectProfile"]["postchecks"].values()
+                    )
+                    self.assertEqual(case.events[case.events.index("budget-stop") + 1 :], [])
+                    self.assertFalse(result["subjectProfile"]["postchecksComplete"])
+
+    def test_initial_read_write_commit_identity_failures_never_enter_observation_and_success_is_unchanged(self) -> None:
+        for options, error_type in [
+            ({"failure": "label-initial"}, PermissionError),
+            ({"write": True}, OSError),
+            ({"commit": True}, OSError),
+            ({"initialUid": True}, active.RefusedError),
+            ({"initialCgroup": True}, active.RefusedError),
+        ]:
+            with self.subTest(options=options), self.fixture(options=options) as case:
+                with self.assertRaises(error_type):
+                    case.lease.bind(case.cid)
+                self.assertNotIn("subjectProfile", case.port.record)
+                self.assertFalse(case.exe_fds)
+                self.assertNotIn("taskAlive", case.events)
+                if options.get("commit"):
+                    self.assertTrue(case.port.record["durabilityUnknown"])
+        with self.fixture(b"private-expected-canary (unconfined)\n") as case:
+            case.lease.bind(case.cid)
+            self.assertIs(case.lease.state, qualification.State.ATTACHED)
+            self.assertIn("subject", case.port.record)
+            self.assertNotIn("subjectProfile", case.port.record)
+            self.assertFalse(case.exe_fds)
+
+    def test_uncertain_owned_query_and_secondary_commit_preserve_first_refusal_and_pending_custody(self) -> None:
+        for extra in ({}, {"secondaryCommit": True}):
+            with self.subTest(extra=extra), self.fixture(options={"query": True, **extra}) as case:
+                result = self.refuse(case)
+                self.assertTrue(result["readerPending"])
+                self.assertEqual(result["subjectProfile"]["postchecks"]["incarnation"], "unavailable")
+                if extra:
+                    case.port.modules.capture._query_capture.assert_not_called()
+                else:
+                    case.port.modules.capture._query_capture.assert_called_once()
+                self.assertEqual(result["durabilityUnknown"], bool(extra))
+
+    def test_executable_categories_failures_stability_and_private_basename_correlation(self) -> None:
+        cases = [
+            (b"/usr/bin/rootlesskit", "rootlesskit", True),
+            (b"/usr/bin/dockerd", "dockerd", False),
+            (b"/bin/sh", "shell", False),
+            (b"/bin/dash", "shell", False),
+            (b"/bin/bash", "shell", False),
+            (b"/bin/ash", "shell", False),
+            (b"/bin/busybox", "multicall", False),
+            (b"/custom/unknown", "other", None),
+            (b"/bin/rootlesskit (deleted)", "unavailable", None),
+            (b"/bin/\xff", "unavailable", None),
+            (b"/" + b"x" * 4096, "unavailable", None),
+        ]
+        for path, category, correlation in cases:
+            with self.subTest(path=path[:80]), self.fixture(options={"exeLink": path}) as case:
+                result = self.refuse(case)
+                self.assertEqual(result["subjectProfile"]["executableKind"], category)
+                self.assertEqual(result["subjectProfile"]["foreignLabelMatchesExecutableBasename"], correlation)
+                self.assertNotIn(path.decode("ascii", errors="replace"), json.dumps(result))
+        for options in (
+            {"exeChanged": True},
+            {"exeMetadataChanged": True},
+            {"exeDirectory": True},
+            {"failure": "exeOpen"},
+            {"failure": "exeLink"},
+            {"failure": "exeStat"},
+        ):
+            with self.subTest(options=options), self.fixture(options=options) as case:
+                facts = self.refuse(case)["subjectProfile"]
+                self.assertEqual(
+                    facts["sameExecutable"],
+                    "mismatch" if options.get("exeChanged") or options.get("exeMetadataChanged") else "unavailable",
+                )
+                self.assertIsNone(facts["foreignLabelMatchesExecutableBasename"])
+
+
+class SubjectProfileFailureClient(unittest.TestCase):
+    def test_real_client_captures_and_redacts_extended_bind_and_retained_close(self) -> None:
+        for operation in ("bind", "close"):
+            with self.subTest(operation=operation), tempfile.TemporaryDirectory() as temporary:
+                client = client_fixture(Path(temporary))
+                value = subject_profile_failure() | {"operation": operation}
+
+                def command(
+                    _name: str, _argv: list, *, client: object = client, value: dict = value, **_kwargs: object
+                ) -> str:
+                    client.ctx.checks.append({"exitCode": 1, "stdout": PRIVATE, "stderr": PRIVATE, "error": PRIVATE})
+                    return json.dumps(value)
+
+                client.ctx.command = Mock(side_effect=command)
+                with self.assertRaises(ValueError):
+                    client.rpc(operation, {})
+                self.assertEqual(client.failures, [value])
+                self.assertEqual(client.evidence["failures"][0]["subjectProfile"], subject_profile_fixture())
+                self.assertEqual(client.name, "new")
+                self.assertFalse(client.evidence["cleanupAuthority"])
+                self.assertNotIn(PRIVATE, client.ctx.scoped_failure_output.read_text())
+                self.assertNotIn(PRIVATE, json.dumps(client.ctx.checks))
+
+    def test_invalid_subject_extension_is_refused_by_real_client_and_never_captured_raw(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            client = client_fixture(Path(temporary))
+            value = subject_profile_failure()
+            value["subjectProfile"]["raw"] = PRIVATE
+            client.ctx.command = Mock(return_value=json.dumps(value))
+            with self.assertRaises(ValueError):
+                client.rpc("bind", {})
+            self.assertNotIn("subjectProfile", client.failures[0])
+            self.assertEqual(client.failures[0]["reason"], "receipt-mismatch")
+            self.assertNotIn(PRIVATE, client.ctx.scoped_failure_output.read_text())

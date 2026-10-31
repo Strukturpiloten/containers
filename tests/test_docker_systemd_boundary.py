@@ -2637,5 +2637,67 @@ class LeafWitnessFailureDiagnosticsTests(unittest.TestCase):
                 self.assertEqual(record["completedStage"], "root-before")
 
 
+class MemoryEventIntegrationTests(unittest.TestCase):
+    def test_observation_precedes_removal_and_keeps_first_state_and_failed_accounting(self) -> None:
+        for arch in ("amd64", "arm64"):
+            with self.subTest(arch=arch):
+                ctx = MagicMock(checks=[], observations=[], image_ref="fixture", architecture=arch)
+                ctx.exec.return_value = "a" * 64
+                state = {"OOMKilled": False, "ExitCode": 137, "StartedAt": "2026-10-31T22:00:00Z"}
+                phases = []
+                ctx.exec.side_effect = lambda name, *_args, phases=phases: phases.append(name) or "a" * 64
+                ctx.assert_equal = MagicMock()
+                with (
+                    patch(
+                        "scripts.runtime_docker_systemd._hierarchy_evidence",
+                        return_value={"controlGroup": "/scope", "groups": {"/scope": ["1"]}},
+                    ),
+                    patch("scripts.runtime_docker_systemd._read_memory_association", return_value={}),
+                    patch(
+                        "scripts.runtime_docker_systemd.memory_event_deadline",
+                        side_effect=lambda _ctx, _kind, phases=phases: phases.append("prepay") or 4,
+                    ),
+                    patch(
+                        "scripts.runtime_docker_systemd._inner_enforcement_state",
+                        side_effect=lambda *_args, phases=phases, state=state, **_kwargs: (
+                            phases.append("first-state") or ("137", state)
+                        ),
+                    ),
+                    patch(
+                        "scripts.runtime_docker_systemd._memory_probe_result",
+                        side_effect=ProbeError("original OOM qualification failure"),
+                    ),
+                    patch(
+                        "scripts.runtime_docker_systemd.observe_memory_events",
+                        side_effect=lambda *args, phases=phases: phases.append(("observe", args[-2], args[-1])),
+                    ) as observation,
+                    self.assertRaisesRegex(ProbeError, "original OOM qualification failure"),
+                ):
+                    verify_inner_limits(ctx, MagicMock(), "owned")
+                self.assertLess(phases.index("prepay"), phases.index("first-state"))
+                self.assertLess(phases.index(("observe", state, 4)), phases.index("remove owned inner memory probe"))
+                self.assertIn("read back owned inner memory absence", phases)
+                self.assertIs(observation.call_args.args[-2], state)
+                self.assertFalse(state["OOMKilled"])
+                ctx.backend.oom_ledger.admit_original.assert_not_called()
+
+    def test_absent_after_telemetry_keeps_same_genuine_oom_requirement_on_both_arches(self) -> None:
+        association = MemoryDiagnosticTests().association()
+        for arch in ("amd64", "arm64"):
+            for genuine in (True, False):
+                with self.subTest(arch=arch, genuine=genuine):
+                    ctx = MagicMock(checks=[], architecture=arch)
+                    state = {"OOMKilled": genuine, "ExitCode": 137}
+                    if genuine:
+                        result = _memory_probe_result(ctx, association, allocator_telemetry_fixture(), "137", state)
+                        self.assertIsNone(result["after"])
+                        self.assertTrue(ctx.checks[-1]["enforcementSatisfied"])
+                    else:
+                        with self.assertRaisesRegex(ProbeError, "lacked genuine Docker OOM"):
+                            _memory_probe_result(ctx, association, allocator_telemetry_fixture(), "137", state)
+                        self.assertNotIn("surviving", ctx.checks[-1]["error"])
+                        self.assertIn("without verified Docker OOM-kill evidence", ctx.checks[-1]["error"])
+
+
 if __name__ == "__main__":
     unittest.main()

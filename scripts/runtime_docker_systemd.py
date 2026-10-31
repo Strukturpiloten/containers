@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
+from scripts.runtime_docker_diagnostics import memory_event_deadline, observe_memory_events
 from scripts.runtime_docker_systemd_guard import PLACEMENT_GUARD, USER_MANAGER, guarded_command  # noqa: F401 - preserve public re-exports.
 from scripts.runtime_errors import ProbeError
 from scripts.runtime_oom_diagnostics import DOCKER_CHECKS, DOCKER_EXIT_MAX, DockerOomLedger, OomDiagnostics
@@ -1431,7 +1432,9 @@ def _allocator_telemetry(output: str, association: dict[str, Any], *, genuine_oo
     except ProbeError as error:
         raise _AllocatorAfterError(str(error), before) from error
     if after is None and not genuine_oom:
-        raise _AllocatorAfterError("surviving memory allocator omitted its post-allocation readback", before)
+        raise _AllocatorAfterError(
+            "memory allocator omitted its post-allocation readback without verified Docker OOM-kill evidence", before
+        )
     return {"before": before, "after": after}
 
 
@@ -2891,6 +2894,9 @@ def verify_inner_limits(
     """Read hard limits and require actual bounded OOM and PID refusal evidence."""
     for kind in ("memory", "pids"):
         name = f"docker-native-limit-{kind}"
+        workload = ""
+        state = None
+        event_deadline = None
         try:
             workload = _exec(
                 ctx,
@@ -2979,6 +2985,7 @@ def verify_inner_limits(
                 if kind == "memory" and diagnostics is not None:
                     diagnostics.snapshot("after-inner-memory")
                 raise
+            event_deadline = memory_event_deadline(ctx, kind)
             exit_code, state = _inner_enforcement_state(
                 ctx, budget, container, (kind, workload), diagnostics=diagnostics
             )
@@ -3028,6 +3035,7 @@ def verify_inner_limits(
             _exec(ctx, budget, container, f"daemon responsive after inner {kind} enforcement", "docker", "info")
             verify_outer_container_limits(ctx, container)
         finally:
+            observe_memory_events(ctx, container, (mode, kind, workload), state, event_deadline)
             ctx.exec(
                 f"remove owned inner {kind} probe",
                 container,

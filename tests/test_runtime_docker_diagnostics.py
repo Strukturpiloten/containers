@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import ctypes
 import json
 import os
@@ -2552,6 +2553,234 @@ class RootlessFailureDiagnostics(unittest.TestCase):
             self.assertRaisesRegex(diagnostics._UnavailableError, "timeout"),
         ):
             diagnostics._capture(self.backend, ["inspect", CONTAINER], 1005)
+
+
+class MemoryEventObservationTests(unittest.TestCase):
+    """Retrospective receipts never grant OOM admission or renew the wait budget."""
+
+    started = "2026-10-31T22:00:00.000000000Z"
+    start = 1793484000000000000
+
+    def event(self, action: str, offset: int, **changes: object) -> dict[str, Any]:
+        event = {
+            "Type": "container",
+            "Action": action,
+            "time": self.start // 1_000_000_000,
+            "timeNano": self.start + offset,
+            "Actor": {"ID": CONTAINER, "Attributes": {"exitCode": "137", "env": PRIVATE_MARKER}},
+            "private": PRIVATE_MARKER,
+        }
+        event.update(changes)
+        return event
+
+    def wire(self, *events: dict[str, Any]) -> bytes:
+        return b"\n".join(json.dumps(event).encode() for event in events)
+
+    def protocol(self, raw: bytes) -> dict[str, Any]:
+        return {"status": "available", "teardownVerified": True, "data": base64.b64encode(raw).decode()}
+
+    def test_both_logging_orders_are_observation_only_and_project_no_attributes(self) -> None:
+        for actions in (("oom", "die"), ("die", "oom")):
+            with self.subTest(actions=actions):
+                result = diagnostics._memory_event_projection(
+                    self.wire(*(self.event(action, index + 1) for index, action in enumerate(actions))),
+                    CONTAINER,
+                    self.start,
+                    self.start + 10,
+                )
+                self.assertEqual(result["order"], "-before-".join(actions))
+                self.assertEqual(result["orderingAuthority"], "engine-logging-only")
+                self.assertEqual(result["historyCompleteness"], "unknown")
+                self.assertNotIn(PRIVATE_MARKER, json.dumps(result))
+
+    def test_missing_tied_duplicate_and_reversed_timestamps_have_no_order_authority(self) -> None:
+        for events in (
+            (),
+            (self.event("die", 1),),
+            (self.event("oom", 1), self.event("die", 1)),
+            (self.event("oom", 2), self.event("die", 1)),
+            (self.event("oom", 1), self.event("oom", 2)),
+        ):
+            with self.subTest(events=events):
+                result = diagnostics._memory_event_projection(
+                    self.wire(*events), CONTAINER, self.start, self.start + 10
+                )
+                self.assertEqual(result["availability"], "partial")
+                self.assertEqual(result["order"], "unresolved")
+
+    def test_malformed_foreign_late_overflow_and_exit_fields_are_unavailable(self) -> None:
+        samples = [
+            b"not-json",
+            self.wire(self.event("die", 11)),
+            self.wire(self.event("oom", -1)),
+            self.wire(self.event("oom", 1, Actor={"ID": "b" * 64, "Attributes": {}})),
+            self.wire(self.event("oom", 1, timeNano=True)),
+            self.wire(self.event("die", 1, Actor={"ID": CONTAINER, "Attributes": {"exitCode": PRIVATE_MARKER}})),
+            self.wire(*(self.event("oom", 1) for _ in range(diagnostics.MEMORY_EVENT_RECORD_LIMIT + 1))),
+            b"x" * (diagnostics.BYTE_LIMIT + 1),
+            b'{"Type":"container","Type":"container"}',
+        ]
+        for raw in samples:
+            with self.subTest(raw=raw[:40]), self.assertRaises((ValueError, diagnostics._UnavailableError)):
+                diagnostics._memory_event_projection(raw, CONTAINER, self.start, self.start + 10)
+
+    def request(self) -> list[str]:
+        return ["guest-memory-events", CONTAINER, "c" * 32, "rootless", CONTAINER, self.started, str(self.start + 10)]
+
+    def identity(self) -> dict[str, Any]:
+        return self.protocol(
+            json.dumps({"id": CONTAINER, "startedAt": self.started}).encode() + b'\n"2026-10-31T22:00:00.000000020Z"'
+        )
+
+    def test_one_exact_cid_query_keeps_fixed_bounds_and_original_deadline(self) -> None:
+        raw = self.wire(self.event("die", 1), self.event("oom", 2))
+        with (
+            patch.object(
+                diagnostics, "_guest_owned_capture", return_value={"status": "available", "teardownVerified": True}
+            ),
+            patch.object(diagnostics, "_query_capture", side_effect=[self.identity(), self.protocol(raw)]) as capture,
+            patch.object(
+                diagnostics.time,
+                "time_ns",
+                side_effect=[self.start + 15, self.start + 25, self.start + 26, self.start + 27],
+            ),
+            patch.object(diagnostics.time, "monotonic", return_value=1),
+        ):
+            result = diagnostics._memory_event_capture(Path("/private"), self.request(), 4, "/timeout")
+        self.assertEqual(result["status"], "available")
+        self.assertEqual(len(capture.call_args_list), 2)
+        for call in capture.call_args_list:
+            self.assertEqual(call.args[1:], (4, "/timeout"))
+        arguments = capture.call_args_list[-1].args[0]
+        self.assertIn("container=" + CONTAINER, arguments)
+        self.assertIn("unix:///run/user/1000/docker.sock", arguments)
+        self.assertIn(self.started, arguments)
+        self.assertIn("1793484000.000000010", arguments)
+        self.assertEqual(arguments.count("events"), 1)
+
+    def test_identity_clock_query_errors_and_unknown_drain_never_launch_events(self) -> None:
+        for identity in (
+            {"status": "cleanup-unverified", "teardownVerified": False},
+            {"status": "interrupted", "teardownVerified": True},
+            self.protocol(b'{}\n"2026-10-31T22:00:00.000000020Z"'),
+            self.protocol(
+                json.dumps({"id": CONTAINER, "startedAt": self.started}).encode()
+                + b'\n"2026-10-31T22:00:00.000000001Z"'
+            ),
+        ):
+            with (
+                self.subTest(identity=identity),
+                patch.object(
+                    diagnostics, "_guest_owned_capture", return_value={"status": "available", "teardownVerified": True}
+                ),
+                patch.object(diagnostics, "_query_capture", return_value=identity) as capture,
+                patch.object(diagnostics.time, "time_ns", side_effect=[self.start + 15, self.start + 25]),
+            ):
+                result = diagnostics._memory_event_capture(Path("/private"), self.request(), 4, "/timeout")
+            self.assertNotEqual(result["status"], "available")
+            self.assertEqual(capture.call_count, 1)
+
+    def context(self) -> SimpleNamespace:
+        backend = MagicMock(spec=DockerBackend)
+        backend.owner = "c" * 32
+        backend.command_timeout.side_effect = lambda remaining: remaining
+        return SimpleNamespace(backend=backend, timeout=45, runtime_deadline=100, observations=[])
+
+    def test_prepaid_deadline_is_never_renewed_and_exhaustion_launches_nothing(self) -> None:
+        ctx = self.context()
+        with patch.object(diagnostics.time, "monotonic", return_value=10):
+            deadline = diagnostics.memory_event_deadline(ctx)
+        self.assertEqual(deadline, 15)
+        with (
+            patch.object(diagnostics.time, "monotonic", return_value=15),
+            patch.object(diagnostics, "_capture") as capture,
+        ):
+            diagnostics.observe_memory_events(
+                ctx, CONTAINER, ("rootless", "memory", CONTAINER), {"StartedAt": self.started}, deadline
+            )
+        capture.assert_not_called()
+        self.assertEqual(ctx.observations[-1]["reason"], "budget-exhausted")
+
+    def test_original_runtime_and_backend_cleanup_reserve_shorten_prepaid_slice(self) -> None:
+        for runtime, backend_room, expected in ((12, 9, 12), (100, 1, 11)):
+            ctx = self.context()
+            ctx.runtime_deadline = runtime
+            ctx.backend.command_timeout.side_effect = lambda _remaining, room=backend_room: room
+            with patch.object(diagnostics.time, "monotonic", return_value=10):
+                self.assertEqual(diagnostics.memory_event_deadline(ctx), expected)
+
+    def test_false_first_state_and_original_failure_are_never_replaced_by_observation(self) -> None:
+        state = {"StartedAt": self.started, "OOMKilled": False, "ExitCode": 137}
+        ctx = self.context()
+        projection = diagnostics._memory_event_projection(
+            self.wire(self.event("die", 1), self.event("oom", 2)), CONTAINER, self.start, self.start + 10
+        )
+        for outcome in (
+            json.dumps(projection).encode(),
+            diagnostics._UnavailableError("cleanup-unverified"),
+            KeyboardInterrupt(),
+            RuntimeError(PRIVATE_MARKER),
+        ):
+            with (
+                self.subTest(outcome=type(outcome).__name__),
+                patch.object(
+                    diagnostics,
+                    "_capture",
+                    **({"side_effect": outcome} if isinstance(outcome, BaseException) else {"return_value": outcome}),
+                ) as capture,
+                patch.object(diagnostics.time, "monotonic", return_value=1),
+                patch.object(diagnostics.time, "time_ns", return_value=self.start + 11),
+            ):
+                diagnostics.observe_memory_events(ctx, CONTAINER, ("rootless", "memory", CONTAINER), state, 4)
+            self.assertFalse(state["OOMKilled"])
+            self.assertEqual(state["ExitCode"], 137)
+            self.assertEqual(capture.call_args.args[-1], 4)
+            self.assertEqual(ctx.observations[-1]["authority"], "observation-only")
+            self.assertNotIn(PRIVATE_MARKER, json.dumps(ctx.observations))
+
+    def test_event_query_cancellation_unknown_drain_and_errors_are_preserved(self) -> None:
+        for failure in (
+            {"status": "cleanup-unverified", "teardownVerified": False},
+            {"status": "interrupted", "teardownVerified": True},
+            {"status": "query-unavailable", "teardownVerified": True},
+            {"status": "byte-limit", "teardownVerified": True},
+        ):
+            with (
+                self.subTest(failure=failure),
+                patch.object(
+                    diagnostics, "_guest_owned_capture", return_value={"status": "available", "teardownVerified": True}
+                ),
+                patch.object(diagnostics, "_query_capture", side_effect=[self.identity(), failure]) as capture,
+                patch.object(
+                    diagnostics.time, "time_ns", side_effect=[self.start + 15, self.start + 25, self.start + 26]
+                ),
+            ):
+                result = diagnostics._memory_event_capture(Path("/private"), self.request(), 4, "/timeout")
+            self.assertEqual(result, failure)
+            self.assertEqual(capture.call_count, 2)
+            self.assertEqual([call.args[1] for call in capture.call_args_list], [4, 4])
+
+    def test_unowned_outer_guest_never_launches_inner_query(self) -> None:
+        failure = {"status": "query-unavailable", "teardownVerified": True}
+        with (
+            patch.object(diagnostics, "_guest_owned_capture", return_value=failure),
+            patch.object(diagnostics, "_query_capture") as capture,
+        ):
+            self.assertEqual(
+                diagnostics._memory_event_capture(Path("/private"), self.request(), 4, "/timeout"), failure
+            )
+        capture.assert_not_called()
+
+    def test_unexpected_query_failure_does_not_invent_drain_acknowledgement(self) -> None:
+        with (
+            patch.object(
+                diagnostics, "_guest_owned_capture", return_value={"status": "available", "teardownVerified": True}
+            ),
+            patch.object(diagnostics, "_query_capture", side_effect=RuntimeError(PRIVATE_MARKER)),
+        ):
+            result = diagnostics._memory_event_capture(Path("/private"), self.request(), 4, "/timeout")
+        self.assertFalse(result["teardownVerified"])
+        self.assertNotIn(PRIVATE_MARKER, json.dumps(result))
 
 
 if __name__ == "__main__":

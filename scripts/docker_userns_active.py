@@ -434,6 +434,235 @@ def failure_context(value: dict[str, Any], phase: str | None = None) -> dict[str
     return context
 
 
+SUBJECT_LABEL_LIMIT = 4096
+SUBJECT_POSTCHECKS = ("taskAlive", "taskReadback", "profileReadback", "namespaceReadback", "incarnation")
+SUBJECT_CHECK_STATES = {"match", "mismatch", "unavailable", "deadline", "cancelled", "not-attempted"}
+SUBJECT_MODES = {"unconfined", "enforce", "complain", "kill", "prompt", "allow", "mixed"}
+SUBJECT_EXECUTABLES = {
+    b"rootlesskit": "rootlesskit",
+    b"dockerd": "dockerd",
+    b"sh": "shell",
+    b"dash": "shell",
+    b"bash": "shell",
+    b"ash": "shell",
+    b"busybox": "multicall",
+}
+
+
+def subject_label(raw: bytes, expected: bytes) -> dict[str, Any]:
+    """Classify already-read bounded bytes; no name or unknown mode crosses the root boundary."""
+    require(type(raw) is bytes and len(raw) <= SUBJECT_LABEL_LIMIT)
+    framing = "non-ascii" if not raw.isascii() else "other"
+    if re.fullmatch(rb"[ -~]*\n", raw):
+        framing = "single-ascii-lf"
+    facts = {"framing": framing, "labelKind": "unparsed", "expectedName": "unparsed", "mode": "unparsed"}
+    if framing != "single-ascii-lf":
+        return facts
+    if raw == b"unconfined\n":
+        return facts | {"labelKind": "bare-unconfined", "expectedName": "absent", "mode": "unconfined"}
+    body, separator, suffix = raw[:-1].rpartition(b" (")
+    if not separator or not suffix.endswith(b")") or re.fullmatch(rb"[A-Za-z][A-Za-z0-9_-]{0,63}\)", suffix) is None:
+        return facts
+    mode = suffix[:-1].decode("ascii")
+    atoms = body.split(b"//&")
+    qualified = any(re.fullmatch(rb":[A-Za-z0-9_.-]+://.+", atom) for atom in atoms)
+    stacked = b"//&" in body
+    kind = (
+        "namespace-and-stack-markers"
+        if qualified and stacked
+        else "namespace-marker"
+        if qualified
+        else "stack-marker"
+        if stacked
+        else "single-named"
+    )
+    components = []
+    for atom in atoms:
+        component = atom
+        if component.startswith(b":"):
+            prefix, delimiter, component = component[1:].partition(b"://")
+            if not delimiter or re.fullmatch(rb"[A-Za-z0-9_.-]+", prefix) is None:
+                break
+        if re.fullmatch(rb"[A-Za-z0-9_./@+-]+", component) is None:
+            break
+        components.append(component)
+    parsed = len(components) == len(atoms)
+    if not parsed and not (qualified or stacked):
+        return facts
+    relation = (
+        "unparsed"
+        if not parsed
+        else "component"
+        if expected in components and (qualified or stacked)
+        else "exact"
+        if body == expected
+        else "absent"
+    )
+    return facts | {"labelKind": kind, "expectedName": relation, "mode": mode if mode in SUBJECT_MODES else "other"}
+
+
+def subject_profile_dependencies(value: dict[str, Any]) -> None:
+    """Reject postcheck claims after a recorded stop or failed task identity."""
+    postchecks = value["postchecks"]
+    if value["bytes"] == 0:
+        require(value["sha256"] == digest(b""))
+    for index, name in enumerate(SUBJECT_POSTCHECKS):
+        if postchecks[name] in {"deadline", "cancelled"}:
+            require(all(postchecks[later] == "not-attempted" for later in SUBJECT_POSTCHECKS[index + 1 :]))
+    if postchecks["taskAlive"] != "match":
+        require(postchecks["taskReadback"] == "not-attempted")
+    if postchecks["taskReadback"] != "match":
+        require(postchecks["profileReadback"] == "not-attempted")
+    if postchecks["profileReadback"] == "not-attempted":
+        require(value["executableKind"] == "unavailable" and value["sameExecutable"] == "not-attempted")
+
+
+def subject_profile_detail(value: object) -> dict[str, Any] | None:
+    """Validate/copy a closed optional observation; malformed internal diagnostics are simply omitted."""
+    keys = {
+        "schemaVersion",
+        "originOperation",
+        "source",
+        "bytes",
+        "sha256",
+        "framing",
+        "labelKind",
+        "expectedName",
+        "mode",
+        "postchecks",
+        "postchecksComplete",
+        "executableKind",
+        "sameExecutable",
+        "foreignLabelMatchesExecutableBasename",
+    }
+    if type(value) is not dict or set(value) != keys:
+        return None
+    try:
+        require(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1)
+        require(value["originOperation"] == "bind" and value["source"] == "held-task-attr/apparmor/current")
+        require(type(value["bytes"]) is int and 0 <= value["bytes"] <= SUBJECT_LABEL_LIMIT)
+        require(type(value["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", value["sha256"]))
+        enums = {
+            "framing": {"single-ascii-lf", "non-ascii", "other"},
+            "labelKind": {
+                "bare-unconfined",
+                "single-named",
+                "stack-marker",
+                "namespace-marker",
+                "namespace-and-stack-markers",
+                "unparsed",
+            },
+            "expectedName": {"exact", "component", "absent", "unparsed"},
+            "mode": SUBJECT_MODES | {"other", "unparsed"},
+            "executableKind": {"rootlesskit", "dockerd", "shell", "multicall", "other", "unavailable"},
+            "sameExecutable": {"match", "mismatch", "unavailable", "not-attempted"},
+        }
+        require(all(type(value[key]) is str and value[key] in allowed for key, allowed in enums.items()))
+        postchecks = value["postchecks"]
+        require(type(postchecks) is dict and set(postchecks) == set(SUBJECT_POSTCHECKS))
+        require(all(type(state) is str and state in SUBJECT_CHECK_STATES for state in postchecks.values()))
+        require(
+            type(value["postchecksComplete"]) is bool
+            and value["postchecksComplete"] == all(state == "match" for state in postchecks.values())
+        )
+        require(
+            value["foreignLabelMatchesExecutableBasename"] is None
+            or type(value["foreignLabelMatchesExecutableBasename"]) is bool
+        )
+        require(
+            value["framing"] == "single-ascii-lf"
+            or (value["labelKind"], value["expectedName"], value["mode"]) == ("unparsed", "unparsed", "unparsed")
+        )
+        require(value["framing"] == "other" or value["bytes"] > 0)
+        subject_profile_dependencies(value)
+        kind = value["labelKind"]
+        if kind == "bare-unconfined":
+            require(
+                (value["expectedName"], value["mode"], value["bytes"], value["sha256"])
+                == ("absent", "unconfined", 11, digest(b"unconfined\n"))
+            )
+        elif kind == "single-named":
+            require(value["expectedName"] in {"exact", "absent"} and value["mode"] != "unparsed")
+            require((value["expectedName"], value["mode"]) != ("exact", "unconfined"))
+        elif kind == "unparsed":
+            require(value["expectedName"] == "unparsed" and value["mode"] == "unparsed")
+        else:
+            require(value["expectedName"] in {"component", "absent", "unparsed"})
+        if value["sameExecutable"] in {"match", "mismatch"}:
+            require(value["executableKind"] != "unavailable")
+            require(postchecks["taskAlive"] == postchecks["taskReadback"] == "match")
+        if value["foreignLabelMatchesExecutableBasename"] is not None:
+            require(kind == "single-named" and value["expectedName"] == "absent" and value["mode"] in SUBJECT_MODES)
+            require(value["executableKind"] in {"rootlesskit", "dockerd", "shell", "multicall"})
+            require(value["sameExecutable"] == "match" and value["postchecksComplete"])
+    except TypeError, ValueError, KeyError, RefusedError:
+        return None
+    return {**value, "postchecks": dict(postchecks)}
+
+
+def subject_profile_origin(value: dict[str, Any]) -> bool:
+    """Require independent source, binding and retained-refusal authority for the optional observation."""
+    return (
+        value["actor"] == "root"
+        and value["operation"] in {"bind", "close"}
+        and value["phase"] == "subject-profile"
+        and value["reason"] == "refused"
+        and value["sourceVerified"] is True
+        and value["bindingVerified"] is True
+        and value["reportingLease"] is not None
+        and value["retained"] is True
+        and type(value["comparisons"]) is dict
+        and value["comparisons"].get("subject-profile") is False
+    )
+
+
+def subject_observation_budget(deadline: int) -> None:
+    """Reuse the original work budget while distinguishing observation expiry from a failed comparison."""
+    try:
+        check(deadline)
+    except RefusedError:
+        raise TimeoutError(errno.ETIMEDOUT, "subject observation deadline") from None
+
+
+def subject_executable(directory: int, stack: ExitStack, deadline: int) -> dict[str, Any]:
+    """Follow only the original held proc's kernel exe link, never its returned pathname or file bytes."""
+    subject_observation_budget(deadline)
+    descriptor = os.open(b"exe", os.O_PATH | os.O_CLOEXEC, dir_fd=directory)
+    stack.callback(os.close, descriptor)
+    info = os.fstat(descriptor)
+    require(stat.S_ISREG(info.st_mode))
+    identity = mark(info)
+    subject_observation_budget(deadline)
+    raw = os.readlink(b"exe", dir_fd=directory)
+    subject_observation_budget(deadline)
+    require(type(raw) is bytes and 0 < len(raw) <= SUBJECT_LABEL_LIMIT and re.fullmatch(rb"[ -~]+", raw))
+    require(raw.startswith(b"/") and not raw.endswith(b" (deleted)"))
+    basename = raw.rsplit(b"/", 1)[-1]
+    require(re.fullmatch(rb"[A-Za-z0-9_.+-]+", basename))
+    result = {
+        "descriptor": descriptor,
+        "identity": identity,
+        "basename": basename,
+        "kind": SUBJECT_EXECUTABLES.get(basename, "other"),
+    }
+    result["stable"] = subject_executable_same(directory, result, deadline)
+    return result
+
+
+def subject_executable_same(directory: int, original: dict[str, Any], deadline: int) -> bool:
+    """Compare held metadata with one fresh exe open of that same held task; no binary provenance claim."""
+    subject_observation_budget(deadline)
+    descriptor = os.open(b"exe", os.O_PATH | os.O_CLOEXEC, dir_fd=directory)
+    try:
+        current = os.fstat(descriptor)
+        require(stat.S_ISREG(current.st_mode))
+        result = mark(current) == original["identity"] == mark(os.fstat(original["descriptor"]))
+        subject_observation_budget(deadline)
+        return result
+    finally:
+        os.close(descriptor)
+
+
 def _failure_receipt(progress: dict[str, Any], error: BaseException) -> dict[str, Any]:
     """Render only bounded finite observations from the existing operation journal."""
     record = progress.get("record") or {}
@@ -499,6 +728,13 @@ def _failure_receipt(progress: dict[str, Any], error: BaseException) -> dict[str
     detail = child_build_detail(record.get("childBuild"), sys.modules.get("scripts.docker_userns_custody_child"))
     if detail is not None:
         result["childBuild"] = detail
+    observation = subject_profile_detail(record.get("subjectProfile"))
+    if (
+        observation is not None
+        and subject_profile_origin(result)
+        and len(encoded(result | {"subjectProfile": observation})) <= MAX_FAILURE
+    ):
+        result["subjectProfile"] = observation
     return result
 
 
@@ -515,8 +751,12 @@ def _valid_failure(value: object, child: ModuleType | None = None) -> bool:
     if type(value) is not dict or len(encoded(value)) > MAX_FAILURE:
         return False
     template = failure_receipt({}, RefusedError())
-    if set(value) not in (set(template), set(template) | {"childBuild"}):
+    if not set(template) <= set(value) <= set(template) | {"childBuild", "subjectProfile"}:
         return False
+    if "subjectProfile" in value:
+        observation = subject_profile_detail(value["subjectProfile"])
+        if observation is None or observation != value["subjectProfile"] or not subject_profile_origin(value):
+            return False
     if "childBuild" in value:
         detail = child_build_detail(value["childBuild"], child)
         if detail is None or detail != value["childBuild"]:
@@ -1564,7 +1804,16 @@ class RootPort:
                 "taskIdentityBound": True,
             }
             if not match:
-                write_leaf(self.store.path, "profile-mismatch.bin", raw)
+                try:
+                    comparison(self.point("subject-profile"), "subject-profile", match)
+                except RefusedError:
+                    # Only this exact comparison enters observation. Initial read/write/commit failures do not.
+                    write_leaf(self.store.path, "profile-mismatch.bin", raw)
+                    self.commit()
+                    self.observe_subject_refusal(
+                        container, (descriptor, pidfd, expected_uid), (first, before, namespace, raw)
+                    )
+                    raise
             self.commit()
             comparison(self.point("subject-profile"), "subject-profile", match)
             comparison(self.point("subject-task-alive"), "subject-task-alive", not select.select([pidfd], [], [], 0)[0])
@@ -1604,6 +1853,145 @@ class RootPort:
         finally:
             os.close(pidfd)
             os.close(descriptor)
+
+    def subject_profile_readback(
+        self, task: tuple[int, bytes], observation: dict[str, Any], executable: dict[str, Any], stack: ExitStack
+    ) -> bool:
+        """Bracket the original profile readback with tiny same-held-proc executable metadata samples."""
+        directory, raw = task
+        try:
+            executable.update(subject_executable(directory, stack, self.work_until))
+            observation["executableKind"] = executable["kind"]
+            observation["sameExecutable"] = "not-attempted" if executable["stable"] else "mismatch"
+        except TimeoutError:
+            raise
+        except OSError, RefusedError:
+            subject_observation_budget(self.work_until)
+            observation["sameExecutable"] = "unavailable"
+        subject_observation_budget(self.work_until)
+        matched = proc_bytes(directory, "attr/apparmor/current", SUBJECT_LABEL_LIMIT) == raw
+        subject_observation_budget(self.work_until)
+        if executable:
+            try:
+                same = subject_executable_same(directory, executable, self.work_until)
+                observation["sameExecutable"] = "match" if same and executable["stable"] else "mismatch"
+            except TimeoutError:
+                raise
+            except OSError, RefusedError:
+                subject_observation_budget(self.work_until)
+                observation["sameExecutable"] = "unavailable"
+        return matched
+
+    def observe_subject_refusal(
+        self, container: str, task: tuple[int, int, int], original: tuple[dict, dict, dict, bytes]
+    ) -> None:
+        """Finish only bounded read-only refusal facts; the original profile comparison always wins."""
+        raw = original[3]
+        diagnostic = self.record["diagnostic"]
+        original_phase = diagnostic["phase"]
+        try:
+            observation = {
+                "schemaVersion": 1,
+                "originOperation": "bind",
+                "source": "held-task-attr/apparmor/current",
+                "bytes": len(raw),
+                "sha256": digest(raw),
+                **subject_label(raw, self.record["profileName"].encode()),
+                "postchecks": dict.fromkeys(SUBJECT_POSTCHECKS, "not-attempted"),
+                "postchecksComplete": False,
+                "executableKind": "unavailable",
+                "sameExecutable": "not-attempted",
+                "foreignLabelMatchesExecutableBasename": None,
+            }
+            self.record["subjectProfile"] = observation
+            self.subject_refusal_checks(container, task, original, observation)
+        except Exception, KeyboardInterrupt:  # noqa: BLE001 - never replace the specific latched comparison refusal.
+            return
+        finally:
+            diagnostic["phase"] = original_phase
+            diagnostic.setdefault("comparisons", {})["subject-profile"] = False
+
+    def subject_refusal_step(self, name: str, read: Callable[[], bool], observation: dict[str, Any]) -> bool:
+        """Record one optional read and signal that remaining observations must stop."""
+        postchecks = observation["postchecks"]
+        if self.cleanup or any(
+            self.record.get(key, False) is not False for key in ("readerPending", "childPending", "durabilityUnknown")
+        ):
+            return True
+        try:
+            subject_observation_budget(self.work_until)
+            matched = read()
+            subject_observation_budget(self.work_until)
+            postchecks[name] = "match" if matched else "mismatch"
+        except KeyboardInterrupt:
+            postchecks[name] = "cancelled"
+            return True
+        except TimeoutError:
+            postchecks[name] = "deadline"
+            return True
+        except Exception:  # noqa: BLE001 - failed secondary readers have one closed unavailable state.
+            postchecks[name] = "unavailable"
+            if time.monotonic_ns() >= self.work_until:
+                postchecks[name] = "deadline"
+                return True
+        if any(
+            self.record.get(key, False) is not False for key in ("readerPending", "childPending", "durabilityUnknown")
+        ):
+            postchecks[name] = "unavailable"
+            return True
+        return False
+
+    def subject_refusal_checks(
+        self,
+        container: str,
+        task: tuple[int, int, int],
+        original: tuple[dict, dict, dict, bytes],
+        observation: dict[str, Any],
+    ) -> None:
+        """Reuse exact existing postchecks without adopting an unverified label or a replacement task."""
+        directory, pidfd, expected_uid = task
+        first, before, namespace, raw = original
+        stopped = False
+        postchecks = observation["postchecks"]
+
+        def run(name: str, read: Callable[[], bool]) -> None:
+            nonlocal stopped
+            if not stopped:
+                stopped = self.subject_refusal_step(name, read, observation)
+
+        run("taskAlive", lambda: not select.select([pidfd], [], [], 0)[0])
+        if postchecks["taskAlive"] == "match":
+            run("taskReadback", lambda: task_snapshot(directory, first["pid"], expected_uid) == first)
+        with ExitStack() as stack:
+            executable: dict[str, Any] = {}
+            if postchecks["taskReadback"] == "match":
+                run(
+                    "profileReadback",
+                    lambda: self.subject_profile_readback((directory, raw), observation, executable, stack),
+                )
+            run("namespaceReadback", lambda: namespace_snapshot(self.modules, self.admission) == namespace)
+
+            def incarnation() -> bool:
+                after = self.inspect(container)
+                return (
+                    after["State"]["Pid"] == first["pid"]
+                    and after["State"]["StartedAt"] == before["State"]["StartedAt"]
+                    and after["State"]["Running"] is True
+                )
+
+            run("incarnation", incarnation)
+            observation["postchecksComplete"] = all(state == "match" for state in postchecks.values())
+            if (
+                observation["postchecksComplete"]
+                and observation["sameExecutable"] == "match"
+                and observation["executableKind"] in {"rootlesskit", "dockerd", "shell", "multicall"}
+                and observation["labelKind"] == "single-named"
+                and observation["expectedName"] == "absent"
+                and observation["mode"] in SUBJECT_MODES
+            ):
+                observation["foreignLabelMatchesExecutableBasename"] = (
+                    raw[:-1].rpartition(b" (")[0] == executable["basename"]
+                )
 
     def subject_task_absent(self) -> None:
         """Prove the bound task incarnation and its exact recursive scope are absent."""

@@ -1372,3 +1372,15 @@ schema-1 failure envelopes expose only finite phases and Boolean comparisons;
 raw task/cgroup/profile values remain private. A failed bind retains the original
 refusal. A subsequent close refusal in the retained state is not a second daemon
 failure and grants no cleanup authority.
+
+An optional closed `subjectProfile` failure diagnostic classifies the already-read
+label's framing, complete name boundaries, marker syntax and finite mode. It
+keeps the first refusal while finishing safe postchecks on the same held task,
+CID and original work deadline. Death or identity loss skips dependent task
+reads; cancellation, expiry or uncertain reader/child/durability custody stops
+further observation. Tiny kernel `exe` link/metadata samples may report an
+executable category and basename correlation; they read no binary bytes and
+establish neither binary provenance nor an attachment-policy cause. Raw labels,
+names, paths and task/file identities stay private. Later matching readback
+cannot repair the failed bind. Retained close reuses this observation without
+new measurements; legacy failures remain valid and cleanup authority stays false.
