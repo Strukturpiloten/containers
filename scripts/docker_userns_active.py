@@ -129,6 +129,18 @@ FAILURE_PHASES = frozenset(
         "registry-absent",
         "registry-present",
         "subject",
+        "subject-namespace",
+        "subject-inspect",
+        "subject-running",
+        "subject-task",
+        "subject-cgroup",
+        "subject-profile",
+        "subject-task-alive",
+        "subject-task-readback",
+        "subject-profile-readback",
+        "subject-namespace-readback",
+        "subject-incarnation",
+        "subject-commit",
         "direct-preflight-rpc",
         "direct-preflight-state",
         "direct-preflight-intent",
@@ -257,6 +269,7 @@ FAILURE_OPERATIONS = frozenset(
         "producer",
         "bootstrap",
         "observe-arm",
+        "observe-maintained-amd64",
         "direct-control-prepare",
         "direct-control-create",
         "direct-gate-prepare",
@@ -1512,23 +1525,33 @@ class RootPort:
         expected_uid = 1000 if direct else 0
         self.point("subject")
         self.daemon()
+        self.point("subject-namespace")
         namespace = namespace_snapshot(self.modules, self.admission)
+        self.point("subject-inspect")
         before = self.inspect(container)
         pid = before["State"]["Pid"]
-        require(type(pid) is int and pid > 0 and before["State"]["Running"] is True)
+        comparison(
+            self.point("subject-running"),
+            "subject-running",
+            type(pid) is int and pid > 0 and before["State"]["Running"] is True,
+        )
+        self.point("subject-task")
         descriptor = os.open(f"/proc/{pid}", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
         pidfd = os.pidfd_open(pid)
         try:
             first = task_snapshot(descriptor, pid, expected_uid)
             expected = "0::/" + binding.runtime_slice + "/docker-" + container + ".scope"
-            require(
+            comparison(
+                self.point("subject-cgroup"),
+                "subject-cgroup",
                 (
                     first["cgroup"] == expected + "\n"
                     if direct
                     else re.fullmatch(re.escape(expected) + r"(?:/[A-Za-z0-9_.@:-]+)*\n", first["cgroup"])
                 )
-                and not any(part in {".", ".."} for part in first["cgroup"].split("/"))
+                and not any(part in {".", ".."} for part in first["cgroup"].split("/")),
             )
+            self.point("subject-profile")
             raw = proc_bytes(descriptor, "attr/apparmor/current", 4096)
             match = raw == self.record["profileName"].encode() + b" (unconfined)\n"
             self.record["profileObservation"] = {
@@ -1543,19 +1566,33 @@ class RootPort:
             if not match:
                 write_leaf(self.store.path, "profile-mismatch.bin", raw)
             self.commit()
-            require(
-                match
-                and not select.select([pidfd], [], [], 0)[0]
-                and task_snapshot(descriptor, pid, expected_uid) == first
-                and proc_bytes(descriptor, "attr/apparmor/current", 4096) == raw
-                and namespace_snapshot(self.modules, self.admission) == namespace
+            comparison(self.point("subject-profile"), "subject-profile", match)
+            comparison(self.point("subject-task-alive"), "subject-task-alive", not select.select([pidfd], [], [], 0)[0])
+            comparison(
+                self.point("subject-task-readback"),
+                "subject-task-readback",
+                task_snapshot(descriptor, pid, expected_uid) == first,
             )
+            comparison(
+                self.point("subject-profile-readback"),
+                "subject-profile-readback",
+                proc_bytes(descriptor, "attr/apparmor/current", 4096) == raw,
+            )
+            comparison(
+                self.point("subject-namespace-readback"),
+                "subject-namespace-readback",
+                namespace_snapshot(self.modules, self.admission) == namespace,
+            )
+            self.point("subject-incarnation")
             after = self.inspect(container)
-            require(
+            comparison(
+                self.point("subject-incarnation"),
+                "subject-incarnation",
                 after["State"]["Pid"] == pid
                 and after["State"]["StartedAt"] == before["State"]["StartedAt"]
-                and after["State"]["Running"] is True
+                and after["State"]["Running"] is True,
             )
+            self.point("subject-commit")
             self.record["subject"] = {
                 "container": container,
                 "pid": pid,
@@ -2430,8 +2467,11 @@ def observation_controls(modules: SimpleNamespace, deadline_ns: int, facts: dict
 class ObservationMarker:
     """Durable observation-only pending custody; its name cannot address an active RPC lease."""
 
-    def __init__(self, stage: Path, binding: dict[str, Any], stack: ExitStack) -> None:
+    def __init__(
+        self, stage: Path, binding: dict[str, Any], stack: ExitStack, *, maintained_amd64: bool = False
+    ) -> None:
         """Persist an exclusive marker and its parent before any version child can start."""
+        require(type(maintained_amd64) is bool)
         self.parent = stage / "leases"
         info = self.parent.lstat()
         require(stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and stat.S_IMODE(info.st_mode) == PRIVATE_DIRECTORY)
@@ -2447,7 +2487,14 @@ class ObservationMarker:
             self.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=self.parent_fd
         )
         stack.callback(os.close, self.descriptor)
-        self.raw = encoded({"schemaVersion": 1, "kind": "arm-observation-pending", "qualification": "none", **binding})
+        self.raw = encoded(
+            {
+                "schemaVersion": 1,
+                "kind": "maintained-amd64-observation-pending" if maintained_amd64 else "arm-observation-pending",
+                "qualification": "none",
+                **binding,
+            }
+        )
         write_leaf(self.path, "pending.json", self.raw)
         info = os.fstat(self.descriptor)
         require(stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and stat.S_IMODE(info.st_mode) == PRIVATE_DIRECTORY)
@@ -2471,9 +2518,16 @@ class ObservationMarker:
 
 
 def observation_version(
-    stage: Path, bootstrap: dict[str, Any], modules: SimpleNamespace, facts: dict[str, Any], progress: dict[str, Any]
+    stage: Path,
+    bootstrap: dict[str, Any],
+    modules: SimpleNamespace,
+    facts: dict[str, Any],
+    progress: dict[str, Any],
 ) -> None:
     """Use only the existing dropped-ID version probe with same-job held tool identities."""
+    maintained_amd64 = (
+        bootstrap["context"]["architecture"] == "amd64" and bootstrap["context"]["purpose"] == "maintained-prerequisite"
+    )
     end = min(bootstrap["deadlineNs"] - RESERVE_NS, time.monotonic_ns() + 10_000_000_000)
     cutoff = min(end - 1_000_000_000, time.monotonic_ns() + 5_000_000_000)
     check(cutoff)
@@ -2510,6 +2564,7 @@ def observation_version(
                 "cleanupDeadlineNs": end,
             },
             stack,
+            maintained_amd64=maintained_amd64,
         )
         state.update(lifetime="unknown", custody="retained")
 
@@ -2718,6 +2773,85 @@ def arm_observation_receipt(
     }
 
 
+def maintained_amd64_observation_receipt(
+    progress: dict[str, Any], facts: dict[str, Any], error: BaseException | None = None
+) -> dict[str, Any]:
+    """Render a separate closed nonqualifying receipt; legacy ARM schema stays unchanged."""
+    try:
+        require(type(facts) is dict)
+        checks = {"fixedExecutableCapabilitiesAbsent", "actorUnconfined"}
+        public, complete = public_arm_observation({key: value for key, value in facts.items() if key not in checks})
+        for key in checks & facts.keys():
+            require(facts[key] is True)
+            public[key] = True
+        complete = complete and checks <= facts.keys()
+        if "reportedImageOS" in public:
+            require(public["reportedImageOS"] == REPORTED_IMAGE_OS["amd64"])
+        if "machine" in public:
+            require(public["machine"] == "x86_64")
+    except Exception:  # noqa: BLE001 - no raw/private fallback for malformed facts.
+        public, complete = {}, False
+    if not complete and error is None:
+        error = RefusedError()
+    return {
+        "schemaVersion": 1,
+        "consumer": CONSUMER,
+        "kind": "maintained-amd64-cohort-observation",
+        "purpose": "public-nonqualifying-maintained-host-observation",
+        "qualification": "none",
+        "disposition": "AMD64_OBSERVATION_ONLY",
+        "activeAuthority": False,
+        "cleanupAuthority": False,
+        "nativeQualification": False,
+        "complete": complete and error is None,
+        "context": failure_context(progress.get("context", {})),
+        "facts": public,
+        "failure": failure_receipt(progress, error) if error is not None else None,
+    }
+
+
+def observe_maintained_amd64(
+    stage: Path, bootstrap: dict[str, Any], modules: SimpleNamespace, progress: dict[str, Any]
+) -> dict[str, Any]:
+    """Collect maintained AMD64 facts without admitting a host or constructing a runtime lease."""
+    facts: dict[str, Any] = {}
+    try:
+        progress["phase"] = "observation-entry"
+        require(
+            bootstrap["context"]["architecture"] == "amd64"
+            and bootstrap["context"]["purpose"] == modules.qualification.MAINTAINED_PURPOSE
+            and bootstrap["context"]["imageOS"] == REPORTED_IMAGE_OS["amd64"]
+        )
+        require(not list((stage / "leases").iterdir()))
+        admission = preflight_authority(stage, bootstrap, modules, progress=progress)
+        facts.update(
+            reportedImageOS=bootstrap["context"]["imageOS"],
+            imageVersion=bootstrap["context"]["imageVersion"],
+            imageVersionKind="workflow-reported-provenance-not-vm-attestation",
+            sourceFilesSha256=digest(encoded(bootstrap["files"])),
+            sourceManifestSha256=admission["sourceManifestSha256"],
+            pythonVersion=list(sys.version_info),
+            pythonImplementation=sys.implementation.name,
+            toolTrust="same-job-root-owned-preinstalled-tool-exception-not-compatibility-admission",
+        )
+        collect_host_facts(modules, progress, facts, lambda _kind, _facts: None)
+        progress["phase"] = "observation-controls"
+        facts["controls"] = {}
+        observation_controls(modules, bootstrap["deadlineNs"] - RESERVE_NS, facts["controls"])
+        facts["files"] = {}
+        collect_cohort_files(modules, progress, facts["files"], lambda _key, _raw, _phase: None)
+        facts["fixedExecutableCapabilitiesAbsent"] = True
+        progress["phase"] = "observation-namespace"
+        facts["namespace"] = namespace_snapshot(modules, admission)
+        facts["actorUnconfined"] = True
+        observation_version(stage, bootstrap, modules, facts, progress)
+        check(bootstrap["deadlineNs"] - RESERVE_NS)
+        progress["phase"] = "observation-complete"
+    except (Exception, KeyboardInterrupt) as error:  # noqa: BLE001 - only completed bounded facts may escape.
+        return maintained_amd64_observation_receipt(progress, facts, error)
+    return maintained_amd64_observation_receipt(progress, facts)
+
+
 def observe_arm(
     stage: Path, bootstrap: dict[str, Any], modules: SimpleNamespace, progress: dict[str, Any]
 ) -> dict[str, Any]:
@@ -2771,6 +2905,7 @@ def main() -> int:
             "owner",
             "dispose-stage",
             "observe-arm",
+            "observe-maintained-amd64",
             "direct-control-prepare",
             "direct-control-create",
             "direct-gate-prepare",
@@ -2806,13 +2941,17 @@ def main() -> int:
                 store.close()
         elif args.operation == "owner":
             return owner_main(args.stage, bootstrap, modules, args.name, args.kind)
-        elif args.operation == "observe-arm":
+        elif args.operation in {"observe-arm", "observe-maintained-amd64"}:
             progress["phase"] = "stage-lock"
             with stage_lock(args.stage):
                 require(args.name == "new" and args.kind is None and args.request == "e30=")
-                result = observe_arm(args.stage, bootstrap, modules, progress)
+                result = (
+                    observe_arm(args.stage, bootstrap, modules, progress)
+                    if args.operation == "observe-arm"
+                    else observe_maintained_amd64(args.stage, bootstrap, modules, progress)
+                )
             sys.stdout.buffer.write(encoded(result))
-            return 1
+            return 0 if args.operation == "observe-maintained-amd64" and result["complete"] is True else 1
         elif args.operation == "dispose-stage":
             progress["phase"] = "stage-lock"
             with stage_lock(args.stage):
@@ -2845,6 +2984,8 @@ def main() -> int:
         result = (
             arm_observation_receipt(progress, {}, error)
             if args.operation == "observe-arm"
+            else maintained_amd64_observation_receipt(progress, {}, error)
+            if args.operation == "observe-maintained-amd64"
             else failure_receipt(progress, error)
         )
         sys.stdout.buffer.write(encoded(result))

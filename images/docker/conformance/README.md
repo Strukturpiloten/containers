@@ -55,6 +55,17 @@ fixture. Its metadata is the manual owner of the fixed package revision;
 Renovate uniquely extracts its base image and groups it with the Debian 11
 direct Docker/Podman bases, with coordinated manual review and automerge disabled.
 
+After RootlessKit copies up `/run`, its rootless child detaches `/run/containerd`
+only if that exact leaf is a symlink. This leaves the original target's ownership,
+mode and contents intact while allowing packaged containerd to create its private
+socket directory. An absent leaf or an existing private directory is accepted;
+a conflicting file or failed unlink stops before dockerd. Preparation never runs
+in the rootful branch or before the external UID 1000 and bus-socket guards.
+This repairs the child path without changing the exact Debian 11 package,
+RootlessKit flags or daemon arguments. Fresh native nested-volume and cleanup
+proof remains required; the failed-run artifacts did not measure the original
+leaf's link or ownership metadata.
+
 Guest PID 1 runs systemd as UID 0. An actual UID 1000 user manager starts the
 rootless Docker service, which requests the systemd cgroup driver. Guest-only
 linger state and `Delegate=yes` provide the intended user-service hierarchy.

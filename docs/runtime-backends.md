@@ -1337,3 +1337,38 @@ Its qualification remains none. The changed source, every ordinary direct row,
 all three systemd fixtures and the other selected profiles need fresh complete
 native evidence. Source controls and generated unknown catalogue entries provide
 no native, registry, publication, release or deployment approval.
+
+
+### Bounded maintained AMD64 host observation
+
+Before a maintained AMD64 runtime lease, the existing source-authenticated staged
+helper can collect a separate `maintained-amd64-cohort-observation` receipt. Its
+schema 1 is specific to this new kind; the ARM observation's schema 2 and behavior
+remain unchanged. The route runs under the original stage lock, rejects existing
+leases or pending markers, and retains the original bootstrap deadline and
+stage-disposal trap. It collects fixed OS/kernel/interpreter facts, five fixed
+file digests and metadata checks, control values, genuine namespace hashes and a
+Boolean unconfined-actor check. Completed executable capability checks are
+reported explicitly. Raw ownership identities, labels, paths and tool output
+remain private. Reported runner-image versions are provenance, not VM attestation.
+
+The parser version child uses held interpreter/parser descriptors, dropped IDs
+and the existing durable observation-only marker. Unresolved child lifetime,
+replacement or marker custody prevents subsequent runtime; proven completion
+retires only the exact held marker. This route creates no policy, compiler,
+profile, guest or runtime lease and grants no cleanup authority. Its disposition
+is `AMD64_OBSERVATION_ONLY`, with `qualification: none`. A complete observation
+only permits the unchanged active host preflight to run: an unknown host tuple
+still refuses. It does not admit AWS or qualify a maintained image. Existing
+rootful, Podman, direct diagnostic and experimental ARM routes do not invoke it.
+The public artifact can be partial and nonqualifying after a failure. Actual host
+compatibility and any later exact admission change require separate review and
+fresh native evidence; these facts alone do not establish either.
+
+Subject binding restores its own diagnostic phase after checking the daemon.
+Finite checkpoints distinguish namespace, inspect/running, held task/UID, exact
+CID scope, actual profile label, post-readback and incarnation failures. Existing
+schema-1 failure envelopes expose only finite phases and Boolean comparisons;
+raw task/cgroup/profile values remain private. A failed bind retains the original
+refusal. A subsequent close refusal in the retained state is not a second daemon
+failure and grants no cleanup authority.

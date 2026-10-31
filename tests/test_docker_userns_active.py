@@ -3562,3 +3562,414 @@ class OrdinaryDirectRootDeadlineTests(unittest.TestCase):
                         active.RootPort(
                             ROOT, bootstrap, SimpleNamespace(qualification=qualification), SimpleNamespace(), record
                         )
+
+
+class SubjectFailureCheckpoints(unittest.TestCase):
+    def proc_reader(self, fault: str | None, subject: object) -> object:
+        """Supply proc bytes to the real task reader without opening host tasks."""
+        expected_uid = 0 if type(subject) is qualification.NativeBinding else 1000
+        calls = {"stat": 0, "attr/apparmor/current": 0}
+
+        def proc(_descriptor: int, leaf: str, _limit: int = 65536) -> bytes:
+            if leaf == "stat":
+                calls[leaf] += 1
+                ticks = 2 if fault == "task-readback" and calls[leaf] > 1 else 1
+                return b"123 (fixture task) S " + b"0 " * 18 + str(ticks).encode() + b"\n"
+            if leaf == "status":
+                uid = 1001 if fault == "task" else expected_uid
+                return b"Pid:\t123\nTgid:\t123\nUid:\t" + (str(uid).encode() + b"\t") * 4 + b"\n"
+            if leaf == "cgroup":
+                suffix = "/foreign" if fault == "cgroup" else ""
+                return ("0::/" + subject.runtime_slice + "/docker-" + "a" * 64 + ".scope" + suffix + "\n").encode()
+            if leaf == "attr/apparmor/current":
+                calls[leaf] += 1
+                if fault == "profile" or (fault == "profile-readback" and calls[leaf] > 1):
+                    return b"protected-different-label (enforce)\n"
+                return b"protected-actual-label (unconfined)\n"
+            raise AssertionError(leaf)
+
+        return proc
+
+    def exercise(self, fault: str | None, subject: object | None = None) -> tuple:
+        """Use the real task UID parser, bind decisions and retained lease state machine."""
+        subject = subject or binding()
+        cid, pid = "a" * 64, 123
+        port = active.RootPort.__new__(active.RootPort)
+        port.binding, port.modules, port.admission = subject, SimpleNamespace(qualification=qualification), {}
+        port.record = {"profileName": "protected-actual-label", "state": "create-intent"}
+        port.commit, port.guard, port.persist = Mock(), Mock(), Mock()
+        state = {"State": {"Pid": pid, "Running": fault != "running", "StartedAt": "first"}}
+        after = copy.deepcopy(state)
+        if fault == "incarnation":
+            after["State"]["StartedAt"] = "other"
+        port.inspect = Mock(side_effect=[state, after])
+        if fault == "inspect":
+            port.inspect.side_effect = active.RefusedError(PRIVATE)
+
+        def daemon() -> None:
+            port.point("daemon")
+            if fault == "daemon":
+                raise active.RefusedError(PRIVATE)
+
+        port.daemon = daemon
+        with tempfile.TemporaryDirectory() as temporary:
+            port.store = SimpleNamespace(path=Path(temporary))
+            lease = qualification.ProfileLease(subject, port)
+            lease.state = qualification.State.CREATE_INTENT
+            namespaces = Mock(side_effect=[{}, {"changed": True} if fault == "namespace-readback" else {}])
+            if fault == "namespace":
+                namespaces.side_effect = active.RefusedError(PRIVATE)
+            with (
+                patch.object(active, "namespace_snapshot", namespaces),
+                patch.object(active, "filesystem_magic"),
+                patch.object(active, "write_leaf"),
+                patch.object(active, "proc_bytes", side_effect=self.proc_reader(fault, subject)),
+                patch.object(active.os, "open", return_value=11),
+                patch.object(active.os, "pidfd_open", return_value=12, create=True),
+                patch.object(active.os, "close"),
+                patch.object(
+                    active.select, "select", return_value=([12], [], []) if fault == "task-alive" else ([], [], [])
+                ),
+            ):
+                if fault:
+                    with self.assertRaises(active.RefusedError):
+                        lease.bind(cid)
+                    original = copy.deepcopy(port.record["diagnostic"])
+                    self.assertEqual(lease.state, qualification.State.RETAINED)
+                    self.assertTrue(port.record["retained"])
+                    self.assertNotIn("subject", port.record)
+                    with self.assertRaises(qualification.QualificationError):
+                        lease.close()
+                    self.assertEqual(port.record["diagnostic"], original)
+                    self.assertEqual(port.guard.call_count, 1)
+                    self.assertEqual(port.record["retainedFrom"], "create-intent")
+                else:
+                    lease.bind(cid)
+                    self.assertEqual(lease.state, qualification.State.ATTACHED)
+                    self.assertEqual(port.record["subject"]["container"], cid)
+            receipt = active.failure_receipt(
+                {"record": port.record, "binding": subject, "operation": "bind"}, active.RefusedError(PRIVATE)
+            )
+            self.assertTrue(active.valid_failure(receipt))
+            self.assertNotIn("protected-", active.encoded(receipt).decode())
+            self.assertNotIn(PRIVATE, active.encoded(receipt).decode())
+            self.assertFalse(receipt["cleanupAuthority"])
+            return port, receipt
+
+    def test_actual_failing_predicates_replace_stale_daemon_and_close_remains_retained(self) -> None:
+        from tests.test_docker_direct_startup_contract import binding as direct_binding  # noqa: PLC0415
+
+        diagnostic = direct_binding()
+        maintained_values = {
+            key: value
+            for key, value in asdict(diagnostic).items()
+            if key not in {"variant", "launcher", "expected_uid", "arm"}
+        }
+        maintained = qualification.MaintainedDirectBinding(
+            **(maintained_values | {"phase": "ordinary-direct", "purpose": qualification.MAINTAINED_PURPOSE})
+        )
+        for subject in (binding(), maintained, diagnostic):
+            for fault in (
+                "daemon",
+                "namespace",
+                "inspect",
+                "running",
+                "task",
+                "cgroup",
+                "profile",
+                "task-alive",
+                "task-readback",
+                "profile-readback",
+                "namespace-readback",
+                "incarnation",
+            ):
+                if fault == "cgroup" and type(subject) is qualification.NativeBinding:
+                    continue  # Native systemd permits genuine descendant scopes; direct bindings do not.
+                with self.subTest(subject=type(subject).__name__, fault=fault):
+                    _port, receipt = self.exercise(fault, subject)
+                    phase = "daemon" if fault == "daemon" else "subject-" + fault
+                    self.assertEqual(receipt["phase"], phase)
+                    if fault in {
+                        "running",
+                        "cgroup",
+                        "profile",
+                        "task-alive",
+                        "task-readback",
+                        "profile-readback",
+                        "namespace-readback",
+                        "incarnation",
+                    }:
+                        self.assertFalse(receipt["comparisons"][phase])
+
+    def test_native_maintained_and_diagnostic_positive_uid_bindings_still_succeed(self) -> None:
+        from tests.test_docker_direct_startup_contract import binding as direct_binding  # noqa: PLC0415
+
+        diagnostic = direct_binding()
+        values = {
+            key: value
+            for key, value in asdict(diagnostic).items()
+            if key not in {"variant", "launcher", "expected_uid", "arm"}
+        }
+        maintained = qualification.MaintainedDirectBinding(
+            **(values | {"phase": "ordinary-direct", "purpose": qualification.MAINTAINED_PURPOSE})
+        )
+        for subject in (binding(), maintained, diagnostic):
+            with self.subTest(subject=type(subject).__name__):
+                port, _receipt = self.exercise(None, subject)
+                self.assertEqual(port.record["diagnostic"]["phase"], "subject-commit")
+
+
+class MaintainedAMD64Observation(unittest.TestCase):
+    def bootstrap(self) -> dict:
+        return {
+            "context": workflow_context(purpose=qualification.MAINTAINED_PURPOSE),
+            "files": dict.fromkeys(active.FILES, "a" * 64),
+            "stageIdentity": [1, 2],
+            "uid": 1000,
+            "gid": 1000,
+            "deadlineNs": 10**18,
+        }
+
+    def facts(self) -> dict:
+        return arm_observation_fixture() | {
+            "reportedImageOS": "ubuntu26",
+            "machine": "x86_64",
+            "kernel": "7.0.0-1014-aws",
+            "fixedExecutableCapabilitiesAbsent": True,
+            "actorUnconfined": True,
+        }
+
+    def test_separate_closed_projection_is_private_nonqualifying_and_preserves_arm(self) -> None:
+        facts = self.facts()
+        before = copy.deepcopy(facts)
+        receipt = active.maintained_amd64_observation_receipt({}, facts)
+        self.assertEqual(receipt["schemaVersion"], 1)
+        self.assertEqual(receipt["kind"], "maintained-amd64-cohort-observation")
+        self.assertEqual(receipt["purpose"], "public-nonqualifying-maintained-host-observation")
+        self.assertEqual(receipt["disposition"], "AMD64_OBSERVATION_ONLY")
+        self.assertEqual(receipt["qualification"], "none")
+        self.assertTrue(receipt["complete"])
+        self.assertIsNone(receipt["failure"])
+        self.assertEqual(receipt["facts"]["kernel"], "7.0.0-1014-aws")
+        self.assertEqual(facts, before)
+        self.assertFalse(any(receipt[key] for key in ("activeAuthority", "cleanupAuthority", "nativeQualification")))
+        self.assertFalse(active.valid_failure(receipt))
+        raw = active.encoded(receipt).decode()
+        for token in ('"identity"', '"uid"', '"gid"', '"inode"', "810000000000000"):
+            self.assertNotIn(token, raw)
+        arm = active.arm_observation_receipt({}, arm_observation_fixture())
+        self.assertEqual(
+            (arm["schemaVersion"], arm["kind"], arm["disposition"]), (2, "arm-cohort-observation", "ARM_NOT_ADMITTED")
+        )
+        for mutation in (
+            {"actorUnconfined": False},
+            {"fixedExecutableCapabilitiesAbsent": "true"},
+            {"machine": "aarch64"},
+            {"reportedImageOS": "ubuntu26-arm64"},
+            {"raw": PRIVATE},
+        ):
+            with self.subTest(mutation=mutation):
+                refused = active.maintained_amd64_observation_receipt({}, facts | mutation)
+                self.assertFalse(refused["complete"])
+                self.assertEqual(refused["facts"], {})
+                self.assertNotIn(PRIVATE, active.encoded(refused).decode())
+        for key in ("actorUnconfined", "fixedExecutableCapabilitiesAbsent", "versionChild"):
+            partial = dict(facts)
+            partial.pop(key)
+            self.assertFalse(active.maintained_amd64_observation_receipt({}, partial)["complete"])
+
+    def test_exact_context_is_authenticated_before_fixed_collection_and_never_admits_host(self) -> None:
+        observed = self.facts()
+        for changed in (
+            {},
+            {"purpose": qualification.EXPERIMENTAL_PURPOSE},
+            {"architecture": "arm64"},
+            {"imageOS": "ubuntu26-arm64"},
+            {"caller": "foreign"},
+            {"job": "foreign"},
+            {"image": "docker-29-rootful"},
+            {"validationProfile": "foreign"},
+        ):
+            with self.subTest(changed=changed):
+                bootstrap = self.bootstrap()
+                bootstrap["context"].update(changed)
+                progress = {"context": bootstrap["context"], "operation": "observe-maintained-amd64"}
+
+                def host_facts(_modules: object, _progress: object, facts: dict, _evaluate: object) -> None:
+                    facts.update({key: observed[key] for key in ("osID", "osVersion", "machine", "kernel")})
+
+                def controls(_modules: object, _deadline: int, facts: dict) -> None:
+                    facts.update(observed["controls"])
+
+                def files(_modules: object, _progress: object, facts: dict, _evaluate: object) -> None:
+                    facts.update(observed["files"])
+
+                def version(
+                    _stage: Path,
+                    _bootstrap: dict,
+                    _modules: object,
+                    facts: dict,
+                    _progress: dict,
+                ) -> None:
+                    self.assertEqual(_bootstrap["context"]["architecture"], "amd64")
+                    facts.update(parserVersion=observed["parserVersion"], versionChild=observed["versionChild"])
+
+                with (
+                    patch.object(active.Path, "iterdir", return_value=iter(())),
+                    patch.object(active, "root_bytes", side_effect=lambda path: path.read_bytes()),
+                    patch.object(active, "collect_host_facts", side_effect=host_facts) as collect,
+                    patch.object(active, "observation_controls", side_effect=controls),
+                    patch.object(active, "collect_cohort_files", side_effect=files),
+                    patch.object(active, "namespace_snapshot", return_value=observed["namespace"]),
+                    patch.object(active, "observation_version", side_effect=version) as probe,
+                    patch.object(active, "root_preflight") as preflight,
+                    patch.object(active, "root_rpc") as rpc,
+                    patch.object(qualification, "ProfileLease") as lease,
+                    patch.object(active, "check"),
+                ):
+                    receipt = active.observe_maintained_amd64(
+                        ROOT, bootstrap, SimpleNamespace(qualification=qualification), progress
+                    )
+                self.assertEqual(receipt["complete"], not changed)
+                self.assertEqual(collect.call_count, int(not changed))
+                self.assertEqual(probe.call_count, int(not changed))
+                preflight.assert_not_called()
+                rpc.assert_not_called()
+                lease.assert_not_called()
+                self.assertFalse(receipt["nativeQualification"])
+                self.assertFalse(receipt["activeAuthority"])
+                if not changed:
+                    self.assertEqual(receipt["facts"]["kernel"], "7.0.0-1014-aws")
+
+    def test_live_lease_or_pending_marker_stops_observation_before_probe(self) -> None:
+        for name in ("a" * 32, "observation-" + "a" * 32):
+            with (
+                self.subTest(name=name),
+                patch.object(active.Path, "iterdir", return_value=iter([Path(name)])),
+                patch.object(active, "preflight_authority") as authority,
+            ):
+                result = active.observe_maintained_amd64(
+                    ROOT, self.bootstrap(), SimpleNamespace(qualification=qualification), {}
+                )
+                self.assertFalse(result["complete"])
+                self.assertEqual(result["failure"]["phase"], "observation-entry")
+                authority.assert_not_called()
+
+    def test_closed_stage_locked_dispatch_and_partial_results_fail_before_runtime(self) -> None:
+        for complete, extra in (
+            (True, []),
+            (False, []),
+            (True, ["a" * 32]),
+            (True, ["new", "owner"]),
+            (True, ["--request", "e30x"]),
+        ):
+            with self.subTest(complete=complete, extra=extra):
+                facts = self.facts() if complete else {}
+                receipt = active.maintained_amd64_observation_receipt({}, facts)
+                stdout = SimpleNamespace(buffer=io.BytesIO())
+                locked = []
+
+                @contextmanager
+                def lock(_stage: Path, locked: list = locked) -> Iterator[None]:
+                    locked.append(True)
+                    try:
+                        yield
+                    finally:
+                        locked.pop()
+
+                def observe(*_args: object, locked: list = locked, receipt: dict = receipt) -> dict:
+                    self.assertEqual(locked, [True])
+                    return receipt
+
+                with (
+                    patch.object(active.sys, "argv", ["root", "observe-maintained-amd64", "/run/unused-stage", *extra]),
+                    patch.object(active.sys, "stdout", stdout),
+                    patch.object(active, "verify_stage", return_value=self.bootstrap()),
+                    patch.object(active, "dependencies", return_value=SimpleNamespace()),
+                    patch.object(active, "stage_lock", side_effect=lock) as held,
+                    patch.object(active, "observe_maintained_amd64", side_effect=observe) as observed,
+                    patch.object(active, "root_rpc") as rpc,
+                ):
+                    self.assertEqual(active.main(), 0 if complete and not extra else 1)
+                held.assert_called_once()
+                self.assertEqual(observed.call_count, int(not extra))
+                rpc.assert_not_called()
+                result = json.loads(stdout.buffer.getvalue())
+                self.assertEqual(result["kind"], "maintained-amd64-cohort-observation")
+                self.assertFalse(result["activeAuthority"])
+                self.assertFalse(result["nativeQualification"])
+
+    def test_held_dropped_id_version_probe_has_accurate_marker_and_uncertain_child_stays_pending(self) -> None:
+        for fault in (None, "unknown"):
+            with self.subTest(fault=fault), ARMObservationCustody().fixture(None) as fixture:
+                fixture.bootstrap["context"] = self.bootstrap()["context"]
+
+                def probe(
+                    authority: child.Interpreter,
+                    target: int,
+                    kind: str,
+                    lease: child.Build,
+                    _clock: object,
+                    *,
+                    fault: str | None = fault,
+                ) -> child.Outcome:
+                    marker = next(fixture.leases.iterdir())
+                    pending = json.loads((marker / "pending.json").read_bytes())
+                    self.assertEqual(pending["kind"], "maintained-amd64-observation-pending")
+                    self.assertEqual(pending["qualification"], "none")
+                    self.assertEqual(pending["context"]["architecture"], "amd64")
+                    self.assertEqual(pending["tools"], fixture.facts["files"])
+                    self.assertEqual((lease.uid, lease.gid), (1000, 1000))
+                    self.assertLess(lease.deadline_ns, lease.cleanup_deadline_ns)
+                    self.assertLessEqual(lease.cleanup_deadline_ns, fixture.bootstrap["deadlineNs"] - active.RESERVE_NS)
+                    self.assertEqual(kind, "parser-version")
+                    self.assertEqual(authority.sha256, fixture.facts["files"]["interpreterSha256"]["sha256"])
+                    self.assertIsInstance(target, int)
+                    if fault:
+                        raise child.ChildError(lifetime=child.Lifetime.UNKNOWN)
+                    return child.Outcome(b"AppArmor parser version 5.9.1\nfixture\n", dead=True)
+
+                fixture.probe.side_effect = probe
+                if fault:
+                    with self.assertRaises(child.ChildError):
+                        active.observation_version(
+                            fixture.stage,
+                            fixture.bootstrap,
+                            fixture.modules,
+                            fixture.facts,
+                            fixture.progress,
+                        )
+                    self.assertEqual(len(list(fixture.leases.iterdir())), 1)
+                    self.assertEqual(fixture.facts["versionChild"], {"lifetime": "unknown", "custody": "retained"})
+                else:
+                    active.observation_version(
+                        fixture.stage,
+                        fixture.bootstrap,
+                        fixture.modules,
+                        fixture.facts,
+                        fixture.progress,
+                    )
+                    self.assertEqual(list(fixture.leases.iterdir()), [])
+                    self.assertEqual(fixture.facts["versionChild"], {"lifetime": "proven-dead", "custody": "retired"})
+
+    def test_action_keeps_observation_inside_maintained_amd64_before_original_runtime(self) -> None:
+        action = yaml.safe_load((ROOT / ".github/actions/build-arch-image/action.yml").read_text())
+        runtime = next(step for step in action["runs"]["steps"] if step.get("name") == "Verify image runtime")
+        script = runtime["run"]
+        start = script.index(
+            'if [ "${IMAGE_ARCH}" = "amd64" ] && '
+            '[ "${FOCUSED_RUNTIME}" != direct-startup-diagnostic ] && '
+            '[ "${VALIDATION_PROFILE,,}" != docker-rootless-diagnostic ]; then'
+        )
+        stop = script.index('if [ "${IMAGE_ARCH}" = "arm64" ]', start)
+        self.assertLess(script.index("trap finish_active_stage EXIT"), start)
+        self.assertLess(stop, script.index("python -m scripts.runtime_tests", stop))
+        self.assertIn('observe-maintained-amd64 "${active_stage}"', script[start:stop])
+        self.assertIn("20s", script[start:stop])
+        self.assertIn(
+            '> "${RUNNER_TEMP}/runtime-evidence/${IMAGE_NAME}-${IMAGE_ARCH}-userns-observation.json"',
+            script[start:stop],
+        )
+        self.assertNotIn("|| true", script[start:stop])
+        self.assertNotIn("exit 0", script[start:stop])
+        self.assertIn("set -euo pipefail", script)

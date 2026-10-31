@@ -808,6 +808,13 @@ runs:
             exit "${active_status}"
           }
           trap finish_active_stage EXIT
+          if [ "${IMAGE_ARCH}" = "amd64" ] && [ "${FOCUSED_RUNTIME}" != direct-startup-diagnostic ] && [ "${VALIDATION_PROFILE,,}" != docker-rootless-diagnostic ]; then
+            # Read-only same-job facts never replace the unchanged active host admission.
+            sudo -n /usr/bin/timeout --signal=TERM --kill-after=1s 20s \
+              /usr/bin/python3.14 -I -B -S "${active_stage}/scripts/docker_userns_active.py" \
+              observe-maintained-amd64 "${active_stage}" \
+              > "${RUNNER_TEMP}/runtime-evidence/${IMAGE_NAME}-${IMAGE_ARCH}-userns-observation.json"
+          fi
           if [ "${IMAGE_ARCH}" = "arm64" ] && [ "${VALIDATION_PROFILE,,}" = docker-rootless-diagnostic ]; then
             # Observation cannot qualify native tests or admit ARM policy loading.
             if sudo -n /usr/bin/timeout --signal=TERM --kill-after=1s 20s \

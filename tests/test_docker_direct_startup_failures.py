@@ -297,3 +297,59 @@ class DirectPublicationFailures(unittest.TestCase):
         )
         with self.assertRaises(contract.DirectDiagnosticError):
             runtime._publish_host(plan, self.evidence(host=True), "before")
+
+
+class ClosedSubjectFailureTransport(unittest.TestCase):
+    def test_all_finite_phases_transport_without_raw_fields_or_authority(self) -> None:
+        from scripts import docker_direct_startup_aggregate as aggregate  # noqa: PLC0415
+        from scripts import docker_direct_startup_client as client  # noqa: PLC0415
+
+        for phase in active.FAILURE_PHASES:
+            with self.subTest(phase=phase):
+                progress = {
+                    "operation": "bind",
+                    "record": {
+                        "retained": True,
+                        "diagnostic": {
+                            "phase": phase,
+                            "comparisons": {phase: False, "PRIVATE_PHASE": True},
+                            "raw": "PRIVATE_DATA",
+                        },
+                    },
+                }
+                receipt = active.failure_receipt(progress, active.RefusedError("PRIVATE_DATA"))
+                self.assertEqual(receipt["phase"], phase)
+                self.assertEqual(receipt["comparisons"], {phase: False})
+                self.assertTrue(active.valid_failure(receipt))
+                self.assertNotIn("PRIVATE_", json.dumps(receipt))
+                projected = client.project_failure(receipt, "B")
+                self.assertEqual(aggregate.validate_failure(projected), projected)
+                self.assertEqual(projected["qualification"], "none")
+                self.assertFalse(projected["cleanupAuthority"])
+
+    def test_unknown_malformed_and_extra_fields_stay_closed(self) -> None:
+        for diagnostic in (
+            {},
+            {"phase": "PRIVATE_PHASE"},
+            {"phase": []},
+            {"comparisons": []},
+            {"comparisons": {"subject-profile": "PRIVATE_DATA"}},
+        ):
+            with self.subTest(diagnostic=diagnostic):
+                receipt = active.failure_receipt(
+                    {"record": {"diagnostic": diagnostic}}, active.RefusedError("PRIVATE_DATA")
+                )
+                self.assertTrue(active.valid_failure(receipt))
+                self.assertEqual(receipt["phase"], "unknown")
+                self.assertEqual(receipt["comparisons"], {})
+                self.assertNotIn("PRIVATE_", json.dumps(receipt))
+        receipt = active.failure_receipt({}, active.RefusedError())
+        for mutation in (
+            {"raw": "PRIVATE_DATA"},
+            {"phase": "subject-private-profile"},
+            {"comparisons": {"subject-profile": "PRIVATE_DATA"}},
+            {"comparisons": {"subject-profile-private": False}},
+            {"cleanupAuthority": True},
+        ):
+            with self.subTest(mutation=mutation):
+                self.assertFalse(active.valid_failure(receipt | mutation))

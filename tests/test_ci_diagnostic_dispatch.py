@@ -6,6 +6,7 @@ import ast
 import json
 import os
 import re
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -584,31 +585,116 @@ class DiagnosticDispatchTests(unittest.TestCase):
         generated = engine._workflow_environment().get_template("ci.yml.j2").render(config=load_config(self.root))
         self.assertEqual(generated, (self.root / ".github/workflows/ci.yml").read_text())
 
-    def test_actual_action_retains_failure_fallback_until_maintained_disposal_and_authority(self) -> None:
+    @staticmethod
+    def inert_stage_commands() -> str:
+        """Replace only runtime/root boundaries; reject every unexpected privileged command."""
+        return r"""set -euo pipefail
+runtime_args=()
+active_stage=/run/containers-userns-active.ffffffffffffffffffffffffffffffff
+root_command_refused() {
+    printf 'unknown-root-command\n' >> "${TEST_EVENTS}"
+    return 97
+}
+sudo() {
+    local operation="${11-}"
+    local -a supplied=("$@")
+    local -a expected=(-n /usr/bin/timeout --signal=TERM --kill-after=1s 20s
+        /usr/bin/python3.14 -I -B -S "${active_stage}/scripts/docker_userns_active.py"
+        "${operation}" "${active_stage}")
+    if [ "${#supplied[@]}" -ne "${#expected[@]}" ]; then
+        root_command_refused
+        return
+    fi
+    local number
+    for number in "${!expected[@]}"; do
+        if [ "${supplied[number]}" != "${expected[number]}" ]; then
+            root_command_refused
+            return
+        fi
+    done
+    case "${operation}" in
+        observe-maintained-amd64)
+            printf 'observe-maintained-amd64\n' >> "${TEST_EVENTS}"
+            return "${TEST_OBSERVATION_EXIT}"
+            ;;
+        observe-arm)
+            printf 'observe-arm\n' >> "${TEST_EVENTS}"
+            return "${TEST_OBSERVATION_EXIT}"
+            ;;
+        dispose-stage)
+            printf 'fallback-dispose\n' >> "${TEST_EVENTS}"
+            return "${TEST_DISPOSAL_EXIT}"
+            ;;
+        *) root_command_refused ;;
+    esac
+}
+uv() {
+    if [[ "$*" == *"scripts.runtime_tests"* ]]; then
+        printf 'runtime\n' >> "${TEST_EVENTS}"
+        cp "${TEST_FIXTURE}" "${RUNNER_TEMP}/runtime-evidence/${IMAGE_NAME}-${IMAGE_ARCH}.json"
+        return "${TEST_RUNTIME_EXIT}"
+    fi
+    if [[ "$*" == *"scripts.docker_direct_startup_aggregate"* ]]; then
+        printf 'diagnostic-aggregate\n' >> "${TEST_EVENTS}"
+        return 0
+    fi
+    if [ "$#" -ne 9 ] || [ "${5}" != python ] || [ "${6}" != - ] ||
+        [ "${7}" != "${IMAGE_NAME}" ] || [ "${8}" != "${IMAGE_ARCH}" ] ||
+        [ "${9}" != "${RUNNER_TEMP}/runtime-evidence/${IMAGE_NAME}-${IMAGE_ARCH}.json" ]; then
+        printf 'unknown-uv-command\n' >> "${TEST_EVENTS}"
+        return 98
+    fi
+    printf 'authority\n' >> "${TEST_EVENTS}"
+    shift 5
+    "${TEST_PYTHON}" "$@"
+}
+"""
+
+    def staged_action(self) -> str:
+        """Execute the authored tail and EXIT trap within their original conditional scope."""
         action = yaml.safe_load((self.root / ".github/actions/build-arch-image/action.yml").read_text())
         runtime = next(step for step in action["runs"]["steps"] if step.get("name") == "Verify image runtime")
         tail = "finish_active_stage() {" + runtime["run"].split("finish_active_stage() {", 1)[1]
-        # Only runtime and sudo boundaries are inert; execute the actual ordinary guard and EXIT trap.
-        shim = r"""set -euo pipefail
-runtime_args=()
-active_stage=/run/containers-userns-active.ffffffffffffffffffffffffffffffff
-sudo() {
-  printf 'fallback-dispose\n' >> "${TEST_EVENTS}"
-  return "${TEST_DISPOSAL_EXIT}"
-}
-uv() {
-  if [[ "$*" == *"scripts.runtime_tests"* ]]; then
-    printf 'runtime\n' >> "${TEST_EVENTS}"
-    cp "${TEST_FIXTURE}" "${RUNNER_TEMP}/runtime-evidence/${IMAGE_NAME}-${IMAGE_ARCH}.json"
-    return "${TEST_RUNTIME_EXIT}"
-  fi
-  printf 'authority\n' >> "${TEST_EVENTS}"
-  while [ "$1" != python ]; do shift; done
-  shift
-  "${TEST_PYTHON}" "$@"
-}
-if true; then
-"""
+        return self.inert_stage_commands() + "if true; then\n" + tail
+
+    def run_staged_action(self, directory: Path, record: dict, overrides: dict | None = None) -> tuple:
+        """Use temporary evidence with inert native boundaries and the real ordinary authority guard."""
+        (directory / "runtime-evidence").mkdir()
+        fixture, events = directory / "fixture.json", directory / "events"
+        fixture.write_text(json.dumps(record))
+        environment = {
+            **os.environ,
+            "RUNNER_TEMP": str(directory),
+            "TEST_FIXTURE": str(fixture),
+            "TEST_EVENTS": str(events),
+            "TEST_PYTHON": os.sys.executable,
+            "TEST_RUNTIME_EXIT": "0",
+            "TEST_DISPOSAL_EXIT": "0",
+            "TEST_OBSERVATION_EXIT": "0",
+            "IMAGE_NAME": record["image"],
+            "IMAGE_ARCH": record["architecture"],
+            "VALIDATION_PROFILE": "full",
+            "IMAGE_PATH": "unused.tar",
+            "PYTHON_VERSION": "3.14",
+            "FOCUSED_RUNTIME": "none",
+            "SELECTED_IMAGE_NAME": record["image"],
+            "SELECTED_IMAGE_ARCH": record["architecture"],
+            "ACTIVE_CANDIDATE": "a" * 40,
+            "ACTIVE_RUN": "1",
+            "ACTIVE_ATTEMPT": "2",
+            **(overrides or {}),
+        }
+        result = subprocess.run(  # noqa: S603 - execute actual authored tail; privileged/runtime commands are inert.
+            ["/bin/bash", "-c", self.staged_action()],
+            cwd=self.root,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=environment,
+        )
+        return result, events.read_text().splitlines()
+
+    def test_actual_action_retains_failure_fallback_until_maintained_disposal_and_authority(self) -> None:
         for architecture, profile, fault in (
             (architecture, profile, fault)
             for architecture in ("amd64", "arm64")
@@ -619,43 +705,120 @@ if true; then
                 self.subTest(architecture=architecture, profile=profile, fault=fault),
                 tempfile.TemporaryDirectory() as directory,
             ):
-                root_path = Path(directory)
-                (root_path / "runtime-evidence").mkdir()
-                fixture = root_path / "fixture.json"
-                events = root_path / "events"
                 record = maintained_runtime(architecture, profile)
                 if fault in {"invalid-ack", "fallback-failure"}:
                     record["stageDisposal"]["stageDisposed"] = False
-                fixture.write_text(json.dumps(record))
-                result = subprocess.run(  # noqa: S603 - inert runtime/sudo functions; actual repository shell and data guard.
-                    ["/bin/bash", "-c", shim + tail],
-                    cwd=self.root,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    env={
-                        **os.environ,
-                        "RUNNER_TEMP": directory,
-                        "TEST_FIXTURE": str(fixture),
-                        "TEST_EVENTS": str(events),
-                        "TEST_PYTHON": os.sys.executable,
+                result, events = self.run_staged_action(
+                    Path(directory),
+                    record,
+                    {
+                        "VALIDATION_PROFILE": profile,
                         "TEST_RUNTIME_EXIT": "1" if fault == "runtime" else "0",
                         "TEST_DISPOSAL_EXIT": "1" if fault == "fallback-failure" else "0",
-                        "IMAGE_NAME": record["image"],
-                        "IMAGE_ARCH": architecture,
-                        "VALIDATION_PROFILE": profile,
-                        "IMAGE_PATH": "unused.tar",
-                        "PYTHON_VERSION": "3.14",
-                        "FOCUSED_RUNTIME": "none",
                     },
                 )
                 self.assertEqual(result.returncode == 0, fault is None, result.stderr)
-                expected = ["runtime", "authority"]
-                if fault == "runtime":
-                    expected = ["runtime"]
+                expected = ["observe-maintained-amd64"] if architecture == "amd64" else []
+                expected.append("runtime")
+                if fault != "runtime":
+                    expected.append("authority")
                 if fault is not None:
                     expected.append("fallback-dispose")
-                self.assertEqual(events.read_text().splitlines(), expected)
+                self.assertEqual(events, expected)
+
+    def test_maintained_observer_failure_stops_before_runtime_and_always_disposes_through_exit(self) -> None:
+        for profile in ("full", "docker-rootless-qualification"):
+            for disposal in ("0", "1"):
+                with self.subTest(profile=profile, disposal=disposal), tempfile.TemporaryDirectory() as directory:
+                    record = maintained_runtime("amd64", profile)
+                    result, events = self.run_staged_action(
+                        Path(directory),
+                        record,
+                        {
+                            "VALIDATION_PROFILE": profile,
+                            "TEST_OBSERVATION_EXIT": "7",
+                            "TEST_DISPOSAL_EXIT": disposal,
+                        },
+                    )
+                    self.assertEqual(result.returncode, 7, result.stderr)
+                    self.assertEqual(events, ["observe-maintained-amd64", "fallback-dispose"])
+                    self.assertFalse(
+                        (Path(directory) / "runtime-evidence" / (record["image"] + "-amd64.json")).exists()
+                    )
+                    self.assertTrue(
+                        (
+                            Path(directory) / "runtime-evidence" / (record["image"] + "-amd64-userns-observation.json")
+                        ).exists()
+                    )
+
+    def test_experimental_arm_and_diagnostic_routes_keep_their_original_paths(self) -> None:
+        for architecture, profile, focused, expected, successful in (
+            ("amd64", "docker-rootless-diagnostic", "mandatory-accounting", ["runtime", "fallback-dispose"], True),
+            ("arm64", "docker-rootless-diagnostic", "mandatory-accounting", ["observe-arm", "fallback-dispose"], False),
+            (
+                "amd64",
+                "docker-direct-rootless-diagnostic",
+                "direct-startup-diagnostic",
+                ["runtime", "diagnostic-aggregate"],
+                True,
+            ),
+            (
+                "arm64",
+                "docker-direct-rootless-diagnostic",
+                "direct-startup-diagnostic",
+                ["runtime", "diagnostic-aggregate"],
+                True,
+            ),
+        ):
+            with self.subTest(architecture=architecture, profile=profile), tempfile.TemporaryDirectory() as directory:
+                result, events = self.run_staged_action(
+                    Path(directory),
+                    maintained_runtime(architecture, "full"),
+                    {
+                        "VALIDATION_PROFILE": profile,
+                        "FOCUSED_RUNTIME": focused,
+                        # A misplaced maintained observer must fail these unrelated paths.
+                        "TEST_OBSERVATION_EXIT": "7" if architecture == "amd64" else "0",
+                    },
+                )
+                self.assertEqual(result.returncode == 0, successful, result.stderr)
+                self.assertEqual(events, expected)
+
+    def test_sudo_shim_rejects_unknown_operations_paths_and_argument_boundaries(self) -> None:
+        stage = "/run/containers-userns-active." + "f" * 32
+        known = [
+            "-n",
+            "/usr/bin/timeout",
+            "--signal=TERM",
+            "--kill-after=1s",
+            "20s",
+            "/usr/bin/python3.14",
+            "-I",
+            "-B",
+            "-S",
+            stage + "/scripts/docker_userns_active.py",
+            "observe-maintained-amd64",
+            stage,
+        ]
+        for arguments in (
+            [*known[:10], "unknown-root-operation", stage],
+            [*known[:9], "/untrusted/staged-helper.py", *known[10:]],
+            [*known, "extra"],
+            known[:-1],
+            [*known[:4], "21s", *known[5:]],
+            [*known[:10], "observe-maintained-amd64 " + stage],
+        ):
+            with self.subTest(arguments=arguments), tempfile.TemporaryDirectory() as directory:
+                events = Path(directory) / "events"
+                result = subprocess.run(  # noqa: S603 - invoke only the inert strict sudo function.
+                    ["/bin/bash", "-c", self.inert_stage_commands() + "sudo " + shlex.join(arguments)],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    env=os.environ | {"TEST_EVENTS": str(events)},
+                )
+                self.assertEqual(result.returncode, 97, result.stderr)
+                self.assertEqual(events.read_text().splitlines(), ["unknown-root-command"])
 
 
 if __name__ == "__main__":
