@@ -87,6 +87,9 @@ FAILURE_PHASES = frozenset(
         "bootstrap-launch",
         "stage-verification",
         "helper-import",
+        "helper-ready",
+        "stage-lock",
+        "stage-disposal",
         "request-binding",
         "store-open",
         "coordinator-proof",
@@ -2707,6 +2710,7 @@ def main() -> int:
             phase="helper-import",
         )
         modules = dependencies(args.stage)
+        progress["phase"] = "helper-ready"
         if args.operation == "compile":
             store = Store(args.stage, args.name)
             try:
@@ -2716,16 +2720,19 @@ def main() -> int:
         elif args.operation == "owner":
             return owner_main(args.stage, bootstrap, modules, args.name, args.kind)
         elif args.operation == "observe-arm":
+            progress["phase"] = "stage-lock"
             with stage_lock(args.stage):
                 require(args.name == "new" and args.kind is None and args.request == "e30=")
                 result = observe_arm(args.stage, bootstrap, modules, progress)
             sys.stdout.buffer.write(encoded(result))
             return 1
         elif args.operation == "dispose-stage":
+            progress["phase"] = "stage-lock"
             with stage_lock(args.stage):
                 require(args.name == "new" and args.kind is None and args.request == "e30=")
                 commitment = digest(root_bytes(args.stage / "bootstrap.json"))
                 context = bootstrap["context"]
+                progress["phase"] = "stage-disposal"
                 dispose_stage(args.stage, bootstrap)
             # No positive ack until source removal and the original lock's close.
             result = {
@@ -2739,6 +2746,7 @@ def main() -> int:
                 "workflowContextSha256": modules.qualification.context_digest(context),
             }
         else:
+            progress["phase"] = "stage-lock"
             with stage_lock(args.stage):
                 result = (
                     modules.gate.rpc(sys.modules[__name__], (args.stage, bootstrap, modules), args)

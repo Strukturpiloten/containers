@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -182,6 +183,7 @@ class PairControls(unittest.TestCase):
                 "tests": {"docker": {"mode": "rootless", "outerPrivilege": "privileged", "nestedRuntime": True}},
             }
             published = []
+            forbidden = Mock(side_effect=AssertionError("unexpected native/subprocess interface in pair fixture"))
 
             def publish(path: Path, value: dict, deadline: float) -> None:
                 published.append((path.name, copy.deepcopy(value), deadline))
@@ -192,6 +194,12 @@ class PairControls(unittest.TestCase):
             if fault == "diagnostic-mode":
                 args.oom_accounting_mode = "diagnostic"
             with (
+                patch.object(subprocess, "Popen", forbidden),
+                patch.object(subprocess, "run", forbidden),
+                patch.object(subprocess, "check_call", forbidden),
+                patch.object(subprocess, "check_output", forbidden),
+                patch.object(DockerBackend, "prepare", forbidden),
+                patch.object(DockerBackend, "cleanup", forbidden),
                 patch.object(runtime, "context", return_value=provenance),
                 patch.object(runtime, "_host_observation", return_value=({"qualification": "none"}, {"fixed": "host"})),
                 patch.object(
@@ -205,6 +213,7 @@ class PairControls(unittest.TestCase):
                     record = None
                 else:
                     record = runtime.run_pair(args, metadata, "amd64", use_sudo=True, services=services)
+                self.assertEqual(forbidden.call_count, 0)
         return record, events, published, provenance
 
     def test_a_native_negative_and_complete_cleanup_precede_every_b_resource(self) -> None:
@@ -489,7 +498,7 @@ class RootFailureComposition(unittest.TestCase):
     def test_old_gate_receipt_cannot_hide_later_local_cleanup_failure(self) -> None:
         record, events, published, state = self.execute("local-cleanup")
         self.assertEqual(record["status"], "failed")
-        self.assertEqual(published[-1][1], record)
+        self.assertEqual(published[-1][1], aggregate.failed_report(record))
         first, cleanup = record["failures"]
         self.assertEqual(first, state.gate.failure)
         self.assertEqual(first["operation"], "direct-observe")
@@ -503,7 +512,7 @@ class RootFailureComposition(unittest.TestCase):
     def assert_failures(self, record: dict, events: list, published: list, operations: tuple[str, str]) -> None:
         self.assertEqual(record["status"], "failed")
         self.assertEqual(record["qualification"], "none")
-        self.assertEqual(published[-1][1], record)
+        self.assertEqual(published[-1][1], aggregate.failed_report(record))
         self.assertFalse(record["arms"][1]["cleanupVerified"])
         self.assertFalse(record["arms"][1]["factsComplete"])
         self.assertIn("cleanup-start-B", events)
@@ -548,3 +557,95 @@ class RootFailureComposition(unittest.TestCase):
             runtime._capture_failures(result, ctx, "B")
         self.assertIsNone(result.failure)
         self.assertEqual(result.secondary_failures, [])
+
+
+class PreArmFailureEvidence(unittest.TestCase):
+    def setUp(self) -> None:
+        """Reject every accidental process/native call, including cleanup."""
+        self.forbidden = []
+        for name in ("Popen", "run", "check_call", "check_output"):
+            self.enterContext(patch.object(subprocess, name, side_effect=self.blocked))
+        for name in ("prepare", "cleanup"):
+            self.enterContext(patch.object(DockerBackend, name, side_effect=self.blocked))
+
+    def blocked(self, *_args: object, **_kwargs: object) -> None:
+        self.forbidden.append(True)
+        message = "unexpected native or subprocess interface"
+        raise AssertionError(message)
+
+    def tearDown(self) -> None:
+        self.assertEqual(self.forbidden, [])
+
+    def test_archive_constructor_failure_is_recorded_before_any_arm_and_retained(self) -> None:
+        class Archive:
+            def __init__(self, *_args: object) -> None:
+                raise PermissionError(13, "PRIVATE_ARCHIVE_CANARY")
+
+        with patch.dict(globals(), _archive_class=lambda _state: Archive):
+            record, events, published, source = PairControls().execute()
+        self.assertFalse(any(event.startswith("allocate-") for event in events))
+        self.assertEqual(record["arms"], [])
+        failure = record["failures"][0]
+        self.assertEqual(failure["phase"], "source-prepare")
+        self.assertEqual(failure["reason"], "permission-denied")
+        self.assertEqual(failure["errorType"], "os-error")
+        value = published[-1][1]
+        self.assertEqual(value["failures"], record["failures"])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pair.json"
+            path.write_text(json.dumps(value))
+            retained = aggregate.retain_pair(
+                path,
+                candidate=source["candidate"],
+                run=source["run"],
+                attempt=source["attempt"],
+                row=(record["image"], record["architecture"]),
+            )
+        self.assertEqual(retained, value)
+        self.assertNotIn("PRIVATE_", json.dumps(retained))
+
+    def test_host_observation_and_publication_failures_have_separate_fixed_phases(self) -> None:
+        def host(plan: SimpleNamespace, _role: str) -> dict:
+            plan.operation = "host-before"
+            raise PermissionError(13, "PRIVATE_HOST_CANARY")
+
+        def publish(_plan: SimpleNamespace, _value: dict, _role: str) -> None:
+            raise PermissionError(13, "PRIVATE_PUBLICATION_CANARY")
+
+        for function, replacement, expected in (
+            ("_pair_host", host, "host-before"),
+            ("_publish_host", publish, "host-before-publication"),
+        ):
+            with self.subTest(phase=expected), patch.object(runtime, function, side_effect=replacement):
+                record, events, published, _source = PairControls().execute()
+                self.assertFalse(any(event.startswith("allocate-") for event in events))
+                self.assertEqual(record["failures"][0]["phase"], expected)
+                self.assertEqual(published[-1][1]["failures"], record["failures"])
+                self.assertNotIn("PRIVATE_", json.dumps(published))
+
+    def test_first_work_failure_and_source_cleanup_error_both_survive_projection(self) -> None:
+        original = _archive_class
+
+        def archive(state: SimpleNamespace) -> type:
+            base = original(state)
+
+            class Archive(base):
+                def close(self) -> None:
+                    super().close()
+                    raise PermissionError(13, "PRIVATE_SOURCE_CLEANUP_CANARY")
+
+            return Archive
+
+        with tempfile.TemporaryDirectory() as source:
+            fake_source = SimpleNamespace(name=source, cleanup=Mock())
+            with (
+                patch.dict(globals(), _archive_class=archive),
+                patch.object(runtime, "tempfile", SimpleNamespace(TemporaryDirectory=lambda **_kwargs: fake_source)),
+            ):
+                record, _events, published, _source = PairControls().execute("a-late-generic")
+        first, cleanup = record["failures"]
+        self.assertEqual(first["errorType"], "runtime-error")
+        self.assertEqual(cleanup["phase"], "source-cleanup")
+        self.assertEqual(cleanup["reason"], "permission-denied")
+        self.assertEqual(published[-1][1]["failures"], record["failures"])
+        self.assertNotIn("PRIVATE_", json.dumps(published))

@@ -1250,6 +1250,16 @@ cancellation failure stays primary; later cleanup liabilities are retained
 separately. Failed publication revokes pair and host-sidecar authority through
 the held private inode, without reopening an unrelated public replacement.
 
+Failed pair artifacts retain a separate closed `diagnostic-incomplete` record in
+the same filename. It keeps finite first/secondary phase, reason and error-type
+categories and known arm exits, including failures before A and during source
+cleanup. At most eight distinct causes are exported; excess diagnostics have an
+explicit overflow marker. Root helper phases distinguish import, readiness, lock
+and stage disposal. Retention rejects mismatched context, private/extra fields and
+invalid bounds. These failed records remain `qualification: none` and cannot
+satisfy the success-pair validator or aggregate. Exception messages, tracebacks,
+commands, environment values and cleanup locators are never exported.
+
 The aggregate certifies collection, with `qualification: none` throughout.
 Matching A-negative/B-ready observations support only `profile-dependent-startup`.
 Two matching negatives mean `profile-not-demonstrated-remedy`. Drift, missing or

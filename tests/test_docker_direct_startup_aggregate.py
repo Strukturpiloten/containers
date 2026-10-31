@@ -12,12 +12,14 @@ import tempfile
 import unittest
 from functools import cache
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts import docker_direct_startup_aggregate as aggregate
 from scripts import docker_direct_startup_contract as contract
 from scripts import docker_direct_startup_gate as gate
 from scripts.docker_userns_qualification import context_digest
 from tests import test_docker_direct_startup_admission as admission_tests
+from tests import test_docker_direct_startup_runtime as runtime_cases
 from tests.test_docker_direct_startup_contract import arm
 
 CANDIDATE_RUN = "145"
@@ -400,3 +402,165 @@ class AggregateCliTests(unittest.TestCase):
                 self.assertEqual(record["status"], "failed")
                 self.assertNotIn("PRIVATE-SECRET", (result.stdout + result.stderr).decode())
                 self.assertNotIn("PRIVATE-SECRET", json.dumps(record))
+
+
+class FailedDiagnosticRetention(unittest.TestCase):
+    def setUp(self) -> None:
+        self.forbidden = []
+        for name in ("Popen", "run", "check_call", "check_output"):
+            self.enterContext(patch.object(subprocess, name, side_effect=self.blocked))
+
+    def blocked(self, *_args: object, **_kwargs: object) -> None:
+        self.forbidden.append(True)
+        message = "unexpected subprocess in diagnostic fixture"
+        raise AssertionError(message)
+
+    def tearDown(self) -> None:
+        self.assertEqual(self.forbidden, [])
+
+    def record(self) -> dict:
+        value = copy.deepcopy(_pair())
+        value.update(
+            status="failed",
+            failures=[aggregate.local_failure("pair", "source-prepare", PermissionError(13, "PRIVATE_MESSAGE"))],
+        )
+        value["arms"] = []
+        return aggregate.failed_report(value)
+
+    def retained(self, value: object, *, row: tuple[str, str] = ("docker-20.10-rootless", "amd64")) -> dict:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pair.json"
+            path.write_text(json.dumps(value) + "\n")
+            return aggregate.retain_pair(
+                path, candidate=_pair()["candidate"], run=CANDIDATE_RUN, attempt=ATTEMPT, row=row
+            )
+
+    def test_pre_a_failed_record_survives_retention_without_any_success_authority(self) -> None:
+        value = self.record()
+        self.assertEqual(self.retained(value), value)
+        self.assertEqual(value["failures"][0]["phase"], "source-prepare")
+        self.assertEqual(value["failures"][0]["reason"], "permission-denied")
+        self.assertEqual(value["armOutcomes"], [])
+        self.assertEqual(value["qualification"], "none")
+        self.assertEqual(value["status"], "failed")
+        self.assertNotIn("PRIVATE_", json.dumps(value))
+        with self.assertRaises(contract.DirectDiagnosticError):
+            aggregate.validate_pair_report(value, candidate=value["candidate"], run=CANDIDATE_RUN, attempt=ATTEMPT)
+
+    def test_local_and_root_cleanup_diagnostics_preserve_order_and_known_native_exit(self) -> None:
+        record, _events, published, _source = runtime_cases.PairControls().execute("work-root-cleanup")
+        value = published[-1][1]
+        self.assertEqual(value["failures"], record["failures"])
+        self.assertEqual([item["actor"] for item in value["failures"]], ["coordinator", "root"])
+        self.assertEqual(value["armOutcomes"][0]["nativeExitCode"], 1)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pair.json"
+            path.write_text(json.dumps(value))
+            retained = aggregate.retain_pair(
+                path,
+                candidate=value["candidate"],
+                run=value["runId"],
+                attempt=value["runAttempt"],
+                row=(value["image"], value["architecture"]),
+            )
+        self.assertEqual(retained, value)
+        for key, item in (
+            ("cleanupAuthority", True),
+            ("reportingLease", "PRIVATE_LOCATOR"),
+            ("phase", "PRIVATE_PHASE"),
+            ("reason", "PRIVATE_REASON"),
+            ("operation", "PRIVATE_OPERATION"),
+            ("bindingVerified", "true"),
+            ("bindingSha256", "PRIVATE_HASH"),
+            ("rootReceiptSha256", "PRIVATE_HASH"),
+            ("retained", 1),
+            ("sourceVerified", 1),
+        ):
+            with self.subTest(root_field=key), tempfile.TemporaryDirectory() as directory:
+                forged = copy.deepcopy(value)
+                forged["failures"][1][key] = item
+                path = Path(directory) / "pair.json"
+                path.write_text(json.dumps(forged))
+                refused = aggregate.retain_pair(
+                    path,
+                    candidate=value["candidate"],
+                    run=value["runId"],
+                    attempt=value["runAttempt"],
+                    row=(value["image"], value["architecture"]),
+                )
+                self.assertEqual(refused["reason"], "pair-evidence-refused")
+                self.assertNotIn("PRIVATE_", json.dumps(refused))
+
+    def test_forged_private_extra_wrong_source_and_overflow_records_use_fixed_refusal(self) -> None:
+        original = self.record()
+        mutations = (
+            ("candidate", "f" * 40),
+            ("runId", "999"),
+            ("runAttempt", "2"),
+            ("producingJob", "PRIVATE_JOB"),
+            ("gateSha256", "0" * 64),
+            ("schemaVersion", True),
+            ("qualification", "complete"),
+            ("status", "diagnostic-complete"),
+            ("reason", "PRIVATE_REASON"),
+            ("extra", "PRIVATE_EXTRA"),
+            ("publicationFailure", "PRIVATE_FAILURE"),
+            ("workflowContextSha256", "0" * 64),
+            ("workflowContext", {**original["workflowContext"], "admissionSha256": "0" * 64}),
+            ("failures", [*original["failures"], original["failures"][0]]),
+            ("failures", [{**original["failures"][0], "traceback": "PRIVATE_TRACE"}]),
+            ("failures", [{**original["failures"][0], "errorType": "PRIVATE_CLASS"}]),
+            ("failures", [{**original["failures"][0], "errorType": "overflow"}]),
+            ("failures", [{**original["failures"][0], "errorType": "cancelled"}]),
+            ("failures", [{**original["failures"][0], "phase": "PRIVATE_PHASE"}]),
+            ("failures", [{**original["failures"][0], "reason": "PRIVATE_REASON"}]),
+            ("failures", original["failures"] * (aggregate.FAILURE_LIMIT + 1)),
+            ("diagnosticOverflow", True),
+            ("armOutcomes", [{"rawEnvironment": "PRIVATE_ENV"}]),
+        )
+        for key, item in mutations:
+            with self.subTest(key=key, item=item):
+                value = copy.deepcopy(original)
+                value[key] = item
+                retained = self.retained(value)
+                self.assertEqual(retained["reason"], "pair-evidence-refused")
+                self.assertNotIn("PRIVATE_", json.dumps(retained))
+        self.assertEqual(
+            self.retained(original, row=("docker-26-rootless", "arm64"))["reason"], "pair-evidence-refused"
+        )
+
+    def test_bounded_distinct_errors_keep_first_cause_and_explicit_overflow(self) -> None:
+        value = copy.deepcopy(_pair())
+        value["status"] = "failed"
+        value["failures"] = [
+            aggregate.local_failure("pair", operation) for operation in sorted(aggregate.LOCAL_OPERATIONS)
+        ]
+        first = value["failures"][0]
+        result = aggregate.failed_report(value)
+        self.assertEqual(result["failures"][0], first)
+        self.assertEqual(len(result["failures"]), aggregate.FAILURE_LIMIT)
+        self.assertEqual(result["failures"][-1]["reason"], "diagnostic-overflow")
+        self.assertTrue(result["diagnosticOverflow"])
+        self.assertEqual(self.retained(result), result)
+        forged = copy.deepcopy(result)
+        forged["failures"][-1]["arm"] = "A"
+        self.assertEqual(self.retained(forged)["reason"], "pair-evidence-refused")
+
+    def test_fixed_publication_invalidation_preserves_only_otherwise_valid_pair(self) -> None:
+        value = copy.deepcopy(_pair())
+        value.update(status="failed", conclusion="inconclusive", publicationFailure="evidence-publication-failed")
+        retained = self.retained(value)
+        self.assertEqual(retained["status"], "failed")
+        self.assertEqual(retained["failures"][0]["phase"], "publication")
+        self.assertEqual(retained["publicationFailure"], "evidence-publication-failed")
+        for key, item in (("gateSha256", "0" * 64), ("publicationFailure", "PRIVATE_CANARY")):
+            invalid = copy.deepcopy(value)
+            invalid[key] = item
+            self.assertEqual(self.retained(invalid)["reason"], "pair-evidence-refused")
+
+    def test_arbitrary_exception_class_names_and_operands_are_never_serialized(self) -> None:
+        error = type("PRIVATE_CLASS_CANARY", (Exception,), {})("PRIVATE_MESSAGE_CANARY")
+        failure = aggregate.local_failure("pair", "source-prepare", error)
+        self.assertEqual(failure["errorType"], "other")
+        self.assertEqual(failure["reason"], "operation-unverified")
+        self.assertNotIn("PRIVATE_", json.dumps(failure))

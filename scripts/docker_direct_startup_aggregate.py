@@ -12,6 +12,7 @@ from pathlib import Path
 
 from scripts import docker_direct_startup_contract as contract
 from scripts import docker_direct_startup_gate as gate
+from scripts import docker_userns_active as protocol
 from scripts.docker_direct_startup_observations import STARTUP_SECONDS
 from scripts.docker_direct_startup_plan import declarations, expected_versions
 from scripts.docker_userns_qualification import (
@@ -180,6 +181,276 @@ def validate_pair_report(record: object, *, candidate: str, run: str, attempt: s
     return pair
 
 
+FAILURE_LIMIT = 8
+LOCAL_OPERATIONS = frozenset(
+    (
+        "allocate",
+        "backend-prepare",
+        "archive",
+        "image-import",
+        "profile-prepare",
+        "gate-prepare",
+        "guest-create",
+        "guest-bind",
+        "guest-preflight",
+        "guest-release",
+        "startup-observation",
+        "cleanup",
+        "host-before",
+        "host-before-publication",
+        "source-prepare",
+        "arm-A",
+        "arm-B",
+        "host-between",
+        "host-between-publication",
+        "host-after",
+        "host-after-publication",
+        "pair-compare",
+        "source-cleanup",
+        "pair-deadline",
+        "publication",
+        "diagnostics",
+    )
+)
+LOCAL_REASONS = protocol.FAILURE_REASONS | frozenset(
+    (
+        "operation-unverified",
+        "diagnostic-overflow",
+        "unrecorded-failure",
+        "logs-unavailable",
+        "logs-byte-limit",
+        "logs-record-limit",
+        "logs-record-byte-limit",
+        "logs-invalid-encoding",
+    )
+)
+ERROR_TYPES = frozenset(
+    (
+        "unverified",
+        "cancelled",
+        "contract-refused",
+        "os-error",
+        "value-error",
+        "type-error",
+        "key-error",
+        "runtime-error",
+        "other",
+        "overflow",
+    )
+)
+LOCAL_KEYS = (
+    "schemaVersion",
+    "purpose",
+    "qualification",
+    "arm",
+    "actor",
+    "operation",
+    "phase",
+    "reason",
+    "errorType",
+    "cleanupAuthority",
+)
+ROOT_KEYS = (
+    "schemaVersion",
+    "purpose",
+    "qualification",
+    "arm",
+    "actor",
+    "operation",
+    "phase",
+    "reason",
+    "bindingVerified",
+    "bindingSha256",
+    "sourceVerified",
+    "retained",
+    "cleanupAuthority",
+    "rootReceiptSha256",
+    "reportingLeaseSha256",
+)
+FAILED_KEYS = (
+    "schemaVersion",
+    "consumer",
+    "purpose",
+    "qualification",
+    "status",
+    "reason",
+    "image",
+    "architecture",
+    "candidate",
+    "runId",
+    "runAttempt",
+    "producingJob",
+    "workflowContext",
+    "workflowContextSha256",
+    "gateSha256",
+    "failures",
+    "armOutcomes",
+    "diagnosticOverflow",
+    "publicationFailure",
+)
+
+
+def local_failure(arm: str, operation: str, error: BaseException | None = None) -> dict:
+    """Classify fixed exception categories only; never expose messages or arbitrary class names."""
+    categories = (
+        (KeyboardInterrupt, "cancelled"),
+        (contract.DirectDiagnosticError, "contract-refused"),
+        (OSError, "os-error"),
+        (ValueError, "value-error"),
+        (TypeError, "type-error"),
+        (KeyError, "key-error"),
+        (RuntimeError, "runtime-error"),
+    )
+    category = (
+        next((name for kind, name in categories if isinstance(error, kind)), "other")
+        if error is not None
+        else "unverified"
+    )
+    reason = protocol.failure_reason(error) if error is not None else "operation-unverified"
+    if category == "contract-refused":
+        reason = "refused"
+    elif reason == "unexpected":
+        reason = "operation-unverified"
+    operation = operation if operation in LOCAL_OPERATIONS else "diagnostics"
+    return {
+        "schemaVersion": 1,
+        "purpose": contract.PURPOSE,
+        "qualification": "none",
+        "arm": arm,
+        "actor": "coordinator",
+        "operation": operation,
+        "phase": operation,
+        "reason": reason,
+        "errorType": category,
+        "cleanupAuthority": False,
+    }
+
+
+def validate_failure(value: object) -> dict:
+    """Validate a diagnostic projection without adopting any receipt or cleanup authority."""
+    contract.require(type(value) is dict)
+    local = value.get("actor") == "coordinator"
+    failure = contract.exact_keys(value, LOCAL_KEYS if local else ROOT_KEYS)
+    contract.require(type(failure["schemaVersion"]) is int and failure["schemaVersion"] == 1)
+    contract.require(failure["purpose"] == contract.PURPOSE and failure["qualification"] == "none")
+    contract.require(failure["arm"] in {"A", "B", "pair"} and failure["cleanupAuthority"] is False)
+    if local:
+        contract.require(failure["operation"] in LOCAL_OPERATIONS and failure["phase"] == failure["operation"])
+        contract.require(failure["reason"] in LOCAL_REASONS and failure["errorType"] in ERROR_TYPES)
+        contract.require((failure["errorType"] == "overflow") == (failure["reason"] == "diagnostic-overflow"))
+        contract.require((failure["errorType"] == "cancelled") == (failure["reason"] == "cancelled"))
+    else:
+        contract.require(failure["arm"] in {"A", "B"})
+        contract.require(failure["actor"] in {"root", "root-bootstrap", "workflow", "producer", "client"})
+        contract.require(failure["operation"] in protocol.FAILURE_OPERATIONS)
+        contract.require(failure["phase"] in protocol.FAILURE_PHASES and failure["reason"] in protocol.FAILURE_REASONS)
+        contract.require(all(type(failure[key]) is bool for key in ("bindingVerified", "sourceVerified")))
+        contract.require(failure["retained"] is None or type(failure["retained"]) is bool)
+        _digest(failure["rootReceiptSha256"])
+        if failure["bindingVerified"]:
+            _digest(failure["bindingSha256"])
+        else:
+            contract.require(failure["bindingSha256"] is None and failure["reportingLeaseSha256"] is None)
+        if failure["reportingLeaseSha256"] is not None:
+            _digest(failure["reportingLeaseSha256"])
+    contract.require(len(contract.canonical(failure)) <= contract.RECORD_BYTES)
+    return failure
+
+
+def _failed_identity(value: dict, *, candidate: str, run: str, attempt: str) -> None:
+    _producer_identity(candidate, run, attempt)
+    contract.require(type(value["schemaVersion"]) is int and value["schemaVersion"] == contract.SCHEMA)
+    contract.require(value["consumer"] == contract.CONSUMER and value["purpose"] == contract.PURPOSE)
+    contract.require(value["qualification"] == "none" and value["status"] == "failed")
+    contract.require(value["candidate"] == candidate and value["runId"] == run and value["runAttempt"] == attempt)
+    contract.require(value["producingJob"] == "smoke-build" and value["gateSha256"] == gate.GATE_SHA256)
+    contract.finite_tuple(value["image"], value["architecture"])
+    raw = (Path(__file__).resolve().parents[1] / ".github/docker-userns-active-admission.json").read_bytes()
+    context = value["workflowContext"]
+    contract.require(type(context) is dict)
+    try:
+        validate_workflow_context(context, admission_document(raw), hashlib.sha256(raw).hexdigest())
+    except QualificationError:
+        raise contract.DirectDiagnosticError from None
+    contract.require(value["workflowContextSha256"] == context_digest(context))
+    expected = {
+        "candidate": candidate,
+        "run": run,
+        "attempt": attempt,
+        "job": "smoke-build",
+        "image": value["image"],
+        "architecture": value["architecture"],
+        "purpose": contract.PURPOSE,
+    }
+    contract.require(all(context[key] == item for key, item in expected.items()))
+
+
+def _arm_outcome(value: object) -> dict:
+    arm = contract.exact_keys(value, ("arm", "startup", "nativeExitCode", "factsComplete", "cleanupVerified"))
+    contract.require(arm["arm"] in {"A", "B"} and arm["startup"] in contract.STARTUP_KINDS)
+    code = arm["nativeExitCode"]
+    contract.require(code is None or (type(code) is int and 0 <= code <= contract.MAX_NATIVE_EXIT))
+    contract.require(arm["startup"] != "ready" or code is None)
+    contract.require(all(type(arm[key]) is bool for key in ("factsComplete", "cleanupVerified")))
+    return arm
+
+
+def failed_report(record: dict) -> dict:
+    """Publish a separate closed failed shape; complete-pair validation stays strict."""
+    failures = []
+    for item in record["failures"]:
+        validate_failure(item)
+        if item not in failures:
+            failures.append(item)
+    if not failures:
+        failures.append({**local_failure("pair", "diagnostics"), "reason": "unrecorded-failure"})
+    overflow = len(failures) > FAILURE_LIMIT
+    if overflow:
+        marker = {**local_failure("pair", "diagnostics"), "reason": "diagnostic-overflow", "errorType": "overflow"}
+        failures = [*failures[: FAILURE_LIMIT - 1], marker]
+    value = {key: record[key] for key in FAILED_KEYS if key in record}
+    value.update(
+        status="failed",
+        reason="diagnostic-incomplete",
+        failures=failures,
+        diagnosticOverflow=overflow,
+        publicationFailure=None,
+        armOutcomes=[
+            {key: arm[key] for key in ("arm", "startup", "nativeExitCode", "factsComplete", "cleanupVerified")}
+            for arm in record["arms"]
+        ],
+    )
+    return validate_failed_report(value, candidate=value["candidate"], run=value["runId"], attempt=value["runAttempt"])
+
+
+def validate_failed_report(value: object, *, candidate: str, run: str, attempt: str) -> dict:
+    """Accept only bounded failed diagnostics bound to this exact source/attempt."""
+    record = contract.exact_keys(value, FAILED_KEYS)
+    _failed_identity(record, candidate=candidate, run=run, attempt=attempt)
+    contract.require(record["reason"] == "diagnostic-incomplete")
+    contract.require(record["publicationFailure"] in {None, "evidence-publication-failed"})
+    failures = record["failures"]
+    contract.require(type(failures) is list and 0 < len(failures) <= FAILURE_LIMIT)
+    for index, failure in enumerate(failures):
+        validate_failure(failure)
+        contract.require(failure not in failures[:index])
+    contract.require(type(record["diagnosticOverflow"]) is bool)
+    markers = [index for index, item in enumerate(failures) if item["reason"] == "diagnostic-overflow"]
+    contract.require(markers == ([FAILURE_LIMIT - 1] if record["diagnosticOverflow"] else []))
+    if markers:
+        contract.require(
+            failures[-1]
+            == {**local_failure("pair", "diagnostics"), "reason": "diagnostic-overflow", "errorType": "overflow"}
+        )
+    arms = record["armOutcomes"]
+    contract.require(type(arms) is list and len(arms) <= len(contract.ROWS))
+    for arm in arms:
+        _arm_outcome(arm)
+    contract.require([arm["arm"] for arm in arms] == ["A", "B"][: len(arms)])
+    contract.require(len(contract.canonical(record)) <= contract.PAIR_RECORD_BYTES)
+    return record
+
+
 def _unique(pairs: list[tuple[str, object]]) -> dict:
     result = {}
     for key, value in pairs:
@@ -208,13 +479,40 @@ def _selected_pair(path: Path, *, candidate: str, run: str, attempt: str, row: t
     return record
 
 
+def _publication_failure(value: dict, *, candidate: str, run: str, attempt: str) -> dict:
+    """Retain the publisher's fixed invalidation marker only over an otherwise valid pair."""
+    contract.exact_keys(value, (*PAIR_KEYS, "publicationFailure"))
+    contract.require(
+        value["publicationFailure"] == "evidence-publication-failed" and value["conclusion"] == "inconclusive"
+    )
+    original = {key: value[key] for key in PAIR_KEYS}
+    original.update(status="diagnostic-complete", conclusion=contract.compare_pair(*original["arms"]))
+    validate_pair_report(original, candidate=candidate, run=run, attempt=attempt)
+    original.update(status="failed", failures=[local_failure("pair", "publication")])
+    failed = failed_report(original)
+    failed["publicationFailure"] = "evidence-publication-failed"
+    return failed
+
+
+def _retained_record(value: object, *, candidate: str, run: str, attempt: str, row: tuple[str, str]) -> dict:
+    if type(value) is dict and value.get("status") == "failed" and "arms" in value:
+        retained = _publication_failure(value, candidate=candidate, run=run, attempt=attempt)
+    else:
+        validator = (
+            validate_failed_report if type(value) is dict and value.get("status") == "failed" else validate_pair_report
+        )
+        retained = validator(value, candidate=candidate, run=run, attempt=attempt)
+    contract.require((retained["image"], retained["architecture"]) == row)
+    return retained
+
+
 def retain_pair(path: Path, *, candidate: str, run: str, attempt: str, row: tuple[str, str]) -> dict:
     """Project only a closed validated pair or a fixed failure, never rejected input."""
     image, architecture = row
     contract.finite_tuple(image, architecture)
     _producer_identity(candidate, run, attempt)
     try:
-        return _selected_pair(path, candidate=candidate, run=run, attempt=attempt, row=row)
+        return _retained_record(_read(path), candidate=candidate, run=run, attempt=attempt, row=row)
     except OSError, ValueError, TypeError, KeyError, StopIteration, RecursionError:
         return {
             "schemaVersion": 1,

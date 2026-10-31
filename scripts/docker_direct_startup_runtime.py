@@ -13,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
+from scripts import docker_direct_startup_aggregate as reports
 from scripts import docker_direct_startup_contract as contract
 from scripts import docker_direct_startup_gate as gate_source
 from scripts import docker_runner_security as host
@@ -202,17 +203,19 @@ def _work(plan: SimpleNamespace, ctx: object, result: ArmOutcome) -> None:
     ctx.runtime_disk_budget = None
 
 
-def _local_failure(plan: SimpleNamespace, *, cancelled: bool, cleanup: bool = False) -> dict:
-    return {
-        "schemaVersion": 1,
-        "purpose": contract.PURPOSE,
-        "qualification": "none",
-        "arm": plan.arm,
-        "actor": "coordinator",
-        "operation": "cleanup" if cleanup else getattr(plan, "operation", "allocate"),
-        "reason": "cancelled" if cancelled else "operation-unverified",
-        "cleanupAuthority": False,
-    }
+def _local_failure(
+    plan: SimpleNamespace, *, cancelled: bool, cleanup: bool = False, error: BaseException | None = None
+) -> dict:
+    operation = "cleanup" if cleanup else getattr(plan, "operation", "allocate")
+    return reports.local_failure(
+        plan.arm, operation, error if error is not None else (KeyboardInterrupt() if cancelled else None)
+    )
+
+
+def _pair_failure(record: dict, plan: SimpleNamespace, error: BaseException) -> None:
+    failure = reports.local_failure("pair", plan.operation, error)
+    if failure not in record["failures"]:
+        record["failures"].append(failure)
 
 
 def _capture_failures(result: ArmOutcome, ctx: object | None, arm: str) -> bool:
@@ -279,7 +282,7 @@ def _run_arm(plan: SimpleNamespace) -> ArmOutcome:
     except (Exception, KeyboardInterrupt) as error:  # noqa: BLE001 - keep only closed outcomes.
         summary["factsComplete"] = False
         if not _capture_failures(result, ctx, plan.arm):
-            _retain_failure(result, _local_failure(plan, cancelled=isinstance(error, KeyboardInterrupt)))
+            _retain_failure(result, _local_failure(plan, cancelled=isinstance(error, KeyboardInterrupt), error=error))
         if isinstance(error, KeyboardInterrupt):
             plan.cancellation.cancelled = True
     finally:
@@ -307,7 +310,10 @@ def _run_arm(plan: SimpleNamespace) -> ArmOutcome:
                     summary["cleanupVerified"] = False
                     if not _capture_failures(result, ctx, plan.arm):
                         _retain_failure(
-                            result, _local_failure(plan, cancelled=isinstance(error, KeyboardInterrupt), cleanup=True)
+                            result,
+                            _local_failure(
+                                plan, cancelled=isinstance(error, KeyboardInterrupt), cleanup=True, error=error
+                            ),
                         )
         finally:
             plan.cancellation.defer_interrupts = False
@@ -317,12 +323,20 @@ def _run_arm(plan: SimpleNamespace) -> ArmOutcome:
     return result
 
 
+def _pair_host(plan: SimpleNamespace, role: str) -> dict:
+    plan.operation = "host-" + role
+    observation, stable = _host_observation()
+    plan.operation = "host-" + role + "-publication"
+    _publish_host(plan, observation, role)
+    return stable
+
+
 def _execute_pair(plan: SimpleNamespace, record: dict) -> None:
     args, services, clock = plan.args, plan.services, plan.clock
     cancellation, provenance = plan.cancellation, plan.provenance
     metadata, architecture, use_sudo = plan.metadata, plan.architecture, plan.use_sudo
-    before, stable = _host_observation()
-    _publish_host(plan, before, "before")
+    stable = _pair_host(plan, "before")
+    plan.operation = "source-prepare"
     cancellation.defer_interrupts = True
     try:
         plan.source = tempfile.TemporaryDirectory(prefix="containers-direct-source-")
@@ -334,11 +348,11 @@ def _execute_pair(plan: SimpleNamespace, record: dict) -> None:
         cancellation.defer_interrupts = False
     expected_identity = None
     for arm in ("A", "B"):
+        plan.operation = "arm-" + arm
         contract.require(not cancellation.cancelled)
         arm_deadline = clock.arm_deadline(time.monotonic_ns())
         if arm == "B":
-            current, current_stable = _host_observation()
-            _publish_host(plan, current, "between")
+            current_stable = _pair_host(plan, "between")
             contract.require(current_stable == stable)
         outcome = _run_arm(
             SimpleNamespace(
@@ -372,9 +386,9 @@ def _execute_pair(plan: SimpleNamespace, record: dict) -> None:
         else:
             contract.require(outcome.stage_disposal is not None)
             record["stageDisposed"] = True
-    after, final_stable = _host_observation()
-    _publish_host(plan, after, "after")
+    final_stable = _pair_host(plan, "after")
     contract.require(final_stable == stable)
+    plan.operation = "pair-compare"
     record["conclusion"] = contract.compare_pair(*record["arms"])
     contract.require(record["conclusion"] in {"profile-dependent-startup", "profile-not-demonstrated-remedy"})
     clock.validate(time.monotonic_ns())
@@ -442,31 +456,40 @@ def run_pair(
         provenance=provenance,
         source=None,
         archive=None,
+        operation="host-before",
     )
     try:
         for kind in previous:
             signal.signal(kind, cancellation)
         _execute_pair(plan, record)
-    except Exception, KeyboardInterrupt:  # noqa: BLE001 - no generic error becomes an expected native negative.
+    except (Exception, KeyboardInterrupt) as error:  # noqa: BLE001 - only finite categories leave the coordinator.
         record["status"] = "failed"
+        if not record["failures"]:
+            _pair_failure(record, plan, error)
     finally:
         cancellation.defer_interrupts = True
         try:
+            plan.operation = "source-cleanup"
             if plan.archive is not None:
                 plan.archive.verify()
                 plan.archive.close()
             if plan.source is not None:
                 plan.source.cleanup()
-        except Exception, KeyboardInterrupt:  # noqa: BLE001 - uncertain source disposal invalidates completion.
+        except (Exception, KeyboardInterrupt) as error:  # noqa: BLE001 - preserve closed cleanup liability.
             record["status"] = "failed"
+            _pair_failure(record, plan, error)
         if cancellation.cancelled or time.monotonic_ns() >= clock.deadline_ns:
             record["status"] = "failed"
+            plan.operation = "pair-deadline"
+            if not cancellation.cancelled or not any(item["reason"] == "cancelled" for item in record["failures"]):
+                _pair_failure(record, plan, KeyboardInterrupt() if cancellation.cancelled else TimeoutError())
         try:
-            contract.require(len(contract.canonical(record)) <= contract.PAIR_RECORD_BYTES)
+            published = reports.failed_report(record) if record["status"] == "failed" else record
+            contract.require(len(contract.canonical(published)) <= contract.PAIR_RECORD_BYTES)
             path = Path(args.evidence)
             path.parent.mkdir(parents=True, exist_ok=True)
             cancellation.defer_interrupts = False
-            services.publish(path, record, clock.deadline_ns / 1_000_000_000)
+            services.publish(path, published, clock.deadline_ns / 1_000_000_000)
         finally:
             for kind, handler in previous.items():
                 signal.signal(kind, handler)

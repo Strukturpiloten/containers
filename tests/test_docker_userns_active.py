@@ -3299,3 +3299,54 @@ class MaintainedDisposalPrivacyTests(unittest.TestCase):
                             self.fail("unverified disposal unexpectedly succeeded")
                 runtime_tests._finish_pair_authority(record)
                 self.check_public(client, record, fault, reason, canary)
+
+
+class AccuratePostImportDiagnosticPhases(unittest.TestCase):
+    def test_main_wires_fixed_post_import_lock_and_disposal_phases_without_entering_root(self) -> None:
+        """Inspect phase placement only; never invoke main/verify_stage or spoof UID."""
+        module = ast.parse(Path(active.__file__).read_text())
+        main = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "main")
+        phases = []
+        for node in ast.walk(main):
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
+                phases.extend(
+                    (node.lineno, node.value.value)
+                    for target in node.targets
+                    if isinstance(target, ast.Subscript)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == "progress"
+                    and isinstance(target.slice, ast.Constant)
+                    and target.slice.value == "phase"
+                )
+        phases.sort()
+        calls = [
+            (node.lineno, node.func.id)
+            for node in ast.walk(main)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        ]
+        imported = next(line for line, name in calls if name == "dependencies")
+        ready = next(line for line, phase in phases if phase == "helper-ready")
+        self.assertGreater(ready, imported)
+        for line, name in calls:
+            if name in {"stage_lock", "dispose_stage"}:
+                expected = "stage-lock" if name == "stage_lock" else "stage-disposal"
+                self.assertEqual([phase for before, phase in phases if before < line][-1], expected)
+                self.assertGreater(line, ready)
+
+    def test_fixed_phase_and_allowlisted_reason_survive_projection_without_private_values(self) -> None:
+        original_uid = os.geteuid()
+        for phase in ("helper-import", "helper-ready", "stage-lock", "stage-disposal"):
+            with self.subTest(phase=phase):
+                value = active.failure_receipt(
+                    {"actor": "root", "operation": "dispose-stage", "phase": phase},
+                    PermissionError(13, "PRIVATE_PHASE_CANARY"),
+                )
+                self.assertTrue(active.valid_failure(value))
+                self.assertEqual(value["phase"], phase)
+                self.assertEqual(value["reason"], "permission-denied")
+                self.assertFalse(value["cleanupAuthority"])
+                self.assertNotIn("PRIVATE_", json.dumps(value))
+        unknown = active.failure_receipt({"phase": "PRIVATE_PHASE_CANARY"}, active.RefusedError())
+        self.assertEqual(unknown["phase"], "unknown")
+        self.assertNotIn("PRIVATE_", json.dumps(unknown))
+        self.assertEqual(os.geteuid(), original_uid)
