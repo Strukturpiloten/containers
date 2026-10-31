@@ -127,8 +127,6 @@ def _gated_start(plan: SimpleNamespace, ctx: object, result: ArmOutcome, identit
     ctx.backend.direct_gate = pending
     pending.prepare()
     options = (*outer_container_limits(), "--device", "/dev/fuse", "--privileged", *pending.create())
-    if plan.arm == "B":
-        options = ctx.backend.scoped_run_options(options)
     plan.operation = "guest-create"
     container = ctx.start("start gated direct-rootless diagnostic", gate_source.GUEST_GATE, options=options)
     plan.operation = "guest-bind"

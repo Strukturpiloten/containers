@@ -2,24 +2,212 @@
 
 from __future__ import annotations
 
+import base64
 import copy
 import json
+import os
+import shutil
 import subprocess
 import tempfile
+import time
 import unittest
+from contextlib import contextmanager
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 from unittest.mock import Mock, patch
 
 from scripts import docker_direct_startup_aggregate as aggregate
 from scripts import docker_direct_startup_contract as contract
 from scripts import docker_direct_startup_plan as planner
 from scripts import docker_direct_startup_runtime as runtime
+from scripts import docker_userns_active_client as active_client_module
 from scripts.docker_userns_active_client import ActiveClient
 from scripts.runtime_docker_backend import DockerBackend, DockerBackendError
+from scripts.runtime_tests import ProbeError, RuntimeContext
 from tests import test_docker_direct_startup_admission as admission_tests
 from tests import test_docker_direct_startup_client as client_tests
 from tests.test_docker_direct_startup_contract import arm
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+
+class DirectCompositionFixture:
+    """Model only external root/runtime replies for the actual composed builders."""
+
+    def __init__(self, case: unittest.TestCase, ctx: RuntimeContext, source: dict) -> None:
+        """Hold independently authored external replies and observed call order."""
+        self.case, self.ctx, self.source = case, ctx, source
+        self.events: list[str] = []
+        self.guest_commands: list[list[str]] = []
+        self.spawn_error: ProbeError | None = None
+        self.stage = "/run/containers-userns-active." + "f" * 32
+        self.lease = "e" * 32
+        self.profile_name = "containers557-owned-profile"
+        self.identifier = "b" * 64
+        self.identity = {
+            "archiveSha256": "c" * 64,
+            "manifestDigest": "sha256:" + "d" * 64,
+            "configDigest": "sha256:" + "e" * 64,
+        }
+        self.guest = copy.deepcopy(arm("B")["guest"])
+        self.guest["executables"].update(planner.expected_versions(ctx.name))
+
+    def profile_response(self, operation: str) -> dict:
+        profile = self.ctx.backend.scoped_profile
+        self.case.assertIs(type(profile), ActiveClient)
+        binding = profile.binding
+        states = {"prepare": "loaded", "create-intent": "create-intent", "bind": "attached", "close": "closed"}
+        self.case.assertIn(operation, states)
+        return {
+            "schemaVersion": 4,
+            "consumer": "containers-ubuntu26-userns-active",
+            "qualification": "none",
+            "binding": asdict(binding),
+            "bindingSha256": binding.digest(),
+            "lease": self.lease,
+            "profileName": self.profile_name,
+            "state": states[operation],
+            "sourceManifestSha256": active_client_module.protocol.SOURCE_MANIFEST_SHA256,
+            "imageVersion": self.source["imageVersion"],
+            "imageVersionKind": self.source["imageVersionKind"],
+            "validationProfile": self.source["validationProfile"],
+            "validationProfileRequested": self.source["validationProfileRequested"],
+            "parserExecutionNamespace": None,
+            "cleanOwnerVerified": True,
+            "ownerReady": True,
+            "ownerTerminationVerified": False,
+            "custodyDisposed": False,
+            "preflight": None,
+            "namespace": None,
+            "guestAbsenceVerified": False,
+            "taskAbsenceVerified": False,
+            "scopeAbsenceVerified": False,
+            "profileAbsenceVerified": False,
+            "profileObservation": None,
+            "retained": False,
+            "readerPending": False,
+            "childPending": False,
+            "purpose": "direct-startup-diagnostic",
+            "admissionRevision": self.source["admissionRevision"],
+            "admissionSha256": self.source["admissionSha256"],
+            "workflowContext": self.source,
+            "bootstrapSha256": "f" * 64,
+        }
+
+    def gate_response(self, operation: str) -> dict:
+        gate = self.ctx.backend.direct_gate
+        prepared = operation == "direct-gate-prepare"
+        observed = operation == "direct-observe"
+        return {
+            "schemaVersion": 1,
+            "consumer": "containers-direct-rootless-startup-diagnostic",
+            "purpose": "direct-startup-diagnostic",
+            "qualification": "none",
+            "bindingSha256": gate.binding.digest(),
+            "arm": "B",
+            "lease": self.lease,
+            "state": "loaded" if prepared else "attached",
+            "gateSha256": client_tests.gate.GATE_SHA256,
+            "released": operation in {"direct-release", "direct-observe"},
+            "disposed": False,
+            "actor": None if prepared else self.guest["actor"],
+            "executables": None if prepared else self.guest["executables"],
+            "startup": {
+                "kind": "ready",
+                "nativeExitCode": None,
+                "engineVersion": self.guest["executables"]["engineVersion"],
+            }
+            if observed
+            else None,
+            "postExecVerified": observed,
+        }
+
+    def profile_command(self, operation: str, arguments: list[str]) -> str:
+        ctx = self.ctx
+        self.events.append(operation)
+        request = json.loads(base64.b64decode(arguments[arguments.index("--request") + 1]))
+        if operation != "prepare":
+            self.case.assertEqual(request["bindingSha256"], ctx.backend.scoped_profile.binding.digest())
+        if operation == "create-intent":
+            self.case.assertEqual(len(ctx.containers), 1, "raw validation and name registration precede intent")
+        if operation == "close" and ctx.backend.scoped_profile.evidence["state"] == "create-intent":
+            ctx.checks[-1]["exitCode"] = 1
+            receipt = RootFailureComposition().receipt(ctx.backend.scoped_profile, "close", "create-intent")
+            return json.dumps(receipt)
+        return json.dumps(self.profile_response(operation))
+
+    def guest_command(self, arguments: list[str]) -> str:
+        self.events.append("guest-run")
+        self.guest_commands.append(arguments)
+        if self.spawn_error is not None:
+            raise self.spawn_error
+        Path(arguments[arguments.index("--cidfile") + 1]).write_text(self.identifier)
+        return self.identifier
+
+    def command(self, name: str, arguments: list[str], **_options: object) -> str:
+        ctx = self.ctx
+        ctx.checks.append({"status": "passed", "exitCode": 0})
+        if name.startswith("scoped userns profile "):
+            return self.profile_command(name.removeprefix("scoped userns profile "), arguments)
+        if name.startswith("direct startup gate "):
+            operation = name.removeprefix("direct startup gate ")
+            self.events.append(operation)
+            return json.dumps(self.gate_response(operation))
+        if name == "start gated direct-rootless diagnostic":
+            return self.guest_command(arguments)
+        responses = {
+            "verify owned outer Docker cgroup parent": json.dumps(ctx.backend.slice) + "|1234",
+            "verify live outer Docker slice membership": "0::/"
+            + ctx.backend.slice
+            + "/docker-"
+            + self.identifier
+            + ".scope",
+            "read direct diagnostic owned volumes": json.dumps(
+                [{"Type": "volume", "Name": "a" * 64, "Destination": "/home/docker/.local/share/docker", "RW": True}]
+            ),
+            "read outer Docker cgroup limits": "200000 100000\n4294967296\n512",
+        }
+        if name not in responses:
+            self.case.fail("unexpected external operation in composed direct fixture: " + name)
+        return responses[name]
+
+    def prepare(self) -> None:
+        self.ctx.backend.prepare_scoped_profile(self.ctx, self.stage, self.identity)
+        self.ctx.backend.direct_gate = runtime.GateClient(self.ctx, self.stage, self.identity, "B")
+        self.ctx.backend.direct_gate.prepare()
+
+
+@contextmanager
+def direct_composition_fixture(case: unittest.TestCase) -> Iterator[DirectCompositionFixture]:
+    """Keep actual clients/builders; simulate only their external command results."""
+    _proof, source, environment, event = admission_tests.DirectAdmissionTests().fixture(
+        "docker-20.10-rootless", "amd64"
+    )
+    ctx = RuntimeContext(
+        image="docker-20.10-rootless", architecture="amd64", timeout=180, use_sudo=False, outer_engine="docker"
+    )
+    try:
+        ctx.runtime_phase = "direct-profiled"
+        ctx.runtime_deadline = time.monotonic() + 360
+        ctx.bind_guest_profile({"launcher": "direct", "mode": "rootless", "outerPrivilege": "privileged"})
+        ctx.backend.ready, ctx.backend.network_id = True, "a" * 64
+        ctx.backend.slice_identity = "1:2"
+        ctx.backend.deadline = ctx.runtime_deadline
+        ctx.backend._gnu_timeout_provider = ("/qualified/gnu-timeout", "9.7", "prefixed")
+        fixture = DirectCompositionFixture(case, ctx, source)
+        ctx.command = fixture.command
+        with (
+            patch.dict(os.environ, environment, clear=True),
+            admission_tests.active_tests.event_payload(json.dumps(event).encode()),
+            patch.object(DockerBackend, "_tool", side_effect=lambda name: "/external/" + name),
+            patch.object(subprocess, "run", side_effect=AssertionError("unexpected external process")),
+        ):
+            yield fixture
+    finally:
+        shutil.rmtree(ctx.directory)
 
 
 class Cancellation:
@@ -405,6 +593,101 @@ class ActualStartupSequence(unittest.TestCase):
         if name == "A":
             self.assertNotIn("profile", events)
         return outcome
+
+
+class RealDirectGuestComposition(unittest.TestCase):
+    def test_b_real_clients_and_builders_add_trusted_options_after_raw_validation_once(self) -> None:
+        with direct_composition_fixture(self) as fixture:
+            ctx = fixture.ctx
+            outcome = runtime.ArmOutcome(
+                {
+                    "startup": "unknown",
+                    "nativeExitCode": None,
+                    "factsComplete": False,
+                    "cleanupVerified": False,
+                    "profileBound": False,
+                }
+            )
+            plan = SimpleNamespace(
+                args=SimpleNamespace(active_userns_stage=fixture.stage),
+                arm="B",
+                stable_host={},
+                outer_runtime={},
+                cancellation=SimpleNamespace(cancelled=False),
+            )
+            runtime._gated_start(plan, ctx, outcome, fixture.identity, SimpleNamespace(checkpoint=Mock()))
+            self.assertEqual(
+                fixture.events,
+                [
+                    "prepare",
+                    "direct-gate-prepare",
+                    "create-intent",
+                    "guest-run",
+                    "bind",
+                    "direct-preflight",
+                    "direct-release",
+                    "direct-observe",
+                ],
+            )
+            self.assertEqual(len(fixture.guest_commands), 1)
+            command = fixture.guest_commands[0]
+            labels = [command[index + 1] for index, value in enumerate(command) if value == "--label"]
+            self.assertCountEqual(
+                labels,
+                [
+                    "io.strukturpiloten.runtime=" + ctx.backend.owner,
+                    "io.strukturpiloten.userns-profile=" + fixture.lease,
+                ],
+            )
+            self.assertEqual(command.count("apparmor=" + fixture.profile_name), 1)
+            self.assertEqual(command[command.index("--network") + 1], ctx.backend.network_id)
+            self.assertEqual(command[command.index("--cgroup-parent") + 1], ctx.backend.slice)
+            self.assertEqual(ctx.containers, [fixture.identifier])
+            self.assertEqual(ctx.container_launchers, {fixture.identifier: "direct"})
+            self.assertIs(ctx.backend.direct_gate.binding, ctx.backend.scoped_profile.binding)
+            self.assertTrue(outcome.summary["profileBound"])
+            self.assertEqual(outcome.summary["startup"], "ready")
+
+    def test_spawn_failure_preserves_original_error_unknown_startup_and_retained_intent(self) -> None:
+        with direct_composition_fixture(self) as fixture:
+            original = ProbeError("PRIVATE_GUEST_CREATE_FAILURE")
+            fixture.spawn_error = original
+            outcome = runtime.ArmOutcome(
+                {
+                    "startup": "unknown",
+                    "nativeExitCode": None,
+                    "factsComplete": False,
+                    "cleanupVerified": False,
+                    "profileBound": False,
+                }
+            )
+            plan = SimpleNamespace(
+                args=SimpleNamespace(active_userns_stage=fixture.stage),
+                arm="B",
+                stable_host={},
+                outer_runtime={},
+                cancellation=SimpleNamespace(cancelled=False),
+            )
+            with self.assertRaises(ProbeError) as caught:
+                runtime._gated_start(plan, fixture.ctx, outcome, fixture.identity, SimpleNamespace(checkpoint=Mock()))
+            self.assertIs(caught.exception, original)
+            self.assertEqual(fixture.events, ["prepare", "direct-gate-prepare", "create-intent", "guest-run"])
+            self.assertEqual(len(fixture.guest_commands), 1)
+            self.assertEqual(outcome.summary["startup"], "unknown")
+            self.assertIsNone(outcome.summary["nativeExitCode"])
+            self.assertFalse(outcome.summary["factsComplete"])
+            self.assertFalse(outcome.summary["cleanupVerified"])
+            profile = fixture.ctx.backend.scoped_profile
+            self.assertEqual(profile.evidence["state"], "create-intent")
+            with self.assertRaises(ValueError):
+                profile.close()
+            self.assertTrue(profile.evidence["retained"])
+            self.assertFalse(profile.evidence["cleanupAuthority"])
+            self.assertEqual(profile.failures[0]["operation"], "close")
+            failure = aggregate.local_failure("B", "guest-create", original)
+            self.assertEqual(failure["errorType"], "runtime-error")
+            self.assertFalse(failure["cleanupAuthority"])
+            self.assertNotIn("PRIVATE_GUEST_CREATE_FAILURE", json.dumps(failure))
 
 
 class RootFailureComposition(unittest.TestCase):

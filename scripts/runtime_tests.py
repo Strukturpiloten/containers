@@ -436,6 +436,8 @@ class RuntimeContext:
             )
             if docker and self.container_launchers[container_name] == "systemd":
                 options = self.backend.scoped_run_options(options)
+            elif docker and getattr(self, "runtime_phase", None) == "direct-profiled":
+                options = self.backend.direct_scoped_run_options(self, options)
             completed = False
             try:
                 output = self.command(
