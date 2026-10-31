@@ -13,11 +13,13 @@ import os
 import re
 import select
 import stat
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 from scripts import docker_direct_startup_contract as contract
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from types import ModuleType
 
     from scripts.docker_direct_startup_active import ControlPort
@@ -36,6 +38,47 @@ ELF_MACHINES = {"amd64": 62, "arm64": 183}
 EXPECTED_LOG_CLASS = "child-fork-exec-operation-not-permitted-message"
 
 
+IMAGE_PHASES = {
+    ("usr", "local", "bin", "start-dockerd"): (
+        "direct-launcher-directory",
+        "direct-launcher-file",
+        "direct-launcher-capability",
+        "direct-launcher-read",
+        "direct-launcher-stable",
+    ),
+    ("usr", "local", "bin", "rootlesskit"): (
+        "direct-rootlesskit-directory",
+        "direct-rootlesskit-file",
+        "direct-rootlesskit-capability",
+        "direct-rootlesskit-read",
+        "direct-rootlesskit-stable",
+    ),
+    ("usr", "share", "strukturpiloten", "docker", "engine-version"): (
+        "direct-engine-directory",
+        "direct-engine-file",
+        "direct-engine-capability",
+        "direct-engine-read",
+        "direct-engine-stable",
+    ),
+}
+GENERIC_IMAGE_PHASES = (
+    "direct-image-directory",
+    "direct-image-file",
+    "direct-image-capability",
+    "direct-image-read",
+    "direct-image-stable",
+)
+
+
+@contextmanager
+def guard_group(port: ControlPort | RootPort, api: ModuleType, phase: str) -> Iterator[None]:
+    """Annotate fixed guard groups in memory; callers keep their original checks/commits."""
+    diagnostic = port.point(phase)
+    diagnostic.setdefault("comparisons", {})[phase] = False
+    yield
+    api.comparison(diagnostic, phase, matched=True)
+
+
 def _image_file(
     port: ControlPort | RootPort,
     api: ModuleType,
@@ -43,36 +86,47 @@ def _image_file(
     components: tuple[str, ...],
     limit: int,
 ) -> tuple[bytes, str]:
-    root = os.open("root", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC, dir_fd=directory)
+    directory_phase, file_phase, capability_phase, read_phase, stable_phase = IMAGE_PHASES.get(
+        components, GENERIC_IMAGE_PHASES
+    )
+    with guard_group(port, api, directory_phase):
+        root = os.open("root", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC, dir_fd=directory)
     descriptor = None
     try:
-        for component in components[:-1]:
-            child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root)
-            os.close(root)
-            root = child
-            info = os.fstat(root)
-            api.require(info.st_uid == 0 and not info.st_mode & 0o7022)
-        descriptor = os.open(components[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root)
-        before = os.fstat(descriptor)
-        api.require(stat.S_ISREG(before.st_mode) and before.st_uid == 0 and before.st_nlink == 1)
-        api.require(0 < before.st_size <= limit and not before.st_mode & 0o7022)
-        try:
-            os.getxattr(descriptor, "security.capability")
-        except OSError as error:
-            api.require(error.errno == errno.ENODATA)
-        else:
-            api.require(value=False)
+        with guard_group(port, api, directory_phase):
+            for component in components[:-1]:
+                child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root)
+                os.close(root)
+                root = child
+                info = os.fstat(root)
+                api.require(info.st_uid == 0 and not info.st_mode & 0o7022)
+        with guard_group(port, api, file_phase):
+            descriptor = os.open(components[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root)
+            before = os.fstat(descriptor)
+            api.require(stat.S_ISREG(before.st_mode) and before.st_uid == 0 and before.st_nlink == 1)
+            api.require(0 < before.st_size <= limit and not before.st_mode & 0o7022)
+        with guard_group(port, api, capability_phase):
+            try:
+                os.getxattr(descriptor, "security.capability")
+            except OSError as error:
+                api.require(error.errno == errno.ENODATA)
+            else:
+                api.require(value=False)
         hasher = hashlib.sha256()
         head = b""
         total = 0
-        while chunk := os.read(descriptor, HASH_BLOCK_BYTES):
-            total += len(chunk)
-            api.require(total <= limit)
-            head = (head + chunk[:ENGINE_VERSION_MAX_BYTES])[:ENGINE_VERSION_MAX_BYTES]
-            hasher.update(chunk)
-            api.check(port.work_until)
-        named = os.stat(components[-1], dir_fd=root, follow_symlinks=False)
-        api.require(total == before.st_size and api.mark(before) == api.mark(os.fstat(descriptor)) == api.mark(named))
+        with guard_group(port, api, read_phase):
+            while chunk := os.read(descriptor, HASH_BLOCK_BYTES):
+                total += len(chunk)
+                api.require(total <= limit)
+                head = (head + chunk[:ENGINE_VERSION_MAX_BYTES])[:ENGINE_VERSION_MAX_BYTES]
+                hasher.update(chunk)
+                api.check(port.work_until)
+        with guard_group(port, api, stable_phase):
+            named = os.stat(components[-1], dir_fd=root, follow_symlinks=False)
+            api.require(
+                total == before.st_size and api.mark(before) == api.mark(os.fstat(descriptor)) == api.mark(named)
+            )
         return head, hasher.hexdigest()
     finally:
         if descriptor is not None:
@@ -80,32 +134,18 @@ def _image_file(
         os.close(root)
 
 
-def preflight(port: ControlPort | RootPort, api: ModuleType, container: str) -> None:
-    """Bind actual installed tools once without copying canonical payload pins."""
-    from scripts import docker_direct_startup_active as control  # noqa: PLC0415 - same closed staged source set.
-
-    api.require(
-        not port.record.get("directPreflightIntent") and port.record.get("subject", {}).get("container") == container
-    )
-    api.require(not port.record["directGate"]["releaseIntent"])
-    before = control.inspect_gate(port, api, container)
-    subject = port.record["subject"]
-    pid = subject["pid"]
-    api.require(before["State"]["Pid"] == pid and before["State"]["Running"] is True)
-    port.work_until = min(port.work_until, api.time.monotonic_ns() + contract.FAILURE_SECONDS * 1_000_000_000)
-    port.record["directPreflightIntent"] = True
-    port.commit()
-    directory = os.open(f"/proc/{pid}", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
-    pidfd = os.pidfd_open(pid)
-    try:
-        task, actor = control.actor_snapshot(port, api, directory, pid)
-        api.require(task["startTicks"] == subject["startTicks"] and task["cgroup"] == subject["cgroup"])
+def _preflight_tools(
+    port: ControlPort | RootPort, api: ModuleType, directory: int, container: str
+) -> tuple[str, str, bytes, re.Match[bytes]]:
+    with guard_group(port, api, "direct-preflight-image-launcher"):
         launcher, launcher_hash = _image_file(
             port, api, directory, ("usr", "local", "bin", "start-dockerd"), LAUNCHER_MAX_BYTES
         )
+    with guard_group(port, api, "direct-preflight-image-rootlesskit"):
         binary, binary_hash = _image_file(
             port, api, directory, ("usr", "local", "bin", "rootlesskit"), ROOTLESSKIT_MAX_BYTES
         )
+    with guard_group(port, api, "direct-preflight-image-engine"):
         engine, _engine_hash = _image_file(
             port,
             api,
@@ -113,26 +153,67 @@ def preflight(port: ControlPort | RootPort, api: ModuleType, container: str) -> 
             ("usr", "share", "strukturpiloten", "docker", "engine-version"),
             ENGINE_VERSION_MAX_BYTES,
         )
+    with guard_group(port, api, "direct-preflight-launcher"):
         api.require(launcher.startswith(b"#!/bin/sh\n"))
+    with guard_group(port, api, "direct-preflight-elf"):
         api.require(
             binary[:6] == b"\x7fELF\x02\x01"
             and int.from_bytes(binary[18:20], "little") == ELF_MACHINES[port.binding.architecture]
         )
+    with guard_group(port, api, "direct-preflight-engine"):
         api.require(re.fullmatch(VERSION_PATTERN, engine.strip()) is not None)
+    with guard_group(port, api, "direct-preflight-version-query"):
         version = port.docker("exec", container, "/usr/local/bin/rootlesskit", "--version")
+    with guard_group(port, api, "direct-preflight-version-size"):
         api.require(len(version) <= contract.GUEST_BYTES)
+    with guard_group(port, api, "direct-preflight-version"):
         match = re.fullmatch(b"rootlesskit version (" + VERSION_PATTERN + b")\n?", version)
         api.require(match is not None)
+    return launcher_hash, binary_hash, engine, match
+
+
+def preflight(port: ControlPort | RootPort, api: ModuleType, container: str) -> None:
+    """Bind actual installed tools once without copying canonical payload pins."""
+    from scripts import docker_direct_startup_active as control  # noqa: PLC0415 - same closed staged source set.
+
+    with guard_group(port, api, "direct-preflight-intent"):
         api.require(
-            control.actor_snapshot(port, api, directory, pid) == (task, actor)
-            and not select.select([pidfd], [], [], 0)[0]
+            not port.record.get("directPreflightIntent")
+            and port.record.get("subject", {}).get("container") == container
         )
-        after = control.inspect_gate(port, api, container)
-        api.require(
-            after["State"]["Pid"] == pid
-            and after["State"]["StartedAt"] == subject["startedAt"]
-            and after["State"]["Running"] is True
-        )
+    with guard_group(port, api, "direct-preflight-unreleased"):
+        api.require(not port.record["directGate"]["releaseIntent"])
+    with guard_group(port, api, "direct-preflight-gate"):
+        before = control.inspect_gate(port, api, container)
+    with guard_group(port, api, "direct-preflight-subject"):
+        subject = port.record["subject"]
+        pid = subject["pid"]
+        api.require(before["State"]["Pid"] == pid and before["State"]["Running"] is True)
+    port.work_until = min(port.work_until, api.time.monotonic_ns() + contract.FAILURE_SECONDS * 1_000_000_000)
+    port.record["directPreflightIntent"] = True
+    with guard_group(port, api, "direct-preflight-commit"):
+        port.commit()
+    with guard_group(port, api, "direct-preflight-proc"):
+        directory = os.open(f"/proc/{pid}", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        pidfd = os.pidfd_open(pid)
+    try:
+        with guard_group(port, api, "direct-preflight-actor-read"):
+            task, actor = control.actor_snapshot(port, api, directory, pid)
+        with guard_group(port, api, "direct-preflight-task"):
+            api.require(task["startTicks"] == subject["startTicks"] and task["cgroup"] == subject["cgroup"])
+        launcher_hash, binary_hash, engine, match = _preflight_tools(port, api, directory, container)
+        with guard_group(port, api, "direct-preflight-actor"):
+            api.require(
+                control.actor_snapshot(port, api, directory, pid) == (task, actor)
+                and not select.select([pidfd], [], [], 0)[0]
+            )
+        with guard_group(port, api, "direct-preflight-incarnation"):
+            after = control.inspect_gate(port, api, container)
+            api.require(
+                after["State"]["Pid"] == pid
+                and after["State"]["StartedAt"] == subject["startedAt"]
+                and after["State"]["Running"] is True
+            )
         port.record["directExecutables"] = {
             "launcherSha256": launcher_hash,
             "rootlesskitSha256": binary_hash,
@@ -140,7 +221,8 @@ def preflight(port: ControlPort | RootPort, api: ModuleType, container: str) -> 
             "engineVersion": engine.strip().decode("ascii"),
         }
         port.record["directActor"] = actor
-        port.commit()
+        with guard_group(port, api, "direct-preflight-commit"):
+            port.commit()
     finally:
         os.close(pidfd)
         os.close(directory)

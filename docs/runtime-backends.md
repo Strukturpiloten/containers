@@ -1260,6 +1260,15 @@ invalid bounds. These failed records remain `qualification: none` and cannot
 satisfy the success-pair validator or aggregate. Exception messages, tracebacks,
 commands, environment values and cleanup locators are never exported.
 
+The bootstrap handoff reader compares device, inode, mode, UID/GID, link count,
+size and nanosecond modification/change times; a read-induced access-time update
+alone cannot refuse an unchanged input. Finite Boolean checkpoints distinguish
+input, proof, source, SDK, admission and trusted-context guards. Each preflight
+RPC reports its current guard/reader group, including the fixed image-file
+family, instead of a previous RPC's phase. Retained failure history and existing
+journal commits stay unchanged. A checkpoint narrows the refusal boundary; it
+does not establish a syscall/policy cause or native qualification.
+
 The aggregate certifies collection, with `qualification: none` throughout.
 Matching A-negative/B-ready observations support only `profile-dependent-startup`.
 Two matching negatives mean `profile-not-demonstrated-remedy`. Drift, missing or

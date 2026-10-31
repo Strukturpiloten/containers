@@ -3350,3 +3350,169 @@ class AccuratePostImportDiagnosticPhases(unittest.TestCase):
         self.assertEqual(unknown["phase"], "unknown")
         self.assertNotIn("PRIVATE_", json.dumps(unknown))
         self.assertEqual(os.geteuid(), original_uid)
+
+
+class BootstrapInputCheckpoints(unittest.TestCase):
+    def setUp(self) -> None:
+        self.forbidden = Mock(side_effect=AssertionError("unexpected native/root/subprocess interface"))
+        for name in ("Popen", "run", "check_call", "check_output"):
+            self.enterContext(patch.object(subprocess, name, self.forbidden))
+        self.enterContext(patch.object(active, "main", self.forbidden))
+        self.enterContext(patch.object(producer, "main", self.forbidden))
+        self.enterContext(patch.object(producer.source, "fetch", self.forbidden))
+        self.namespace = literal_namespace()
+        self.namespace["main"] = self.forbidden
+        self.namespace["create"] = self.forbidden
+        self.uid = os.getuid()
+
+    def tearDown(self) -> None:
+        self.assertEqual(self.forbidden.call_count, 0)
+        self.assertEqual(os.getuid(), self.uid)
+
+    def receipt(self, error: BaseException) -> dict:
+        output = io.BytesIO()
+        self.namespace["sys"] = SimpleNamespace(stdout=SimpleNamespace(buffer=output))
+        self.namespace["failure"](error)
+        value = json.loads(output.getvalue())
+        self.assertTrue(active.valid_failure(value))
+        self.assertLessEqual(len(output.getvalue()), active.MAX_FAILURE)
+        self.assertNotIn("PRIVATE_", json.dumps(value))
+        self.assertFalse(value["cleanupAuthority"])
+        return value
+
+    def test_read_induced_atime_change_is_accepted_with_real_owner_and_unchanged_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "handoff"
+            raw = b"owned inert handoff bytes"
+            path.write_bytes(raw)
+            path.chmod(0o600)
+            os.utime(path, ns=(1_000_000_000, path.stat().st_mtime_ns))
+            before = path.stat()
+            result = self.namespace["read_input"](str(path), self.uid, 2097152)
+            after = path.stat()
+            self.assertEqual(result, raw)
+            self.assertEqual(before.st_uid, self.uid)
+            self.assertNotEqual(before.st_atime_ns, after.st_atime_ns)
+            self.assertEqual(self.namespace["input_identity"](before), self.namespace["input_identity"](after))
+            self.assertEqual(self.namespace["DIAGNOSTIC"]["phase"], "bootstrap-input-stability")
+            self.assertTrue(self.namespace["DIAGNOSTIC"]["comparisons"]["bootstrap-input-stability"])
+
+    def test_each_security_field_and_one_nanosecond_mutation_is_rejected_after_read(self) -> None:
+        fields = (
+            "st_dev",
+            "st_ino",
+            "st_mode",
+            "st_uid",
+            "st_gid",
+            "st_nlink",
+            "st_size",
+            "st_mtime_ns",
+            "st_ctime_ns",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "handoff"
+            path.write_bytes(b"fixed bytes")
+            before = path.stat()
+            for field in fields:
+                with self.subTest(field=field):
+                    values = {name: getattr(before, name) for name in (*fields, "st_mtime", "st_ctime")}
+                    values[field] += 1
+                    after = SimpleNamespace(**values)
+                    self.assertNotEqual(
+                        self.namespace["input_identity"](before), self.namespace["input_identity"](after)
+                    )
+                    # Only the returned post-read metadata is simulated; no process/file UID changes.
+                    operations = {
+                        key: getattr(os, key)
+                        for key in ("O_RDONLY", "O_NONBLOCK", "O_NOFOLLOW", "O_CLOEXEC", "open", "read", "close")
+                    }
+                    operations["fstat"] = Mock(side_effect=[before, after])
+                    self.namespace["os"] = SimpleNamespace(**operations)
+                    with self.assertRaises(ValueError) as raised:
+                        self.namespace["read_input"](str(path), self.uid, 2097152)
+                    value = self.receipt(raised.exception)
+                    self.assertEqual(value["phase"], "bootstrap-input-stability")
+                    self.assertFalse(value["comparisons"]["bootstrap-input-stability"])
+                    self.assertEqual(after.st_mtime, before.st_mtime)
+                    self.assertEqual(after.st_ctime, before.st_ctime)
+
+    def test_original_symlink_link_owner_and_size_guards_remain_failing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "handoff"
+            path.write_bytes(b"PRIVATE_HANDOFF_CANARY")
+            link = path.with_name("PRIVATE_LINK_CANARY")
+            link.symlink_to(path)
+            for name, uid, limit, phase in (
+                (link, self.uid, 2097152, "bootstrap-input-open"),
+                (path, self.uid + 1, 2097152, "bootstrap-input-identity"),
+                (path, self.uid, 1, "bootstrap-input-identity"),
+            ):
+                with self.subTest(phase=phase), self.assertRaises((OSError, ValueError)) as raised:
+                    self.namespace["read_input"](str(name), uid, limit)
+                self.assertEqual(self.receipt(raised.exception)["phase"], phase)
+            link.unlink()
+            os.link(path, link)
+            with self.assertRaises(ValueError) as raised:
+                self.namespace["read_input"](str(path), self.uid, 2097152)
+            self.assertEqual(self.receipt(raised.exception)["phase"], "bootstrap-input-identity")
+
+    def test_growth_past_the_read_cap_is_rejected_before_stability(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "handoff"
+            path.write_bytes(b"oversized bytes")
+            before = path.stat()
+            initial = SimpleNamespace(st_mode=before.st_mode, st_uid=before.st_uid, st_nlink=1, st_size=0)
+            operations = {
+                key: getattr(os, key)
+                for key in ("O_RDONLY", "O_NONBLOCK", "O_NOFOLLOW", "O_CLOEXEC", "open", "read", "close")
+            }
+            operations["fstat"] = Mock(return_value=initial)
+            self.namespace["os"] = SimpleNamespace(**operations)
+            with self.assertRaises(ValueError) as raised:
+                self.namespace["read_input"](str(path), self.uid, 1)
+            receipt = self.receipt(raised.exception)
+            self.assertEqual(receipt["phase"], "bootstrap-input-read")
+            self.assertFalse(receipt["comparisons"]["bootstrap-input-read"])
+            self.assertNotIn("bootstrap-input-stability", receipt["comparisons"])
+
+    def test_proof_guard_families_and_unknown_checkpoint_are_closed(self) -> None:
+        for fault, phase in (
+            ("shape", "bootstrap-bundle-shape"),
+            ("object", "bootstrap-git-objects"),
+            ("closure", "bootstrap-git-closure"),
+            ("source", "bootstrap-source"),
+            ("sdk", "bootstrap-sdk"),
+            ("admission", "bootstrap-admission"),
+            ("context", "bootstrap-trusted-context"),
+        ):
+            with self.subTest(fault=fault):
+                namespace = literal_namespace()
+                self.namespace = namespace
+                proof = SyntheticProof()
+                namespace["SOURCE_MANIFEST_SHA256"] = active.digest(proof.files[producer.MANIFEST])
+                value = proof.value()
+                trusted = copy.deepcopy(proof.context)
+                if fault == "shape":
+                    value["PRIVATE_EXTRA"] = "PRIVATE_VALUE"
+                elif fault == "object":
+                    value["objects"][0]["data"] = base64.b64encode(b"PRIVATE_BYTES").decode()
+                elif fault == "closure":
+                    trusted["candidate"] = "0" * 40
+                elif fault == "source":
+                    namespace["SOURCE_MANIFEST_SHA256"] = "0" * 64
+                elif fault == "sdk":
+                    value["sdk"]["LICENSE"] = base64.b64encode(b"PRIVATE_TOKEN").decode()
+                elif fault == "admission":
+                    namespace["ADMISSION_REVISION"] = "not-the-admitted-revision"
+                else:
+                    trusted["run"] = "999999"
+                with self.assertRaises((ValueError, KeyError, TypeError)) as raised:
+                    namespace["verify_bundle"](json.dumps(value).encode(), trusted)
+                receipt = self.receipt(raised.exception)
+                self.assertEqual(receipt["phase"], phase)
+                self.assertFalse(receipt["comparisons"][phase])
+                self.assertLessEqual(len(receipt["comparisons"]), len(namespace["BOOTSTRAP_CHECKPOINTS"]))
+        with self.assertRaises(ValueError) as raised:
+            self.namespace["point"]("PRIVATE_PHASE")
+        self.assertNotIn("PRIVATE_", json.dumps(self.receipt(raised.exception)))
+        self.assertTrue(set(self.namespace["BOOTSTRAP_CHECKPOINTS"]) <= active.FAILURE_PHASES)

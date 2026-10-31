@@ -489,7 +489,8 @@ def _operate(
         api.require(type(port) is ControlPort and port.record.get("directCreateIntent") is True)
         bind_control(port, api, request["container"])
     elif route.operation == "direct-preflight":
-        api.require(type(port) is ControlPort or port.record["state"] == "attached")
+        with observations.guard_group(port, api, "direct-preflight-state"):
+            api.require(type(port) is ControlPort or port.record["state"] == "attached")
         observations.preflight(port, api, request["container"])
     elif route.operation == "direct-observe":
         api.require(type(port) is ControlPort or port.record["state"] == "attached")
@@ -502,12 +503,19 @@ def _operate(
             route.operation == "direct-control-close" and type(port) is ControlPort and request["container"] is None
         )
         return _close_control(port, api)
+    if route.operation == "direct-preflight":
+        with observations.guard_group(port, api, "direct-preflight-reply"):
+            return _receipt(port, api)
     return _receipt(port, api)
 
 
 def rpc(api: ModuleType, source: tuple[Path, dict, SimpleNamespace], route: Namespace) -> dict:
     """Dispatch a closed gate route after root source and stage-lock verification."""
     stage, bootstrap, modules = source
+    diagnostic = None
+    if route.operation == "direct-preflight":
+        diagnostic = {"phase": "direct-preflight-rpc", "comparisons": {}}
+        route.diagnostic["diagnostic"] = diagnostic
     api.require(bootstrap["context"]["purpose"] == contract.PURPOSE)
     request = api.request_value(route.request)
     create = route.operation == "direct-control-prepare"
@@ -530,9 +538,13 @@ def rpc(api: ModuleType, source: tuple[Path, dict, SimpleNamespace], route: Name
                 api.require(set(request) == {"bindingSha256", "container"})
                 record = store.read()
                 api.require(request["bindingSha256"] == record["bindingSha256"])
+            if diagnostic is not None and not record.get("retained"):
+                record["diagnostic"] = diagnostic
             if record.get("kind") == "direct-control":
                 port = ControlPort(api, source, store, record)
-                api.preflight_authority(stage, bootstrap, modules, progress=route.diagnostic)
+                api.preflight_authority(
+                    stage, bootstrap, modules, progress=route.diagnostic if diagnostic is None else diagnostic
+                )
             else:
                 port = api.RootPort(stage, bootstrap, modules, store, record)
                 api.require(type(port.binding) is contract.DirectDiagnosticBinding)
