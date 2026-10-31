@@ -67,6 +67,7 @@ GLOBAL_IMAGE_INPUTS = (
     "scripts/ci_scope.py",
     "scripts/image_inputs.py",
     "scripts/runtime_tests.py",
+    "scripts/docker_direct_startup*.py",
     "scripts/runtime_backends.py",
     "scripts/runtime_docker_backend.py",
     "scripts/runtime_docker_diagnostics.py",

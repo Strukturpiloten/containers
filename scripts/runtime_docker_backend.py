@@ -28,6 +28,7 @@ from scripts.runtime_docker_diagnostics import qualify_gnu_timeout
 from scripts.runtime_oom_diagnostics import MAX_BYTES, SNAPSHOT_SECONDS, DockerOomLedger, _docker_hash, _parent_validate
 
 if TYPE_CHECKING:
+    from scripts.docker_direct_startup_client import GateClient
     from scripts.docker_userns_active_client import ActiveClient
     from scripts.runtime_tests import RuntimeContext
 
@@ -64,6 +65,7 @@ class DockerBackend:
         self.watchdog: str | None = None
         self.diagnostic_reader_pending = False
         self.scoped_profile: ActiveClient | None = None
+        self.direct_gate: GateClient | None = None
         self._gnu_timeout_provider: tuple[str, str, str] | None = None
 
     @staticmethod
@@ -642,12 +644,74 @@ class DockerBackend:
         self.scoped_profile.prepare()
 
     def scoped_run_options(self, options: tuple[str, ...]) -> tuple[str, ...]:
-        """Qualify only the one owned detached systemd guest in this phase."""
+        """Qualify only the one owned detached admitted guest in this phase."""
         if self.scoped_profile is None:
             return options
         if any("apparmor=" in option for option in options):
-            raise DockerBackendError("systemd guest cannot override the qualified scoped profile")
+            raise DockerBackendError("admitted guest cannot override the qualified scoped profile")
         return (*options, *self.scoped_profile.create_options())
+
+    def direct_scoped_run_options(self, ctx: RuntimeContext, options: tuple[str, ...]) -> tuple[str, ...]:
+        """Append only this prepared direct-B lease after raw option validation."""
+        from dataclasses import asdict  # noqa: PLC0415
+
+        from scripts.docker_direct_startup_client import GateClient  # noqa: PLC0415
+        from scripts.docker_direct_startup_contract import DirectDiagnosticBinding  # noqa: PLC0415
+        from scripts.docker_userns_active_client import ActiveClient  # noqa: PLC0415
+
+        profile, gate = self.scoped_profile, self.direct_gate
+        if (
+            type(profile) is not ActiveClient
+            or type(gate) is not GateClient
+            or ctx.backend is not self
+            or profile.ctx is not ctx
+            or gate.ctx is not ctx
+            or gate.stage != profile.stage
+            or gate.arm != "B"
+            or gate.failed
+            or gate.failures
+            or profile.failures
+        ):
+            raise DockerBackendError("direct guest scoped clients are not authenticated")
+        binding = profile.binding
+        if type(binding) is not DirectDiagnosticBinding or gate.binding is not binding or ctx.runtime_deadline is None:
+            raise DockerBackendError("direct guest scoped binding is unavailable")
+        binding.validate()
+        actual = (
+            ctx.runtime_phase,
+            ctx.name,
+            ctx.architecture,
+            self.owner,
+            self.slice,
+            self.slice_identity,
+            int(ctx.runtime_deadline * 1_000_000_000),
+        )
+        expected = (
+            binding.phase,
+            binding.image,
+            binding.architecture,
+            binding.owner,
+            binding.runtime_slice,
+            binding.slice_identity,
+            binding.deadline_ns,
+        )
+        if actual != expected or gate.name != profile.name or not re.fullmatch(r"[0-9a-f]{32}", profile.name):
+            raise DockerBackendError("direct guest scoped context changed")
+        if (
+            profile.evidence.get("state") != "loaded"
+            or profile.evidence.get("lease") != profile.name
+            or profile.evidence.get("binding") != asdict(binding)
+            or profile.evidence.get("bindingSha256") != binding.digest()
+            or profile.evidence.get("workflowContext") != profile.provenance
+            or profile.evidence.get("retained") is not False
+            or gate.evidence.get("state") != "loaded"
+            or gate.evidence.get("lease") != profile.name
+            or gate.evidence.get("bindingSha256") != binding.digest()
+            or gate.evidence.get("released") is not False
+            or gate.evidence.get("disposed") is not False
+        ):
+            raise DockerBackendError("direct guest scoped preparation is unverified")
+        return self.scoped_run_options(options)
 
     @staticmethod
     def save_arguments(arguments: tuple[str, ...]) -> tuple[str, ...]:
@@ -864,7 +928,7 @@ class DockerBackend:
 
     def _cleanup_resources(self, ctx: RuntimeContext) -> list[str]:
         """Close scoped custody before touching endpoint dependencies."""
-        if self.scoped_profile is None:
+        if self.scoped_profile is None and self.direct_gate is None:
             return self._ordinary_resource_cleanup(ctx)
         failures: list[str] = []
         if self.ready:
@@ -872,6 +936,11 @@ class DockerBackend:
                 self._remove_containers(ctx)
             except Exception as error:  # noqa: BLE001 - still attempt the independently owned scoped cleanup.
                 failures.append(str(error))
+            if self.direct_gate is not None and self.direct_gate.arm == "A":
+                try:
+                    self.direct_gate.close_control()
+                except Exception as error:
+                    raise DockerBackendError("direct gate cleanup unverified; retaining private runtime") from error
             if self.scoped_profile is not None:
                 try:
                     self.scoped_profile.close()

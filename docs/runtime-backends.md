@@ -725,7 +725,7 @@ unchanged. Admission itself records `qualification: none`; it permits an attempt
 not native qualification, release or publication permission.
 
 Bootstrap transport/stage, native lease records, scoped receipts and disposal
-acknowledgments use schema 3. Admission uses schema 4: its maintained policy
+acknowledgments use schema 4. Admission uses schema 5: its maintained policy
 contains the exact `validationProfiles` allowset `full` and
 `docker-rootless-qualification`, while each actual context/receipt retains one
 canonical profile and the exact raw request. The exact maintained-caller table
@@ -1208,3 +1208,81 @@ fixed-name allocation and are checked around I/O; directory substitution cannot
 rebind a stream. Invalid response limits refuse before reads. The root observer's
 private copy uses the absolute witness end without changing original runtime or
 backend deadlines. Its timestamp validation makes no freshness or cause claim.
+
+
+## Direct-rootless startup pair
+
+The issue442 manual diagnostic admits only `docker-20.10-rootless`/AMD64 and
+`docker-26-rootless`/ARM64. It uses one inherited 900-second deadline established
+before bootstrap preparation, the existing cleanup reserves and combined source/
+store accounting. A receives an ordinary unprofiled privileged direct launch;
+B receives the unchanged canonical owned scoped profile. B's store, services,
+network, guest, volumes and profile lease cannot start until A's complete owned
+cleanup is acknowledged. Shared preparation stages immutable source/SDK bytes;
+it does not create B runtime resources or load its policy.
+
+Both arms use the same root-owned read-only shell gate and inert one-shot FIFO
+token. The held task must be genuine PID1 with all four UID/GID values 1000,
+its exact private cgroup and the measured effective label before release. B
+reuses the existing custody, `ActiveClient`, `ProfileLease` and independent
+owner; maintained29's UID0/systemd descendant rule and the old ARM experimental
+observation/refusal remain separate. The gate execs unchanged original launcher
+bytes/argv. Instrumentation adds shell startup and timing and can change incidental
+`SHLVL`/`PWD`; byte-identical ungated process environment is not claimed. No host
+environment capture/replay, dynamic FIFO code or new authority controller exists.
+
+Bounded observations bind installed launcher/RootlessKit hashes, architecture
+and actual versions to the immutable archive, alongside UID/GID, groups,
+capabilities, NoNewPrivs, seccomp, mappings and namespace relationships. Declared
+software versions still come from each canonical `payload.yaml`. The existing
+exact RootlessKit message classifier retains A's original nonzero native exit;
+creation success, a stopped-container cgroup error or readiness timeout is not
+an expected negative. A generic failure, unknown ownership or cleanup uncertainty
+stops before B. A running-ready B has an unknown native exit (`null`), with
+original-incarnation post-exec proof; no zero exit is fabricated.
+
+Owned Docker logs combine stdout and stderr inside the existing bounded reader;
+other queries keep their original stream selection. A 65-record tail detects
+whether the 64-record classification limit was exceeded, including an older fatal
+hidden by the tail. Byte, record, encoding or query failure retains the observed
+native exit but leaves facts incomplete and prevents B. The first work or
+cancellation failure stays primary; later cleanup liabilities are retained
+separately. Failed publication revokes pair and host-sidecar authority through
+the held private inode, without reopening an unrelated public replacement.
+
+Failed pair artifacts retain a separate closed `diagnostic-incomplete` record in
+the same filename. It keeps finite first/secondary phase, reason and error-type
+categories and known arm exits, including failures before A and during source
+cleanup. At most eight distinct causes are exported; excess diagnostics have an
+explicit overflow marker. Root helper phases distinguish import, readiness, lock
+and stage disposal. Retention rejects mismatched context, private/extra fields and
+invalid bounds. These failed records remain `qualification: none` and cannot
+satisfy the success-pair validator or aggregate. Exception messages, tracebacks,
+commands, environment values and cleanup locators are never exported.
+
+The bootstrap handoff reader compares device, inode, mode, UID/GID, link count,
+size and nanosecond modification/change times; a read-induced access-time update
+alone cannot refuse an unchanged input. Finite Boolean checkpoints distinguish
+input, proof, source, SDK, admission and trusted-context guards. Each preflight
+RPC reports its current guard/reader group, including the fixed image-file
+family, instead of a previous RPC's phase. Retained failure history and existing
+journal commits stay unchanged. A checkpoint narrows the refusal boundary; it
+does not establish a syscall/policy cause or native qualification.
+
+The aggregate certifies collection, with `qualification: none` throughout.
+Matching A-negative/B-ready observations support only `profile-dependent-startup`.
+Two matching negatives mean `profile-not-demonstrated-remedy`. Drift, missing or
+skipped records and uncertain cleanup cannot complete. Raw process/environment/
+guest-log data and sensitive profile names/paths stay private; public records
+contain closed categories, validated versions, hashes and counts. Namespace
+U/M/UM controls are unavailable and excluded from this milestone. Kernel
+attribution remains unavailable; a message, rootfs warning or version query does
+not identify the denied syscall. A later repair requires the original ungated
+launcher and complete affected-matrix smoke/enforcement evidence.
+
+The diagnostic reuses existing external SDK/policy/parser, runner, image,
+payload and Action versions. No software pin or integrity exception is added.
+The helper closure and global source-input pattern own the added standard-library
+source files; existing template/generated Action Renovate managers own reused
+Action references. Ordinary full, maintained29, publication and local Podman
+routes retain their existing boundaries.

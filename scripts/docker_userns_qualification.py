@@ -18,6 +18,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn, Protocol
 
+from scripts import docker_direct_startup_contract as direct
 from scripts import docker_runner_security as reader
 
 if TYPE_CHECKING:
@@ -26,9 +27,9 @@ if TYPE_CHECKING:
 LEGACY_CLONE = Path("/proc/sys/kernel/unprivileged_userns_clone")
 MAX_NAMESPACES = 2**63 - 1
 CONSUMER = "containers-ubuntu26-userns-active"
-PREREQUISITE_SCHEMA = 3
-ADMISSION_SCHEMA = 4
-ADMISSION_REVISION = "containers527-maintained-callers-v1"
+PREREQUISITE_SCHEMA = 4
+ADMISSION_SCHEMA = 5
+ADMISSION_REVISION = "containers442-direct-diagnostic-v1"
 MAINTAINED_PROFILES = ("full", "docker-rootless-qualification")
 EXPERIMENTAL_PURPOSE = "experimental-candidate"
 MAINTAINED_PURPOSE = "maintained-prerequisite"
@@ -225,7 +226,7 @@ def validation_profile(value: object) -> str:
     if (
         type(value) is not str
         or not value.isascii()
-        or value.lower() not in {"", *MAINTAINED_PROFILES, "docker-rootless-diagnostic"}
+        or value.lower() not in {"", *MAINTAINED_PROFILES, "docker-rootless-diagnostic", direct.PROFILE}
     ):
         _refuse("context")
     return value.lower() or "full"
@@ -252,6 +253,17 @@ def event_scope(event: object) -> tuple[str, str]:
     focused = inputs.get("focused_runtime", "witness-diagnostic")
     if type(focused) is not str or focused not in {"witness-diagnostic", "mandatory-accounting"}:
         _refuse("context")
+    if canonical == direct.PROFILE:
+        if (
+            set(inputs) - {"validation_profile", "focused_runtime"}
+            or focused != "witness-diagnostic"
+            or type(event.get("repository")) is not dict
+            or event["repository"].get("full_name") != REPOSITORY
+            or event.get("workflow") != CI_WORKFLOW
+            or event.get("ref") != direct.REF
+        ):
+            _refuse("context")
+        return direct.PURPOSE, direct.REF
     if canonical in MAINTAINED_PROFILES:
         if (
             "inputs" not in event
@@ -534,7 +546,12 @@ def context_digest(value: dict[str, str]) -> str:
     """Bind the complete staged workflow context, including purpose/admission/ref."""
     if (
         type(value) is not dict
-        or set(value) != WORKFLOW_CONTEXT_KEYS
+        or set(value)
+        != (
+            WORKFLOW_CONTEXT_KEYS | set(direct.CONTEXT_FIELDS)
+            if value.get("purpose") == direct.PURPOSE
+            else WORKFLOW_CONTEXT_KEYS
+        )
         or any(type(item) is not str for item in value.values())
     ):
         _refuse("context")
@@ -572,6 +589,7 @@ def admission_document(raw: bytes) -> dict:
             "maintainedContext",
             "maintainedArchitectures",
             "maintainedCallers",
+            "directContext",
         }
         or type(value["schemaVersion"]) is not int
         or value["schemaVersion"] != ADMISSION_SCHEMA
@@ -582,6 +600,7 @@ def admission_document(raw: bytes) -> dict:
         or value["architectures"] != {"amd64": "experimental-load-candidate", "arm64": "compile-only-refuse-load"}
         or value["maintainedArchitectures"] != {"amd64": "maintained-prerequisite", "arm64": "maintained-prerequisite"}
         or value["maintainedCallers"] != MAINTAINED_CALLERS
+        or value["directContext"] != direct.admission_context()
     ):
         _refuse("admission")
     context_keys = {
@@ -666,10 +685,13 @@ def active_cohort(admission: dict, context: dict) -> dict:
     architecture = context["architecture"]
     if (
         architecture not in {"amd64", "arm64"}
-        or context["purpose"] not in {EXPERIMENTAL_PURPOSE, MAINTAINED_PURPOSE}
-        or (architecture == "arm64" and context["purpose"] != MAINTAINED_PURPOSE)
+        or context["purpose"] not in {EXPERIMENTAL_PURPOSE, MAINTAINED_PURPOSE, direct.PURPOSE}
+        or (architecture == "arm64" and context["purpose"] not in {MAINTAINED_PURPOSE, direct.PURPOSE})
     ):
         _refuse("admission")
+    if context["purpose"] == direct.PURPOSE:
+        context_digest(context)
+        _direct_context(context, admission, context["admissionSha256"])
     return admission["cohorts"][architecture]
 
 
@@ -677,6 +699,9 @@ def validate_workflow_context(context: dict[str, str], admission: dict, admissio
     """Validate root-bound caller facts intrinsically, without current consumer environment."""
     context_digest(context)
     purpose = context["purpose"]
+    if purpose == direct.PURPOSE:
+        _direct_context(context, admission, admission_sha256)
+        return
     if purpose not in {EXPERIMENTAL_PURPOSE, MAINTAINED_PURPOSE}:
         _refuse("context")
     expected = admission["maintainedContext"] if purpose == MAINTAINED_PURPOSE else admission["context"]
@@ -721,6 +746,53 @@ def validate_workflow_context(context: dict[str, str], admission: dict, admissio
         or context["validationProfile"] != expected["validationProfile"]
     ):
         _refuse("context")
+
+
+def _direct_context(context: dict[str, str], admission: dict, admission_sha256: str) -> None:
+    """Check the direct discriminator without widening any maintained29 predicate."""
+    policy = direct.admission_context()
+    if admission["directContext"] != policy:
+        _refuse("admission")
+    identity = {key: context[key] for key in ("repository", "event", "ref", "workflowRef", "job", "candidate")}
+    derived = caller_context(_archived_event(context), identity)
+    if (
+        any(context[key] != value for key, value in derived.items())
+        or any(
+            context[key] != policy[key]
+            for key in ("repository", "event", "ref", "job", "validationProfile", *direct.CONTEXT_FIELDS)
+        )
+        or context["workflowPath"] != CI_WORKFLOW
+        or context["caller"] != "ci-manual"
+        or context["purpose"] != direct.PURPOSE
+        or context["admissionRevision"] != admission["revision"]
+        or context["admissionRevision"] != ADMISSION_REVISION
+        or context["admissionSha256"] != admission_sha256
+        or re.fullmatch(r"[0-9a-f]{64}", admission_sha256) is None
+        or context["candidate"] != context["workflow"]
+        or context["candidate"] != context["checkout"]
+        or any(re.fullmatch(r"[1-9][0-9]{0,19}", context[key]) is None for key in ("run", "attempt"))
+        or (context["image"], context["architecture"]) not in direct.ROWS
+        or context["imageOS"] != {"amd64": "ubuntu26", "arm64": "ubuntu26-arm64"}.get(context["architecture"])
+        or context["imageVersionKind"] != "workflow-reported-provenance-not-vm-attestation"
+        or re.fullmatch(r"[0-9]{8}\.[0-9]+\.[0-9]+", context["imageVersion"]) is None
+    ):
+        _refuse("context")
+
+
+def native_binding(value: object) -> NativeBinding | direct.DirectDiagnosticBinding:
+    """Dispatch only the separate maintained29 or direct profiled-B wire types."""
+    if type(value) is not dict:
+        _refuse("context")
+    try:
+        result = (
+            direct.DirectDiagnosticBinding(**value)
+            if value.get("purpose") == direct.PURPOSE
+            else NativeBinding(**value)
+        )
+        result.validate()
+    except TypeError, direct.DirectDiagnosticError:
+        _refuse("context")
+    return result
 
 
 def validate_stage_disposal(value: object, scoped: dict) -> None:

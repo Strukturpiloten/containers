@@ -128,7 +128,15 @@ class DiagnosticDispatchTests(unittest.TestCase):
         dispatch = self.workflow[True]["workflow_dispatch"]["inputs"]["validation_profile"]
         self.assertEqual(dispatch["type"], "choice")
         self.assertEqual(dispatch["default"], "full")
-        self.assertEqual(dispatch["options"], ["full", "docker-rootless-qualification", "docker-rootless-diagnostic"])
+        self.assertEqual(
+            dispatch["options"],
+            [
+                "full",
+                "docker-rootless-qualification",
+                "docker-rootless-diagnostic",
+                "docker-direct-rootless-diagnostic",
+            ],
+        )
         self.assertEqual(self.selector["env"]["VALIDATION_PROFILE"], "${{ inputs.validation_profile || 'full' }}")
         for profile in ("", dispatch["default"], "FULL", "FuLl"):
             with self.subTest(profile=profile):
@@ -209,6 +217,7 @@ class DiagnosticDispatchTests(unittest.TestCase):
             "${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || '' }}": "",
             "${{ steps.mode.outputs.scope }}": values["scope"],
             "${{ steps.mode.outputs.target }}": values["target"],
+            "${{ steps.mode.outputs.validation_profile }}": values["validation_profile"],
             "${{ github.head_ref || github.ref_name }}": "issue521",
             "${{ github.sha }}": "a" * 40,
         }
@@ -478,6 +487,9 @@ class DiagnosticDispatchTests(unittest.TestCase):
             "ACTIVE_USERNS_CONTEXT": "true",
             "VALIDATION_PROFILE": "docker-rootless-diagnostic",
             "IMAGE_NAME": "docker-29-conformance-rootless",
+            "IMAGE_ARCH": "amd64",
+            "SELECTED_IMAGE_NAME": "docker-29-conformance-rootless",
+            "SELECTED_IMAGE_ARCH": "amd64",
             "GITHUB_EVENT_NAME": "workflow_dispatch",
             "GITHUB_REF": "refs/heads/TheRealBecks/issue527",
             "GITHUB_JOB": "smoke-build",
@@ -487,6 +499,9 @@ class DiagnosticDispatchTests(unittest.TestCase):
             {"GITHUB_JOB": "publish"},
             {"GITHUB_REF": "refs/heads/main"},
             {"IMAGE_NAME": "other"},
+            {"IMAGE_ARCH": "arm64"},
+            {"SELECTED_IMAGE_NAME": "docker-20.10-rootless"},
+            {"SELECTED_IMAGE_ARCH": "arm64"},
             {"ACTIVE_USERNS_CONTEXT": "false"},
             {"VALIDATION_PROFILE": "full"},
             {"OOM_ACCOUNTING_MODE": "diagnostic"},

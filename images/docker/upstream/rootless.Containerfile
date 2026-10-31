@@ -17,9 +17,22 @@ RUN set -eux; \
     /usr/bin/curl --disable --version > /usr/share/strukturpiloten/docker/curl-version; \
     apk info -vv > /usr/share/strukturpiloten/docker/os-packages
 COPY --from=payload /payload/engine/ /usr/local/bin/
-COPY --from=payload /payload/rootless/ /usr/local/bin/
+COPY --from=payload --chown=0:0 /payload/rootless/ /usr/local/bin/
 COPY --from=payload /payload/provenance/ /usr/share/strukturpiloten/docker/
 COPY images/docker/upstream/start-rootless.sh /usr/local/bin/start-dockerd
+
+# Check the copied file, without executing it, against the direct reader's metadata contract.
+RUN set -eu; \
+    metadata="$(stat -c '%f %u %h %s' /usr/local/bin/rootlesskit)"; \
+    set -- $metadata; \
+    test "$#" -eq 4; \
+    mode="$((0x$1))"; \
+    test "$((mode & 0170000))" -eq "$((0100000))"; \
+    test "$2" -eq 0; \
+    test "$3" -eq 1; \
+    test "$4" -gt 0; \
+    test "$4" -le 33554432; \
+    test "$((mode & 07022))" -eq 0
 
 ARG OCI_BASE_DIGEST=""
 ARG OCI_BASE_NAME=""

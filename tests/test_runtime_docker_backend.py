@@ -313,6 +313,84 @@ class PrivateDockerControls(unittest.TestCase):
         self.assertIn(backend.slice, options)
         self.assertIn("io.strukturpiloten.runtime=" + backend.owner, options)
 
+    def test_direct_b_caller_labels_refuse_even_exact_internal_values_before_intent_or_spawn(self) -> None:
+        from tests import test_docker_direct_startup_runtime as direct_tests  # noqa: PLC0415
+
+        for spelling in ("--label", "--label=", "-l", "-l="):
+            for key in ("runtime", "userns-profile"):
+                with self.subTest(spelling=spelling, key=key), direct_tests.direct_composition_fixture(self) as fixture:
+                    fixture.prepare()
+                    fixture.events.clear()
+                    value = (
+                        "io.strukturpiloten."
+                        + key
+                        + "="
+                        + (fixture.ctx.backend.owner if key == "runtime" else fixture.lease)
+                    )
+                    options = (spelling + value,) if spelling.endswith("=") else (spelling, value)
+                    with self.assertRaises(DockerBackendError):
+                        fixture.ctx.start("start gated direct-rootless diagnostic", "true", options=options)
+                    self.assertEqual(fixture.events, [])
+                    self.assertEqual(fixture.guest_commands, [])
+                    self.assertEqual(fixture.ctx.containers, [])
+                    self.assertEqual(fixture.ctx.backend.scoped_profile.evidence["state"], "loaded")
+
+    def test_direct_b_requires_prepared_real_clients_same_binding_lease_and_current_context(self) -> None:
+        from dataclasses import replace  # noqa: PLC0415
+
+        from tests import test_docker_direct_startup_runtime as direct_tests  # noqa: PLC0415
+
+        faults = (
+            "missing-profile",
+            "missing-gate",
+            "fake-profile",
+            "fake-gate",
+            "arm-a",
+            "gate-failed",
+            "unprepared",
+            "copied-binding",
+            "other-context",
+            "other-lease",
+            "other-stage",
+            "other-owner",
+            "other-slice",
+            "other-architecture",
+            "other-deadline",
+            "retained",
+            "prepared-digest",
+        )
+        for fault in faults:
+            with self.subTest(fault=fault), direct_tests.direct_composition_fixture(self) as fixture:
+                fixture.prepare()
+                ctx, backend = fixture.ctx, fixture.ctx.backend
+                gate, profile = backend.direct_gate, backend.scoped_profile
+                mutations = {
+                    "missing-profile": (backend, "scoped_profile", None),
+                    "missing-gate": (backend, "direct_gate", None),
+                    "fake-profile": (backend, "scoped_profile", MagicMock()),
+                    "fake-gate": (backend, "direct_gate", MagicMock()),
+                    "arm-a": (gate, "arm", "A"),
+                    "gate-failed": (gate, "failed", True),
+                    "unprepared": (gate, "evidence", {}),
+                    "copied-binding": (gate, "binding", replace(profile.binding)),
+                    "other-context": (gate, "ctx", MagicMock()),
+                    "other-lease": (gate, "name", "d" * 32),
+                    "other-stage": (gate, "stage", Path("/run/containers-userns-active." + "a" * 32)),
+                    "other-owner": (backend, "owner", "c" * 32),
+                    "other-slice": (backend, "slice_identity", "2:3"),
+                    "other-architecture": (ctx, "architecture", "arm64"),
+                    "other-deadline": (ctx, "runtime_deadline", ctx.runtime_deadline + 1),
+                    "retained": (profile, "evidence", {**profile.evidence, "retained": True}),
+                    "prepared-digest": (gate, "evidence", {**gate.evidence, "bindingSha256": "0" * 64}),
+                }
+                target, attribute, value = mutations[fault]
+                setattr(target, attribute, value)
+                fixture.events.clear()
+                with self.assertRaises(DockerBackendError):
+                    ctx.start("start gated direct-rootless diagnostic", "true")
+                self.assertEqual(fixture.events, [])
+                self.assertEqual(fixture.guest_commands, [])
+
     def test_export_only_normalizes_the_explicit_docker_transport(self) -> None:
         self.assertEqual(
             DockerBackend.save_arguments(("save", "--format", "docker-archive", "--output", "fixture.tar", "image")),

@@ -79,6 +79,22 @@ or publication gates. There is no image publication. The default manual profile
 is `full`; PR and merge-queue runs always ignore this input and retain their
 ordinary selection. Use the full gates before merging or publishing.
 
+The separate manual profile `docker-direct-rootless-diagnostic` is restricted to
+`TheRealBecks/issue442-direct-startup-20261031`. It selects exactly
+`docker-20.10-rootless`/AMD64 and `docker-26-rootless`/ARM64, with their matching
+payloads. Each job collects a serialized, instrumented startup pair; it does not
+run ordinary smoke/OOM qualification. Leave `focused_runtime` at its default.
+
+The check is **Direct-rootless startup diagnostic (qualification:none)**, including
+planning failures. Its dedicated pair artifacts and aggregate always retain
+`qualification: none`. A green check certifies complete bounded collection:
+`profile-dependent-startup` reports an A/B startup differential;
+`profile-not-demonstrated-remedy` retains both original negative outcomes.
+Neither result establishes a specific denied syscall, broad direct-rootless
+support, merge eligibility or publication authority. Read the
+[direct pair boundary](runtime-backends.md#direct-rootless-startup-pair)
+before interpreting an attempt. Source-only tests are not native results.
+
 The maintained scoped prerequisite source contract also recognizes ordinary
 same-repository PR and merge-queue CI, plus main push, scheduled and manual
 publication builds. CI records use native leaf job `smoke-build`; reusable

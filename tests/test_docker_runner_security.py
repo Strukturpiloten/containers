@@ -198,6 +198,26 @@ class RunnerSecurityTests(unittest.TestCase):
             collector._check(time.monotonic() + 1)
 
 
+def upload_consumers(source: str) -> dict[tuple[str, str], tuple[str, str]]:
+    """Locate each real upload consumer and its exact annotated source line."""
+    document = yaml.compose(source)
+    jobs = next(value for key, value in document.value if key.value == "jobs")
+    lines = source.splitlines()
+    result = {}
+    for job, body in jobs.value:
+        sequences = [value for key, value in body.value if key.value == "steps"]
+        for sequence in sequences:
+            for node in sequence.value:
+                fields = {key.value: value for key, value in node.value}
+                reference = fields.get("uses")
+                if reference is not None and reference.value.startswith("actions/upload-artifact@"):
+                    result[(job.value, fields["name"].value)] = (
+                        reference.value,
+                        lines[reference.start_mark.line].strip(),
+                    )
+    return result
+
+
 class RunnerSecurityWorkflowTests(unittest.TestCase):
     def test_capture_and_fixed_artifact_precede_unchanged_mandatory_checks(self) -> None:
         workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
@@ -217,31 +237,82 @@ class RunnerSecurityWorkflowTests(unittest.TestCase):
 
     def test_reused_artifact_pin_has_existing_template_and_generated_owners(self) -> None:
         config = json.loads((ROOT / ".github/renovate.json").read_text())
-        manager = next(
+        managers = [
             item
             for item in config["customManagers"]
             if item.get("description", "").startswith("Keep pinned action references")
-        )
-        pattern = manager["matchStrings"][0].replace("(?<", "(?P<")
-        template = (ROOT / ".github/workflow-templates/ci.yml.j2").read_text()
-        observed = [
-            match.groupdict()
-            for match in re.finditer(pattern, template)
-            if match.group("depName") == "actions/upload-artifact"
         ]
-        self.assertEqual(len(observed), 5)
-        self.assertTrue(all(pin == observed[0] for pin in observed))
-        self.assertRegex(observed[0]["currentDigest"], r"^[a-f0-9]{40}$")
-        self.assertRegex(observed[0]["currentValue"], r"^v\d+\.\d+\.\d+$")
-        workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
-        upload = next(
-            step
-            for step in workflow["jobs"]["validate"]["steps"]
-            if step["name"] == "Retain runner security observation"
+        self.assertEqual(len(managers), 1)
+        manager = managers[0]
+        pattern = manager["matchStrings"][0].replace("(?<", "(?P<")
+        pin = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+        expected_pin = {
+            "depName": "actions/upload-artifact",
+            "currentDigest": pin.split("@", 1)[1],
+            "currentValue": "v7.0.1",
+        }
+        previous_consumers = {
+            ("validate", "Retain runner security observation"),
+            ("userns-dryparse", "Retain nonqualifying compile-only observation"),
+            ("userns-custody-unused", "Retain nonqualifying hosted unused custody observation"),
+            ("userns-custody-unused", "Retain separate nonqualifying Python import observation"),
+            ("plan", "Upload build plan"),
+        }
+        expected_consumers = previous_consumers | {("required-ci", "Retain direct startup diagnostic aggregate")}
+        paths = (".github/workflow-templates/ci.yml.j2", ".github/workflows/ci.yml")
+        for path in paths:
+            with self.subTest(path=path):
+                source = (ROOT / path).read_text()
+                observed = upload_consumers(source)
+                self.assertEqual(set(observed), expected_consumers)
+                self.assertTrue(previous_consumers.issubset(observed))
+                for location, (reference, annotated_line) in observed.items():
+                    with self.subTest(location=location):
+                        self.assertEqual(reference, pin)
+                        self.assertEqual(annotated_line, "uses: " + pin + " # v7.0.1")
+                extracted = [
+                    match.groupdict()
+                    for match in re.finditer(pattern, source)
+                    if match.group("depName") == "actions/upload-artifact"
+                ]
+                self.assertEqual(extracted, [expected_pin] * len(expected_consumers))
+                owner_patterns = (
+                    manager["managerFilePatterns"]
+                    if path.endswith(".j2")
+                    else config["github-actions"]["managerFilePatterns"]
+                )
+                self.assertTrue(any(re.search(expression[1:-1], path) for expression in owner_patterns))
+                self.assertNotIn(path, config["ignorePaths"])
+        group = next(
+            item
+            for item in config["packageRules"]
+            if item.get("description", "").startswith("Keep workflow template action updates")
         )
-        self.assertEqual(upload["uses"], "actions/upload-artifact@" + observed[0]["currentDigest"])
+        self.assertEqual(group["matchManagers"], ["github-actions", "custom.regex"])
+        self.assertEqual(group["matchDatasources"], ["github-tags"])
+        self.assertEqual(
+            group["matchFileNames"], [".github/workflows/**", ".github/actions/**", ".github/workflow-templates/**"]
+        )
+        self.assertEqual(group["matchUpdateTypes"], ["digest", "pinDigest", "patch"])
+        self.assertEqual(group["groupName"], "GitHub Actions")
+        immutable = next(
+            item
+            for item in config["packageRules"]
+            if item.get("description", "").startswith("Keep GitHub Actions pinned")
+        )
+        self.assertEqual(immutable["matchManagers"], ["github-actions"])
+        self.assertTrue(immutable["pinDigests"])
+        admission_review = next(
+            item
+            for item in config["packageRules"]
+            if item.get("description", "").startswith("Require coordinated human review")
+        )
+        self.assertTrue(admission_review["dependencyDashboardApproval"])
+        self.assertFalse(admission_review["automerge"])
+        self.assertEqual(admission_review["matchFileNames"], [".github/docker-userns-policy-source.json"])
         self.assertIn("helpers:pinGitHubActionDigests", config["extends"])
         self.assertNotIn(".github/workflows/**", config["ignorePaths"])
+        self.assertNotIn(".github/workflow-templates/**", config["ignorePaths"])
 
 
 if __name__ == "__main__":
