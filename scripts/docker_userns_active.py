@@ -374,9 +374,40 @@ def failure_context(value: dict[str, Any], phase: str | None = None) -> dict[str
         and (phase is None or type(phase) is str)
         and (
             (
-                context["image"] == "docker-29-conformance-rootless"
+                context["image"]
+                in {
+                    "docker-debian-11-conformance-rootless",
+                    "docker-29-conformance-rootless",
+                    "docker-29-8-1-conformance-rootless",
+                }
                 and context["architecture"] in {"amd64", "arm64"}
                 and phase in {None, "clean-control", "enforcement"}
+            )
+            or (
+                context["architecture"]
+                in {
+                    "docker-20.10-rootless": ["amd64", "arm64"],
+                    "docker-23-rootless": ["amd64", "arm64"],
+                    "docker-24-rootless": ["amd64", "arm64"],
+                    "docker-25-rootless": ["amd64", "arm64"],
+                    "docker-26-rootless": ["amd64", "arm64"],
+                    "docker-27-rootless": ["amd64", "arm64"],
+                    "docker-28-rootless": ["amd64", "arm64"],
+                    "docker-29-rootless": ["amd64", "arm64"],
+                    "docker-alpine-3.24-rootless": ["amd64", "arm64"],
+                    "docker-debian-11-rootless": ["amd64", "arm64"],
+                    "docker-debian-12-rootless": ["amd64", "arm64"],
+                    "docker-debian-13-rootless": ["amd64", "arm64"],
+                    "docker-fedora-43-rootless": ["amd64", "arm64"],
+                    "docker-fedora-44-rootless": ["amd64", "arm64"],
+                    "docker-opensuse-leap-16.0-rootless": ["amd64", "arm64"],
+                    "docker-opensuse-tumbleweed-rootless": ["amd64", "arm64"],
+                    "docker-ubuntu-22.04-rootless": ["amd64", "arm64"],
+                    "docker-ubuntu-24.04-rootless": ["amd64", "arm64"],
+                    "docker-ubuntu-26.04-rootless": ["amd64", "arm64"],
+                    "docker-arch-rootless": ["amd64"],
+                }.get(context["image"], ())
+                and phase in {None, "ordinary-direct"}
             )
             or (
                 (context["image"], context["architecture"])
@@ -1474,7 +1505,10 @@ class RootPort:
 
     def bind_subject(self, container: str, binding: NativeBinding) -> None:
         """Verify before/after through one held task and exact container incarnation."""
-        direct = type(binding) is self.modules.qualification.direct.DirectDiagnosticBinding
+        direct = type(binding) in {
+            self.modules.qualification.direct.DirectDiagnosticBinding,
+            self.modules.qualification.MaintainedDirectBinding,
+        }
         expected_uid = 1000 if direct else 0
         self.point("subject")
         self.daemon()

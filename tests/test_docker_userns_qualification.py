@@ -234,7 +234,7 @@ def workflow_context(
         "validationProfile": profile,
         "validationProfileRequested": profile if requested is None else requested,
         "purpose": purpose,
-        "admissionRevision": "containers442-direct-diagnostic-v1",
+        "admissionRevision": "containers558-ordinary-direct-v1",
         "admissionSha256": hashlib.sha256(admission.read_bytes()).hexdigest(),
     }
 
@@ -523,6 +523,7 @@ class PurposeAdmissionBindingTests(unittest.TestCase):
         admission, _digest = self.admission()
         for key, value in (
             ("schemaVersion", 1),
+            ("schemaVersion", 5),
             ("schemaVersion", True),
             ("revision", "unknown"),
             ("purpose", "maintained-prerequisite"),
@@ -532,6 +533,49 @@ class PurposeAdmissionBindingTests(unittest.TestCase):
         ):
             with self.subTest(key=key), self.assertRaises(qualification.QualificationError):
                 qualification.admission_document(json.dumps({**admission, key: value}).encode())
+
+    def test_historical_image_requires_exact_maintained_full_context(self) -> None:
+        admission, digest = self.admission()
+        self.assertEqual(admission["schemaVersion"], 7)
+        self.assertEqual(
+            admission["maintainedContext"]["images"],
+            [
+                "docker-29-conformance-rootless",
+                "docker-29-8-1-conformance-rootless",
+                "docker-debian-11-conformance-rootless",
+            ],
+        )
+        context = workflow_context(purpose="maintained-prerequisite")
+        context["image"] = "docker-29-8-1-conformance-rootless"
+        qualification.validate_workflow_context(context, admission, digest)
+        for image in (
+            "",
+            "docker-29-8-1-conformance-rootful",
+            "docker-29-8-2-conformance-rootless",
+            "docker-29-8-1-conformance-rootless\n",
+        ):
+            with self.subTest(image=image), self.assertRaises(qualification.QualificationError):
+                qualification.validate_workflow_context({**context, "image": image}, admission, digest)
+        for profile in ("docker-rootless-qualification", "docker-rootless-diagnostic"):
+            changed = workflow_context(purpose="maintained-prerequisite", profile=profile)
+            changed["image"] = context["image"]
+            with self.subTest(profile=profile), self.assertRaises(qualification.QualificationError):
+                qualification.validate_workflow_context(changed, admission, digest)
+        experimental = workflow_context()
+        experimental["image"] = context["image"]
+        with self.assertRaises(qualification.QualificationError):
+            qualification.validate_workflow_context(experimental, admission, digest)
+        with self.assertRaises(qualification.QualificationError):
+            replace(binding(), image=context["image"]).validate()
+        for images in (
+            [context["image"]],
+            ["docker-29-conformance-rootless"] * 2,
+            ["docker-29-conformance-rootless", "unknown"],
+            "docker-29-conformance-rootless",
+        ):
+            changed = {**admission, "maintainedContext": {**admission["maintainedContext"], "images": images}}
+            with self.subTest(images=images), self.assertRaises(qualification.QualificationError):
+                qualification.admission_document(json.dumps(changed).encode())
 
     def test_manual_ref_is_finite_and_context_or_disposal_replay_is_not_equivalent(self) -> None:
         admission, digest = self.admission()
@@ -565,3 +609,100 @@ class PurposeAdmissionBindingTests(unittest.TestCase):
             ack = {**stage_disposal(receipt), key: value}
             with self.subTest(key=key), self.assertRaises(qualification.QualificationError):
                 qualification.validate_stage_disposal(ack, receipt)
+
+
+class OrdinaryDirectPolicyTests(unittest.TestCase):
+    """Finite ordinary admission expectations authored independently of the policy map."""
+
+    def test_exact_twenty_images_thirty_nine_rows_have_only_the_direct_wire_kind(self) -> None:
+        names = (
+            "20.10",
+            "23",
+            "24",
+            "25",
+            "26",
+            "27",
+            "28",
+            "29",
+            "alpine-3.24",
+            "debian-11",
+            "debian-12",
+            "debian-13",
+            "fedora-43",
+            "fedora-44",
+            "opensuse-leap-16.0",
+            "opensuse-tumbleweed",
+            "ubuntu-22.04",
+            "ubuntu-24.04",
+            "ubuntu-26.04",
+        )
+        expected = {f"docker-{name}-rootless": ["amd64", "arm64"] for name in names}
+        expected["docker-arch-rootless"] = ["amd64"]
+        self.assertEqual(qualification.MAINTAINED_DIRECT_IMAGES, expected)
+        self.assertEqual(sum(map(len, expected.values())), 39)
+        raw = (Path(__file__).resolve().parents[1] / ".github/docker-userns-active-admission.json").read_bytes()
+        admission = qualification.admission_document(raw)
+        self.assertEqual(admission["maintainedDirectImages"], expected)
+        for image, architectures in expected.items():
+            for architecture in architectures:
+                with self.subTest(image=image, architecture=architecture):
+                    context = workflow_context(purpose="maintained-prerequisite", architecture=architecture)
+                    context["image"] = image
+                    qualification.validate_workflow_context(context, admission, hashlib.sha256(raw).hexdigest())
+                    fields = asdict(binding()) | {
+                        "image": image,
+                        "architecture": architecture,
+                        "phase": "ordinary-direct",
+                        "purpose": "maintained-prerequisite",
+                    }
+                    self.assertIs(type(qualification.native_binding(fields)), qualification.MaintainedDirectBinding)
+                    with self.assertRaises(qualification.QualificationError):
+                        qualification.NativeBinding(**fields).validate()
+                    for fault in (
+                        {"phase": "enforcement"},
+                        {"purpose": "experimental-candidate"},
+                        {"purpose": "direct-startup-diagnostic"},
+                        {"image": image.replace("-rootless", "-rootful")},
+                        {"image": "docker-30-rootless"},
+                        {"image": "docker-arch-rootless", "architecture": "arm64"},
+                    ):
+                        with self.subTest(fault=fault), self.assertRaises(qualification.QualificationError):
+                            qualification.native_binding(fields | fault)
+                    bounded = workflow_context(
+                        purpose="maintained-prerequisite",
+                        architecture=architecture,
+                        profile="docker-rootless-qualification",
+                    )
+                    with self.assertRaises(qualification.QualificationError):
+                        qualification.validate_workflow_context(
+                            bounded | {"image": image}, admission, hashlib.sha256(raw).hexdigest()
+                        )
+        for changed in (
+            {},
+            expected | {"docker-30-rootless": ["amd64"]},
+            expected | {"docker-arch-rootless": ["amd64", "arm64"]},
+        ):
+            with self.subTest(map=changed), self.assertRaises(qualification.QualificationError):
+                qualification.admission_document(json.dumps(admission | {"maintainedDirectImages": changed}).encode())
+
+    def test_integer_deadline_ceiling_and_conversion_cannot_hide_one_nanosecond(self) -> None:
+        ceiling = 10_000_000_000_000_001
+        with patch.object(qualification.time, "monotonic_ns", return_value=9_999_900_000_000_001):
+            self.assertEqual(
+                qualification.admitted_deadline_ns(ceiling, ceiling_ns=ceiling, reserve_ns=75_000_000_000), ceiling
+            )
+            shortened = 9_999_990_000_000_001
+            self.assertEqual(qualification.admitted_deadline_ns(shortened, ceiling_ns=ceiling), shortened)
+            for value in (ceiling + 1, True, False, None, str(ceiling), float(ceiling), 2**63, -1):
+                with self.subTest(value=value), self.assertRaises(qualification.QualificationError):
+                    qualification.admitted_deadline_ns(value, ceiling_ns=ceiling)
+        for value in (ceiling, ceiling - 1):
+            with (
+                patch.object(qualification.time, "monotonic_ns", return_value=ceiling),
+                self.assertRaises(qualification.QualificationError),
+            ):
+                qualification.admitted_deadline_ns(value)
+        for value in (1, 1_000_000_001, 9_007_199_254_740_993, ceiling, 2**63 - 1):
+            seconds = qualification.deadline_seconds(value)
+            numerator, denominator = seconds.as_integer_ratio()
+            self.assertLessEqual(numerator * 1_000_000_000, value * denominator)

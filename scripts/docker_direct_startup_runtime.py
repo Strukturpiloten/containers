@@ -21,7 +21,7 @@ from scripts.docker_direct_startup_client import GateClient, project_failure
 from scripts.docker_direct_startup_observations import STARTUP_SECONDS
 from scripts.docker_direct_startup_plan import expected_versions
 from scripts.docker_userns_active_bootstrap_bundle import context
-from scripts.docker_userns_qualification import context_digest
+from scripts.docker_userns_qualification import context_digest, deadline_seconds
 from scripts.runtime_resource_budgets import STORE_LIMIT_BYTES, outer_container_limits, verify_outer_container_limits
 
 if TYPE_CHECKING:
@@ -272,7 +272,8 @@ def _run_arm(plan: SimpleNamespace) -> ArmOutcome:
         finally:
             plan.cancellation.defer_interrupts = False
         ctx.runtime_phase = "direct-control" if plan.arm == "A" else "direct-profiled"
-        ctx.runtime_deadline = plan.deadline_ns / 1_000_000_000
+        ctx.runtime_deadline_ns = plan.deadline_ns
+        ctx.runtime_deadline = deadline_seconds(plan.deadline_ns)
         ctx.bind_guest_profile(plan.metadata["tests"]["docker"])
         plan.operation = "backend-prepare"
         plan.outer_runtime = ctx.prepare()

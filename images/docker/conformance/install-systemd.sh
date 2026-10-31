@@ -2,7 +2,16 @@
 set -eux
 
 mode="${1:?daemon mode required}"
-test "${2:?distribution required}" = debian-13
+distro="${2:?distribution required}"
+case "$mode" in
+    rootless|rootful) ;;
+    *) echo 'Unsupported conformance daemon mode' >&2; exit 1 ;;
+esac
+case "$distro" in
+    debian-11) test "$mode" = rootless ;;
+    debian-13) ;;
+    *) echo 'Unsupported conformance systemd distribution' >&2; exit 1 ;;
+esac
 provenance=/usr/share/strukturpiloten/docker
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
@@ -45,6 +54,15 @@ if [ "$mode" = rootless ]; then
     touch /var/lib/systemd/linger/dockertest
     cp /usr/local/share/conformance/user-delegation.conf /etc/systemd/system/user@1000.service.d/delegate.conf
     cp /usr/local/share/conformance/docker-user.service /home/docker/.config/systemd/user/docker.service
+    if [ "$distro" = debian-11 ]; then
+        # Bullseye packages dockerd in /usr/sbin and rootless shell helpers in
+        # /usr/share/docker.io/contrib; a user manager's PATH need not include either.
+        mkdir -p /home/docker/.config/systemd/user/docker.service.d
+        printf '%s\n' '[Service]' \
+            'Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/share/docker.io/contrib' \
+            > /home/docker/.config/systemd/user/docker.service.d/package-path.conf
+        cp /home/docker/.config/systemd/user/docker.service.d/package-path.conf "$provenance/conformance-package-path"
+    fi
     ln -s ../docker.service /home/docker/.config/systemd/user/default.target.wants/docker.service
     chown -R 1000:1000 /home/docker
     mkdir -p /etc/systemd/system/multi-user.target.wants

@@ -1,6 +1,9 @@
 #!/bin/sh
 set -eux
-test "${1:?distribution required}" = debian-13
+case "${1:?distribution required}" in
+    debian-11|debian-13) ;;
+    *) echo 'Unsupported conformance compiler distribution' >&2; exit 1 ;;
+esac
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install --yes --no-install-recommends gcc libc6-dev

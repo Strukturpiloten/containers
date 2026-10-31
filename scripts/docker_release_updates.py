@@ -449,6 +449,22 @@ def payload_consumers(root: Path, line: str) -> list[Path]:
     consumers = []
     for path in sorted((root / "images/docker").glob("*/container.yaml")):
         image = yaml.safe_load(path.read_text(encoding="utf-8"))
+        # This exact historical consumer has independent immutable archive inputs;
+        # it is not another consumer of the maintained upstream-29 release line.
+        historical = "docker-29-8-1-conformance-rootless"
+        if line == "29" and path.parent.name == historical:
+            if (
+                image.get("name") != historical
+                or image.get("version") != "v29.8.1"
+                or image.get("image") != f"ghcr.io/strukturpiloten/{historical}"
+                or image.get("build", {}).get("payload") != "images/docker/conformance/29.8.1/payload.yaml"
+                or set(image.get("build", {}).get("architectures", [])) != set(ARCHES)
+                or image.get("tests", {}).get("docker", {}).get("mode") != "rootless"
+                or image.get("tests", {}).get("docker", {}).get("launcher") != "systemd"
+            ):
+                msg = f"Historical Docker compatibility consumer ownership is invalid: {path}"
+                raise DockerReleaseError(msg)
+            continue
         if image.get("build", {}).get("payload") != payload:
             if path.parent.name.startswith(f"docker-{line}-"):
                 msg = f"Docker image points to the wrong canonical payload: {path}"

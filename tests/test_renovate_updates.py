@@ -138,18 +138,15 @@ class GeneratedSnapshotTests(unittest.TestCase):
         self.assertIn("b" * 40 + " # v5.0.0", changes[OUTPUT])
         self.assert_idempotent(head, changes)
 
-    def test_python_project_and_lock_migration_updates_interpreter_and_workflows(self) -> None:
+    def test_python_migration_without_explicit_interpreter_pin_is_rejected(self) -> None:
         head = self.commit(
             {
                 "pyproject.toml": '[project]\nrequires-python = ">=3.15,<3.16"\n',
                 "uv.lock": 'requires-python = "==3.15.*"\n',
             }
         )
-        changes = repair.generated_changes(self.root, self.base, head)
-        self.assertEqual(set(changes), {repair.CONFIG, OUTPUT})
-        self.assertEqual(yaml.safe_load(changes[repair.CONFIG])["PYTHON_VERSION"], "3.15")
-        self.assertEqual(yaml.safe_load(changes[OUTPUT])["env"]["PYTHON_VERSION"], "3.15")
-        self.assert_idempotent(head, changes)
+        with self.assertRaisesRegex(repair.RepairError, "runtime does not match"):
+            repair.generated_changes(self.root, self.base, head)
 
     def test_python_migration_without_matching_lock_is_rejected(self) -> None:
         head = self.commit({"pyproject.toml": '[project]\nrequires-python = ">=3.15,<3.16"\n'})
@@ -161,13 +158,60 @@ class GeneratedSnapshotTests(unittest.TestCase):
             {
                 "pyproject.toml": '[project]\nrequires-python = ">=3.15,<3.16"\n',
                 "uv.lock": 'requires-python = "==3.15.*"\n',
-                repair.CONFIG: yaml.safe_dump({**FIXTURE, "PYTHON_VERSION": "3.15.1"}),
+                repair.CONFIG: yaml.safe_dump({**FIXTURE, "PYTHON_VERSION": "3.15.4"}),
             }
         )
         changes = repair.generated_changes(self.root, self.base, head)
         self.assertNotIn(repair.CONFIG, changes)
-        self.assertEqual(yaml.safe_load(changes[OUTPUT])["env"]["PYTHON_VERSION"], "3.15.1")
+        self.assertEqual(yaml.safe_load(changes[OUTPUT])["env"]["PYTHON_VERSION"], "3.15.4")
         self.assert_idempotent(head, changes)
+
+    def test_immature_or_floating_python_migration_is_rejected(self) -> None:
+        for version in ("3.15", "3.15.0", "3.15.1", "3.15.2", "3.15.3"):
+            with self.subTest(version=version):
+                head = self.commit(
+                    {
+                        "pyproject.toml": '[project]\nrequires-python = ">=3.15,<3.16"\n',
+                        "uv.lock": 'requires-python = "==3.15.*"\n',
+                        repair.CONFIG: yaml.safe_dump({**FIXTURE, "PYTHON_VERSION": version}),
+                    }
+                )
+                with self.assertRaisesRegex(repair.RepairError, "patch level 4 or later"):
+                    repair.generated_changes(self.root, self.base, head)
+
+    def test_patch_specific_python_requirement_and_lock_migrate_automatically(self) -> None:
+        head = self.commit(
+            {
+                "pyproject.toml": '[project]\nrequires-python = ">=3.15.4, <3.16"\n',
+                "uv.lock": 'requires-python = ">=3.15.4, <3.16"\n',
+                repair.CONFIG: yaml.safe_dump({**FIXTURE, "PYTHON_VERSION": "3.15.4"}),
+            }
+        )
+        changes = repair.generated_changes(self.root, self.base, head)
+        self.assertEqual(yaml.safe_load(changes[OUTPUT])["env"]["PYTHON_VERSION"], "3.15.4")
+        self.assert_idempotent(head, changes)
+
+    def test_python_pin_below_project_patch_requirement_is_rejected(self) -> None:
+        head = self.commit(
+            {
+                "pyproject.toml": '[project]\nrequires-python = ">=3.15.5,<3.16"\n',
+                "uv.lock": 'requires-python = ">=3.15.5, <3.16"\n',
+                repair.CONFIG: yaml.safe_dump({**FIXTURE, "PYTHON_VERSION": "3.15.4"}),
+            }
+        )
+        with self.assertRaisesRegex(repair.RepairError, "runtime does not match"):
+            repair.generated_changes(self.root, self.base, head)
+
+    def test_python_patch_requirement_rejects_a_broad_stale_lock(self) -> None:
+        head = self.commit(
+            {
+                "pyproject.toml": '[project]\nrequires-python = ">=3.15.4,<3.16"\n',
+                "uv.lock": 'requires-python = "==3.15.*"\n',
+                repair.CONFIG: yaml.safe_dump({**FIXTURE, "PYTHON_VERSION": "3.15.4"}),
+            }
+        )
+        with self.assertRaisesRegex(repair.RepairError, "matching lockfile"):
+            repair.generated_changes(self.root, self.base, head)
 
     def test_python_patch_update_within_supported_line_is_preserved(self) -> None:
         head = self.commit({repair.CONFIG: yaml.safe_dump({**FIXTURE, "PYTHON_VERSION": "3.14.8"})})
@@ -181,6 +225,7 @@ class GeneratedSnapshotTests(unittest.TestCase):
             {
                 "pyproject.toml": '[project]\nrequires-python = ">=3.15,<3.16"\n',
                 "uv.lock": 'requires-python = "==3.15.*"\n',
+                repair.CONFIG: yaml.safe_dump({**FIXTURE, "PYTHON_VERSION": "3.15.4"}),
             }
         )
         repair._git(self.root, "switch", "-c", "advanced-main", self.base)
@@ -190,7 +235,7 @@ class GeneratedSnapshotTests(unittest.TestCase):
         merged = repair._merge_snapshot(self.root, head, main)
         self.assertIsNotNone(merged)
         changes = repair.generated_changes(self.root, main, merged)
-        self.assertEqual(yaml.safe_load(changes[new_output])["env"]["PYTHON_VERSION"], "3.15")
+        self.assertEqual(yaml.safe_load(changes[new_output])["env"]["PYTHON_VERSION"], "3.15.4")
         completed = repair._commit(self.root, head, changes, merged=merged, default_head=main)
         self.assertEqual(repair._git(self.root, "rev-parse", f"{completed}^1").strip(), head)
         self.assertEqual(repair._git(self.root, "rev-parse", f"{completed}^2").strip(), main)

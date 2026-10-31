@@ -180,7 +180,7 @@ def _scoped_binding(record: dict[str, Any], scoped: dict[str, Any], expected_pur
     admission = prerequisite.admission_document(raw)
     context = scoped["workflowContext"]
     prerequisite.validate_workflow_context(context, admission, hashlib.sha256(raw).hexdigest())
-    binding = NativeBinding(**scoped["binding"])
+    binding = prerequisite.native_binding(scoped["binding"])
     binding.validate()
     if (
         set(scoped) != prerequisite.SCOPED_RECEIPT_KEYS
@@ -226,7 +226,9 @@ def _scoped_phase(record: dict[str, Any], phase: dict[str, Any], *, expected_pur
         identity = phase["imageIdentity"]
         observation = scoped["profileObservation"]
         valid = (
-            _scoped_preflight(scoped)
+            type(binding)
+            is (prerequisite.MaintainedDirectBinding if phase.get("phase") == "ordinary-direct" else NativeBinding)
+            and _scoped_preflight(scoped)
             and scoped["consumer"] == "containers-ubuntu26-userns-active"
             and scoped["qualification"]
             == (
@@ -331,6 +333,40 @@ def _maintained_phase(record: dict[str, Any], expected_phase: str, phase: object
     _scoped_phase(record, phase, expected_purpose=prerequisite.MAINTAINED_PURPOSE)
 
 
+def _ordinary_direct_authority(record: dict[str, Any], profile: str, configuration: dict, phases: object) -> None:
+    """Validate the flat maintained variant without fabricating systemd accounting phases."""
+    if (
+        record.get("architecture") not in prerequisite.MAINTAINED_DIRECT_IMAGES.get(record.get("image"), ())
+        or configuration.get("outerPrivilege") != "privileged"
+        or configuration.get("nestedRuntime", True) is not True
+        or record.get("phase") != "ordinary-direct"
+        or record.get("status") != "passed"
+        or record.get("qualification") != "complete"
+        or record.get("cleanupVerified") is not True
+        or record.get("prerequisiteAuthority") != prerequisite.MAINTAINED_PURPOSE
+        or record.get("oomAccountingMode") != "qualification"
+        or record.get("focusedRuntime") != "none"
+        or phases
+    ):
+        reason = "Ordinary direct runtime authority or cleanup is incomplete."
+        raise EvidenceError(reason)
+    _scoped_phase(record, record, expected_purpose=prerequisite.MAINTAINED_PURPOSE)
+    scoped = record["scopedProfile"]
+    if type(record.get("deadlineNs")) is not int or record["deadlineNs"] != scoped["binding"]["deadline_ns"]:
+        reason = "Ordinary direct deadline differs from its root binding."
+        raise EvidenceError(reason)
+    if scoped["workflowContext"]["validationProfile"] != "full":
+        reason = "Ordinary direct runtime requires a full caller."
+        raise EvidenceError(reason)
+    try:
+        prerequisite.validate_stage_disposal(record.get("stageDisposal"), scoped)
+    except (QualificationError, ValueError, TypeError, KeyError, AttributeError) as error:
+        reason = "Ordinary direct stage disposal is unverified."
+        raise EvidenceError(reason) from error
+    _outer_runtime(record, profile)
+    _runtime_skips(record, nested_disabled=False, profile=profile)
+
+
 def require_ordinary_runtime_authority(record: dict[str, Any], profile: str, configuration: object) -> None:
     """Validate maintained authority using trusted metadata and intrinsic root evidence."""
     phases = record.get("phases", [])
@@ -349,6 +385,15 @@ def require_ordinary_runtime_authority(record: dict[str, Any], profile: str, con
         and configuration.get("launcher") == "systemd"
         and configuration.get("mode") == "rootless"
     )
+    direct_required = (
+        profile == "docker"
+        and isinstance(configuration, dict)
+        and configuration.get("launcher", "direct") == "direct"
+        and configuration.get("mode") == "rootless"
+    )
+    if direct_required:
+        _ordinary_direct_authority(record, profile, configuration, phases)
+        return
     if not required:
         if any("scopedProfile" in item or item.get("scopedProfileRequired") is True for item in records):
             reason = "Unexpected scoped authority on an unrelated ordinary route."

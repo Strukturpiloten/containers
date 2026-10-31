@@ -63,6 +63,7 @@ class DirectGateClientTests(unittest.TestCase):
             name="docker-20.10-rootless",
             architecture="amd64",
             runtime_deadline=native.deadline_ns / 1_000_000_000,
+            runtime_deadline_ns=native.deadline_ns,
             runtime_phase="direct-control" if arm == "A" else "direct-profiled",
             backend=backend,
             checks=[{"exitCode": 0, "stdout": "PRIVATE_CANARY", "stderr": "PRIVATE_CANARY"}],
@@ -283,3 +284,31 @@ class DirectRootFailureTests(unittest.TestCase):
         client.capture_failure(second)
         self.assertEqual(client.failures[0], first)
         self.assertEqual(client.failure, captured)
+
+
+class DirectControlExactCutoffTests(unittest.TestCase):
+    def test_a_forwards_original_nonrepresentable_integer_in_actual_prepare_request(self) -> None:
+        import base64  # noqa: PLC0415
+
+        from scripts.docker_userns_qualification import deadline_seconds  # noqa: PLC0415
+
+        original, ctx, response = DirectGateClientTests().fixture("A")
+        ctx.runtime_deadline_ns = 9_007_199_254_740_993
+        ctx.runtime_deadline = deadline_seconds(9_007_199_254_740_993)
+        _proof, source, _environment, _event = admission_tests.DirectAdmissionTests().fixture(
+            ctx.name, ctx.architecture
+        )
+        identity = {
+            "archiveSha256": original.binding.archive_sha256,
+            "manifestDigest": original.binding.manifest_digest,
+            "configDigest": original.binding.config_digest,
+        }
+        with patch.object(client_module, "context", return_value=source):
+            client = client_module.GateClient(ctx, str(original.stage), identity, "A")
+        self.assertNotEqual(int(ctx.runtime_deadline * 1_000_000_000), 9_007_199_254_740_993)
+        self.assertEqual(client.binding.deadline_ns, 9_007_199_254_740_993)
+        ctx.command.return_value = json.dumps(response | {"bindingSha256": client.binding.digest()})
+        client.prepare()
+        command = ctx.command.call_args.args[1]
+        request = json.loads(base64.b64decode(command[command.index("--request") + 1]))
+        self.assertEqual(request["binding"]["deadline_ns"], 9_007_199_254_740_993)

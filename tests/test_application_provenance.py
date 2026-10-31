@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import re
 import tempfile
 import unittest
 from pathlib import Path
+
+import yaml
 
 from scripts import container_engine as engine
 
@@ -70,33 +73,58 @@ class ApplicationProvenanceTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertIsNone(re.search(file_pattern, path.as_posix()))
 
-    def test_php_version_managers_match_both_images_and_require_review(self) -> None:
+    def test_php_version_managers_match_both_images_and_inherit_automerge(self) -> None:
         config = json.loads(Path(".github/renovate.json").read_text(encoding="utf-8"))
-        versions = {
-            "PHP_APCU_VERSION": "5.1.28",
-            "PHP_IMAGICK_VERSION": "3.8.1",
-            "PHP_REDIS_VERSION": "6.3.0",
-            "COMPOSER_VERSION": "2.10.3",
-        }
-        for name, version in versions.items():
+        for name in ("PHP_APCU_VERSION", "PHP_IMAGICK_VERSION", "PHP_REDIS_VERSION", "COMPOSER_VERSION"):
             manager = next(
                 manager for manager in config["customManagers"] if name in " ".join(manager.get("matchStrings", []))
             )
             for path in PHP_PATHS:
                 with self.subTest(input=name, image=path):
-                    match = re.search(
-                        manager["matchStrings"][0].replace("(?<", "(?P<"), path.read_text(encoding="utf-8")
-                    )
+                    source = path.read_text(encoding="utf-8")
+                    version = yaml.safe_load(source)["build"]["args"][name]["value"]
+                    self.assertRegex(version, r"^\d+\.\d+\.\d+$")
+                    pattern = manager["matchStrings"][0].replace("(?<", "(?P<")
+                    match = re.search(pattern, source)
                     self.assertIsNotNone(match)
                     self.assertEqual(match.group("currentValue"), version)
                     self.assertTrue(re.search(manager["managerFilePatterns"][0][1:-1], path.as_posix()))
-        review_rule = next(
-            rule
-            for rule in config["packageRules"]
-            if rule.get("description", "").startswith("PHP extension and Composer")
-        )
-        self.assertFalse(review_rule["automerge"])
-        self.assertEqual(len(review_rule["matchPackageNames"]), 4)
+                    # A future Renovate pin must pass without editing this test.
+                    metadata = yaml.safe_load(source)
+                    metadata["build"]["args"][name]["value"] = "98.76.54"
+                    updated = re.search(pattern, yaml.safe_dump(metadata, sort_keys=False))
+                    self.assertIsNotNone(updated)
+                    self.assertEqual(updated.group("currentValue"), "98.76.54")
+        self.assertTrue(config["automerge"])
+        # Reviewed source/fixed-fixture exceptions must not apply to PHP updates.
+        for path in PHP_PATHS:
+            for manager in (
+                item
+                for item in config["customManagers"]
+                if any(
+                    name in " ".join(item.get("matchStrings", []))
+                    for name in ("PHP_APCU_VERSION", "PHP_IMAGICK_VERSION", "PHP_REDIS_VERSION", "COMPOSER_VERSION")
+                )
+            ):
+                for rule in (item for item in config["packageRules"] if item.get("automerge") is False):
+                    file_matches = any(
+                        re.search(pattern[1:-1], path.as_posix()) is not None
+                        if pattern.startswith("/") and pattern.endswith("/")
+                        else fnmatch.fnmatchcase(path.as_posix(), pattern)
+                        for pattern in rule.get("matchFileNames", ["**"])
+                    )
+                    package = manager.get("packageNameTemplate", manager.get("depNameTemplate"))
+                    dep = manager.get("depNameTemplate", package)
+                    matches = (
+                        file_matches
+                        and package in rule.get("matchPackageNames", [package])
+                        and dep in rule.get("matchDepNames", [dep])
+                        and "custom.regex" in rule.get("matchManagers", ["custom.regex"])
+                        and manager["datasourceTemplate"]
+                        in rule.get("matchDatasources", [manager["datasourceTemplate"]])
+                    )
+                    with self.subTest(path=path, dependency=dep, manual_rule=rule["description"]):
+                        self.assertFalse(matches)
 
     def test_existing_digest_and_patch_automerge_policy_is_preserved(self) -> None:
         config = json.loads(Path(".github/renovate.json").read_text(encoding="utf-8"))

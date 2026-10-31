@@ -80,6 +80,7 @@ class GateClient:
         contract.require(type(arm) is str and arm in {"A", "B"})
         contract.finite_tuple(ctx.name, ctx.architecture)
         contract.require(ctx.runtime_phase == ("direct-control" if arm == "A" else "direct-profiled"))
+        contract.require(type(ctx.runtime_deadline_ns) is int and ctx.runtime_deadline_ns > 0)
         self.ctx, self.stage, self.arm = ctx, Path(stage), arm
         self.evidence: dict = {}
         self.failed = False
@@ -96,7 +97,7 @@ class GateClient:
                 and self.binding.owner == ctx.backend.owner
                 and self.binding.runtime_slice == ctx.backend.slice
                 and self.binding.slice_identity == ctx.backend.slice_identity
-                and self.binding.deadline_ns == int(ctx.runtime_deadline * 1_000_000_000)
+                and self.binding.deadline_ns == ctx.runtime_deadline_ns
             )
             self.name = profile.name
         else:
@@ -116,7 +117,7 @@ class GateClient:
                 owner=ctx.backend.owner,
                 runtime_slice=ctx.backend.slice,
                 slice_identity=ctx.backend.slice_identity,
-                deadline_ns=int(ctx.runtime_deadline * 1_000_000_000),
+                deadline_ns=ctx.runtime_deadline_ns,
                 purpose=contract.PURPOSE,
                 admission_sha256=source["admissionSha256"],
                 workflow_context_sha256=context_digest(source),

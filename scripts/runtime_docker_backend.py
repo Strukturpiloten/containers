@@ -24,6 +24,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from scripts import docker_userns_qualification as prerequisite
 from scripts.runtime_docker_diagnostics import qualify_gnu_timeout
 from scripts.runtime_oom_diagnostics import MAX_BYTES, SNAPSHOT_SECONDS, DockerOomLedger, _docker_hash, _parent_validate
 
@@ -55,6 +56,10 @@ class DockerBackend:
         self.network_id: str | None = None
         self.ready = False
         self.deadline: float | None = None
+        self.deadline_ns: int | None = None
+        self.ordinary_direct_guest: str | None = None
+        self.scoped_image_ref: str | None = None
+        self.scoped_stage: Path | None = None
         self.cleaning_up = False
         self.lifecycle_failures: list[str] = []
         self.slice_identity: str | None = None
@@ -96,7 +101,9 @@ class DockerBackend:
 
     def check_deadline(self) -> None:
         """Never turn late teardown or command completion into passing evidence."""
-        if self.deadline is not None and time.monotonic() >= self.deadline:
+        if (self.deadline_ns is not None and time.monotonic_ns() >= self.deadline_ns) or (
+            self.deadline is not None and time.monotonic() >= self.deadline
+        ):
             raise DockerBackendError("private runtime original aggregate deadline exhausted")
 
     def timeout_executable(self) -> str:
@@ -438,20 +445,29 @@ class DockerBackend:
         self._start(ctx, "containerd", containerd)
         self._start(ctx, "dockerd", (self._tool("dockerd"), "--config-file", str(self.config)))
 
+    def _bind_deadline(self, ctx: RuntimeContext) -> None:
+        """Establish the backend budget once, retaining exact supplied authority."""
+        if self.deadline is not None:
+            raise DockerBackendError("private Docker preparation cannot renew its budget")
+        supplied_ns = vars(ctx).get("runtime_deadline_ns")
+        if supplied_ns is not None:
+            self.deadline_ns = prerequisite.admitted_deadline_ns(supplied_ns, reserve_ns=60_000_000_000)
+            self.deadline = prerequisite.deadline_seconds(self.deadline_ns)
+        else:
+            self.deadline = time.monotonic() + 1800
+        existing_deadline = vars(ctx).get("runtime_deadline")
+        if type(existing_deadline) in {int, float}:
+            if not math.isfinite(existing_deadline):
+                raise DockerBackendError("existing runtime phase deadline is invalid")
+            self.deadline = min(self.deadline, existing_deadline)
+
     def prepare(self, ctx: RuntimeContext) -> dict[str, str]:
         """Start and prove private services before importing any image."""
         if not self.sudo and os.geteuid() != 0:
             raise DockerBackendError("private Docker backend requires rootful execution")
         for name in ("docker", "dockerd", "containerd", "systemd-run", "systemctl", "ip", "skopeo"):
             self._tool(name)
-        if self.deadline is not None:
-            raise DockerBackendError("private Docker preparation cannot renew its budget")
-        self.deadline = time.monotonic() + 1800
-        existing_deadline = vars(ctx).get("runtime_deadline")
-        if type(existing_deadline) in {int, float}:
-            if not math.isfinite(existing_deadline):
-                raise DockerBackendError("existing runtime phase deadline is invalid")
-            self.deadline = min(self.deadline, existing_deadline)
+        self._bind_deadline(ctx)
         try:
             self._gnu_timeout_provider = qualify_gnu_timeout(ctx)
         except ValueError:
@@ -555,6 +571,13 @@ class DockerBackend:
         self.check_deadline()
         return result
 
+    def _expiry_deadline_ns(self) -> int:
+        """Keep the original exact cutoff through the independent watchdog argv."""
+        if self.deadline_ns is not None:
+            return self.deadline_ns - 60_000_000_000
+        # Non-scoped legacy callers may provide only the existing float budget.
+        return int((self.deadline - 60) * 1_000_000_000)
+
     def _start_expiry(self, ctx: RuntimeContext) -> None:
         """Bound the whole slice even if the Python caller is killed outright."""
         if self.deadline is None or self.slice_identity is None:
@@ -574,7 +597,7 @@ class DockerBackend:
             "--identity",
             self.slice_identity,
             "--deadline-ns",
-            str(int((self.deadline - 60) * 1_000_000_000)),
+            str(self._expiry_deadline_ns()),
             "--ready-file",
             str(self.directory / "expiry-ready"),
         )
@@ -612,7 +635,7 @@ class DockerBackend:
             ],
             seconds=10,
         )
-        if observed != self.slice_identity + "|" + str(int((self.deadline - 60) * 1_000_000_000)):
+        if observed != self.slice_identity + "|" + str(self._expiry_deadline_ns()):
             raise DockerBackendError("private runtime expiry acknowledgement is invalid")
 
     def run_options(self, options: tuple[str, ...]) -> tuple[str, ...]:
@@ -621,6 +644,25 @@ class DockerBackend:
             raise DockerBackendError("owned parent lifetime is closed to new resources")
         if not self.ready or self.network_id is None:
             raise DockerBackendError("private Docker network is not ready")
+        if self.scoped_profile is not None and any("apparmor=" in option.lower() for option in options):
+            raise DockerBackendError("admitted guest cannot override the qualified scoped profile")
+        if (
+            self.scoped_profile is not None
+            and type(self.scoped_profile.binding) is prerequisite.MaintainedDirectBinding
+        ):
+            overrides = ("--entrypoint", "--user", "-u", "--pid", "--userns", "--ipc", "--uts")
+            if any(
+                option.startswith("-u")
+                or option in overrides
+                or any(option.startswith(flag + "=") for flag in overrides)
+                for option in options
+            ):
+                raise DockerBackendError("ordinary direct guest cannot override its native launch identity")
+            for index, option in enumerate(options):
+                if (option == "--cgroupns" and options[index + 1 : index + 2] != ("private",)) or (
+                    option.startswith("--cgroupns=") and option != "--cgroupns=private"
+                ):
+                    raise DockerBackendError("ordinary direct guest requires its private cgroup namespace")
         forbidden = ("--network", "--net", "--label", "-l", "--cgroup-parent")
         if any(option in forbidden or any(option.startswith(name + "=") for name in forbidden) for option in options):
             raise DockerBackendError("outer Docker run cannot override private network, ownership or cgroup parent")
@@ -640,6 +682,8 @@ class DockerBackend:
 
         if self.scoped_profile is not None:
             raise DockerBackendError("active qualification cannot prepare twice")
+        self.scoped_image_ref = ctx.image_ref
+        self.scoped_stage = Path(stage)
         self.scoped_profile = ActiveClient(ctx, stage, identity)
         self.scoped_profile.prepare()
 
@@ -650,6 +694,70 @@ class DockerBackend:
         if any("apparmor=" in option for option in options):
             raise DockerBackendError("admitted guest cannot override the qualified scoped profile")
         return (*options, *self.scoped_profile.create_options())
+
+    def ordinary_scoped_run_options(
+        self, ctx: RuntimeContext, options: tuple[str, ...], name: str, cidfile: Path
+    ) -> tuple[str, ...]:
+        """Persist one production guest intent after raw options and ownership registration."""
+        from dataclasses import asdict  # noqa: PLC0415
+
+        from scripts.docker_userns_active_client import ActiveClient  # noqa: PLC0415
+
+        profile = self.scoped_profile
+        if (
+            type(profile) is not ActiveClient
+            or type(profile.binding) is not prerequisite.MaintainedDirectBinding
+            or self.direct_gate is not None
+            or ctx.backend is not self
+            or profile.ctx is not ctx
+            or profile.stage != self.scoped_stage
+            or profile.failures
+            or ctx.declared_launcher != "direct"
+            or not ctx._launcher_bound
+            or self.scoped_image_ref != ctx.image_ref
+            or self.ordinary_direct_guest is not None
+            or name not in ctx.run_containers
+            or cidfile.parent != self.directory
+            or not re.fullmatch(r"run-[0-9a-f]{32}\.cid", cidfile.name)
+            or "--detach" not in options
+        ):
+            raise DockerBackendError("ordinary direct guest authority is unavailable or reused")
+        binding = profile.binding
+        binding.validate()
+        actual = (
+            ctx.runtime_phase,
+            ctx.name,
+            ctx.architecture,
+            self.owner,
+            self.slice,
+            self.slice_identity,
+            ctx.runtime_deadline_ns,
+        )
+        expected = (
+            binding.phase,
+            binding.image,
+            binding.architecture,
+            binding.owner,
+            binding.runtime_slice,
+            binding.slice_identity,
+            binding.deadline_ns,
+        )
+        if (
+            actual != expected
+            or self.deadline_ns is None
+            or binding.deadline_ns > self.deadline_ns
+            or not re.fullmatch(r"[0-9a-f]{32}", profile.name)
+            or profile.evidence.get("state") != "loaded"
+            or profile.evidence.get("lease") != profile.name
+            or profile.evidence.get("binding") != asdict(binding)
+            or profile.evidence.get("bindingSha256") != binding.digest()
+            or profile.evidence.get("workflowContext") != profile.provenance
+            or profile.evidence.get("retained") is not False
+        ):
+            raise DockerBackendError("ordinary direct guest context or prepared receipt changed")
+        prerequisite.admitted_deadline_ns(binding.deadline_ns, ceiling_ns=self.deadline_ns, reserve_ns=75_000_000_000)
+        self.ordinary_direct_guest = name
+        return self.scoped_run_options(options)
 
     def direct_scoped_run_options(self, ctx: RuntimeContext, options: tuple[str, ...]) -> tuple[str, ...]:
         """Append only this prepared direct-B lease after raw option validation."""
@@ -674,7 +782,11 @@ class DockerBackend:
         ):
             raise DockerBackendError("direct guest scoped clients are not authenticated")
         binding = profile.binding
-        if type(binding) is not DirectDiagnosticBinding or gate.binding is not binding or ctx.runtime_deadline is None:
+        if (
+            type(binding) is not DirectDiagnosticBinding
+            or gate.binding is not binding
+            or type(ctx.runtime_deadline_ns) is not int
+        ):
             raise DockerBackendError("direct guest scoped binding is unavailable")
         binding.validate()
         actual = (
@@ -684,7 +796,7 @@ class DockerBackend:
             self.owner,
             self.slice,
             self.slice_identity,
-            int(ctx.runtime_deadline * 1_000_000_000),
+            ctx.runtime_deadline_ns,
         )
         expected = (
             binding.phase,
@@ -751,13 +863,20 @@ class DockerBackend:
                 raise DockerBackendError("systemd guest lost its original private slice identity")
             if not valid:
                 raise DockerBackendError("outer Docker process is outside its exact owned scope")
-        if self.scoped_profile is not None and self._systemd_guest(ctx, identifier):
+        if self.scoped_profile is not None and (
+            self._systemd_guest(ctx, identifier) or self.ordinary_direct_guest == identifier
+        ):
             self.scoped_profile.bind(identifier)
 
     @staticmethod
     def _systemd_guest(ctx: RuntimeContext, identifier: str) -> bool:
         return (
-            ctx.name == "docker-29-conformance-rootless"
+            ctx.name
+            in {
+                "docker-debian-11-conformance-rootless",
+                "docker-29-conformance-rootless",
+                "docker-29-8-1-conformance-rootless",
+            }
             and vars(ctx).get("declared_launcher") == "systemd"
             and vars(ctx).get("container_launchers", {}).get(identifier) == "systemd"
         )

@@ -71,7 +71,7 @@ runs:
         sudo apt-get install --yes --no-install-recommends buildah crun podman skopeo
 
     - name: Download build plan
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         name: container-build-plan
         path: ${{ runner.temp }}/container-build-plan
@@ -83,7 +83,7 @@ runs:
 
     - name: Download internal dependency build results
       if: fromJSON(inputs.entry).stage > 0 && inputs.use-published-dependency-fallback != 'true'
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         pattern: "*-build-result"
         path: ${{ runner.temp }}/dependency-results
@@ -91,7 +91,7 @@ runs:
 
     - name: Download same-run payload
       if: fromJSON(inputs.entry).payloadName != ''
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         name: payload-${{ fromJSON(inputs.entry).payloadName }}-${{ fromJSON(inputs.entry).arch }}
         path: ${{ runner.temp }}/payload
@@ -145,9 +145,9 @@ runs:
 
           CONSUMER = 'containers-ubuntu26-userns-active'
           SOURCE_MANIFEST_SHA256 = '7f6693f40311617e4854f8c6a35cbe13b3afdd3d7a8bef58978397ba1178dbd8'
-          ADMISSION_SCHEMA = 5
+          ADMISSION_SCHEMA = 7
           MAINTAINED_PROFILES = ('full', 'docker-rootless-qualification')
-          ADMISSION_REVISION = 'containers442-direct-diagnostic-v1'
+          ADMISSION_REVISION = 'containers558-ordinary-direct-v1'
           DIRECT_PROFILE = 'docker-direct-rootless-diagnostic'
           DIRECT_PURPOSE = 'direct-startup-diagnostic'
           DIRECT_REF = 'refs/heads/TheRealBecks/issue442-direct-startup-20261031'
@@ -156,6 +156,9 @@ runs:
           DIRECT_FIELDS = ('diagnosticVariant', 'launcher', 'expectedUid', 'diagnosticArm')
           EXPERIMENTAL_PURPOSE = 'experimental-candidate'
           MAINTAINED_PURPOSE = 'maintained-prerequisite'
+          MAINTAINED_IMAGES = ('docker-29-conformance-rootless', 'docker-29-8-1-conformance-rootless', 'docker-debian-11-conformance-rootless')
+          MAINTAINED_DIRECT_IMAGES = {'docker-20.10-rootless': ['amd64', 'arm64'], 'docker-23-rootless': ['amd64', 'arm64'], 'docker-24-rootless': ['amd64', 'arm64'], 'docker-25-rootless': ['amd64', 'arm64'], 'docker-26-rootless': ['amd64', 'arm64'], 'docker-27-rootless': ['amd64', 'arm64'], 'docker-28-rootless': ['amd64', 'arm64'], 'docker-29-rootless': ['amd64', 'arm64'], 'docker-alpine-3.24-rootless': ['amd64', 'arm64'], 'docker-debian-11-rootless': ['amd64', 'arm64'], 'docker-debian-12-rootless': ['amd64', 'arm64'], 'docker-debian-13-rootless': ['amd64', 'arm64'], 'docker-fedora-43-rootless': ['amd64', 'arm64'], 'docker-fedora-44-rootless': ['amd64', 'arm64'], 'docker-opensuse-leap-16.0-rootless': ['amd64', 'arm64'], 'docker-opensuse-tumbleweed-rootless': ['amd64', 'arm64'], 'docker-ubuntu-22.04-rootless': ['amd64', 'arm64'], 'docker-ubuntu-24.04-rootless': ['amd64', 'arm64'], 'docker-ubuntu-26.04-rootless': ['amd64', 'arm64'], 'docker-arch-rootless': ['amd64']}
+          FULL_ONLY_IMAGES = (*MAINTAINED_IMAGES[1:], *MAINTAINED_DIRECT_IMAGES)
           PREREQUISITE_SCHEMA = 4
           REPOSITORY = 'Strukturpiloten/containers'
           CI_WORKFLOW = '.github/workflows/ci.yml'
@@ -554,12 +557,13 @@ runs:
               admission = json.loads(admission_raw, object_pairs_hook=unique)
               exact(admission, ('schemaVersion', 'consumer', 'purpose', 'qualification', 'sourceManifestSha256',
                                'context', 'cohorts', 'architectures', 'policyNamespace', 'parserExecutionNamespace',
-                               'review', 'revision', 'maintainedContext', 'maintainedArchitectures', 'maintainedCallers', 'directContext'))
+                               'review', 'revision', 'maintainedContext', 'maintainedArchitectures', 'maintainedCallers', 'directContext', 'maintainedDirectImages'))
               require(type(admission['schemaVersion']) is int and admission['schemaVersion'] == ADMISSION_SCHEMA
                       and admission['consumer'] == CONSUMER and admission['purpose'] == 'scoped-prerequisite-attempt'
                       and admission['qualification'] == 'none' and admission['revision'] == ADMISSION_REVISION)
               require(admission['maintainedCallers'] == MAINTAINED_CALLERS)
               require(admission['directContext'] == DIRECT_CONTEXT)
+              require(admission['maintainedDirectImages'] == MAINTAINED_DIRECT_IMAGES)
               if trusted['purpose'] == DIRECT_PURPOSE:
                   require(trusted['caller'] == 'ci-manual' and trusted['workflowPath'] == CI_WORKFLOW
                           and (trusted['image'], trusted['architecture']) in DIRECT_ROWS
@@ -567,15 +571,20 @@ runs:
                                   ('repository', 'event', 'ref', 'job', 'validationProfile', *DIRECT_FIELDS)))
               else:
                   policy = admission['maintainedContext'] if trusted['purpose'] == MAINTAINED_PURPOSE else admission['context']
-                  require(policy['repository'] == trusted['repository'] and policy['image'] == trusted['image'])
+                  require(policy['repository'] == trusted['repository'])
                   if trusted['purpose'] == MAINTAINED_PURPOSE:
-                      exact(policy, ('repository', 'image', 'imageOS', 'imageVersion', 'validationProfiles'))
+                      exact(policy, ('repository', 'images', 'imageOS', 'imageVersion', 'validationProfiles'))
+                      require(policy['images'] == list(MAINTAINED_IMAGES) and trusted['image'] in (*policy['images'], *MAINTAINED_DIRECT_IMAGES))
+                      require(trusted['architecture'] in MAINTAINED_DIRECT_IMAGES.get(trusted['image'], ('amd64', 'arm64')))
+                      require(trusted['image'] not in FULL_ONLY_IMAGES or trusted['validationProfile'] == 'full')
+                      require(trusted['image'] not in FULL_ONLY_IMAGES or trusted['publicationScope'] != 'image' or trusted['publicationTarget'] == trusted['image'])
+                      require(trusted['image'] not in FULL_ONLY_IMAGES or trusted['publicationScope'] != 'family' or trusted['publicationTarget'] == 'docker')
                       require(policy['validationProfiles'] == list(MAINTAINED_PROFILES) and trusted['validationProfile'] in policy['validationProfiles'])
                       caller = admission['maintainedCallers'][trusted['caller']]
                       require((caller['workflow'], caller['event'], caller['job']) == (trusted['workflowPath'], trusted['event'], trusted['job']))
                   else:
                       exact(policy, ('repository', 'workflow', 'event', 'ref', 'job', 'image', 'imageOS', 'imageVersion', 'validationProfile'))
-                      require(trusted['caller'] == 'ci-manual' and policy['workflow'] == trusted['workflowPath'] == CI_WORKFLOW
+                      require(policy['image'] == trusted['image'] and trusted['caller'] == 'ci-manual' and policy['workflow'] == trusted['workflowPath'] == CI_WORKFLOW
                               and policy['event'] == trusted['event'] and policy['job'] == trusted['job']
                               and policy['ref'] == trusted['ref'] and policy['validationProfile'] == trusted['validationProfile'] == 'docker-rootless-diagnostic')
               require(admission['maintainedArchitectures'] == {'amd64': MAINTAINED_PURPOSE, 'arm64': MAINTAINED_PURPOSE})
@@ -643,7 +652,9 @@ runs:
                   require(deadline <= time.monotonic_ns() + 900_000_000_000)
                   extra = {key: DIRECT_CONTEXT[key] for key in DIRECT_FIELDS}
               else:
-                  require(image == 'docker-29-conformance-rootless' and arm == '')
+                  require(image in (*MAINTAINED_IMAGES, *MAINTAINED_DIRECT_IMAGES) and arm == '')
+                  require(architecture in MAINTAINED_DIRECT_IMAGES.get(image, ('amd64', 'arm64')))
+                  require(image not in FULL_ONLY_IMAGES or (derived['purpose'] == MAINTAINED_PURPOSE and derived['validationProfile'] == 'full'))
 
               trusted = {'candidate': candidate, 'workflow': workflow, 'checkout': checkout, **derived, **extra,
                   'run': run, 'attempt': attempt, 'architecture': architecture, 'image': image,
@@ -733,7 +744,11 @@ runs:
           direct_deadline_ns="$((direct_started_ns + 900000000000))"
           runtime_args+=(--direct-startup-diagnostic --direct-started-ns "${direct_started_ns}" --direct-deadline-ns "${direct_deadline_ns}")
         fi
-        if [ "${ACTIVE_USERNS_CONTEXT}" = "true" ] && { [ "${IMAGE_NAME}" = "docker-29-conformance-rootless" ] || [ "${FOCUSED_RUNTIME}" = direct-startup-diagnostic ]; }; then
+        active_image=false
+        case "${IMAGE_NAME}:${IMAGE_ARCH}" in
+          docker-29-conformance-rootless:amd64|docker-29-conformance-rootless:arm64|docker-29-8-1-conformance-rootless:amd64|docker-29-8-1-conformance-rootless:arm64|docker-debian-11-conformance-rootless:amd64|docker-debian-11-conformance-rootless:arm64|docker-20.10-rootless:amd64|docker-20.10-rootless:arm64|docker-23-rootless:amd64|docker-23-rootless:arm64|docker-24-rootless:amd64|docker-24-rootless:arm64|docker-25-rootless:amd64|docker-25-rootless:arm64|docker-26-rootless:amd64|docker-26-rootless:arm64|docker-27-rootless:amd64|docker-27-rootless:arm64|docker-28-rootless:amd64|docker-28-rootless:arm64|docker-29-rootless:amd64|docker-29-rootless:arm64|docker-alpine-3.24-rootless:amd64|docker-alpine-3.24-rootless:arm64|docker-debian-11-rootless:amd64|docker-debian-11-rootless:arm64|docker-debian-12-rootless:amd64|docker-debian-12-rootless:arm64|docker-debian-13-rootless:amd64|docker-debian-13-rootless:arm64|docker-fedora-43-rootless:amd64|docker-fedora-43-rootless:arm64|docker-fedora-44-rootless:amd64|docker-fedora-44-rootless:arm64|docker-opensuse-leap-16.0-rootless:amd64|docker-opensuse-leap-16.0-rootless:arm64|docker-opensuse-tumbleweed-rootless:amd64|docker-opensuse-tumbleweed-rootless:arm64|docker-ubuntu-22.04-rootless:amd64|docker-ubuntu-22.04-rootless:arm64|docker-ubuntu-24.04-rootless:amd64|docker-ubuntu-24.04-rootless:arm64|docker-ubuntu-26.04-rootless:amd64|docker-ubuntu-26.04-rootless:arm64|docker-arch-rootless:amd64) active_image=true ;;
+        esac
+        if [ "${ACTIVE_USERNS_CONTEXT}" = "true" ] && { [ "${active_image}" = true ] || [ "${FOCUSED_RUNTIME}" = direct-startup-diagnostic ]; }; then
           readonly FIXED_ACTIVE_ROOT_BOOTSTRAP
           active_checkout="$(git rev-parse HEAD)"
           test "${ACTIVE_CANDIDATE}" = "${ACTIVE_WORKFLOW}"
@@ -765,7 +780,7 @@ runs:
           fi
           [[ "${active_stage}" =~ ^/run/containers-userns-active\.[0-9a-f]{32}$ ]]
           rm -- "${active_failure}"
-          runtime_args+=(--active-userns-stage "${active_stage}")
+          runtime_args+=(--active-userns-stage "${active_stage}" --active-userns-deadline-ns "${active_deadline}")
           finish_active_stage() {
             active_status=$?
             trap - EXIT
@@ -855,7 +870,7 @@ runs:
           --output "${RUNNER_TEMP}/direct-startup-pair-export/${IMAGE_NAME}-${IMAGE_ARCH}.json"
     - name: Upload one closed direct diagnostic pair report
       if: always() && inputs.focused-runtime == 'direct-startup-diagnostic' && steps.direct-report-retention.outcome == 'success'
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: direct-startup-pair-${{ fromJSON(inputs.entry).name }}-${{ fromJSON(inputs.entry).arch }}
         path: ${{ runner.temp }}/direct-startup-pair-export/${{ fromJSON(inputs.entry).name }}-${{ fromJSON(inputs.entry).arch }}.json
@@ -863,7 +878,7 @@ runs:
         retention-days: 7
     - name: Upload separate nonqualifying direct host observations
       if: always() && inputs.focused-runtime == 'direct-startup-diagnostic' && steps.build.outcome == 'success'
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: direct-startup-host-${{ steps.build.outputs.image_name }}-${{ steps.build.outputs.arch }}
         path: |
@@ -876,7 +891,7 @@ runs:
         retention-days: 7
     - name: Upload runtime evidence
       if: always() && inputs.focused-runtime != 'direct-startup-diagnostic' && steps.build.outcome == 'success'
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: ${{ steps.build.outputs.image_name }}-${{ steps.build.outputs.arch }}-runtime-evidence
         path: |
@@ -915,7 +930,7 @@ runs:
 
     - name: Upload scanner debug evidence
       if: always() && steps.build.outcome == 'success'
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: ${{ steps.build.outputs.image_name }}-${{ steps.build.outputs.arch }}-scan-debug
         path: ${{ runner.temp }}/vulnerability-evidence/
@@ -939,7 +954,7 @@ runs:
 
     - name: Upload vulnerability report
       if: always() && steps.build.outcome == 'success'
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: ${{ steps.build.outputs.image_name }}-${{ steps.build.outputs.arch }}-vulnerability-report
         path: ${{ runner.temp }}/scan-reports/${{ steps.build.outputs.image_name }}-${{ steps.build.outputs.arch }}-vulnerability-report.json
@@ -948,7 +963,7 @@ runs:
 
     - name: Upload architecture image archive
       if: inputs.upload-archive == 'true'
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: ${{ steps.build.outputs.image_name }}-${{ steps.build.outputs.arch }}-oci-archive
         path: ${{ steps.build.outputs.archive_path }}

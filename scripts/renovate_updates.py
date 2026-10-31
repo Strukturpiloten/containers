@@ -37,6 +37,7 @@ BOT_NAME = "github-actions[bot]"
 BOT_EMAIL = "41898282+github-actions[bot]@users.noreply.github.com"
 MAX_BLOB_SIZE = 1_000_000
 MERGE_PARENT_COUNT = 2
+MIN_PYTHON_RELEASE_PATCH = 4
 
 
 class RepairError(RuntimeError):
@@ -136,21 +137,16 @@ def _update_actions(text: str, updates: dict) -> str:
 
 def _python_configuration(root: Path, before: dict, head: dict) -> tuple[str, dict[str, str]]:
     text = _read(root, head, CONFIG)
-    old_requirement = tomllib.loads(_read(root, before, "pyproject.toml"))["project"]["requires-python"]
-    requirement = tomllib.loads(_read(root, head, "pyproject.toml"))["project"]["requires-python"]
-    if requirement != old_requirement:
-        match = re.fullmatch(r">=(\d+)\.(\d+),<(\d+)\.(\d+)", requirement)
-        if not match or (int(match[3]), int(match[4])) != (int(match[1]), int(match[2]) + 1):
-            raise RepairError("Python migration requires one explicit supported minor line")
-        version = f"{match[1]}.{match[2]}"
-        if tomllib.loads(_read(root, head, "uv.lock")).get("requires-python") != f"=={version}.*":
-            raise RepairError("Python migration requires a matching lockfile")
-        raw_config = yaml.safe_load(text)
-        selected = raw_config.get("PYTHON_VERSION", "") if isinstance(raw_config, dict) else ""
-        if not isinstance(selected, str) or ".".join(selected.split(".")[:2]) != version:
-            text, count = re.subn(r"(?m)^PYTHON_VERSION:[^\n]*$", f'PYTHON_VERSION: "{version}"', text)
-            if count != 1:
-                raise RepairError("Python migration requires one canonical interpreter pin")
+    requirement = tomllib.loads(_read(root, head, "pyproject.toml"))["project"]["requires-python"].replace(" ", "")
+    match = re.fullmatch(r">=(\d+)\.(\d+)(?:\.(\d+))?,<(\d+)\.(\d+)", requirement)
+    if not match or (int(match[4]), int(match[5])) != (int(match[1]), int(match[2]) + 1):
+        raise RepairError("Python migration requires one explicit supported minor line")
+    version = f"{match[1]}.{match[2]}"
+    minimum = (int(match[1]), int(match[2]), int(match[3] or 0))
+    expected_lock = requirement if minimum[2] else f"=={version}.*"
+    locked = tomllib.loads(_read(root, head, "uv.lock")).get("requires-python", "").replace(" ", "")
+    if locked != expected_lock:
+        raise RepairError("Python migration requires a matching lockfile")
     with tempfile.TemporaryDirectory() as directory:
         temporary = Path(directory)
         path = temporary / CONFIG
@@ -158,8 +154,14 @@ def _python_configuration(root: Path, before: dict, head: dict) -> tuple[str, di
         path.write_text(text, encoding="utf-8")
         config = load_config(temporary)
     supported_line = ".".join(config["PYTHON_VERSION"].split(".")[:2])
-    if not requirement.startswith(f">={supported_line},"):
+    selected_version = tuple(int(part) for part in config["PYTHON_VERSION"].split("."))
+    if supported_line != version or (*selected_version, 0)[:3] < minimum:
         raise RepairError("Canonical Python runtime does not match project requirement")
+    previous = yaml.safe_load(_read(root, before, CONFIG))["PYTHON_VERSION"]
+    if supported_line != ".".join(previous.split(".")[:2]):
+        selected = re.fullmatch(r"\d+\.\d+\.(\d+)", config["PYTHON_VERSION"])
+        if not selected or int(selected[1]) < MIN_PYTHON_RELEASE_PATCH:
+            raise RepairError("Python release-line migration requires an exact stable patch level 4 or later")
     return text, config
 
 

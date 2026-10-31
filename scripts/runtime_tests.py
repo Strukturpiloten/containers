@@ -83,6 +83,7 @@ class RuntimeContext:
         self.checks: list[dict[str, Any]] = []
         self.observations: list[dict[str, Any]] = []
         self.runtime_deadline: float | None = None
+        self.runtime_deadline_ns: int | None = None
         self.runtime_phase = "single"
         self.oom_accounting_mode = "qualification"
         self.runtime_disk_budget: IsolatedStoreDiskBudget | None = None
@@ -118,7 +119,12 @@ class RuntimeContext:
             self.outer_engine == "docker"
             and launcher == "systemd"
             and (
-                self.name != "docker-29-conformance-rootless"
+                self.name
+                not in {
+                    "docker-debian-11-conformance-rootless",
+                    "docker-29-conformance-rootless",
+                    "docker-29-8-1-conformance-rootless",
+                }
                 or profile.get("mode") != "rootless"
                 or profile.get("outerPrivilege") != "privileged"
             )
@@ -436,6 +442,13 @@ class RuntimeContext:
             )
             if docker and self.container_launchers[container_name] == "systemd":
                 options = self.backend.scoped_run_options(options)
+            elif (
+                docker
+                and getattr(self, "runtime_phase", None) == "ordinary-direct"
+                and "--detach" in options
+                and not args[image_index + 1 :]
+            ):
+                options = self.backend.ordinary_scoped_run_options(self, options, container_name, cidfile)
             elif docker and getattr(self, "runtime_phase", None) == "direct-profiled":
                 options = self.backend.direct_scoped_run_options(self, options)
             completed = False
@@ -468,6 +481,8 @@ class RuntimeContext:
                     self.run_containers.remove(container_name)
                     self.run_containers.add(container)
                     self.container_launchers[container] = self.container_launchers.pop(container_name)
+                    if docker and self.backend.ordinary_direct_guest == container_name:
+                        self.backend.ordinary_direct_guest = container
                     if docker and completed and self.checks[-1].get("exitCode") == 0:
                         self.backend.admit_container(self, container)
                 elif completed and self.checks[-1].get("exitCode") == 0:
@@ -1235,7 +1250,10 @@ def _execute_docker_phase(plan: _DockerPhasePlan) -> dict[str, Any]:
             raise ProbeError("unknown OOM lifecycle execution mode")
         result["oomAccountingMode"] = ctx.oom_accounting_mode
         result["focusedRuntime"] = _focused_runtime_request(plan.args, plan.metadata, ctx.outer_engine)
-        ctx.runtime_deadline = plan.deadline
+        ctx.runtime_deadline_ns = min(
+            getattr(plan.args, "active_userns_deadline_ns", None) or 2**63 - 1, int(plan.deadline * 1_000_000_000)
+        )
+        ctx.runtime_deadline = prerequisite.deadline_seconds(ctx.runtime_deadline_ns)
         ctx.bind_guest_profile(plan.metadata["tests"]["docker"])
         result["outerRuntime"] = ctx.prepare()
         if plan.cancellation.cancelled:
@@ -1460,6 +1478,9 @@ def _run_systemd_pair(
 ) -> dict[str, Any]:
     started = time.monotonic()
     deadline = started + SYSTEMD_PAIR_SECONDS
+    forwarded_ns = getattr(args, "active_userns_deadline_ns", None)
+    if forwarded_ns is not None:
+        deadline = min(deadline, prerequisite.deadline_seconds(prerequisite.admitted_deadline_ns(forwarded_ns)))
     cancellation = _PairCancellation()
     previous = {kind: signal.getsignal(kind) for kind in (signal.SIGTERM, signal.SIGINT)}
     source: tempfile.TemporaryDirectory[str] | None = None
@@ -1660,6 +1681,52 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             execution_mode != "qualification" or getattr(args, "focused_runtime", "none") != "none"
         ):
             raise ProbeError("maintained prerequisite requires the ordinary qualification workload")
+    stage = getattr(args, "active_userns_stage", None)
+    forwarded_ns = getattr(args, "active_userns_deadline_ns", None)
+    direct_required = (
+        profile_name == "docker"
+        and outer_engine == "docker"
+        and profile.get("launcher", "direct") == "direct"
+        and profile.get("mode") == "rootless"
+    )
+    if (stage is None) != (forwarded_ns is None):
+        raise ProbeError("active source stage and exact deadline must be forwarded together")
+    if stage is not None:
+        if type(stage) is not str or re.fullmatch(r"/run/containers-userns-active\.[0-9a-f]{32}", stage) is None:
+            raise ProbeError("active source stage is not the admitted root-private path")
+        prerequisite.admitted_deadline_ns(forwarded_ns, reserve_ns=75_000_000_000)
+        if not direct_required and not _private_systemd_accounting(metadata, outer_engine):
+            raise ProbeError("scoped authority supplied on an unrelated runtime route")
+    if direct_required:
+        if (
+            architecture not in prerequisite.MAINTAINED_DIRECT_IMAGES.get(metadata["name"], ())
+            or stage is None
+            or selection != "profile"
+            or profile.get("outerPrivilege") != "privileged"
+            or profile.get("nestedRuntime", True) is not True
+            or args.skip_nested
+            or not args.allow_privileged
+            or execution_mode != "qualification"
+            or getattr(args, "focused_runtime", "none") != "none"
+        ):
+            raise ProbeError("ordinary direct runtime requires its exact full scoped prerequisite")
+        from scripts.docker_userns_active_bootstrap_bundle import context  # noqa: PLC0415
+
+        provenance = context(dict(os.environ), architecture)
+        if (
+            provenance["purpose"] != prerequisite.MAINTAINED_PURPOSE
+            or provenance["validationProfile"] != "full"
+            or provenance["image"] != metadata["name"]
+        ):
+            raise ProbeError("ordinary direct caller is not the selected maintained full context")
+        evidence.update(
+            phase="ordinary-direct",
+            qualification="none",
+            cleanupVerified=False,
+            focusedRuntime="none",
+            oomAccountingMode="qualification",
+            deadlineNs=forwarded_ns,
+        )
     evidence["host"]["outerEngineSelection"] = selection
     if outer_engine == "docker" and args.archive is None:
         raise ProbeError("private Docker backend requires an explicit OCI archive, not an ambient image reference")
@@ -1684,6 +1751,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             ctx.bind_guest_profile(profile)
         evidence["checks"] = ctx.checks
         evidence["observations"] = ctx.observations
+        if direct_required:
+            ctx.runtime_phase = "ordinary-direct"
+            ctx.runtime_deadline_ns = prerequisite.admitted_deadline_ns(forwarded_ns, reserve_ns=75_000_000_000)
+            ctx.runtime_deadline = prerequisite.deadline_seconds(ctx.runtime_deadline_ns)
         evidence["host"]["outerRuntime"] = ctx.prepare()
         if archive is None:
             archive = ctx.directory / "source-image.tar"
@@ -1695,6 +1766,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             )
             generated_archive = True
         evidence["imageIdentity"] = ctx.load_archive(archive)
+        if direct_required:
+            prerequisite.admitted_deadline_ns(ctx.runtime_deadline_ns, reserve_ns=75_000_000_000)
+            evidence_path = Path(args.evidence)
+            ctx.scoped_failure_output = evidence_path.with_name(evidence_path.stem + "-userns-failure.json")
+            ctx.backend.prepare_scoped_profile(ctx, stage, evidence["imageIdentity"])
         if outer_engine == "podman":
             evidence["host"]["podmanVersion"] = evidence["host"]["outerRuntime"]["clientVersion"]
         if profile_name == "podman":
@@ -1717,10 +1793,28 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         if ctx is not None:
             try:
                 ctx.cleanup()
+                if direct_required:
+                    evidence["cleanupVerified"] = True
             except (Exception, KeyboardInterrupt) as cleanup_error:
                 evidence["status"] = "failed"
                 evidence["cleanupError"] = f"{type(cleanup_error).__name__}: {cleanup_error}"
                 evidence["cleanupErrorTraceback"] = "".join(traceback.format_exception(cleanup_error))
+        if direct_required and ctx is not None:
+            scoped = getattr(ctx.backend, "scoped_profile", None)
+            if scoped is not None:
+                evidence["scopedProfile"] = scoped.evidence
+            if evidence["status"] == "passed" and evidence["cleanupVerified"] is True:
+                try:
+                    ctx.backend.check_deadline()
+                    _scoped_phase(evidence, evidence, expected_purpose=prerequisite.MAINTAINED_PURPOSE)
+                    evidence["stageDisposal"] = scoped.dispose_stage()
+                    ctx.backend.check_deadline()
+                    evidence["prerequisiteAuthority"] = prerequisite.MAINTAINED_PURPOSE
+                    evidence["qualification"] = "complete"
+                    require_ordinary_runtime_authority(evidence, profile_name, profile)
+                except (Exception, KeyboardInterrupt) as completion_error:
+                    evidence["qualification"] = "none"
+                    _phase_error(evidence, completion_error, key="cleanupError")
         if generated_archive:
             evidence["source"] = "locally exported image"
         evidence_path = Path(args.evidence)
@@ -1730,6 +1824,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 ctx.backend.check_deadline()
             except Exception as completion_error:
                 evidence["status"] = "failed"
+                if direct_required:
+                    evidence["qualification"] = "none"
                 previous = evidence.get("cleanupError", "")
                 evidence["cleanupError"] = f"{previous}; {completion_error}".lstrip("; ")
         try:
@@ -1747,6 +1843,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                             ctx.backend.check_deadline()
                         except Exception as completion_error:
                             evidence["status"] = "failed"
+                            if direct_required:
+                                evidence["qualification"] = "none"
                             previous = evidence.get("cleanupError", "")
                             evidence["cleanupError"] = f"{previous}; {completion_error}".lstrip("; ")
                             # Remove the passing body before serializing its
@@ -1792,6 +1890,7 @@ def main() -> int:
     )
     parser.add_argument("--oom-accounting-mode", choices=("qualification", "diagnostic"), default="qualification")
     parser.add_argument("--active-userns-stage", help=argparse.SUPPRESS)
+    parser.add_argument("--active-userns-deadline-ns", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--direct-startup-diagnostic", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--direct-started-ns", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--direct-deadline-ns", type=int, help=argparse.SUPPRESS)

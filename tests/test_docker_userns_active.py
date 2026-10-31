@@ -635,8 +635,12 @@ class ActiveSourceOwnership(unittest.TestCase):
             "smoke-build",
         ):
             self.assertIn(token, context)
-        self.assertIn('[ "${IMAGE_NAME}" = "docker-29-conformance-rootless" ]', step["run"])
-        self.assertIn('runtime_args+=(--active-userns-stage "${active_stage}")', step["run"])
+        self.assertIn("docker-29-conformance-rootless:amd64", step["run"])
+        self.assertIn('case "${IMAGE_NAME}:${IMAGE_ARCH}" in', step["run"])
+        self.assertIn(
+            'runtime_args+=(--active-userns-stage "${active_stage}" --active-userns-deadline-ns "${active_deadline}")',
+            step["run"],
+        )
         self.assertNotIn("${{", step["env"]["FIXED_ACTIVE_ROOT_BOOTSTRAP"])
         self.assertNotIn("import scripts", step["env"]["FIXED_ACTIVE_ROOT_BOOTSTRAP"])
         self.assertIn("candidate == workflow == checkout", step["env"]["FIXED_ACTIVE_ROOT_BOOTSTRAP"])
@@ -840,6 +844,7 @@ class ConcreteBoundedOperations(unittest.TestCase):
 def candidate_environment(selected: str = "a" * 40) -> dict[str, str]:
     """Supply the existing diagnostic workflow envelope without creating a native job."""
     return {
+        "IMAGE_NAME": "docker-29-conformance-rootless",
         "GITHUB_ACTIONS": "true",
         "RUNNER_ENVIRONMENT": "github-hosted",
         "RUNNER_OS": "Linux",
@@ -888,6 +893,7 @@ class DiagnosticCaseScope(unittest.TestCase):
                         name=fixture.image,
                         runtime_phase=fixture.phase,
                         runtime_deadline=1000,
+                        runtime_deadline_ns=2**62,
                         backend=SimpleNamespace(
                             owner=fixture.owner,
                             slice=fixture.runtime_slice,
@@ -2971,8 +2977,10 @@ class MaintainedBootstrapContract(unittest.TestCase):
                 14: "GITHUB_REF",
                 15: "GITHUB_WORKFLOW_REF",
                 16: "GITHUB_JOB",
+                17: "IMAGE_NAME",
             }.items():
-                literal["sys"].argv[position] = environment[key]
+                if key != "IMAGE_NAME" or key in environment:
+                    literal["sys"].argv[position] = environment[key]
         literal["os"] = SimpleNamespace(getuid=lambda: 0, geteuid=lambda: 0, urandom=lambda _: b"x" * 16)
         literal["time"] = SimpleNamespace(monotonic_ns=lambda: 1)
         literal["read_input"] = Mock(side_effect=[json.dumps(event).encode(), json.dumps(proof.value()).encode()])
@@ -3516,3 +3524,41 @@ class BootstrapInputCheckpoints(unittest.TestCase):
             self.namespace["point"]("PRIVATE_PHASE")
         self.assertNotIn("PRIVATE_", json.dumps(self.receipt(raised.exception)))
         self.assertTrue(set(self.namespace["BOOTSTRAP_CHECKPOINTS"]) <= active.FAILURE_PHASES)
+
+
+class OrdinaryDirectRootDeadlineTests(unittest.TestCase):
+    def test_exact_parent_ceiling_above_2pow53_is_not_reconstructed_from_float(self) -> None:
+        from tests.test_evidence_gate import ordinary_direct_runtime  # noqa: PLC0415
+
+        expected = ordinary_direct_runtime()["scopedProfile"]
+        admission = (ROOT / ".github/docker-userns-active-admission.json").read_bytes()
+        parent = 10_000_000_000_000_001
+        for supplied, accepted in ((parent, True), (parent - 1, True), (parent + 1, False)):
+            native = qualification.MaintainedDirectBinding(**(expected["binding"] | {"deadline_ns": supplied}))
+            record = {
+                "schemaVersion": 4,
+                "binding": asdict(native),
+                "bindingSha256": native.digest(),
+                "bootstrapSha256": active.digest(b"bootstrap"),
+                "state": "closed",
+                "timeoutExecutable": "/usr/bin/timeout",
+            }
+            bootstrap = {"context": expected["workflowContext"], "deadlineNs": parent}
+            with (
+                self.subTest(deadline=supplied),
+                patch.object(
+                    active,
+                    "root_bytes",
+                    side_effect=lambda path: admission if path.name.endswith("admission.json") else b"bootstrap",
+                ),
+            ):
+                if accepted:
+                    port = active.RootPort(
+                        ROOT, bootstrap, SimpleNamespace(qualification=qualification), SimpleNamespace(), record
+                    )
+                    self.assertEqual(port.binding.deadline_ns, supplied)
+                else:
+                    with self.assertRaises(active.RefusedError):
+                        active.RootPort(
+                            ROOT, bootstrap, SimpleNamespace(qualification=qualification), SimpleNamespace(), record
+                        )

@@ -67,7 +67,7 @@ jobs:
             --output "${RUNNER_TEMP}/docker-runner-security.json"
       - name: Retain runner security observation
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: docker-runner-security
           path: ${{ runner.temp }}/docker-runner-security.json
@@ -126,7 +126,7 @@ jobs:
             --output "${RUNNER_TEMP}/docker-userns-dryparse.json"
       - name: Retain nonqualifying compile-only observation
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: docker-userns-dryparse
           path: ${{ runner.temp }}/docker-userns-dryparse.json
@@ -528,7 +528,7 @@ jobs:
           capture_unused_artifact < /dev/null > "${artifact}"
       - name: Retain nonqualifying hosted unused custody observation
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: docker-userns-custody-unused
           path: ${{ runner.temp }}/docker-userns-custody-unused.json
@@ -537,7 +537,7 @@ jobs:
       - name: Retain separate nonqualifying Python import observation
         if: ${{ always() }}
         continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: python-runtime-fd-observation
           path: ${{ runner.temp }}/python-runtime-fd-observation.json
@@ -720,7 +720,7 @@ jobs:
           uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine plan-summary build-plan.json >> "$GITHUB_STEP_SUMMARY"
       - name: Upload build plan
         if: always() && steps.outputs.outcome == 'success'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: container-build-plan
           path: |
@@ -871,7 +871,7 @@ jobs:
           version: ${{ env.UV_VERSION }}
       - name: Download direct diagnostic pair reports
         if: github.event_name == 'workflow_dispatch' && inputs.validation_profile == 'docker-direct-rootless-diagnostic'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: 'direct-startup-pair-*'
           path: ${{ runner.temp }}/direct-startup-pairs
@@ -890,7 +890,7 @@ jobs:
           echo 'Both instrumented direct-startup pairs completed; qualification:none; no host-denial attribution or rollout authority.' >> "$GITHUB_STEP_SUMMARY"
       - name: Retain direct startup diagnostic aggregate
         if: always() && github.event_name == 'workflow_dispatch' && inputs.validation_profile == 'docker-direct-rootless-diagnostic'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: direct-startup-diagnostic-aggregate
           path: ${{ runner.temp }}/direct-startup-aggregate.json

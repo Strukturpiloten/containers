@@ -230,11 +230,17 @@ class DirectPolicySubjectTests(unittest.TestCase):
             for key, value in asdict(direct).items()
             if key not in {"variant", "launcher", "expected_uid", "arm"}
         }
+        maintained = qualification.MaintainedDirectBinding(
+            **(values | {"phase": "ordinary-direct", "purpose": "maintained-prerequisite"})
+        )
         values.update(image="docker-29-conformance-rootless", phase="enforcement", purpose="maintained-prerequisite")
         native = qualification.NativeBinding(**values)
         for subject, suffix, accepted, uid in (
             (direct, "", True, 1000),
             (direct, "/child", False, 1000),
+            (maintained, "", True, 1000),
+            (maintained, "/child", False, 1000),
+            (maintained, "-foreign", False, 1000),
             (native, "", True, 0),
             (native, "/child", True, 0),
         ):
@@ -332,3 +338,21 @@ class DirectPolicySubjectTests(unittest.TestCase):
             wrong[key] = value
             with self.subTest(key=key, value=value):
                 self.assertIsNone(active.failure_context(wrong, "direct-control"))
+
+
+class MaintainedDirectRealUidTests(unittest.TestCase):
+    def test_ordinary_binding_checks_all_four_uid_values_through_the_actual_proc_reader(self) -> None:
+        from scripts import docker_userns_qualification as qualification  # noqa: PLC0415
+
+        fields = {
+            key: value
+            for key, value in asdict(binding()).items()
+            if key not in {"variant", "launcher", "expected_uid", "arm"}
+        }
+        subject = qualification.MaintainedDirectBinding(
+            **(fields | {"phase": "ordinary-direct", "purpose": "maintained-prerequisite"})
+        )
+        with patch(__name__ + ".binding", return_value=subject):
+            DirectPolicySubjectTests.test_direct_b_rejects_each_non1000_real_effective_saved_and_fs_uid_with_real_reader(
+                self
+            )

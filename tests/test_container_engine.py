@@ -139,22 +139,16 @@ class PlanningTests(unittest.TestCase):
             with self.subTest(changed=changed), patch.object(engine, "_changed_files", return_value=[changed]):
                 self.assertEqual(engine._selected_image_names(self.images, _options()), {"base", "app"})
 
-    def test_systemd_guard_only_change_selects_conformance_and_skips_unrelated_images(self) -> None:
+    def test_root_guard_change_selects_all_consumers_including_ordinary_direct(self) -> None:
         images = engine._load_images()
         with patch.object(engine, "_changed_files", return_value=["scripts/runtime_docker_systemd_guard.py"]):
             plan = engine._build_plan(images, _options())
-        self.assertEqual(plan["selection"]["directImages"], ["docker-29-conformance-rootless"])
+        self.assertEqual(set(plan["selection"]["directImages"]), {image["name"] for image in images})
         self.assertEqual(plan["selection"]["reverseDependencies"], [])
-        self.assertEqual([image["name"] for image in plan["images"]], ["docker-29-conformance-rootless"])
-        self.assertEqual(
-            {(entry["name"], entry["arch"]) for entry in plan["smokeBuildMatrix"]["include"]},
-            {("docker-29-conformance-rootless", "amd64"), ("docker-29-conformance-rootless", "arm64")},
-        )
-        selected = {image["name"] for image in plan["images"]}
-        for unrelated in ("docker-29-rootless", "podman-debian-13-rootful", "nextcloud-phpfpm"):
-            with self.subTest(unrelated=unrelated):
-                self.assertNotIn(unrelated, selected)
-        self.assertEqual(plan["selection"]["reason"], "image-specific or shared runtime input changed")
+        expected = {
+            (image["name"], architecture) for image in images for architecture in image["build"]["architectures"]
+        }
+        self.assertEqual({(row["name"], row["arch"]) for row in plan["smokeBuildMatrix"]["include"]}, expected)
 
     def test_validation_only_change_selects_no_images(self) -> None:
         for changed_file in (".github/renovate.json", "container.schema.json", "pyproject.toml", "uv.lock"):
@@ -823,3 +817,19 @@ class RepositoryValidationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MaintainedDirectInputOwnershipTests(unittest.TestCase):
+    def test_every_active_helper_is_a_global_input_for_all_direct_consumers(self) -> None:
+        import fnmatch  # noqa: PLC0415
+
+        from scripts import docker_userns_active_bootstrap_bundle as producer  # noqa: PLC0415
+        from scripts.container_engine import GLOBAL_IMAGE_INPUTS  # noqa: PLC0415
+
+        for path in (
+            *producer.FILES,
+            "scripts/docker_userns_active_client.py",
+            "scripts/docker_userns_active_bootstrap_bundle.py",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(any(fnmatch.fnmatchcase(path, pattern) for pattern in GLOBAL_IMAGE_INPUTS))

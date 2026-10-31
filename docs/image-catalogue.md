@@ -18,6 +18,7 @@ Lifecycle is repository policy. Registry availability and runtime coverage requi
 | docker-27-rootless | legacy | isolated-test | 2026-10-27 | unknown | unknown | unknown |
 | docker-28-rootful | legacy | isolated-test | 2026-10-27 | unknown | unknown | unknown |
 | docker-28-rootless | legacy | isolated-test | 2026-10-27 | unknown | unknown | unknown |
+| docker-29-8-1-conformance-rootless | legacy | isolated-test | 2026-10-31 | unknown | unknown | unknown |
 | docker-29-conformance-rootless | maintained | isolated-test | 2026-10-27 | unknown | unknown | unknown |
 | docker-29-rootful | maintained | isolated-test | 2026-10-27 | unknown | unknown | unknown |
 | docker-29-rootless | maintained | isolated-test | 2026-10-27 | unknown | unknown | unknown |
@@ -25,6 +26,7 @@ Lifecycle is repository policy. Registry availability and runtime coverage requi
 | docker-alpine-3.24-rootless | maintained | isolated-test | 2026-10-27 | unknown | unknown | unknown |
 | docker-arch-rootful | maintained | isolated-test | 2026-10-27 | unknown | unknown | unknown |
 | docker-arch-rootless | maintained | isolated-test | 2026-10-27 | unknown | unknown | unknown |
+| docker-debian-11-conformance-rootless | legacy | isolated-test | 2026-10-31 | unknown | unknown | unknown |
 | docker-debian-11-rootful | legacy | isolated-test | 2026-10-27 | unknown | unknown | unknown |
 | docker-debian-11-rootless | legacy | isolated-test | 2026-10-27 | unknown | unknown | unknown |
 | docker-debian-12-rootful | maintained | isolated-test | 2026-10-27 | unknown | unknown | unknown |

@@ -10,6 +10,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import json
+import math
 import re
 import time
 from contextlib import suppress
@@ -28,9 +29,37 @@ LEGACY_CLONE = Path("/proc/sys/kernel/unprivileged_userns_clone")
 MAX_NAMESPACES = 2**63 - 1
 CONSUMER = "containers-ubuntu26-userns-active"
 PREREQUISITE_SCHEMA = 4
-ADMISSION_SCHEMA = 5
-ADMISSION_REVISION = "containers442-direct-diagnostic-v1"
+ADMISSION_SCHEMA = 7
+ADMISSION_REVISION = "containers558-ordinary-direct-v1"
 MAINTAINED_PROFILES = ("full", "docker-rootless-qualification")
+MAINTAINED_IMAGES = (
+    "docker-29-conformance-rootless",
+    "docker-29-8-1-conformance-rootless",
+    "docker-debian-11-conformance-rootless",
+)
+MAINTAINED_DIRECT_IMAGES = {
+    "docker-20.10-rootless": ["amd64", "arm64"],
+    "docker-23-rootless": ["amd64", "arm64"],
+    "docker-24-rootless": ["amd64", "arm64"],
+    "docker-25-rootless": ["amd64", "arm64"],
+    "docker-26-rootless": ["amd64", "arm64"],
+    "docker-27-rootless": ["amd64", "arm64"],
+    "docker-28-rootless": ["amd64", "arm64"],
+    "docker-29-rootless": ["amd64", "arm64"],
+    "docker-alpine-3.24-rootless": ["amd64", "arm64"],
+    "docker-debian-11-rootless": ["amd64", "arm64"],
+    "docker-debian-12-rootless": ["amd64", "arm64"],
+    "docker-debian-13-rootless": ["amd64", "arm64"],
+    "docker-fedora-43-rootless": ["amd64", "arm64"],
+    "docker-fedora-44-rootless": ["amd64", "arm64"],
+    "docker-opensuse-leap-16.0-rootless": ["amd64", "arm64"],
+    "docker-opensuse-tumbleweed-rootless": ["amd64", "arm64"],
+    "docker-ubuntu-22.04-rootless": ["amd64", "arm64"],
+    "docker-ubuntu-24.04-rootless": ["amd64", "arm64"],
+    "docker-ubuntu-26.04-rootless": ["amd64", "arm64"],
+    "docker-arch-rootless": ["amd64"],
+}
+FULL_ONLY_IMAGES = frozenset((*MAINTAINED_IMAGES[1:], *MAINTAINED_DIRECT_IMAGES))
 EXPERIMENTAL_PURPOSE = "experimental-candidate"
 MAINTAINED_PURPOSE = "maintained-prerequisite"
 WORKFLOW = "Strukturpiloten/containers/.github/workflows/ci.yml"
@@ -590,6 +619,7 @@ def admission_document(raw: bytes) -> dict:
             "maintainedArchitectures",
             "maintainedCallers",
             "directContext",
+            "maintainedDirectImages",
         }
         or type(value["schemaVersion"]) is not int
         or value["schemaVersion"] != ADMISSION_SCHEMA
@@ -601,6 +631,7 @@ def admission_document(raw: bytes) -> dict:
         or value["maintainedArchitectures"] != {"amd64": "maintained-prerequisite", "arm64": "maintained-prerequisite"}
         or value["maintainedCallers"] != MAINTAINED_CALLERS
         or value["directContext"] != direct.admission_context()
+        or value["maintainedDirectImages"] != MAINTAINED_DIRECT_IMAGES
     ):
         _refuse("admission")
     context_keys = {
@@ -618,18 +649,23 @@ def admission_document(raw: bytes) -> dict:
         expected_keys = (
             context_keys
             if name == "context"
-            else {"repository", "image", "imageOS", "imageVersion", "validationProfiles"}
+            else {"repository", "images", "imageOS", "imageVersion", "validationProfiles"}
         )
         if (
             type(value[name]) is not dict
             or set(value[name]) != expected_keys
-            or any(type(item) is not str for key, item in value[name].items() if key != "validationProfiles")
+            or any(
+                type(item) is not str
+                for key, item in value[name].items()
+                if key not in {"validationProfiles", "images"}
+            )
         ):
             _refuse("admission")
     if (
         value["context"]["ref"] != "refs/heads/TheRealBecks/issue527"
         or value["context"]["validationProfile"] != "docker-rootless-diagnostic"
         or value["maintainedContext"]["validationProfiles"] != list(MAINTAINED_PROFILES)
+        or value["maintainedContext"]["images"] != list(MAINTAINED_IMAGES)
     ):
         _refuse("admission")
     _validate_cohorts(value["cohorts"])
@@ -718,10 +754,25 @@ def validate_workflow_context(context: dict[str, str], admission: dict, admissio
         or any(re.fullmatch(r"[1-9][0-9]{0,19}", context[key]) is None for key in ("run", "attempt"))
         or context["repository"] != expected["repository"]
         or context["repository"] != REPOSITORY
-        or context["image"] != expected["image"]
-        or context["image"] != "docker-29-conformance-rootless"
+        or (purpose == MAINTAINED_PURPOSE and context["image"] not in (*expected["images"], *MAINTAINED_DIRECT_IMAGES))
+        or (purpose != MAINTAINED_PURPOSE and context["image"] != expected["image"])
+        or context["image"] not in (*MAINTAINED_IMAGES, *MAINTAINED_DIRECT_IMAGES)
+        or (
+            context["image"] in FULL_ONLY_IMAGES
+            and (purpose != MAINTAINED_PURPOSE or context["validationProfile"] != "full")
+        )
+        or (
+            context["image"] in FULL_ONLY_IMAGES
+            and context["publicationScope"] == "image"
+            and context["publicationTarget"] != context["image"]
+        )
+        or (
+            context["image"] in FULL_ONLY_IMAGES
+            and context["publicationScope"] == "family"
+            and context["publicationTarget"] != "docker"
+        )
         or expected["imageOS"] != "ubuntu26"
-        or context["architecture"] not in {"amd64", "arm64"}
+        or context["architecture"] not in MAINTAINED_DIRECT_IMAGES.get(context["image"], ["amd64", "arm64"])
         or context["imageOS"] != {"amd64": "ubuntu26", "arm64": "ubuntu26-arm64"}[context["architecture"]]
         or context["imageVersionKind"] != "workflow-reported-provenance-not-vm-attestation"
         or re.fullmatch(r"[0-9]{8}\.[0-9]+\.[0-9]+", context["imageVersion"]) is None
@@ -779,7 +830,7 @@ def _direct_context(context: dict[str, str], admission: dict, admission_sha256: 
         _refuse("context")
 
 
-def native_binding(value: object) -> NativeBinding | direct.DirectDiagnosticBinding:
+def native_binding(value: object) -> NativeBinding | MaintainedDirectBinding | direct.DirectDiagnosticBinding:
     """Dispatch only the separate maintained29 or direct profiled-B wire types."""
     if type(value) is not dict:
         _refuse("context")
@@ -787,6 +838,8 @@ def native_binding(value: object) -> NativeBinding | direct.DirectDiagnosticBind
         result = (
             direct.DirectDiagnosticBinding(**value)
             if value.get("purpose") == direct.PURPOSE
+            else MaintainedDirectBinding(**value)
+            if value.get("phase") == "ordinary-direct"
             else NativeBinding(**value)
         )
         result.validate()
@@ -889,8 +942,8 @@ class NativeBinding:
     admission_sha256: str
     workflow_context_sha256: str
 
-    def validate(self) -> None:
-        """Require the candidate's closed shape before interpreting any root request."""
+    def _validate_common(self) -> None:
+        """Require the common closed shape before interpreting any root request."""
         if any(type(value) is not str for key, value in asdict(self).items() if key != "deadline_ns"):
             _refuse("context")
         hashes = (
@@ -908,13 +961,23 @@ class NativeBinding:
             or any(not re.fullmatch(r"[1-9][0-9]{0,19}", value) for value in (self.run, self.attempt))
             or self.job not in NATIVE_JOBS
             or self.architecture not in {"amd64", "arm64"}
-            or self.phase not in {"clean-control", "enforcement"}
-            or self.image != "docker-29-conformance-rootless"
             or not re.fullmatch(r"[0-9a-f]{32}", self.owner)
             or self.runtime_slice != "strukturpiloten" + self.owner + ".slice"
             or not re.fullmatch(r"[0-9]+:[1-9][0-9]*", self.slice_identity)
             or type(self.deadline_ns) is not int
+            or not 0 < self.deadline_ns <= 2**63 - 1
             or self.purpose not in {EXPERIMENTAL_PURPOSE, MAINTAINED_PURPOSE}
+        ):
+            _refuse("context")
+
+    def validate(self) -> None:
+        """Keep the systemd phase variant separate from direct admission."""
+        self._validate_common()
+        if (
+            type(self) is not NativeBinding
+            or self.phase not in {"clean-control", "enforcement"}
+            or self.image not in MAINTAINED_IMAGES
+            or (self.image in FULL_ONLY_IMAGES and self.purpose != MAINTAINED_PURPOSE)
         ):
             _refuse("context")
 
@@ -922,6 +985,45 @@ class NativeBinding:
         """Bind every field into root receipts and the finalizer's original lease."""
         self.validate()
         return hashlib.sha256(json.dumps(asdict(self), sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+@dataclass(frozen=True)
+class MaintainedDirectBinding(NativeBinding):
+    """One ordinary UID1000 direct guest, with the existing common wire keys."""
+
+    def validate(self) -> None:
+        """Never admit a systemd or diagnostic route by coercing its binding."""
+        self._validate_common()
+        if (
+            type(self) is not MaintainedDirectBinding
+            or self.phase != "ordinary-direct"
+            or self.purpose != MAINTAINED_PURPOSE
+            or self.architecture not in MAINTAINED_DIRECT_IMAGES.get(self.image, ())
+        ):
+            _refuse("context")
+
+
+def admitted_deadline_ns(value: object, *, ceiling_ns: int | None = None, reserve_ns: int = 0) -> int:
+    """Retain exact integer authority and reject expiry or a later parent ceiling."""
+    if (
+        type(value) is not int
+        or not 0 < value <= 2**63 - 1
+        or value <= time.monotonic_ns() + reserve_ns
+        or (ceiling_ns is not None and (type(ceiling_ns) is not int or value > ceiling_ns))
+    ):
+        _refuse("deadline")
+    return value
+
+
+def deadline_seconds(value: int) -> float:
+    """Convert only for legacy timeout APIs, rounding toward an earlier cutoff."""
+    if type(value) is not int or not 0 < value <= 2**63 - 1:
+        _refuse("deadline")
+    seconds = value / 1_000_000_000
+    numerator, denominator = seconds.as_integer_ratio()
+    if numerator * 1_000_000_000 > value * denominator:
+        seconds = math.nextafter(seconds, -math.inf)
+    return seconds
 
 
 class State(StrEnum):

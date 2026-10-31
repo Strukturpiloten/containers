@@ -725,7 +725,7 @@ unchanged. Admission itself records `qualification: none`; it permits an attempt
 not native qualification, release or publication permission.
 
 Bootstrap transport/stage, native lease records, scoped receipts and disposal
-acknowledgments use schema 4. Admission uses schema 5: its maintained policy
+acknowledgments use schema 4. Admission uses schema 7: its maintained policy
 contains the exact `validationProfiles` allowset `full` and
 `docker-rootless-qualification`, while each actual context/receipt retains one
 canonical profile and the exact raw request. The exact maintained-caller table
@@ -1286,3 +1286,54 @@ The helper closure and global source-input pattern own the added standard-librar
 source files; existing template/generated Action Renovate managers own reused
 Action references. Ordinary full, maintained29, publication and local Podman
 routes retain their existing boundaries.
+
+The exact `docker-29-8-1-conformance-rootless` compatibility fixture is additive;
+standard and conformance Engine 29.9.2 inputs retain their own identities and
+evidence. Schema 7 names the three distinct systemd fixtures, but the historical image
+requires `full` and the existing finite original CI/publication caller tuples.
+Manual publication selection must name that image or the Docker family.
+Experimental and two-row diagnostic selectors remain unchanged. A selected
+image must agree across event, producer, fixed-root source proof and native
+binding; absent/unknown maintained selection is not a fallback. No runtime or
+receipt schema changes, native qualification or publication follow from this
+source-policy addition. Final closure readmission remains primary-owned.
+
+## Maintained ordinary direct-rootless prerequisite
+
+Admission schema 7 keeps `maintainedDirectImages` separate from the three
+systemd fixture names. The finite direct map covers the existing upstream and
+distribution rootless rows, including AMD64-only Arch. A new catalogue name or
+architecture does not acquire authority by its spelling. Direct, exact 29.8.1
+and packaged Debian 11 callers require effective `full`, ordinary qualification
+work and no focused selection. Only the rolling systemd fixture retains bounded
+qualification and historical experimental routes.
+
+Ordinary direct work uses the flat runtime path and original image entrypoint
+and CMD. Provenance/version probes receive no profile. Exactly one detached
+daemon guest can consume a maintained `ordinary-direct` lease, after raw caller
+options are validated and its owned name/cidfile are registered. The existing
+root owner verifies all four UID fields are 1000, the exact CID cgroup scope,
+live task/incarnation and effective single profile before and after binding.
+Systemd remains UID 0 with its distinct descendant placement rule. No diagnostic
+gate, FIFO, launcher wrapper or fallback is used for ordinary admission.
+
+The Action's pre-bootstrap absolute cutoff is forwarded as integer nanoseconds
+through runtime, private backend, binding and root receipts. Float-only timeout
+APIs round toward an earlier cutoff; the independent expiry service retains the
+original cutoff minus its cleanup reserve. Bootstrap, archive import, workload,
+cleanup, stage disposal and final evidence writes cannot renew the allowance.
+A late completion remains nonqualifying even after successful native work.
+
+Direct qualification requires explicit whole-backend cleanup, the closed held-task
+lease receipt and matching source-stage disposal. The shared authority guard is
+used by the runtime Action, archive admission, release evidence and maintenance
+catalogue. Missing host/runtime facts or self-reported requirement flags cannot
+supply authority. Failed work and uncertain custody remain failures. Root receipt
+and stage-disposal envelopes remain schema 4; runtime evidence remains schema 1.
+
+The successful historical two-row diagnostic on candidate `3ca24bd9` observed
+profile-dependent startup and verified cleanup only for its selected pairs.
+Its qualification remains none. The changed source, every ordinary direct row,
+all three systemd fixtures and the other selected profiles need fresh complete
+native evidence. Source controls and generated unknown catalogue entries provide
+no native, registry, publication, release or deployment approval.

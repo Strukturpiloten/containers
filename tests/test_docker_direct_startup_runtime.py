@@ -24,6 +24,7 @@ from scripts import docker_direct_startup_plan as planner
 from scripts import docker_direct_startup_runtime as runtime
 from scripts import docker_userns_active_client as active_client_module
 from scripts.docker_userns_active_client import ActiveClient
+from scripts.docker_userns_qualification import deadline_seconds
 from scripts.runtime_docker_backend import DockerBackend, DockerBackendError
 from scripts.runtime_tests import ProbeError, RuntimeContext
 from tests import test_docker_direct_startup_admission as admission_tests
@@ -42,6 +43,7 @@ class DirectCompositionFixture:
         self.case, self.ctx, self.source = case, ctx, source
         self.events: list[str] = []
         self.guest_commands: list[list[str]] = []
+        self.profile_requests: list[tuple[str, dict]] = []
         self.spawn_error: ProbeError | None = None
         self.stage = "/run/containers-userns-active." + "f" * 32
         self.lease = "e" * 32
@@ -129,6 +131,7 @@ class DirectCompositionFixture:
         ctx = self.ctx
         self.events.append(operation)
         request = json.loads(base64.b64decode(arguments[arguments.index("--request") + 1]))
+        self.profile_requests.append((operation, request))
         if operation != "prepare":
             self.case.assertEqual(request["bindingSha256"], ctx.backend.scoped_profile.binding.digest())
         if operation == "create-intent":
@@ -181,7 +184,9 @@ class DirectCompositionFixture:
 
 
 @contextmanager
-def direct_composition_fixture(case: unittest.TestCase) -> Iterator[DirectCompositionFixture]:
+def direct_composition_fixture(
+    case: unittest.TestCase, *, deadline_ns: int | None = None
+) -> Iterator[DirectCompositionFixture]:
     """Keep actual clients/builders; simulate only their external command results."""
     _proof, source, environment, event = admission_tests.DirectAdmissionTests().fixture(
         "docker-20.10-rootless", "amd64"
@@ -191,7 +196,8 @@ def direct_composition_fixture(case: unittest.TestCase) -> Iterator[DirectCompos
     )
     try:
         ctx.runtime_phase = "direct-profiled"
-        ctx.runtime_deadline = time.monotonic() + 360
+        ctx.runtime_deadline_ns = time.monotonic_ns() + 360_000_000_000 if deadline_ns is None else deadline_ns
+        ctx.runtime_deadline = deadline_seconds(ctx.runtime_deadline_ns)
         ctx.bind_guest_profile({"launcher": "direct", "mode": "rootless", "outerPrivilege": "privileged"})
         ctx.backend.ready, ctx.backend.network_id = True, "a" * 64
         ctx.backend.slice_identity = "1:2"
@@ -932,3 +938,72 @@ class PreArmFailureEvidence(unittest.TestCase):
         self.assertEqual(cleanup["reason"], "permission-denied")
         self.assertEqual(published[-1][1]["failures"], record["failures"])
         self.assertNotIn("PRIVATE_", json.dumps(published))
+
+
+class DiagnosticExactCutoffComposition(unittest.TestCase):
+    def test_real_composed_b_retains_nonrepresentable_integer_through_both_authority_checks(self) -> None:
+        cutoff = 9_007_199_254_740_993
+        clock = [9_007_000_000_000_000]
+        with (
+            patch("time.monotonic_ns", side_effect=lambda: clock[0]),
+            patch("time.monotonic", side_effect=lambda: clock[0] / 1_000_000_000),
+            direct_composition_fixture(self, deadline_ns=cutoff) as fixture,
+        ):
+            ctx = fixture.ctx
+            self.assertNotEqual(int(ctx.runtime_deadline * 1_000_000_000), cutoff)
+            original = ctx.command
+
+            def command(name: str, arguments: list[str], **options: object) -> str:
+                clock[0] += 1_000_000_000
+                return original(name, arguments, **options)
+
+            ctx.command = command
+            outcome = runtime.ArmOutcome(
+                {
+                    "startup": "unknown",
+                    "nativeExitCode": None,
+                    "factsComplete": False,
+                    "cleanupVerified": False,
+                    "profileBound": False,
+                }
+            )
+            plan = SimpleNamespace(
+                args=SimpleNamespace(active_userns_stage=fixture.stage),
+                arm="B",
+                stable_host={},
+                outer_runtime={},
+                cancellation=SimpleNamespace(cancelled=False),
+            )
+            runtime._gated_start(plan, ctx, outcome, fixture.identity, SimpleNamespace(checkpoint=Mock()))
+            self.assertEqual(ctx.runtime_deadline_ns, 9_007_199_254_740_993)
+            self.assertEqual(ctx.backend.scoped_profile.binding.deadline_ns, 9_007_199_254_740_993)
+            self.assertEqual(ctx.backend.direct_gate.binding.deadline_ns, 9_007_199_254_740_993)
+            self.assertEqual(
+                [
+                    request["binding"]["deadline_ns"]
+                    for operation, request in fixture.profile_requests
+                    if operation == "prepare"
+                ],
+                [9_007_199_254_740_993],
+            )
+            self.assertGreater(clock[0], 9_007_000_000_000_000)
+            self.assertEqual(len(fixture.guest_commands), 1)
+            self.assertEqual(outcome.summary["startup"], "ready")
+            self.assertTrue(outcome.summary["profileBound"])
+            self.assertEqual(fixture.events.count("create-intent"), 1)
+
+    def test_one_nanosecond_changed_b_context_refuses_constructor_and_backend_before_intent(self) -> None:
+        with (
+            patch("time.monotonic_ns", return_value=9_007_000_000_000_000),
+            direct_composition_fixture(self, deadline_ns=9_007_199_254_740_993) as fixture,
+        ):
+            fixture.prepare()
+            ctx = fixture.ctx
+            ctx.runtime_deadline_ns = 9_007_199_254_740_994
+            with self.assertRaises(contract.DirectDiagnosticError):
+                runtime.GateClient(ctx, fixture.stage, fixture.identity, "B")
+            fixture.events.clear()
+            with self.assertRaises(DockerBackendError):
+                ctx.start("start gated direct-rootless diagnostic", "true")
+            self.assertEqual(fixture.events, [])
+            self.assertEqual(fixture.guest_commands, [])

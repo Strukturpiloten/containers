@@ -328,10 +328,18 @@ class BoundedAdmissionTests(unittest.TestCase):
     def test_exact_allowset_schema_and_revision_cannot_be_replayed(self) -> None:
         path = Path(__file__).resolve().parents[1] / ".github/docker-userns-active-admission.json"
         document = json.loads(path.read_bytes())
-        self.assertEqual(document["schemaVersion"], 5)
-        self.assertEqual(document["revision"], "containers442-direct-diagnostic-v1")
+        self.assertEqual(document["schemaVersion"], 7)
+        self.assertEqual(document["revision"], "containers558-ordinary-direct-v1")
         self.assertEqual(qualification.admission_document(path.read_bytes()), document)
-        self.assertEqual(document["maintainedContext"]["image"], "docker-29-conformance-rootless")
+        self.assertEqual(
+            document["maintainedContext"]["images"],
+            [
+                "docker-29-conformance-rootless",
+                "docker-29-8-1-conformance-rootless",
+                "docker-debian-11-conformance-rootless",
+            ],
+        )
+        self.assertEqual(document["context"]["image"], "docker-29-conformance-rootless")
         self.assertEqual(document["maintainedContext"]["validationProfiles"], ["full", PROFILE])
         for values in (
             ["full"],
@@ -348,8 +356,10 @@ class BoundedAdmissionTests(unittest.TestCase):
         for key, value in (
             ("schemaVersion", 2),
             ("schemaVersion", 4),
+            ("schemaVersion", 6),
             ("schemaVersion", True),
             ("revision", "containers527-maintained-native-v1"),
+            ("revision", "containers553-exact-conformance-images-v1"),
             ("revision", "unknown-revision"),
             ("unknownField", "unrecognized"),
         ):
@@ -487,3 +497,25 @@ class BoundedAdmissionTests(unittest.TestCase):
             self.assertEqual(result["qualification"], "none")
             self.assertEqual(result["status"], "failed")
             self.assertEqual(ctx.probe_calls, 0)
+
+
+class PreviousAdmissionReplayTests(unittest.TestCase):
+    def test_previous_schema_and_revision_refuse_both_python_and_fixed_root_before_stage(self) -> None:
+        raw = (Path(__file__).resolve().parents[1] / ".github/docker-userns-active-admission.json").read_bytes()
+        fixture = root_tests.MaintainedBootstrapContract()
+        for fault in (
+            {"schemaVersion": 6},
+            {"revision": "containers553-exact-conformance-images-v1"},
+            {"schemaVersion": 6, "revision": "containers553-exact-conformance-images-v1"},
+        ):
+            document = json.loads(raw) | fault
+            with self.subTest(fault=fault), self.assertRaises(qualification.QualificationError):
+                qualification.admission_document(json.dumps(document).encode())
+            proof = root_tests.SyntheticProof(admission_raw=json.dumps(document).encode())
+            proof.context = workflow_context(
+                purpose="maintained-prerequisite", candidate=proof.candidate, profile=PROFILE
+            )
+            proof.context["admissionSha256"] = root_tests.active.digest(proof.files[root_tests.producer.ADMISSION])
+            with self.subTest(root_fault=fault):
+                _literal, mkdir = fixture.root(proof, fixture.event(proof.context))
+                mkdir.assert_not_called()

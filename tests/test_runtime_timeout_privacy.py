@@ -233,7 +233,7 @@ class TimeoutProviderPrivacy(unittest.TestCase):
             output = Path(directory) / "evidence.json"
             args = argparse.Namespace(
                 metadata=None,
-                image_name="docker-29-rootless",
+                image_name="docker-29-rootful",
                 arch="amd64",
                 evidence=str(output),
                 sudo=False,
@@ -268,7 +268,7 @@ class TimeoutProviderPrivacy(unittest.TestCase):
             output = Path(directory) / "evidence.json"
             args = argparse.Namespace(
                 metadata=None,
-                image_name="docker-29-rootless",
+                image_name="docker-29-rootful",
                 arch="amd64",
                 evidence=str(output),
                 sudo=False,
@@ -333,6 +333,132 @@ class TimeoutProviderPrivacy(unittest.TestCase):
         ):
             budget._measure()
         self.assertNotIn("provider-sentinel", "".join(traceback.format_exception(caught.exception)))
+
+
+class AdmittedDirectTimeoutPrivacy(unittest.TestCase):
+    def test_actual_direct_admission_redacts_completed_and_failed_native_work_without_mutating_owned_records(
+        self,
+    ) -> None:
+        for fault in (None, "work", "cleanup", "late-write"):
+            with self.subTest(fault=fault):
+                self._case(fault)
+
+    def _case(self, fault: str | None) -> None:
+        from scripts.docker_userns_qualification import deadline_seconds  # noqa: PLC0415
+        from tests.test_evidence_gate import ordinary_direct_runtime  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory() as directory:
+            expected = ordinary_direct_runtime()
+            cutoff, clock = 10_000_000_000_000_001, [9_999_800_000_000_001]
+            backend = DockerBackend(Path(directory), ())
+            backend._gnu_timeout_provider = (PRIVATE_PATH, "9.7", "prefixed")
+            backend.deadline_ns, backend.deadline = cutoff, deadline_seconds(cutoff)
+            client = SimpleNamespace(
+                evidence=expected["scopedProfile"], dispose_stage=MagicMock(return_value=expected["stageDisposal"])
+            )
+            backend.scoped_profile = client
+            ctx = SimpleNamespace(
+                backend=backend,
+                checks=[{"name": "native observation", "status": "passed", "detail": [PRIVATE_PATH]}],
+                observations=[],
+                bind_guest_profile=MagicMock(),
+                prepare=MagicMock(return_value=expected["host"]["outerRuntime"]),
+                load_archive=MagicMock(return_value=expected["imageIdentity"]),
+                cleanup=MagicMock(),
+            )
+            backend.prepare_scoped_profile = MagicMock()
+            if fault == "cleanup":
+                ctx.cleanup.side_effect = ProbeError(f"cleanup {PRIVATE_PATH!a}: unavailable")
+            output = Path(directory) / "evidence.json"
+            args = argparse.Namespace(
+                metadata=None,
+                image_name="docker-20.10-rootless",
+                arch="amd64",
+                evidence=str(output),
+                sudo=False,
+                no_sudo=True,
+                archive="source.tar",
+                image_ref=None,
+                timeout=5,
+                allow_privileged=True,
+                skip_nested=False,
+                outer_engine="profile",
+                active_userns_stage="/run/containers-userns-active." + "f" * 32,
+                active_userns_deadline_ns=cutoff,
+            )
+            bodies = []
+            opened = self._capture_output(output, bodies, clock, cutoff, late=fault == "late-write")
+            original_check = backend.check_deadline
+
+            def check() -> None:
+                try:
+                    original_check()
+                except DockerBackendError:
+                    message = f"late completion {PRIVATE_PATH!r}: original deadline exhausted"
+                    raise DockerBackendError(message) from None
+
+            work_error = ProbeError(f"native failure {PRIVATE_PATH!r}: Permission denied") if fault == "work" else None
+            with (
+                patch.dict(os.environ, {"GITHUB_RUN_ID": "1", "GITHUB_RUN_ATTEMPT": "2", "GITHUB_JOB": "smoke-build"}),
+                patch("time.monotonic_ns", side_effect=lambda: clock[0]),
+                patch("time.monotonic", side_effect=lambda: clock[0] / 1_000_000_000),
+                patch.object(Path, "open", opened),
+                patch.object(runtime_tests, "RuntimeContext", return_value=ctx),
+                patch(
+                    "scripts.docker_userns_active_bootstrap_bundle.context",
+                    return_value=expected["scopedProfile"]["workflowContext"],
+                ),
+                patch.object(runtime_tests, "_docker", side_effect=work_error),
+                patch.object(backend, "check_deadline", side_effect=check),
+            ):
+                result = runtime_tests.run(args)
+            self.assertEqual(ctx.runtime_phase, "ordinary-direct")
+            self.assertEqual(ctx.runtime_deadline_ns, 10_000_000_000_000_001)
+            backend.prepare_scoped_profile.assert_called_once_with(
+                ctx, args.active_userns_stage, expected["imageIdentity"]
+            )
+            self.assertEqual(result["status"], "passed" if fault is None else "failed")
+            self.assertEqual(result["qualification"], "complete" if fault is None else "none")
+            self.assertEqual(ctx.checks[0]["detail"], [PRIVATE_PATH])
+            self.assertEqual(json.loads(output.read_text()), result)
+            self.assertTrue(bodies)
+            for body in bodies:
+                self.assertNotIn("provider-sentinel", json.dumps(body))
+                self.assertEqual(body["checks"][0]["detail"], [REDACTED])
+            if fault == "late-write":
+                self.assertEqual(
+                    [(body["status"], body["qualification"]) for body in bodies],
+                    [("passed", "complete"), ("failed", "none")],
+                )
+                self.assertEqual(result["cleanupError"], f"late completion {REDACTED}: original deadline exhausted")
+            elif fault == "work":
+                self.assertEqual(result["error"], f"ProbeError: native failure {REDACTED}: Permission denied")
+            elif fault == "cleanup":
+                self.assertEqual(result["cleanupError"], f"ProbeError: cleanup {REDACTED}: unavailable")
+
+    @staticmethod
+    def _capture_output(output: Path, bodies: list, clock: list[int], cutoff: int, *, late: bool) -> object:
+        original = Path.open
+
+        def opened(path: Path, *args: object, **kwargs: object) -> object:
+            handle = original(path, *args, **kwargs)
+            if path != output or args[:1] != ("wb",):
+                return handle
+            proxy = MagicMock(wraps=handle)
+            proxy.__enter__.return_value = proxy
+            proxy.__exit__.side_effect = handle.__exit__
+
+            def write(body: bytes) -> int:
+                bodies.append(json.loads(body))
+                count = handle.write(body)
+                if late:
+                    clock[0] = cutoff
+                return count
+
+            proxy.write.side_effect = write
+            return proxy
+
+        return opened
 
 
 if __name__ == "__main__":

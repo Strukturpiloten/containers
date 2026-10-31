@@ -6,6 +6,55 @@ distribution images, for native AMD64 and ARM64. This declaration is not native
 qualification or evidence that an image has been published. The existing direct
 launch images retain their separate contract.
 
+
+## Exact Engine 29.8.1 consumer fixture
+
+`docker-29-8-1-conformance-rootless:v29.8.1` is an additional exact-version
+consumer compatibility fixture. The maintained `docker-29-conformance-rootless`
+continues to use Engine 29.9.2; its earlier evidence is not relabelled. Both
+metadata files reuse the same guest-systemd recipe, two declared architectures,
+source/custody admission, resource assertions, deadlines and cleanup.
+
+The historical fixture reads only `29.8.1/payload.yaml`. Its Engine and rootless
+archive SHA-256s, component versions and source IDs come from repository commit
+`0b136a13a8bb612d91960ae5d07e72f449c89ec1`; its payload-build Alpine base uses
+the current reviewed 3.24 digest. The exact target is separately Renovate-owned
+and fixed at 29.8.1 with manual approval; it is outside rolling upstream-line
+version discovery. Base digest refreshes retain their existing unique owners
+and groups and require manual review for this fixture. No checksum is inferred
+from a version label, and no historical runtime receipt qualifies the new image.
+
+Scoped-owner policy schema 6 lists these two exact ordinary fixture names.
+The historical fixture is allowed only under the existing ordinary/publication
+caller tuples with validation profile `full`; experimental, rootless diagnostic,
+and direct two-row selectors remain unchanged. Missing or ambiguous selected
+image metadata is refused rather than defaulting to the historical fixture.
+The existing binding, source proof and receipt formats are unchanged. Final
+source/closure readmission and actual two-architecture native qualification are
+still required. Source, local builds and generated catalogue entries do not
+establish registry availability or expand DockerLens's four supported profiles.
+
+
+## Exact Debian 11 packaged fixture
+
+`docker-debian-11-conformance-rootless:v1.0.0` preserves the archived signed
+`docker.io` revision `20.10.5+dfsg1-1+deb11u2`, reporting Engine
+`20.10.5+dfsg1`. It uses its own packaged recipe and pinned Debian 11 base;
+it does not reuse an upstream static payload or roll with newer packages.
+Fresh package/version/provenance checks surround systemd and compiler setup.
+The packaged executable paths are supplied to the guest user service without
+copying Docker binaries. The existing legacy outer OOM score normalization to
+zero applies to this exact fixture, preserving inner defaults and strict
+memory, zero-swap, OOM, PID and shutdown assertions.
+
+Exact 29.8.1 and Debian 11 fixtures are full-only maintained attempts with
+separate provenance. Both architectures remain unqualified until clean-control,
+enforcement, whole-backend cleanup and source-stage disposal succeed on the
+final source. Debian 11 is beyond LTS and remains an isolated compatibility
+fixture. Its metadata is the manual owner of the fixed package revision;
+Renovate uniquely extracts its base image and groups it with the Debian 11
+direct Docker/Podman bases, with coordinated manual review and automerge disabled.
+
 Guest PID 1 runs systemd as UID 0. An actual UID 1000 user manager starts the
 rootless Docker service, which requests the systemd cgroup driver. Guest-only
 linger state and `Delegate=yes` provide the intended user-service hierarchy.

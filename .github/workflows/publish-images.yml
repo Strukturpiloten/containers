@@ -62,9 +62,9 @@ permissions: {}
 
 env:
   ACTIONLINT_VERSION: 1.7.12
-  PYTHON_VERSION: "3.14"
+  PYTHON_VERSION: "3.14.10"
   SYFT_VERSION: v1.55.0
-  UV_VERSION: 0.13.5
+  UV_VERSION: 0.13.6
 
 jobs:
   plan:
@@ -183,7 +183,7 @@ jobs:
 
       - name: Upload build plan
         if: always() && steps.outputs.outcome == 'success'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: container-build-plan
           path: |

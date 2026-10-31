@@ -18,7 +18,9 @@ from scripts.docker_userns_active_bootstrap_bundle import context
 from scripts.docker_userns_qualification import (
     PREREQUISITE_SCHEMA,
     SCOPED_RECEIPT_KEYS,
+    MaintainedDirectBinding,
     QualificationError,
+    admitted_deadline_ns,
     context_digest,
     native_binding,
     validate_stage_disposal,
@@ -55,7 +57,7 @@ class ActiveClient:
             "owner": backend.owner,
             "runtime_slice": backend.slice,
             "slice_identity": backend.slice_identity,
-            "deadline_ns": int(ctx.runtime_deadline * 1_000_000_000),
+            "deadline_ns": admitted_deadline_ns(ctx.runtime_deadline_ns),
             "purpose": self.provenance["purpose"],
             "admission_sha256": self.provenance["admissionSha256"],
             "workflow_context_sha256": context_digest(self.provenance),
@@ -246,6 +248,7 @@ class ActiveClient:
         """Finish the existing root stage before maintained pair publication."""
         if not (
             (self.binding.purpose == "maintained-prerequisite" and self.binding.phase == "enforcement")
+            or (type(self.binding) is MaintainedDirectBinding and self.binding.phase == "ordinary-direct")
             or (type(self.binding) is direct.DirectDiagnosticBinding and self.binding.phase == "direct-profiled")
         ):
             reason = "maintained final phase is required for stage disposal"

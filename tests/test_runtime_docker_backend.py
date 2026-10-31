@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import io
 import json
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -35,6 +36,10 @@ class PrivateDockerControls(unittest.TestCase):
     def test_systemd_profile_binding_is_closed_and_precedes_native_work(self) -> None:
         cases = (
             ("docker-29-conformance-rootless", "rootless", "privileged", True),
+            ("docker-29-8-1-conformance-rootless", "rootless", "privileged", True),
+            ("docker-29-8-1-conformance-rootless", "rootful", "privileged", False),
+            ("docker-29-8-1-conformance-rootless", "rootless", "unprivileged", False),
+            ("docker-29-8-2-conformance-rootless", "rootless", "privileged", False),
             ("docker-29-rootless", "rootless", "privileged", False),
             ("docker-29-conformance-rootless", "rootful", "privileged", False),
             ("docker-29-conformance-rootless", "rootless", "unprivileged", False),
@@ -379,7 +384,7 @@ class PrivateDockerControls(unittest.TestCase):
                     "other-owner": (backend, "owner", "c" * 32),
                     "other-slice": (backend, "slice_identity", "2:3"),
                     "other-architecture": (ctx, "architecture", "arm64"),
-                    "other-deadline": (ctx, "runtime_deadline", ctx.runtime_deadline + 1),
+                    "other-deadline": (ctx, "runtime_deadline_ns", ctx.runtime_deadline_ns + 1),
                     "retained": (profile, "evidence", {**profile.evidence, "retained": True}),
                     "prepared-digest": (gate, "evidence", {**gate.evidence, "bindingSha256": "0" * 64}),
                 }
@@ -547,20 +552,27 @@ class PrivateDockerControls(unittest.TestCase):
         ctx.podman.return_value = json.dumps(backend.slice) + "|123"
         root = "0::/" + backend.slice + "/docker-" + identifier + ".scope"
         with patch.object(backend, "_slice_identity", return_value="1:2"):
-            for suffix in ("", "/init.scope", "/container/init.scope"):
-                with self.subTest(suffix=suffix), patch.object(backend, "_call", return_value=root + suffix):
-                    backend.admit_container(ctx, identifier)
-            for suffix in ("-other/init.scope", "/../sibling", "/./init.scope", "//init.scope"):
-                with (
-                    self.subTest(suffix=suffix),
-                    patch.object(backend, "_call", return_value=root + suffix),
-                    self.assertRaises(DockerBackendError),
-                ):
-                    backend.admit_container(ctx, identifier)
+            for name in ("docker-29-conformance-rootless", "docker-29-8-1-conformance-rootless"):
+                ctx.name = name
+                for suffix in ("", "/init.scope", "/container/init.scope"):
+                    with (
+                        self.subTest(name=name, suffix=suffix),
+                        patch.object(backend, "_call", return_value=root + suffix),
+                    ):
+                        backend.admit_container(ctx, identifier)
+                for suffix in ("-other/init.scope", "/../sibling", "/./init.scope", "//init.scope"):
+                    with (
+                        self.subTest(name=name, suffix=suffix),
+                        patch.object(backend, "_call", return_value=root + suffix),
+                        self.assertRaises(DockerBackendError),
+                    ):
+                        backend.admit_container(ctx, identifier)
             for name, launcher, recorded in (
                 ("docker-29-rootless", "systemd", "systemd"),
                 ("docker-29-conformance-rootless", "direct", "systemd"),
                 ("docker-29-conformance-rootless", "systemd", "direct"),
+                ("docker-29-8-1-conformance-rootless", "direct", "systemd"),
+                ("docker-29-8-1-conformance-rootless", "systemd", "direct"),
             ):
                 ctx.name, ctx.declared_launcher, ctx.container_launchers[identifier] = name, launcher, recorded
                 with (
@@ -837,7 +849,7 @@ class SelectionIntegrationControls(unittest.TestCase):
             output = Path(directory) / "evidence.json"
             args = argparse.Namespace(
                 metadata=None,
-                image_name="docker-29-rootless",
+                image_name="docker-29-rootful",
                 arch="amd64",
                 evidence=str(output),
                 sudo=False,
@@ -903,7 +915,7 @@ class SelectionIntegrationControls(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             args = argparse.Namespace(
                 metadata=None,
-                image_name="docker-29-rootless",
+                image_name="docker-29-rootful",
                 arch="amd64",
                 evidence=str(Path(directory) / "evidence.json"),
                 sudo=False,
@@ -943,7 +955,7 @@ class SelectionIntegrationControls(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             args = argparse.Namespace(
                 metadata=None,
-                image_name="docker-29-rootless",
+                image_name="docker-29-rootful",
                 arch="amd64",
                 evidence=str(Path(directory) / "evidence.json"),
                 sudo=False,
@@ -998,6 +1010,11 @@ class SelectionIntegrationControls(unittest.TestCase):
                     patch("scripts.runtime_tests.RuntimeContext", return_value=ctx) as factory,
                     patch("scripts.runtime_tests._docker"),
                 ):
+                    if image == "docker-29-rootless":
+                        with self.assertRaisesRegex(runtime_tests.ProbeError, "exact full scoped prerequisite"):
+                            runtime_tests.run(args)
+                        factory.assert_not_called()
+                        continue
                     result = runtime_tests.run(args)
                 self.assertEqual(factory.call_args.kwargs["outer_engine"], "docker")
                 self.assertEqual(result["status"], "passed")
@@ -1019,3 +1036,161 @@ class SelectionIntegrationControls(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OrdinaryDirectCompositionControls(unittest.TestCase):
+    def fixture(self) -> tuple[RuntimeContext, object, list]:
+        from dataclasses import asdict  # noqa: PLC0415
+
+        from scripts import docker_userns_qualification as qualification  # noqa: PLC0415
+        from scripts.docker_userns_active_client import ActiveClient  # noqa: PLC0415
+        from tests.test_docker_userns_qualification import binding  # noqa: PLC0415
+
+        ctx = RuntimeContext(
+            image="docker-20.10-rootless", architecture="amd64", timeout=45, use_sudo=False, outer_engine="docker"
+        )
+        ctx.bind_guest_profile({"mode": "rootless", "outerPrivilege": "privileged", "launcher": "direct"})
+        backend = ctx.backend
+        backend.ready, backend.network_id, backend.slice_identity = True, "a" * 64, "1:2"
+        backend._gnu_timeout_provider = (FAKE_GNU_TIMEOUT, "9.7", "prefixed")
+        ctx.runtime_phase, ctx.runtime_deadline_ns = "ordinary-direct", 10_000_000_000_000_001
+        backend.deadline_ns = ctx.runtime_deadline_ns
+        backend.scoped_image_ref = ctx.image_ref
+        client = ActiveClient.__new__(ActiveClient)
+        client.ctx, client.stage, client.name = ctx, Path("/run/containers-userns-active." + "f" * 32), "b" * 32
+        client.provenance, client.failures = {}, []
+        backend.scoped_stage = client.stage
+        client.binding = qualification.MaintainedDirectBinding(
+            **(
+                asdict(binding())
+                | {
+                    "image": ctx.name,
+                    "phase": "ordinary-direct",
+                    "purpose": "maintained-prerequisite",
+                    "owner": backend.owner,
+                    "runtime_slice": backend.slice,
+                    "deadline_ns": ctx.runtime_deadline_ns,
+                }
+            )
+        )
+        client.evidence = {
+            "state": "loaded",
+            "lease": client.name,
+            "binding": asdict(client.binding),
+            "bindingSha256": client.binding.digest(),
+            "workflowContext": {},
+            "retained": False,
+        }
+        events = []
+
+        def rpc(operation: str, _request: dict) -> dict:
+            events.append(operation)
+            return client.evidence | {"state": operation, "profileName": "owned-profile"}
+
+        client.rpc = rpc
+        backend.scoped_profile = client
+        ctx._prefix = lambda _timeout: ["docker"]
+        ctx.command = MagicMock()
+        self.addCleanup(shutil.rmtree, ctx.directory)
+        return ctx, client, events
+
+    def test_raw_overrides_refuse_before_intent_and_only_unwrapped_daemon_consumes_one_lease(self) -> None:
+        with tempfile.TemporaryDirectory():
+            ctx, _client, events = self.fixture()
+            for options in (
+                ("--network", "foreign"),
+                ("--label=foreign",),
+                ("--cgroup-parent=foreign",),
+                ("--security-opt", "apparmor=foreign"),
+                ("--entrypoint=wrapper",),
+                ("--user", "0"),
+                ("-u0",),
+                ("-u1000",),
+                ("-uroot",),
+                ("-u=0",),
+                ("--cgroupns", "host"),
+            ):
+                with self.subTest(options=options), self.assertRaises(DockerBackendError):
+                    ctx.start("rejected daemon", options=options)
+                self.assertEqual(events, [])
+                self.assertEqual(ctx.containers, [])
+            identifier = "c" * 64
+            commands = []
+
+            def command(_name: str, argv: list, **_kwargs: object) -> str:
+                commands.append(argv)
+                self.assertEqual(events, ["create-intent"] if "--detach" in argv else [])
+                Path(argv[argv.index("--cidfile") + 1]).write_text(identifier)
+                ctx.checks.append({"status": "passed", "exitCode": 0})
+                return identifier
+
+            ctx.command.side_effect = command
+            with patch.object(ctx.backend, "admit_container") as admit:
+                ctx.run("unprofiled provenance", "sh", "-c", "docker --version")
+                self.assertEqual(events, [])
+                ctx.start("ordinary daemon", options=("--privileged",))
+                self.assertEqual(events, ["create-intent"])
+                self.assertEqual(ctx.backend.ordinary_direct_guest, identifier)
+                admit.assert_called_with(ctx, identifier)
+            daemon = commands[-1]
+            self.assertEqual(daemon[-1], ctx.image_ref)
+            self.assertEqual(daemon.count("apparmor=owned-profile"), 1)
+            self.assertNotIn("apparmor=owned-profile", commands[0])
+            with self.assertRaisesRegex(DockerBackendError, "reused"):
+                ctx.start("second daemon")
+            self.assertEqual(events, ["create-intent"])
+
+    def test_exact_cutoff_reaches_backend_and_watchdog_without_new_window(self) -> None:
+        from scripts import docker_userns_qualification as qualification  # noqa: PLC0415
+
+        ceiling = 10_000_000_000_000_001
+        for now in (9_999_800_000_000_001, 9_999_900_000_000_001):
+            backend = admitted_backend(Path("/unused-owned-runtime"), ("sudo", "-n"))
+            ctx = MagicMock()
+            ctx.runtime_deadline_ns = ceiling
+            ctx.runtime_deadline = qualification.deadline_seconds(ceiling)
+            with (
+                patch("time.monotonic_ns", return_value=now),
+                patch.object(backend, "_tool", return_value="/tool"),
+                patch(
+                    "scripts.runtime_docker_backend.qualify_gnu_timeout",
+                    return_value=(FAKE_GNU_TIMEOUT, "9.7", "prefixed"),
+                ),
+                patch.object(backend, "_unused_slice", side_effect=RuntimeError("stop before services")),
+                self.assertRaisesRegex(RuntimeError, "stop before services"),
+            ):
+                backend.prepare(ctx)
+            self.assertEqual(backend.deadline_ns, 10_000_000_000_000_001)
+            self.assertEqual(backend._expiry_deadline_ns(), 9_999_940_000_000_001)
+        with patch("time.monotonic_ns", return_value=ceiling), self.assertRaises(DockerBackendError):
+            backend.check_deadline()
+
+
+class OrdinaryDirectInterruptedCreateControls(unittest.TestCase):
+    fixture = OrdinaryDirectCompositionControls.fixture
+
+    def test_pending_name_and_optional_cid_survive_failure_without_bind_or_retry(self) -> None:
+        for recorded in (False, True):
+            with self.subTest(cidfile=recorded):
+                ctx, _client, events = self.fixture()
+                identifier = "c" * 64
+
+                def interrupted(
+                    _name: str,
+                    argv: list,
+                    *,
+                    recorded: bool = recorded,
+                    identifier: str = identifier,
+                    **_kwargs: object,
+                ) -> str:
+                    if recorded:
+                        Path(argv[argv.index("--cidfile") + 1]).write_text(identifier)
+                    raise KeyboardInterrupt
+
+                ctx.command.side_effect = interrupted
+                with patch.object(ctx.backend, "admit_container") as bind, self.assertRaises(KeyboardInterrupt):
+                    ctx.start("ordinary daemon", options=("--privileged",))
+                self.assertEqual(events, ["create-intent"])
+                self.assertEqual(ctx.backend.ordinary_direct_guest, identifier if recorded else ctx.containers[0])
+                self.assertEqual(ctx.run_containers, {ctx.backend.ordinary_direct_guest})
+                bind.assert_not_called()

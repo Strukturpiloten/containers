@@ -245,11 +245,11 @@ class RunnerSecurityWorkflowTests(unittest.TestCase):
         self.assertEqual(len(managers), 1)
         manager = managers[0]
         pattern = manager["matchStrings"][0].replace("(?<", "(?P<")
-        pin = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+        pin = "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9"
         expected_pin = {
             "depName": "actions/upload-artifact",
             "currentDigest": pin.split("@", 1)[1],
-            "currentValue": "v7.0.1",
+            "currentValue": "v7.0.2",
         }
         previous_consumers = {
             ("validate", "Retain runner security observation"),
@@ -269,7 +269,7 @@ class RunnerSecurityWorkflowTests(unittest.TestCase):
                 for location, (reference, annotated_line) in observed.items():
                     with self.subTest(location=location):
                         self.assertEqual(reference, pin)
-                        self.assertEqual(annotated_line, "uses: " + pin + " # v7.0.1")
+                        self.assertEqual(annotated_line, "uses: " + pin + " # v7.0.2")
                 extracted = [
                     match.groupdict()
                     for match in re.finditer(pattern, source)

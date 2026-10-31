@@ -23,7 +23,10 @@ from scripts import docker_userns_active as diagnostic
 from scripts import docker_userns_bootstrap_bundle as git
 from scripts import docker_userns_policy_source as source
 from scripts.docker_userns_qualification import (
+    FULL_ONLY_IMAGES,
     MAINTAINED_CALLERS,
+    MAINTAINED_DIRECT_IMAGES,
+    MAINTAINED_IMAGES,
     NATIVE_JOBS,
     PREREQUISITE_SCHEMA,
     QualificationError,
@@ -183,7 +186,18 @@ def context(
     require(type(event) is dict)
     phase("producer-choice")
     caller = caller_context(event, identity)
-    image = "docker-29-conformance-rootless"
+    image = environment.get("IMAGE_NAME", "docker-29-conformance-rootless")
+    require(
+        caller["purpose"] == direct.PURPOSE
+        or (
+            caller["purpose"] == "maintained-prerequisite"
+            and "IMAGE_NAME" in environment
+            and architecture in MAINTAINED_DIRECT_IMAGES.get(image, ("amd64", "arm64"))
+            and image in (*MAINTAINED_IMAGES, *MAINTAINED_DIRECT_IMAGES)
+            and (image not in FULL_ONLY_IMAGES or caller["validationProfile"] == "full")
+        )
+        or (caller["purpose"] != "maintained-prerequisite" and image == "docker-29-conformance-rootless")
+    )
     extra = {}
     if caller["purpose"] == direct.PURPOSE:
         image = environment.get("IMAGE_NAME", "")

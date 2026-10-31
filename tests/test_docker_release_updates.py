@@ -84,6 +84,8 @@ class DockerReleaseUpdatesTests(unittest.TestCase):
             ),
             Path("images/docker/upstream/20.10/payload.yaml"),
             Path("images/docker/docker-20.10-rootful/container.yaml"),
+            Path("images/docker/conformance/29.8.1/payload.yaml"),
+            Path("images/docker/docker-29-8-1-conformance-rootless/container.yaml"),
         ]
         for path in paths:
             (self.root / path).parent.mkdir(parents=True, exist_ok=True)
@@ -112,6 +114,52 @@ class DockerReleaseUpdatesTests(unittest.TestCase):
             self.assertEqual(metadata["version"], f"v{NEW_VERSION}")
             self.assertIn(f"Docker Engine {NEW_VERSION}", metadata["description"])
             self.assertEqual(metadata["lifecycle"]["admission"], "isolated-test")
+
+    def test_upstream29_apply_and_verify_leave_exact_2981_fixture_byte_identical(self) -> None:
+        historical = self.root / "images/docker/docker-29-8-1-conformance-rootless/container.yaml"
+        payload = self.root / "images/docker/conformance/29.8.1/payload.yaml"
+        original = (historical.read_bytes(), payload.read_bytes())
+        self.assertNotIn(historical, payload_consumers(self.root, "29"))
+        changed = apply_release("29", NEW_VERSION, self.evidence_dir, self.root)
+        verify_release("29", NEW_VERSION, self.evidence_dir, self.root)
+        self.assertEqual(len(changed), 4)
+        self.assertEqual((historical.read_bytes(), payload.read_bytes()), original)
+        for mode in ("rootful", "rootless"):
+            current = yaml.safe_load((self.root / f"images/docker/docker-29-{mode}/container.yaml").read_text())
+            self.assertEqual(current["version"], f"v{NEW_VERSION}")
+        conformance = yaml.safe_load(
+            (self.root / "images/docker/docker-29-conformance-rootless/container.yaml").read_text()
+        )
+        self.assertEqual(conformance["version"], f"v{NEW_VERSION}")
+
+    def test_historical_separation_is_exact_and_rejects_wrong_or_cross_line_payloads(self) -> None:
+        path = self.root / "images/docker/docker-29-8-1-conformance-rootless/container.yaml"
+        valid = yaml.safe_load(path.read_text())
+        for field, value in (
+            (("name",), "docker-29-conformance-rootless"),
+            (("version",), "v29.8.2"),
+            (("image",), "ghcr.io/strukturpiloten/docker-29-conformance-rootless"),
+            (("build", "payload"), "images/docker/upstream/29/payload.yaml"),
+            (("build", "payload"), "images/docker/upstream/28/payload.yaml"),
+            (("tests", "docker", "launcher"), "direct"),
+        ):
+            candidate = json.loads(json.dumps(valid))
+            node = candidate
+            for key in field[:-1]:
+                node = node[key]
+            node[field[-1]] = value
+            path.write_text(yaml.safe_dump(candidate))
+            with self.subTest(field=field, value=value), self.assertRaisesRegex(DockerReleaseError, "ownership"):
+                payload_consumers(self.root, "29")
+        path.write_text(yaml.safe_dump(valid))
+        unknown = self.root / "images/docker/docker-29-8-2-conformance-rootless/container.yaml"
+        unknown.parent.mkdir()
+        candidate = json.loads(json.dumps(valid))
+        candidate["name"] = unknown.parent.name
+        candidate["image"] = f"ghcr.io/strukturpiloten/{unknown.parent.name}"
+        unknown.write_text(yaml.safe_dump(candidate))
+        with self.assertRaisesRegex(DockerReleaseError, "wrong canonical payload"):
+            payload_consumers(self.root, "29")
 
     def test_all_canonical_consumers_are_discovered_without_editing_historical_lanes(self) -> None:
         source = self.root / "images/docker/docker-29-conformance-rootless/container.yaml"

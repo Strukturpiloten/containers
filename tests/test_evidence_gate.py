@@ -517,3 +517,158 @@ class AuthorityImportOrderTests(unittest.TestCase):
                     )
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(result.stdout.strip(), "ok")
+
+
+def ordinary_direct_runtime(image: str = "docker-20.10-rootless", architecture: str = "amd64") -> dict:
+    """Use independent closed root facts, retaining the flat ordinary workload shape."""
+    from dataclasses import asdict  # noqa: PLC0415
+
+    from scripts import docker_userns_qualification as qualification  # noqa: PLC0415
+
+    pair = maintained_runtime(architecture)
+    record = copy.deepcopy(pair["phases"][0])
+    record.update({key: copy.deepcopy(pair[key]) for key in ("host", "runId", "runAttempt", "producingJob", "checks")})
+    record.update(image=image, profile="docker", phase="ordinary-direct", deadlineNs=10_000_000_000_000_001)
+    for key in ("oomAccountingRequired", "oomAccountingStatus"):
+        record.pop(key, None)
+    scoped = record["scopedProfile"]
+    context = scoped["workflowContext"]
+    context["image"] = image
+    binding = qualification.MaintainedDirectBinding(
+        **(
+            scoped["binding"]
+            | {
+                "image": image,
+                "phase": "ordinary-direct",
+                "deadline_ns": 10_000_000_000_000_001,
+                "workflow_context_sha256": qualification.context_digest(context),
+            }
+        )
+    )
+    scoped.update(binding=asdict(binding), bindingSha256=binding.digest())
+    record["stageDisposal"] = stage_disposal(scoped)
+    return record
+
+
+class OrdinaryDirectAuthorityTests(unittest.TestCase):
+    def test_flat_ordinary_receipt_requires_complete_cleanup_disposal_and_ci_backend(self) -> None:
+        configuration = {"mode": "rootless", "launcher": "direct", "outerPrivilege": "privileged"}
+        record = ordinary_direct_runtime()
+        require_ordinary_runtime_authority(record, "docker", configuration)
+        faults = (
+            ("qualification", "none"),
+            ("cleanupVerified", False),
+            ("stageDisposal", None),
+            ("phase", "direct-profiled"),
+            ("prerequisiteAuthority", "experimental-candidate-only"),
+            ("focusedRuntime", "witness-diagnostic"),
+            ("oomAccountingMode", "diagnostic"),
+            ("host", {}),
+            ("phases", [{"phase": "enforcement"}]),
+            ("checks", [{"name": "nested Docker runtime", "status": "skipped", "reason": "disabled by CLI"}]),
+        )
+        for key, value in faults:
+            with self.subTest(key=key), self.assertRaises(EvidenceError):
+                require_ordinary_runtime_authority(record | {key: value}, "docker", configuration)
+        for path in ("binding", "profileObservation", "workflowContext"):
+            changed = copy.deepcopy(record)
+            changed["scopedProfile"][path] = {}
+            with self.subTest(path=path), self.assertRaises(EvidenceError):
+                require_ordinary_runtime_authority(changed, "docker", configuration)
+        with self.assertRaises(EvidenceError):
+            require_ordinary_runtime_authority(record, "docker", {"mode": "rootful"})
+
+
+class OrdinaryDirectConsumerTests(unittest.TestCase):
+    def test_archive_release_and_catalogue_share_the_closed_direct_authority_guard(self) -> None:
+        from scripts.maintenance import catalogue  # noqa: PLC0415
+        from scripts.release_evidence import ReleaseEvidenceError, _require_complete  # noqa: PLC0415
+        from tests.test_maintenance import IMAGE  # noqa: PLC0415
+
+        configuration = {"mode": "rootless", "outerPrivilege": "privileged", "launcher": "direct"}
+        good = ordinary_direct_runtime()
+        identity = good["imageIdentity"]
+        metadata = copy.deepcopy(IMAGE) | {
+            "name": good["image"],
+            "image": "ghcr.io/strukturpiloten/" + good["image"],
+            "tests": {"docker": configuration},
+        }
+        policy = {"image": metadata["image"], "admission": "isolated-test", "requiredRuntimeProfile": "docker"}
+        scan = {
+            "image": metadata["image"],
+            "architecture": "amd64",
+            "admission": "isolated-test",
+            "decision": "passed",
+            "sourceRevision": "a" * 40,
+            "runId": "1",
+            "runAttempt": "2",
+            "candidateSource": identity,
+            "baselineStatus": "absent",
+            "baselineDigest": None,
+            "baselineSource": {"status": "absent"},
+            "scanner": {"version": "fixture"},
+            "database": {"version": "fixture"},
+        }
+        for complete in (True, False):
+            runtime = good if complete else good | {"qualification": "none"}
+            with (
+                self.subTest(complete=complete),
+                patch("scripts.evidence_gate.image_policy", return_value=policy),
+                patch("scripts.evidence_gate.archive_identity", return_value=identity),
+                patch("scripts.evidence_gate.container_engine._load_images", return_value=[metadata]),
+            ):
+                if complete:
+                    verify_architecture(
+                        name=metadata["name"],
+                        architecture="amd64",
+                        source_revision="a" * 40,
+                        version="1.0.0",
+                        run_id="1",
+                        execution_attempt=2,
+                        archive=Path("unused.tar"),
+                        runtime=runtime,
+                        scan=scan,
+                    )
+                else:
+                    with self.assertRaises(EvidenceError):
+                        verify_architecture(
+                            name=metadata["name"],
+                            architecture="amd64",
+                            source_revision="a" * 40,
+                            version="1.0.0",
+                            run_id="1",
+                            execution_attempt=2,
+                            archive=Path("unused.tar"),
+                            runtime=runtime,
+                            scan=scan,
+                        )
+            release_scan = scan | {
+                "candidateDigest": identity["manifestDigest"],
+                "candidateSource": identity | {"archiveSha256": "sha256:" + identity["archiveSha256"]},
+            }
+            args = {
+                "name": metadata["name"],
+                "image": metadata["image"],
+                "version": "1.0.0",
+                "source": "a" * 40,
+                "run_id": "1",
+                "execution_attempt": 2,
+                "architecture_digests": {"amd64": identity["manifestDigest"]},
+                "published": {"amd64": {"configDigest": identity["configDigest"]}},
+                "runtime": [runtime],
+                "scans": [release_scan],
+            }
+            with (
+                patch("scripts.release_evidence.image_policy", return_value=policy),
+                patch("scripts.release_evidence.container_engine._load_images", return_value=[metadata]),
+            ):
+                if complete:
+                    _require_complete(**args)
+                else:
+                    with self.assertRaises(ReleaseEvidenceError):
+                        _require_complete(**args)
+            row = catalogue([metadata], runtime_results={metadata["name"]: [runtime]})["images"][0]
+            self.assertEqual(
+                row["runtimeCoverage"]["amd64"]["docker"]["nativeAuthority"], "ordinary" if complete else "none"
+            )
+            self.assertEqual(row["registry"]["status"], "unknown")

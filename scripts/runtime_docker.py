@@ -23,7 +23,7 @@ from scripts.runtime_resource_budgets import (
 )
 
 MAX_HTTP_RESPONSE = 8192
-LEGACY_ROOTLESS_OOM_PROFILES = ("docker-debian-11-rootless",)
+LEGACY_ROOTLESS_OOM_PROFILES = ("docker-debian-11-rootless", "docker-debian-11-conformance-rootless")
 
 
 class DockerProbePhase(Enum):

@@ -4,6 +4,11 @@
     "config:recommended",
     "helpers:pinGitHubActionDigests"
   ],
+  "automerge": true,
+  "automergeType": "pr",
+  "automergeStrategy": "squash",
+  "platformAutomerge": true,
+  "ignoreUnstable": true,
   "baseBranchPatterns": [
     "$default"
   ],
@@ -301,6 +306,22 @@
       "depNameTemplate": "python",
       "datasourceTemplate": "python-version",
       "versioningTemplate": "python"
+    },
+    {
+      "customType": "regex",
+      "description": "Track the exact Docker 29.8.1 compatibility fixture version as a manually reviewed fixed target",
+      "managerFilePatterns": [
+        "/^images\\/docker\\/conformance\\/29\\.8\\.1\\/payload\\.yaml$/",
+        "/^images\\/docker\\/docker-29-8-1-conformance-rootless\\/container\\.yaml$/"
+      ],
+      "matchStrings": [
+        "(?:ENGINE_VERSION|version):\\s*v?(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "docker-29-8-1-compatibility",
+      "packageNameTemplate": "moby/moby",
+      "datasourceTemplate": "github-tags",
+      "extractVersionTemplate": "^docker-v(?<version>\\d+\\.\\d+\\.\\d+)$",
+      "versioningTemplate": "semver"
     }
   ],
   "github-actions": {
@@ -336,7 +357,7 @@
       "automerge": false
     },
     {
-      "description": "Review both Grype architecture release assets in one update",
+      "description": "Update both Grype architecture release assets together",
       "matchManagers": [
         "custom.regex"
       ],
@@ -346,8 +367,7 @@
       "matchPackageNames": [
         "anchore/grype"
       ],
-      "groupName": "Grype scanner archives",
-      "automerge": false
+      "groupName": "Grype scanner archives"
     },
     {
       "description": "Keep GitHub Actions pinned to immutable commits while allowing Renovate updates",
@@ -447,7 +467,8 @@
       "matchFileNames": [
         "/^images\\/podman\\/podman-(?:alpine|arch|centos|debian|fedora|opensuse|ubi|ubuntu)-.+\\/container\\.yaml$/",
         "/^images\\/docker\\/docker-(?:alpine|arch|debian|fedora|opensuse|ubuntu)(?:-.+)?-(?:rootful|rootless)\\/container\\.yaml$/",
-        "/^images\\/docker\\/docker-29-conformance-rootless\\/container\\.yaml$/"
+        "/^images\\/docker\\/docker-(?:29|29-8-1)-conformance-rootless\\/container\\.yaml$/",
+        "/^images\\/docker\\/docker-debian-11-conformance-rootless\\/container\\.yaml$/"
       ],
       "matchDatasources": [
         "docker"
@@ -654,16 +675,6 @@
       "versioning": "regex:^(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)-(?<compatibility>fpm-alpine)(?<build>\\d+)\\.(?<revision>\\d+)$"
     },
     {
-      "description": "PHP extension and Composer version updates require human review",
-      "matchPackageNames": [
-        "krakjoe/apcu",
-        "Imagick/imagick",
-        "phpredis/phpredis",
-        "composer/composer"
-      ],
-      "automerge": false
-    },
-    {
       "description": "Group compatible patch and digest updates for nextcloud-notifypush",
       "matchFileNames": [
         "/^images\\/(?:nextcloud|typo3)\\/nextcloud-notifypush\\/container\\.yaml$/"
@@ -766,7 +777,8 @@
       ],
       "matchFileNames": [
         "/^images\\/docker\\/upstream\\/.+\\/payload\\.yaml$/",
-        "/^images\\/docker\\/docker-\\d+(?:\\.\\d+)?-(?:rootful|rootless)\\/container\\.yaml$/"
+        "/^images\\/docker\\/docker-\\d+(?:\\.\\d+)?-(?:rootful|rootless)\\/container\\.yaml$/",
+        "/^images\\/docker\\/conformance\\/29\\.8\\.1\\/payload\\.yaml$/"
       ],
       "matchPackageNames": [
         "docker.io/library/alpine"
@@ -783,7 +795,8 @@
       ],
       "matchFileNames": [
         "/^images\\/docker\\/upstream\\/.+\\/payload\\.yaml$/",
-        "/^images\\/docker\\/docker-\\d+(?:\\.\\d+)?-(?:rootful|rootless)\\/container\\.yaml$/"
+        "/^images\\/docker\\/docker-\\d+(?:\\.\\d+)?-(?:rootful|rootless)\\/container\\.yaml$/",
+        "/^images\\/docker\\/conformance\\/29\\.8\\.1\\/payload\\.yaml$/"
       ],
       "matchUpdateTypes": [
         "digest"
@@ -863,7 +876,8 @@
       ],
       "matchCurrentValue": "/^11$/",
       "matchFileNames": [
-        "/^images\\/(?:docker\\/docker|podman\\/podman)-debian-11-(?:rootful|rootless)\\/container\\.yaml$/"
+        "/^images\\/(?:docker\\/docker|podman\\/podman)-debian-11-(?:rootful|rootless)\\/container\\.yaml$/",
+        "/^images\\/docker\\/docker-debian-11-conformance-rootless\\/container\\.yaml$/"
       ],
       "matchUpdateTypes": [
         "digest"
@@ -904,7 +918,7 @@
       "matchCurrentValue": "/^13$/",
       "matchFileNames": [
         "/^images\\/(?:docker\\/docker|podman\\/podman)-debian-13-(?:rootful|rootless)\\/container\\.yaml$/",
-        "/^images\\/docker\\/docker-29-conformance-rootless\\/container\\.yaml$/"
+        "/^images\\/docker\\/docker-(?:29|29-8-1)-conformance-rootless\\/container\\.yaml$/"
       ],
       "matchUpdateTypes": [
         "digest"
@@ -1052,7 +1066,7 @@
       "groupName": "Docker Ubuntu 26.04 distro base"
     },
     {
-      "description": "Coordinate reviewed Python runtime, project constraint and lockfile migrations",
+      "description": "Coordinate Python updates; adopt new stable release lines only at patch level 4 or later",
       "matchDatasources": [
         "python-version"
       ],
@@ -1060,6 +1074,38 @@
         "python"
       ],
       "groupName": "Python runtime",
+      "rangeStrategy": "bump",
+      "allowedVersions": "/^({{major}}\\.{{minor}}\\.\\d+|\\d+\\.\\d+\\.([4-9]|[1-9]\\d+))$/",
+      "recreateWhen": "always"
+    },
+    {
+      "description": "Keep the reviewed Docker 29.8.1 compatibility target fixed; any archive/component change requires coordinated manual integrity review",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDepNames": [
+        "docker-29-8-1-compatibility"
+      ],
+      "allowedVersions": "29.8.1",
+      "groupName": "Docker 29.8.1 compatibility fixture version",
+      "dependencyDashboardApproval": true,
+      "automerge": false
+    },
+    {
+      "description": "Require manual review for exact Docker 29.8.1 fixture input changes",
+      "matchFileNames": [
+        "/^images\\/docker\\/conformance\\/29\\.8\\.1\\/payload\\.yaml$/",
+        "/^images\\/docker\\/docker-29-8-1-conformance-rootless\\/container\\.yaml$/"
+      ],
+      "dependencyDashboardApproval": true,
+      "automerge": false
+    },
+    {
+      "description": "Require coordinated manual review of Debian 11 conformance base and fixed docker.io 20.10.5+dfsg1-1+deb11u2 package; package scalar is manually owned, never auto-rolled",
+      "matchFileNames": [
+        "/^images\\/docker\\/docker-debian-11-conformance-rootless\\/container\\.yaml$/"
+      ],
+      "dependencyDashboardApproval": true,
       "automerge": false
     }
   ],

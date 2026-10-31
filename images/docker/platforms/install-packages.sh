@@ -4,6 +4,19 @@ set -eux
 distro="${1:?distribution ID required}"
 engine_package="${2:?native Engine package required}"
 run_as_user="${3:?runtime user required}"
+engine_selector="$engine_package"
+# Only the fixed Debian 11 rootless conformance fixture may request a revision.
+# Keep the package name separate for all installed/source provenance queries.
+if [ "$#" -gt 3 ]; then
+    test "$#" -eq 4
+    test "$distro:$engine_package:$run_as_user" = debian-11:docker.io:1000:1000
+    exact_package_version="${4:?exact package version must not be empty}"
+    case "$exact_package_version" in
+        *[!A-Za-z0-9.+:~_-]*) echo 'Invalid exact package version' >&2; exit 1 ;;
+    esac
+    dpkg --validate-version "$exact_package_version"
+    engine_selector="$engine_package=$exact_package_version"
+fi
 if [ "$run_as_user" = root ]; then
     mode=rootful
 else
@@ -23,12 +36,19 @@ case "$distro" in
             printf '%s\n' \
                 'deb [check-valid-until=no] http://archive.debian.org/debian bullseye main' \
                 > /etc/apt/sources.list
+            if [ "$#" -eq 4 ]; then
+                # The fixed revision's session/compiler dependencies require the
+                # signed archived security pocket. Never use the retired live URL.
+                printf '%s\n' \
+                    'deb [check-valid-until=no] http://archive.debian.org/debian-security bullseye-security main' \
+                    >> /etc/apt/sources.list
+            fi
         fi
         export DEBIAN_FRONTEND=noninteractive
         apt-get update
         apt-get --yes upgrade
         apt-get install --yes --no-install-recommends \
-            busybox ca-certificates curl "$engine_package" iproute2 iptables passwd procps tar
+            busybox ca-certificates curl "$engine_selector" iproute2 iptables passwd procps tar
         if [ "$distro" = debian-13 ]; then
             # Debian 13 splits the vendor CLI from the docker.io daemon package.
             apt-get install --yes --no-install-recommends docker-cli
