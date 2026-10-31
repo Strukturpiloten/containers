@@ -19,6 +19,17 @@ Each line has a `docker-<line>-rootful` and a `docker-<line>-rootless` image. Th
 
 The Engine, CLI, containerd, and runc binaries come from Docker's official static Engine archive. RootlessKit and `dockerd-rootless.sh` come from Docker's separate rootless-extras archive for the same release. These binaries are **assembled from verified upstream artifacts**, not compiled by this repository. Every payload manifest records both per-architecture SHA256 checksums, upstream URLs, component versions, and available source revision IDs. The payload build verifies SHA256 before extraction and records the observed versions under `/usr/share/strukturpiloten/docker/` in each final image. `components.txt` lists the exact inputs; `os-packages` lists installed Alpine packages. Rootful images do not install the rootless helper binaries even though both variants derive from the same checked payload.
 
+The direct rootless recipe explicitly copies the rootless helper tree with numeric
+UID/GID `0:0`. Before switching to UID 1000, its build checks the resulting
+`/usr/local/bin/rootlesskit` without executing it: the file must be regular, owned
+by UID 0, have exactly one hard link, contain between 1 byte and 32 MiB inclusive,
+and have no special, group-write, or other-write mode bits. This producer contract
+matches the direct startup reader's metadata requirements. Verified 20.10.24 AMD64
+and 26.1.4 ARM64 input archives record UID/GID 1000 ownership; that input evidence
+does not establish the metadata of a previously built image or identify which
+live metadata predicate caused a diagnostic refusal. Native qualification and
+cleanup still require their own evidence.
+
 The shared payload is a build-only OCI artifact. It is assembled once per Engine release and architecture in a build run, then supplied to both final recipes through `BUILD_PAYLOAD_IMAGE`. It has no public `container.yaml`, release tag, or invented registry digest. The final images alone have public image metadata. The pinned common runtime base is Alpine 3.24 at its multi-architecture manifest digest recorded in each image. Runtime packages receive repository updates during image builds; old static Engine binaries and their vendored dependencies do not receive fixes from an Alpine rebuild. Retire a legacy line when its compatibility value no longer justifies isolated testing.
 
 Renovate updates the pinned runtime-base digests in paired groups. Upstream Engine releases and their Engine/rootless-extras archive checksums are reviewed manual updates: update the payload manifest, verified per-architecture checksums and component provenance, then the paired image versions, and require the full native CI contract before publication. Distribution packages refresh during reviewed image rebuilds; the installed package manifest records their actual revisions.

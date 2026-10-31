@@ -7,6 +7,7 @@ import errno
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -164,6 +165,65 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class DirectRootlessBuildMetadataControls(unittest.TestCase):
+    def assertion(self) -> str:
+        recipe = Path(__file__).resolve().parents[1] / "images/docker/upstream/rootless.Containerfile"
+        instructions = recipe.read_text(encoding="utf-8").replace("\\\n", " ").splitlines()
+        assertions = [
+            line.removeprefix("RUN ")
+            for line in instructions
+            if line.startswith("RUN ") and "stat -c" in line and "/usr/local/bin/rootlesskit" in line
+        ]
+        self.assertEqual(len(assertions), 1)
+        return assertions[0]
+
+    def check_metadata(self, metadata: str, *, accepted: bool, stat_status: int = 0) -> None:
+        # Only stat is substituted; the recipe's exact shell predicate executes.
+        stat = """stat() {
+            test "$#" -eq 3 && test "$1" = -c &&
+            test "$2" = '%f %u %h %s' && test "$3" = /usr/local/bin/rootlesskit || return 97
+            printf '%s\n' "$CONTROL_METADATA"
+            return "$CONTROL_STAT_STATUS"
+        }
+        """
+        result = subprocess.run(  # noqa: S603 - Execute only the extracted fixed assertion with authored stat output.
+            ["/bin/sh", "-c", stat + self.assertion()],
+            env={"CONTROL_METADATA": metadata, "CONTROL_STAT_STATUS": str(stat_status)},
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+        self.assertEqual(result.returncode == 0, accepted, result.stderr)
+
+    def test_build_assertion_accepts_independent_safe_metadata_and_inclusive_size_bounds(self) -> None:
+        for metadata in ("81ed 0 1 1", "8124 0 1 33554432", "8180 0 1 11273787", "8000 0 1 1"):
+            with self.subTest(metadata=metadata):
+                self.check_metadata(metadata, accepted=True)
+
+    def test_build_assertion_refuses_each_metadata_failure_and_stat_errors(self) -> None:
+        refused = (
+            "81ed 1000 1 11273787",  # Verified incoming archive ownership, before explicit COPY ownership.
+            "81ed 0 0 1",
+            "81ed 0 2 1",
+            "81ed 0 1 0",
+            "81ed 0 1 -1",
+            "81ed 0 1 33554433",
+            "41ed 0 1 1",  # Directory.
+            "a1ed 0 1 1",  # Symbolic link.
+            "11ed 0 1 1",  # FIFO.
+            "c1ed 0 1 1",  # Socket.
+            "81ed 0 1",  # Incomplete stat output.
+            "81ed 0 1 1 extra",
+            "nothex 0 1 1",
+            "",
+        )
+        for metadata in (*refused, *(f"{0o100755 | bit:x} 0 1 1" for bit in (0o4000, 0o2000, 0o1000, 0o20, 0o2))):
+            with self.subTest(metadata=metadata):
+                self.check_metadata(metadata, accepted=False)
+        # A command substitution error must not be masked by the following set command.
+        self.check_metadata("81ed 0 1 1", accepted=False, stat_status=42)
+
+
 class ExecutablePreflightControls(unittest.TestCase):
     def test_actual_bounded_file_hash_refuses_modes_caps_and_in_read_source_replacement(self) -> None:
         original_fstat, original_stat = os.fstat, os.stat
@@ -181,10 +241,10 @@ class ExecutablePreflightControls(unittest.TestCase):
 
         def rooted(value: os.stat_result) -> SimpleNamespace:
             result = {name: getattr(value, name) for name in fields}
-            result["st_uid"] = 0
+            result["st_uid"] = 1000 if fault == "archive-owner" and stat.S_ISREG(value.st_mode) else 0
             return SimpleNamespace(**result)
 
-        for fault in (None, "writable", "suid", "capabilities", "replaced"):
+        for fault in (None, "archive-owner", "writable", "suid", "capabilities", "replaced"):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temporary:
                 base = Path(temporary)
                 image = base / "image"
