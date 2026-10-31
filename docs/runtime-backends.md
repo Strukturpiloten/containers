@@ -725,7 +725,7 @@ unchanged. Admission itself records `qualification: none`; it permits an attempt
 not native qualification, release or publication permission.
 
 Bootstrap transport/stage, native lease records, scoped receipts and disposal
-acknowledgments use schema 4. Admission uses schema 5: its maintained policy
+acknowledgments use schema 4. Admission uses schema 6: its maintained policy
 contains the exact `validationProfiles` allowset `full` and
 `docker-rootless-qualification`, while each actual context/receipt retains one
 canonical profile and the exact raw request. The exact maintained-caller table
@@ -1286,3 +1286,14 @@ The helper closure and global source-input pattern own the added standard-librar
 source files; existing template/generated Action Renovate managers own reused
 Action references. Ordinary full, maintained29, publication and local Podman
 routes retain their existing boundaries.
+
+The exact `docker-29-8-1-conformance-rootless` compatibility fixture is additive;
+standard and conformance Engine 29.9.2 inputs retain their own identities and
+evidence. Schema 6 names both exact ordinary fixtures, but the historical image
+requires `full` and the existing finite original CI/publication caller tuples.
+Manual publication selection must name that image or the Docker family.
+Experimental and two-row diagnostic selectors remain unchanged. A selected
+image must agree across event, producer, fixed-root source proof and native
+binding; absent/unknown maintained selection is not a fallback. No runtime or
+receipt schema changes, native qualification or publication follow from this
+source-policy addition. Final closure readmission remains primary-owned.

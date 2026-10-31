@@ -15,7 +15,7 @@ Each line has a `docker-<line>-rootful` and a `docker-<line>-rootless` image. Th
 | 26 | 26.1.4 | 1.7.18 | 1.1.12 | 2.0.2 | Legacy fixture |
 | 27 | 27.5.1 | 1.7.25 | 1.2.4 | 2.3.2 | Legacy fixture |
 | 28 | 28.5.2 | 1.7.28 | 1.3.3 | 2.3.4 | Legacy fixture |
-| 29 | 29.8.1 | 2.3.5 | 1.5.1 | 3.1.0 | Current selected fixture |
+| 29 | 29.9.2 | 2.4.2 | 1.5.2 | 3.3.0 | Maintained current line |
 
 The Engine, CLI, containerd, and runc binaries come from Docker's official static Engine archive. RootlessKit and `dockerd-rootless.sh` come from Docker's separate rootless-extras archive for the same release. These binaries are **assembled from verified upstream artifacts**, not compiled by this repository. Every payload manifest records both per-architecture SHA256 checksums, upstream URLs, component versions, and available source revision IDs. The payload build verifies SHA256 before extraction and records the observed versions under `/usr/share/strukturpiloten/docker/` in each final image. `components.txt` lists the exact inputs; `os-packages` lists installed Alpine packages. Rootful images do not install the rootless helper binaries even though both variants derive from the same checked payload.
 
@@ -95,3 +95,13 @@ sudo podman run --rm --privileged --device /dev/fuse --oom-score-adj=0 \
 ```
 
 Both modes declare a separate Docker data-root volume and use only an internal Unix socket. Rootless runs as UID 1000 with subordinate UID/GID ranges and the distribution's RootlessKit. Package-only builds prove package availability, installed binary provenance, and image construction. Publication additionally requires native daemon startup, API compatibility, nested workloads, resource-budget checks and cleanup on every declared architecture. These profiles request AMD64 and ARM64, except Arch, whose official base image provides AMD64 only. Use the immutable release maintenance evidence to establish which exact published digest passed those checks.
+
+## Exact 29.8.1 conformance input
+
+The additional `docker-29-8-1-conformance-rootless` fixture retains the exact
+DockerLens milestone input without downgrading the maintained 29.9.2 standard
+or conformance images. It reuses the existing systemd conformance architecture;
+see [its input and admission contract](conformance/README.md#exact-engine-2981-consumer-fixture).
+Both declared architectures require fresh qualification, and publication needs
+separate authorization. This child does not supply the remaining Debian 11
+systemd fixture or add a DockerLens profile.

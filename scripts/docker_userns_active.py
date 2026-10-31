@@ -374,7 +374,7 @@ def failure_context(value: dict[str, Any], phase: str | None = None) -> dict[str
         and (phase is None or type(phase) is str)
         and (
             (
-                context["image"] == "docker-29-conformance-rootless"
+                context["image"] in {"docker-29-conformance-rootless", "docker-29-8-1-conformance-rootless"}
                 and context["architecture"] in {"amd64", "arm64"}
                 and phase in {None, "clean-control", "enforcement"}
             )

@@ -840,6 +840,7 @@ class ConcreteBoundedOperations(unittest.TestCase):
 def candidate_environment(selected: str = "a" * 40) -> dict[str, str]:
     """Supply the existing diagnostic workflow envelope without creating a native job."""
     return {
+        "IMAGE_NAME": "docker-29-conformance-rootless",
         "GITHUB_ACTIONS": "true",
         "RUNNER_ENVIRONMENT": "github-hosted",
         "RUNNER_OS": "Linux",
@@ -2971,8 +2972,10 @@ class MaintainedBootstrapContract(unittest.TestCase):
                 14: "GITHUB_REF",
                 15: "GITHUB_WORKFLOW_REF",
                 16: "GITHUB_JOB",
+                17: "IMAGE_NAME",
             }.items():
-                literal["sys"].argv[position] = environment[key]
+                if key != "IMAGE_NAME" or key in environment:
+                    literal["sys"].argv[position] = environment[key]
         literal["os"] = SimpleNamespace(getuid=lambda: 0, geteuid=lambda: 0, urandom=lambda _: b"x" * 16)
         literal["time"] = SimpleNamespace(monotonic_ns=lambda: 1)
         literal["read_input"] = Mock(side_effect=[json.dumps(event).encode(), json.dumps(proof.value()).encode()])

@@ -118,7 +118,7 @@ class RuntimeContext:
             self.outer_engine == "docker"
             and launcher == "systemd"
             and (
-                self.name != "docker-29-conformance-rootless"
+                self.name not in {"docker-29-conformance-rootless", "docker-29-8-1-conformance-rootless"}
                 or profile.get("mode") != "rootless"
                 or profile.get("outerPrivilege") != "privileged"
             )

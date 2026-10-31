@@ -1,0 +1,80 @@
+---
+# yaml-language-server: $schema=../../../container.schema.json
+schemaVersion: 1
+name: docker-29-8-1-conformance-rootless
+version: v29.8.1
+image: ghcr.io/strukturpiloten/docker-29-8-1-conformance-rootless
+title: Docker 29 systemd conformance rootless
+description: Upstream Docker Engine 29.8.1 on Debian 13, dedicated rootless systemd conformance fixture
+tests:
+  docker:
+    mode: rootless
+    launcher: systemd
+    outerPrivilege: privileged
+    nestedRuntime: true
+build:
+  context: .
+  containerfile: images/docker/conformance/upstream.Containerfile
+  architectures:
+    - amd64
+    - arm64
+  runtimeBaseArg: DISTRO_IMAGE
+  payload: images/docker/conformance/29.8.1/payload.yaml
+  args:
+    DISTRO_IMAGE:
+      value: docker.io/library/debian:13@sha256:4c25275446ca371766b8b093c696782eabce06263fccacb8d5d813b3dc44b308
+      type: external-image
+    DISTRO_ID:
+      value: 'debian-13'
+      type: static
+    MODE:
+      value: 'rootless'
+      type: static
+    DOCKER_HOST_VALUE:
+      value: 'unix:///run/user/1000/docker.sock'
+      type: static
+    STORAGE_PATH:
+      value: '/home/docker/.local/share/docker'
+      type: static
+dependencies:
+  internal: []
+  external:
+    - name: debian-13
+      image: docker.io/library/debian
+      arg: DISTRO_IMAGE
+inputs:
+  - images/docker/docker-29-8-1-conformance-rootless/**
+  - images/docker/conformance/**
+  - images/docker/conformance/29.8.1/payload.yaml
+  - images/docker/upstream/payload.Containerfile
+  - images/docker/upstream/fetch-payload.sh
+  - scripts/docker_userns_active.py
+  - scripts/docker_userns_active_client.py
+  - scripts/docker_userns_active_bootstrap_bundle.py
+  - scripts/docker_userns_bootstrap_bundle.py
+  - scripts/docker_userns_qualification.py
+  - .github/docker-userns-active-admission.json
+  - .github/docker-userns-active-helper-closure.json
+  - scripts/__init__.py
+  - scripts/docker_runner_security.py
+  - scripts/docker_userns_custody_child.py
+  - scripts/docker_userns_policy_source.py
+  - scripts/docker_userns_custody.py
+  - scripts/docker_userns_hosted.py
+  - scripts/docker_userns_dryparse.py
+  - .github/docker-userns-policy-source.json
+  - scripts/runtime_docker_systemd.py
+  - scripts/runtime_docker_systemd_guard.py
+  - scripts/runtime_oom_diagnostics.py
+  - scripts/runtime_oom_watch.py
+  - shared/oci-labels.env
+lifecycle:
+  state: legacy
+  admission: isolated-test
+  reviewAfter: '2026-10-31'
+  supportBoundary: >-
+    Exact Engine 29.8.1 consumer-compatibility fixture on maintained Debian 13; not current-patch security support. Native conformance remains unqualified.
+    Dedicated privileged isolated conformance fixture; guest systemd requires verified private cgroup-v2 delegation and backend-specific exec placement.
+    Devices remain subject to native Engine/runc behavior and are not repaired by this profile.
+  requiredRuntimeProfiles:
+    - docker

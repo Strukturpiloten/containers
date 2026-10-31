@@ -28,9 +28,10 @@ LEGACY_CLONE = Path("/proc/sys/kernel/unprivileged_userns_clone")
 MAX_NAMESPACES = 2**63 - 1
 CONSUMER = "containers-ubuntu26-userns-active"
 PREREQUISITE_SCHEMA = 4
-ADMISSION_SCHEMA = 5
-ADMISSION_REVISION = "containers442-direct-diagnostic-v1"
+ADMISSION_SCHEMA = 6
+ADMISSION_REVISION = "containers553-exact-conformance-images-v1"
 MAINTAINED_PROFILES = ("full", "docker-rootless-qualification")
+MAINTAINED_IMAGES = ("docker-29-conformance-rootless", "docker-29-8-1-conformance-rootless")
 EXPERIMENTAL_PURPOSE = "experimental-candidate"
 MAINTAINED_PURPOSE = "maintained-prerequisite"
 WORKFLOW = "Strukturpiloten/containers/.github/workflows/ci.yml"
@@ -618,18 +619,23 @@ def admission_document(raw: bytes) -> dict:
         expected_keys = (
             context_keys
             if name == "context"
-            else {"repository", "image", "imageOS", "imageVersion", "validationProfiles"}
+            else {"repository", "images", "imageOS", "imageVersion", "validationProfiles"}
         )
         if (
             type(value[name]) is not dict
             or set(value[name]) != expected_keys
-            or any(type(item) is not str for key, item in value[name].items() if key != "validationProfiles")
+            or any(
+                type(item) is not str
+                for key, item in value[name].items()
+                if key not in {"validationProfiles", "images"}
+            )
         ):
             _refuse("admission")
     if (
         value["context"]["ref"] != "refs/heads/TheRealBecks/issue527"
         or value["context"]["validationProfile"] != "docker-rootless-diagnostic"
         or value["maintainedContext"]["validationProfiles"] != list(MAINTAINED_PROFILES)
+        or value["maintainedContext"]["images"] != list(MAINTAINED_IMAGES)
     ):
         _refuse("admission")
     _validate_cohorts(value["cohorts"])
@@ -718,8 +724,23 @@ def validate_workflow_context(context: dict[str, str], admission: dict, admissio
         or any(re.fullmatch(r"[1-9][0-9]{0,19}", context[key]) is None for key in ("run", "attempt"))
         or context["repository"] != expected["repository"]
         or context["repository"] != REPOSITORY
-        or context["image"] != expected["image"]
-        or context["image"] != "docker-29-conformance-rootless"
+        or (purpose == MAINTAINED_PURPOSE and context["image"] not in expected["images"])
+        or (purpose != MAINTAINED_PURPOSE and context["image"] != expected["image"])
+        or context["image"] not in MAINTAINED_IMAGES
+        or (
+            context["image"] == MAINTAINED_IMAGES[1]
+            and (purpose != MAINTAINED_PURPOSE or context["validationProfile"] != "full")
+        )
+        or (
+            context["image"] == MAINTAINED_IMAGES[1]
+            and context["publicationScope"] == "image"
+            and context["publicationTarget"] != MAINTAINED_IMAGES[1]
+        )
+        or (
+            context["image"] == MAINTAINED_IMAGES[1]
+            and context["publicationScope"] == "family"
+            and context["publicationTarget"] != "docker"
+        )
         or expected["imageOS"] != "ubuntu26"
         or context["architecture"] not in {"amd64", "arm64"}
         or context["imageOS"] != {"amd64": "ubuntu26", "arm64": "ubuntu26-arm64"}[context["architecture"]]
@@ -909,7 +930,8 @@ class NativeBinding:
             or self.job not in NATIVE_JOBS
             or self.architecture not in {"amd64", "arm64"}
             or self.phase not in {"clean-control", "enforcement"}
-            or self.image != "docker-29-conformance-rootless"
+            or self.image not in MAINTAINED_IMAGES
+            or (self.image == MAINTAINED_IMAGES[1] and self.purpose != MAINTAINED_PURPOSE)
             or not re.fullmatch(r"[0-9a-f]{32}", self.owner)
             or self.runtime_slice != "strukturpiloten" + self.owner + ".slice"
             or not re.fullmatch(r"[0-9]+:[1-9][0-9]*", self.slice_identity)

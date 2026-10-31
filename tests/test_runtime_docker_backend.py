@@ -35,6 +35,10 @@ class PrivateDockerControls(unittest.TestCase):
     def test_systemd_profile_binding_is_closed_and_precedes_native_work(self) -> None:
         cases = (
             ("docker-29-conformance-rootless", "rootless", "privileged", True),
+            ("docker-29-8-1-conformance-rootless", "rootless", "privileged", True),
+            ("docker-29-8-1-conformance-rootless", "rootful", "privileged", False),
+            ("docker-29-8-1-conformance-rootless", "rootless", "unprivileged", False),
+            ("docker-29-8-2-conformance-rootless", "rootless", "privileged", False),
             ("docker-29-rootless", "rootless", "privileged", False),
             ("docker-29-conformance-rootless", "rootful", "privileged", False),
             ("docker-29-conformance-rootless", "rootless", "unprivileged", False),
@@ -469,20 +473,27 @@ class PrivateDockerControls(unittest.TestCase):
         ctx.podman.return_value = json.dumps(backend.slice) + "|123"
         root = "0::/" + backend.slice + "/docker-" + identifier + ".scope"
         with patch.object(backend, "_slice_identity", return_value="1:2"):
-            for suffix in ("", "/init.scope", "/container/init.scope"):
-                with self.subTest(suffix=suffix), patch.object(backend, "_call", return_value=root + suffix):
-                    backend.admit_container(ctx, identifier)
-            for suffix in ("-other/init.scope", "/../sibling", "/./init.scope", "//init.scope"):
-                with (
-                    self.subTest(suffix=suffix),
-                    patch.object(backend, "_call", return_value=root + suffix),
-                    self.assertRaises(DockerBackendError),
-                ):
-                    backend.admit_container(ctx, identifier)
+            for name in ("docker-29-conformance-rootless", "docker-29-8-1-conformance-rootless"):
+                ctx.name = name
+                for suffix in ("", "/init.scope", "/container/init.scope"):
+                    with (
+                        self.subTest(name=name, suffix=suffix),
+                        patch.object(backend, "_call", return_value=root + suffix),
+                    ):
+                        backend.admit_container(ctx, identifier)
+                for suffix in ("-other/init.scope", "/../sibling", "/./init.scope", "//init.scope"):
+                    with (
+                        self.subTest(name=name, suffix=suffix),
+                        patch.object(backend, "_call", return_value=root + suffix),
+                        self.assertRaises(DockerBackendError),
+                    ):
+                        backend.admit_container(ctx, identifier)
             for name, launcher, recorded in (
                 ("docker-29-rootless", "systemd", "systemd"),
                 ("docker-29-conformance-rootless", "direct", "systemd"),
                 ("docker-29-conformance-rootless", "systemd", "direct"),
+                ("docker-29-8-1-conformance-rootless", "direct", "systemd"),
+                ("docker-29-8-1-conformance-rootless", "systemd", "direct"),
             ):
                 ctx.name, ctx.declared_launcher, ctx.container_launchers[identifier] = name, launcher, recorded
                 with (

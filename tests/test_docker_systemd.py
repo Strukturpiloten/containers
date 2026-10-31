@@ -133,12 +133,56 @@ class DockerSystemdTests(unittest.TestCase):
         self.assertEqual(metadata["version"], f"v{payload['build']['args']['ENGINE_VERSION']}")
         self.assertEqual(metadata["build"]["architectures"], ["amd64", "arm64"])
 
-    def test_helper_only_edit_selects_one_owner_and_no_direct_profiles(self) -> None:
+    def test_historical_fixture_preserves_exact_archive_inputs_and_standard_payload(self) -> None:
+        path = ROOT / "images/docker/docker-29-8-1-conformance-rootless/container.yaml"
+        metadata = yaml.safe_load(path.read_text())
+        self.assertEqual(metadata["name"], "docker-29-8-1-conformance-rootless")
+        self.assertEqual(metadata["version"], "v29.8.1")
+        self.assertEqual(
+            metadata["tests"]["docker"],
+            {"mode": "rootless", "launcher": "systemd", "outerPrivilege": "privileged", "nestedRuntime": True},
+        )
+        self.assertEqual(metadata["build"]["containerfile"], "images/docker/conformance/upstream.Containerfile")
+        self.assertEqual(metadata["build"]["architectures"], ["amd64", "arm64"])
+        self.assertEqual(metadata["build"]["payload"], "images/docker/conformance/29.8.1/payload.yaml")
+        payload = yaml.safe_load((ROOT / metadata["build"]["payload"]).read_text())
+        self.assertEqual(payload["build"]["args"]["ENGINE_VERSION"], "29.8.1")
+        self.assertEqual(
+            payload["build"]["architectureArgs"],
+            {
+                "amd64": {
+                    "DOCKER_ARCH": "x86_64",
+                    "ENGINE_SHA256": "d8db66739d2e28d4933786d73e918d9be643a67fbd835db1bf740d650a259e70",
+                    "ROOTLESS_SHA256": "8f1ed16fc6913241e599af6234a7f30502bde6e73bebbbc7176b17802d967d49",
+                },
+                "arm64": {
+                    "DOCKER_ARCH": "aarch64",
+                    "ENGINE_SHA256": "667395fbffab52901b80181dfbb39ea76da2fbd7642c4fbddd24e42146b07b48",
+                    "ROOTLESS_SHA256": "3890bed82dc432e9fed7e52efcc18bb82647cd7beae45b03e9e2a2f6c3282c66",
+                },
+            },
+        )
+        for key, expected in {
+            "engine": "29.8.1",
+            "cli": "29.8.1",
+            "containerd": "2.3.5",
+            "runc": "1.5.1",
+            "rootlesskit": "3.1.0",
+        }.items():
+            self.assertEqual(payload["provenance"][key], expected)
+        current = yaml.safe_load((ROOT / "images/docker/upstream/29/payload.yaml").read_text())
+        self.assertEqual(current["build"]["args"]["ENGINE_VERSION"], "29.9.2")
+        self.assertEqual(payload["build"]["args"]["ALPINE_IMAGE"], current["build"]["args"]["ALPINE_IMAGE"])
+        self.assertEqual(
+            payload["provenance"]["repositorySource"]["revision"], "0b136a13a8bb612d91960ae5d07e72f449c89ec1"
+        )
+
+    def test_helper_only_edit_selects_two_exact_owners_and_no_direct_profiles(self) -> None:
         images = container_engine._load_images()
         options = container_engine.PlanOptions(
             event_name="push", ref_name="main", default_branch="main", before="a" * 40, sha="b" * 40, max_stages=None
         )
-        expected = {"docker-29-conformance-rootless"}
+        expected = {"docker-29-conformance-rootless", "docker-29-8-1-conformance-rootless"}
         for changed in (
             "scripts/runtime_docker_systemd.py",
             "scripts/runtime_oom_diagnostics.py",

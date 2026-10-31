@@ -695,7 +695,7 @@ class DockerBackend:
     @staticmethod
     def _systemd_guest(ctx: RuntimeContext, identifier: str) -> bool:
         return (
-            ctx.name == "docker-29-conformance-rootless"
+            ctx.name in {"docker-29-conformance-rootless", "docker-29-8-1-conformance-rootless"}
             and vars(ctx).get("declared_launcher") == "systemd"
             and vars(ctx).get("container_launchers", {}).get(identifier) == "systemd"
         )

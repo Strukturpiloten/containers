@@ -105,6 +105,7 @@ def caller_case(kind: str, architecture: str, candidate: str = "a" * 40) -> tupl
     context["workflowRef"] = REPOSITORY + "/" + context["workflowPath"] + "@" + context["ref"]
     environment = {
         **active_tests.candidate_environment(candidate),
+        "IMAGE_NAME": context["image"],
         "GITHUB_EVENT_NAME": context["event"],
         "GITHUB_REF": context["ref"],
         "GITHUB_WORKFLOW_REF": context["workflowRef"],
@@ -205,6 +206,80 @@ class CallerContextTests(unittest.TestCase):
                     mkdir.assert_called_once_with(mode=0o700)
                     self.assertEqual(actual["candidate"], actual["workflow"])
                     self.assertEqual(actual["candidate"], actual["checkout"])
+
+    def test_historical_fixture_is_bound_for_full_ordinary_callers_only(self) -> None:
+        root = active_tests.MaintainedBootstrapContract()
+        raw = (Path(__file__).resolve().parents[1] / ".github/docker-userns-active-admission.json").read_bytes()
+        admission = qualification.admission_document(raw)
+        for kind in KINDS:
+            if kind in {"ci-manual-bounded", "ci-diagnostic"}:
+                continue
+            for architecture in ("amd64", "arm64"):
+                with self.subTest(kind=kind, architecture=architecture):
+                    proof = active_tests.SyntheticProof(parents=("c" * 40, "b" * 40) if kind == "ci-pr" else ())
+                    event, environment, expected = caller_case(kind, architecture, proof.candidate)
+                    environment["IMAGE_NAME"] = expected["image"] = "docker-29-8-1-conformance-rootless"
+                    if kind == "publication-manual-image":
+                        event["inputs"]["target"] = expected["publicationTarget"] = expected["image"]
+                    with (
+                        patch.dict(os.environ, environment, clear=True),
+                        active_tests.event_payload(json.dumps(event).encode()),
+                    ):
+                        actual = producer.context(environment, architecture)
+                    self.assertEqual(actual, expected)
+                    qualification.validate_workflow_context(actual, admission, expected["admissionSha256"])
+                    proof.context = actual
+                    _literal, mkdir = root.root(proof, event, architecture=architecture, environment=environment)
+                    mkdir.assert_called_once_with(mode=0o700)
+        for kind in ("ci-manual-bounded", "ci-diagnostic"):
+            with self.subTest(kind=kind):
+                self.refused(
+                    kind,
+                    lambda _event, environment, context: (
+                        environment.update(IMAGE_NAME="docker-29-8-1-conformance-rootless"),
+                        context.update(image="docker-29-8-1-conformance-rootless"),
+                    ),
+                )
+        self.refused(
+            "publication-manual-image",
+            lambda _event, environment, context: (
+                environment.update(IMAGE_NAME="docker-29-8-1-conformance-rootless"),
+                context.update(image="docker-29-8-1-conformance-rootless"),
+            ),
+        )
+        self.refused(
+            "publication-manual-family",
+            lambda event, environment, context: (
+                event["inputs"].update(target="podman"),
+                environment.update(IMAGE_NAME="docker-29-8-1-conformance-rootless"),
+                context.update(image="docker-29-8-1-conformance-rootless", publicationTarget="podman"),
+            ),
+        )
+        proof = active_tests.SyntheticProof(parents=("c" * 40, "b" * 40))
+        event, environment, expected = caller_case("ci-pr", "amd64", proof.candidate)
+        environment["IMAGE_NAME"] = expected["image"] = "docker-29-8-1-conformance-rootless"
+        proof.context = expected
+        _literal, mkdir = root.root(
+            proof, event, environment={**environment, "IMAGE_NAME": "docker-29-conformance-rootless"}
+        )
+        mkdir.assert_not_called()
+        for image in ("", "unknown", "docker-29-8-2-conformance-rootless"):
+            with self.subTest(image=image):
+                self.refused(
+                    "ci-pr",
+                    lambda _event, environment, context, image=image: (
+                        environment.update(IMAGE_NAME=image),
+                        context.update(image=image),
+                    ),
+                )
+        event, environment, _expected = caller_case("ci-pr", "amd64")
+        environment.pop("IMAGE_NAME")
+        with (
+            patch.dict(os.environ, environment, clear=True),
+            active_tests.event_payload(json.dumps(event).encode()),
+            self.assertRaises(ValueError),
+        ):
+            producer.context(environment, "amd64")
 
     def refused(self, kind: str, mutate: object) -> None:
         proof = active_tests.SyntheticProof(parents=("c" * 40, "b" * 40) if kind == "ci-pr" else ())
@@ -337,7 +412,7 @@ class CallerContextTests(unittest.TestCase):
     def test_prior_protocol_or_changed_finite_policy_cannot_reach_root_stage(self) -> None:
         raw = (Path(__file__).resolve().parents[1] / ".github/docker-userns-active-admission.json").read_bytes()
         baseline = json.loads(raw)
-        variants = [(f"schema-{version}", {**baseline, "schemaVersion": version}) for version in (1, 2, 3, True)]
+        variants = [(f"schema-{version}", {**baseline, "schemaVersion": version}) for version in (1, 2, 3, 4, 5, True)]
         for fault in ("missing", "extra", "job", "event", "workflow", "refPolicy", "selector"):
             admission = copy.deepcopy(baseline)
             if fault == "missing":

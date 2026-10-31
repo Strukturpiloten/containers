@@ -145,9 +145,9 @@ runs:
 
           CONSUMER = 'containers-ubuntu26-userns-active'
           SOURCE_MANIFEST_SHA256 = '7f6693f40311617e4854f8c6a35cbe13b3afdd3d7a8bef58978397ba1178dbd8'
-          ADMISSION_SCHEMA = 5
+          ADMISSION_SCHEMA = 6
           MAINTAINED_PROFILES = ('full', 'docker-rootless-qualification')
-          ADMISSION_REVISION = 'containers442-direct-diagnostic-v1'
+          ADMISSION_REVISION = 'containers553-exact-conformance-images-v1'
           DIRECT_PROFILE = 'docker-direct-rootless-diagnostic'
           DIRECT_PURPOSE = 'direct-startup-diagnostic'
           DIRECT_REF = 'refs/heads/TheRealBecks/issue442-direct-startup-20261031'
@@ -156,6 +156,7 @@ runs:
           DIRECT_FIELDS = ('diagnosticVariant', 'launcher', 'expectedUid', 'diagnosticArm')
           EXPERIMENTAL_PURPOSE = 'experimental-candidate'
           MAINTAINED_PURPOSE = 'maintained-prerequisite'
+          MAINTAINED_IMAGES = ('docker-29-conformance-rootless', 'docker-29-8-1-conformance-rootless')
           PREREQUISITE_SCHEMA = 4
           REPOSITORY = 'Strukturpiloten/containers'
           CI_WORKFLOW = '.github/workflows/ci.yml'
@@ -567,15 +568,19 @@ runs:
                                   ('repository', 'event', 'ref', 'job', 'validationProfile', *DIRECT_FIELDS)))
               else:
                   policy = admission['maintainedContext'] if trusted['purpose'] == MAINTAINED_PURPOSE else admission['context']
-                  require(policy['repository'] == trusted['repository'] and policy['image'] == trusted['image'])
+                  require(policy['repository'] == trusted['repository'])
                   if trusted['purpose'] == MAINTAINED_PURPOSE:
-                      exact(policy, ('repository', 'image', 'imageOS', 'imageVersion', 'validationProfiles'))
+                      exact(policy, ('repository', 'images', 'imageOS', 'imageVersion', 'validationProfiles'))
+                      require(policy['images'] == list(MAINTAINED_IMAGES) and trusted['image'] in policy['images'])
+                      require(trusted['image'] != MAINTAINED_IMAGES[1] or trusted['validationProfile'] == 'full')
+                      require(trusted['image'] != MAINTAINED_IMAGES[1] or trusted['publicationScope'] != 'image' or trusted['publicationTarget'] == MAINTAINED_IMAGES[1])
+                      require(trusted['image'] != MAINTAINED_IMAGES[1] or trusted['publicationScope'] != 'family' or trusted['publicationTarget'] == 'docker')
                       require(policy['validationProfiles'] == list(MAINTAINED_PROFILES) and trusted['validationProfile'] in policy['validationProfiles'])
                       caller = admission['maintainedCallers'][trusted['caller']]
                       require((caller['workflow'], caller['event'], caller['job']) == (trusted['workflowPath'], trusted['event'], trusted['job']))
                   else:
                       exact(policy, ('repository', 'workflow', 'event', 'ref', 'job', 'image', 'imageOS', 'imageVersion', 'validationProfile'))
-                      require(trusted['caller'] == 'ci-manual' and policy['workflow'] == trusted['workflowPath'] == CI_WORKFLOW
+                      require(policy['image'] == trusted['image'] and trusted['caller'] == 'ci-manual' and policy['workflow'] == trusted['workflowPath'] == CI_WORKFLOW
                               and policy['event'] == trusted['event'] and policy['job'] == trusted['job']
                               and policy['ref'] == trusted['ref'] and policy['validationProfile'] == trusted['validationProfile'] == 'docker-rootless-diagnostic')
               require(admission['maintainedArchitectures'] == {'amd64': MAINTAINED_PURPOSE, 'arm64': MAINTAINED_PURPOSE})
@@ -643,7 +648,8 @@ runs:
                   require(deadline <= time.monotonic_ns() + 900_000_000_000)
                   extra = {key: DIRECT_CONTEXT[key] for key in DIRECT_FIELDS}
               else:
-                  require(image == 'docker-29-conformance-rootless' and arm == '')
+                  require(image in MAINTAINED_IMAGES and arm == '')
+                  require(image != MAINTAINED_IMAGES[1] or (derived['purpose'] == MAINTAINED_PURPOSE and derived['validationProfile'] == 'full'))
 
               trusted = {'candidate': candidate, 'workflow': workflow, 'checkout': checkout, **derived, **extra,
                   'run': run, 'attempt': attempt, 'architecture': architecture, 'image': image,
@@ -733,7 +739,7 @@ runs:
           direct_deadline_ns="$((direct_started_ns + 900000000000))"
           runtime_args+=(--direct-startup-diagnostic --direct-started-ns "${direct_started_ns}" --direct-deadline-ns "${direct_deadline_ns}")
         fi
-        if [ "${ACTIVE_USERNS_CONTEXT}" = "true" ] && { [ "${IMAGE_NAME}" = "docker-29-conformance-rootless" ] || [ "${FOCUSED_RUNTIME}" = direct-startup-diagnostic ]; }; then
+        if [ "${ACTIVE_USERNS_CONTEXT}" = "true" ] && { [ "${IMAGE_NAME}" = "docker-29-conformance-rootless" ] || [ "${IMAGE_NAME}" = "docker-29-8-1-conformance-rootless" ] || [ "${FOCUSED_RUNTIME}" = direct-startup-diagnostic ]; }; then
           readonly FIXED_ACTIVE_ROOT_BOOTSTRAP
           active_checkout="$(git rev-parse HEAD)"
           test "${ACTIVE_CANDIDATE}" = "${ACTIVE_WORKFLOW}"

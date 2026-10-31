@@ -143,12 +143,18 @@ class PlanningTests(unittest.TestCase):
         images = engine._load_images()
         with patch.object(engine, "_changed_files", return_value=["scripts/runtime_docker_systemd_guard.py"]):
             plan = engine._build_plan(images, _options())
-        self.assertEqual(plan["selection"]["directImages"], ["docker-29-conformance-rootless"])
+        conformance = ["docker-29-8-1-conformance-rootless", "docker-29-conformance-rootless"]
+        self.assertEqual(plan["selection"]["directImages"], conformance)
         self.assertEqual(plan["selection"]["reverseDependencies"], [])
-        self.assertEqual([image["name"] for image in plan["images"]], ["docker-29-conformance-rootless"])
+        self.assertEqual([image["name"] for image in plan["images"]], conformance)
         self.assertEqual(
             {(entry["name"], entry["arch"]) for entry in plan["smokeBuildMatrix"]["include"]},
-            {("docker-29-conformance-rootless", "amd64"), ("docker-29-conformance-rootless", "arm64")},
+            {
+                ("docker-29-8-1-conformance-rootless", "amd64"),
+                ("docker-29-8-1-conformance-rootless", "arm64"),
+                ("docker-29-conformance-rootless", "amd64"),
+                ("docker-29-conformance-rootless", "arm64"),
+            },
         )
         selected = {image["name"] for image in plan["images"]}
         for unrelated in ("docker-29-rootless", "podman-debian-13-rootful", "nextcloud-phpfpm"):

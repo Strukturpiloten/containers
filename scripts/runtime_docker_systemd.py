@@ -716,7 +716,10 @@ def _journal_boundary_evidence(output: str) -> dict[str, Any]:
 def systemd_options(ctx: RuntimeContext) -> tuple[str, ...]:
     """Select only the declared outer backend's guest launch prerequisites."""
     if getattr(ctx, "outer_engine", "podman") == "docker":
-        if ctx.name != "docker-29-conformance-rootless" or vars(ctx).get("declared_launcher") != "systemd":
+        if (
+            ctx.name not in {"docker-29-conformance-rootless", "docker-29-8-1-conformance-rootless"}
+            or vars(ctx).get("declared_launcher") != "systemd"
+        ):
             raise ProbeError("Docker systemd options require the reviewed declared fixture")
         return DOCKER_SYSTEMD_OPTIONS
     return SYSTEMD_OPTIONS

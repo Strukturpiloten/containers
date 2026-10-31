@@ -234,7 +234,7 @@ def workflow_context(
         "validationProfile": profile,
         "validationProfileRequested": profile if requested is None else requested,
         "purpose": purpose,
-        "admissionRevision": "containers442-direct-diagnostic-v1",
+        "admissionRevision": "containers553-exact-conformance-images-v1",
         "admissionSha256": hashlib.sha256(admission.read_bytes()).hexdigest(),
     }
 
@@ -523,6 +523,7 @@ class PurposeAdmissionBindingTests(unittest.TestCase):
         admission, _digest = self.admission()
         for key, value in (
             ("schemaVersion", 1),
+            ("schemaVersion", 5),
             ("schemaVersion", True),
             ("revision", "unknown"),
             ("purpose", "maintained-prerequisite"),
@@ -532,6 +533,45 @@ class PurposeAdmissionBindingTests(unittest.TestCase):
         ):
             with self.subTest(key=key), self.assertRaises(qualification.QualificationError):
                 qualification.admission_document(json.dumps({**admission, key: value}).encode())
+
+    def test_historical_image_requires_exact_maintained_full_context(self) -> None:
+        admission, digest = self.admission()
+        self.assertEqual(admission["schemaVersion"], 6)
+        self.assertEqual(
+            admission["maintainedContext"]["images"],
+            ["docker-29-conformance-rootless", "docker-29-8-1-conformance-rootless"],
+        )
+        context = workflow_context(purpose="maintained-prerequisite")
+        context["image"] = "docker-29-8-1-conformance-rootless"
+        qualification.validate_workflow_context(context, admission, digest)
+        for image in (
+            "",
+            "docker-29-8-1-conformance-rootful",
+            "docker-29-8-2-conformance-rootless",
+            "docker-29-8-1-conformance-rootless\n",
+        ):
+            with self.subTest(image=image), self.assertRaises(qualification.QualificationError):
+                qualification.validate_workflow_context({**context, "image": image}, admission, digest)
+        for profile in ("docker-rootless-qualification", "docker-rootless-diagnostic"):
+            changed = workflow_context(purpose="maintained-prerequisite", profile=profile)
+            changed["image"] = context["image"]
+            with self.subTest(profile=profile), self.assertRaises(qualification.QualificationError):
+                qualification.validate_workflow_context(changed, admission, digest)
+        experimental = workflow_context()
+        experimental["image"] = context["image"]
+        with self.assertRaises(qualification.QualificationError):
+            qualification.validate_workflow_context(experimental, admission, digest)
+        with self.assertRaises(qualification.QualificationError):
+            replace(binding(), image=context["image"]).validate()
+        for images in (
+            [context["image"]],
+            ["docker-29-conformance-rootless"] * 2,
+            ["docker-29-conformance-rootless", "unknown"],
+            "docker-29-conformance-rootless",
+        ):
+            changed = {**admission, "maintainedContext": {**admission["maintainedContext"], "images": images}}
+            with self.subTest(images=images), self.assertRaises(qualification.QualificationError):
+                qualification.admission_document(json.dumps(changed).encode())
 
     def test_manual_ref_is_finite_and_context_or_disposal_replay_is_not_equivalent(self) -> None:
         admission, digest = self.admission()
