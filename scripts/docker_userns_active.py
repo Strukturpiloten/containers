@@ -2471,7 +2471,6 @@ class RootPort:
             )
             self.witness_require("scope-census", re.fullmatch(rb"(?:[1-9][0-9]{0,9}\n)*", raw))
             members = {int(value) for value in raw.splitlines()}
-            self.witness_require("scope-census", len(members) == len(raw.splitlines()) and not result & members)
             result.update(members)
             self.witness_counts["pids"].update(result)
             self.witness_require("pid-cap", len(self.witness_counts["pids"]) <= WITNESS_PID_LIMIT)

@@ -287,15 +287,65 @@ class RootWitness(unittest.TestCase):
                 port.witness_sample("ready")
             self.assertEqual(port.modules.observations.held_executable_hash.call_count, 3)
 
-    def test_scope_walk_rejects_symlinks_aliases_duplicates_and_pid_overflow(self) -> None:
+    def test_sample_rejects_missing_outer_candidate_or_stale_incarnation(self) -> None:
+        for direct in (True, False):
+            for candidates, start in (({20, 30}, 10), ({10, 20, 30}, 99)):
+                port, tasks = self.sampled_port(direct=direct)
+                port.witness_scope_pids.return_value = candidates
+                tasks[10]["before"]["startTicks"] = start
+                with (
+                    self.subTest(direct=direct, candidates=candidates, start=start),
+                    patch.object(active.time, "monotonic_ns", return_value=1),
+                    self.assertRaises(active.RefusedError),
+                ):
+                    port.witness_sample("ready")
+                port.modules.observations.held_rootlesskit.assert_not_called()
+
+    def test_scope_walk_unions_unordered_and_repeated_pid_locators(self) -> None:
+        port = self.port()
+        entry = SimpleNamespace(name="child", is_symlink=lambda: False, is_dir=lambda **_kw: True)
+        all_pids = b"".join(str(pid).encode() + b"\n" for pid in range(64, 0, -1))
+        for root_raw, child_raw, expected in (
+            (b"30\n10\n20\n", b"", {10, 20, 30}),
+            (b"30\n10\n30\n20\n10\n", b"", {10, 20, 30}),
+            (b"30\n10\n", b"20\n10\n30\n", {10, 20, 30}),
+            (all_pids + b"64\n1\n", all_pids, set(range(1, 65))),
+        ):
+            port.witness_counts = {"procBytes": 0, "pids": set()}
+            with (
+                self.subTest(root_raw=root_raw, child_raw=child_raw),
+                ExitStack() as stack,
+                patch.object(active.time, "monotonic_ns", return_value=1),
+                patch.object(active.os, "fstat", side_effect=lambda fd: SimpleNamespace(st_dev=1, st_ino=fd + 2)),
+                patch.object(active.os, "stat", return_value=SimpleNamespace(st_dev=1, st_ino=4)),
+                patch.object(active.os, "open", side_effect=[3, 2, 4]) as opened,
+                patch.object(active.os, "close"),
+                patch.object(active.os, "read", side_effect=[root_raw, child_raw]) as read,
+                patch.object(
+                    active.os, "scandir", side_effect=lambda fd: nullcontext(iter([entry] if fd == 1 else []))
+                ) as scanned,
+                patch.object(port, "witness_budget", wraps=port.witness_budget) as budget,
+            ):
+                self.assertEqual(port.witness_scope_walk(stack, 1), (expected, {(): (1, 3), ("child",): (1, 4)}))
+                self.assertEqual(port.witness_counts, {"procBytes": len(root_raw) + len(child_raw), "pids": expected})
+                self.assertEqual(
+                    [call.args for call in read.call_args_list],
+                    [(3, active.WITNESS_READ_LIMIT + 1), (4, active.WITNESS_READ_LIMIT + 1)],
+                )
+                self.assertEqual([call.args for call in scanned.call_args_list], [(1,), (2,)])
+                self.assertEqual(opened.call_count, 3)
+                self.assertEqual(budget.call_count, 2)
+
+    def test_scope_walk_rejects_malformed_symlinks_aliases_and_pid_overflow(self) -> None:
         port = self.port()
         entry = SimpleNamespace(name="child", is_symlink=lambda: False, is_dir=lambda **_kw: True)
         for raw, children, child_identity in (
             (b"10\n", [], (1, 3)),
-            (b"10\n10\n", [], (1, 3)),
+            *((raw, [], (1, 3)) for raw in (b"10", b"0\n", b"01\n", b"-1\n", b"10 \n", b"10\n\n", b"12345678901\n")),
+            (b"10\n" * (active.WITNESS_READ_LIMIT // 3 + 1), [], (1, 3)),
             (b"10\n", [SimpleNamespace(is_symlink=lambda: True)], (1, 3)),
             (b"10\n", [entry], (1, 3)),
-            (b"10\n", [entry], (1, 4)),
+            (b"10\n", [SimpleNamespace(name="../child", is_symlink=lambda: False, is_dir=lambda **_kw: True)], (1, 4)),
             (b"".join(str(pid).encode() + b"\n" for pid in range(1, 66)), [], (1, 3)),
         ):
             port.witness_counts = {"procBytes": 0, "pids": set()}
@@ -321,6 +371,47 @@ class RootWitness(unittest.TestCase):
                 else:
                     with self.assertRaises(active.RefusedError):
                         port.witness_scope_walk(stack, 1)
+
+    def test_scope_walk_duplicate_bytes_still_consume_aggregate_budget(self) -> None:
+        port = self.port()
+        raw = b"10\n10\n"
+        for excess in (0, 1):
+            port.witness_counts = {"procBytes": active.WITNESS_PROC_LIMIT - len(raw) + excess, "pids": set()}
+            with (
+                self.subTest(excess=excess),
+                ExitStack() as stack,
+                patch.object(active.time, "monotonic_ns", return_value=1),
+                patch.object(active.os, "fstat", return_value=SimpleNamespace(st_dev=1, st_ino=3)),
+                patch.object(active.os, "open", return_value=2),
+                patch.object(active.os, "close"),
+                patch.object(active.os, "read", return_value=raw) as read,
+                patch.object(active.os, "scandir", side_effect=lambda _fd: nullcontext(iter([]))),
+            ):
+                if excess:
+                    with self.assertRaises(active.RefusedError):
+                        port.witness_scope_walk(stack, 1)
+                else:
+                    self.assertEqual(port.witness_scope_walk(stack, 1), ({10}, {(): (1, 3)}))
+                self.assertEqual(port.witness_counts["procBytes"], active.WITNESS_PROC_LIMIT + excess)
+                read.assert_called_once_with(2, active.WITNESS_READ_LIMIT + 1)
+
+    def test_scope_walk_read_errors_cannot_become_empty_candidates(self) -> None:
+        port = self.port()
+        for code in (errno.EIO, errno.EOPNOTSUPP):
+            port.witness_counts = {"procBytes": 0, "pids": set()}
+            with (
+                self.subTest(code=code),
+                ExitStack() as stack,
+                patch.object(active.time, "monotonic_ns", return_value=1),
+                patch.object(active.os, "fstat", return_value=SimpleNamespace(st_dev=1, st_ino=3)),
+                patch.object(active.os, "open", return_value=2),
+                patch.object(active.os, "close") as closed,
+                patch.object(active.os, "read", side_effect=OSError(code, "unavailable")) as read,
+                self.assertRaises(OSError),
+            ):
+                port.witness_scope_walk(stack, 1)
+            read.assert_called_once_with(2, active.WITNESS_READ_LIMIT + 1)
+            closed.assert_called_once_with(2)
 
     def test_scope_identity_and_named_directory_drift_are_refused(self) -> None:
         port = self.port()

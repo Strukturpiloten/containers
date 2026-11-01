@@ -124,13 +124,21 @@ private; exported digests bind the task identities, original binding, source
 manifest and lease. Old or incomplete receipts cannot establish this claim.
 
 Each read-only checkpoint has at most five seconds inside the original work
-budget, 64 IDs across owned cgroup candidates and the held parent thread/child
+budget, 64 distinct IDs across owned cgroup candidates and the held parent thread/child
 union, 512 KiB of proc/cgroup input and 96 MiB of executable input (32 MiB per
 executable). It preserves the
 original cleanup and finalizer reserves, pending-child/reader guards and close
 rules. Failure grants no new cleanup authority. The samples establish measured
 post-readiness/pre-close task evidence, not capture of an exec event, historical
 denial attribution, numeric path-flag equality or broader pathname semantics.
+
+The owned cgroup walk unions numeric PID locators observed over its bounded
+interval. Linux [permits unordered and repeated `cgroup.procs` entries](https://docs.kernel.org/admin-guide/cgroup-v2.html#processes);
+separate directory reads can also overlap as processes migrate. Duplicates still
+consume raw input budget but count once toward the distinct-ID limit. This union
+is not an atomic or guaranteed complete current process census. Missing required
+actors, changed directory identities and failed held-task readbacks still refuse
+the witness, without retries or additional reads.
 
 This is source integration only. Strict no-load compilation under the original
 fatal-warning flags, fresh post-RootlessKit-exec held-task label/workload readbacks,
