@@ -13,6 +13,7 @@ Start with the [image catalogue](image-catalogue.md) to see every declared image
 | Read JSON or Markdown exports | [Catalogue data and discovery](data-and-discovery.md) |
 | Change a recipe or metadata | [Contributing](../CONTRIBUTING.md) |
 | Build, release, or recover a publication | [Operations](operations.md) |
+| Understand native smoke-test runtime isolation | [Runtime backends](runtime-backends.md) |
 | Track upstream releases and maintain Docker/Podman version lines | [Upstream release automation](upstream-releases.md) |
 | Identify the website operator and review privacy information | [Legal Notice](legal-notice.md) · [Privacy Policy](privacy-policy.md) · [Impressum](impressum.md) · [Datenschutz](datenschutz.md) |
 

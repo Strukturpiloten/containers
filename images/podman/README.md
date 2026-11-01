@@ -106,6 +106,8 @@ The exact upstream rootless images use the narrower unprivileged outer profile b
 
 ### Automated nested-runtime coverage
 
+CI explicitly selects the metadata profile's outer runtime; Podman profiles retain the existing isolated Podman backend and root-mode checks. See [runtime backends](../../docs/runtime-backends.md).
+
 | Image profiles | Build and CLI check | Nested `podman run` check | Reason |
 | --- | --- | --- | --- |
 | All rootful profiles | Yes | Yes | The trusted outer test container supplies the required mount and namespace privileges. |

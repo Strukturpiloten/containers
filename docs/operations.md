@@ -30,6 +30,104 @@ A push to `main` selects changed images and their reverse dependencies; the dail
 
 ## Test a change
 
+See [runtime backends](runtime-backends.md) for the explicit CI profile policy, local Podman default, private Docker prerequisites, evidence and publication boundary.
+
+The mediated-profile-v2 source integration selects immutable DockerLens158 commit
+`d7f18d756fe754adea3c57e6c0cba2a906e2a780`, its fixed
+`flags=(attach_disconnected,mediate_deleted)` candidate and one exact generated
+enforce label. The finite workload claim additionally requires ordered ready and
+pre-close held original-task/RootlessKit parent/unique immediate namespace-child
+executable and enforce-label witnesses. Numeric flag equality, historical denial
+attribution and broader pathname/aliasing semantics remain unproven. Source review and complete gates
+must finish before native qualification consumes the exact producer/consumer pair.
+No producer release or image publication is required for that source dependency;
+the complete already-supported ordinary/systemd label, workload and cleanup
+matrix still needs fresh native evidence. Historical retained failures grant no
+cleanup authority, and source checks alone do not qualify this changed policy.
+
+For a bounded ordinary qualification attempt on a reviewed exact source ref,
+select the existing manual profile below after the source reviews and gates:
+
+```sh
+gh workflow run ci.yml --repo Strukturpiloten/containers --ref your-reviewed-branch -f validation_profile=docker-rootless-qualification
+```
+
+This selects only `docker-29-conformance-rootless` on AMD64 and ARM64, its two
+payload entries and two smoke entries through the existing planner and build
+Action. An exact-plan guard rejects future reverse-dependency expansion,
+missing entries or drift before matrix outputs are published. Budgets and
+concurrency limits are unchanged. The effective focus is `none` and the workload
+is ordinary qualification; leave the raw focused input at its default.
+`mandatory-accounting` is refused outside the experimental diagnostic profile.
+
+Its check is **Docker fixture qualification (bounded)**, even if planning fails.
+It never creates a successful or skipped `Required CI` check and does not prove
+full-matrix validation or release/publication eligibility. Admission and a plan
+preview are requests for work, not passing native results. Both actual native
+phases, original accounting, cleanup and authenticated stage disposal must pass
+before ordinary per-image native authority exists. Read the resulting exact
+source/run/attempt/profile and native artifacts; no source-only qualification is
+inferred. The `full` default continues to select the broad ordinary matrix.
+
+For a manual, non-publishing diagnosis of the Docker rootless conformance fixture
+on the admitted issue527 source branch, dispatch the existing CI workflow:
+
+```sh
+gh workflow run ci.yml --repo Strukturpiloten/containers --ref TheRealBecks/issue527 -f validation_profile=docker-rootless-diagnostic
+gh run list --repo Strukturpiloten/containers --workflow ci.yml --branch TheRealBecks/issue527 --limit 5
+```
+
+The diagnostic profile admits only `TheRealBecks/issue527`. The workflow
+must already be registered on the default branch; `--ref` selects
+the candidate branch to execute. This profile selects only the catalogue identity
+`docker-29-conformance-rootless`, on AMD64 and ARM64, through the normal planner
+and `build-arch-image` action. It retains repository validation, input preflight,
+payload handling, build/runtime checks, and failure propagation. Native Docker
+guests still use Docker outer; local development remains Podman-only.
+
+Its aggregate check is **Docker fixture diagnostic (not Required CI)**. The
+result and summary are nonqualifying, source-bound evidence for that image only;
+they cannot satisfy `Required CI`, full PR/main/merge-queue validation, release,
+or publication gates. There is no image publication. The default manual profile
+is `full`; PR and merge-queue runs always ignore this input and retain their
+ordinary selection. Use the full gates before merging or publishing.
+
+The separate manual profile `docker-direct-rootless-diagnostic` is restricted to
+`TheRealBecks/issue442-direct-startup-20261031`. It selects exactly
+`docker-20.10-rootless`/AMD64 and `docker-26-rootless`/ARM64, with their matching
+payloads. Each job collects a serialized, instrumented startup pair; it does not
+run ordinary smoke/OOM qualification. Leave `focused_runtime` at its default.
+
+The check is **Direct-rootless startup diagnostic (qualification:none)**, including
+planning failures. Its dedicated pair artifacts and aggregate always retain
+`qualification: none`. A green check certifies complete bounded collection:
+`profile-dependent-startup` reports an A/B startup differential;
+`profile-not-demonstrated-remedy` retains both original negative outcomes.
+Neither result establishes a specific denied syscall, broad direct-rootless
+support, merge eligibility or publication authority. Read the
+[direct pair boundary](runtime-backends.md#direct-rootless-startup-pair)
+before interpreting an attempt. Source-only tests are not native results.
+
+The maintained scoped prerequisite source contract also recognizes ordinary
+same-repository PR and merge-queue CI, plus main push, scheduled and manual
+publication builds. CI records use native leaf job `smoke-build`; reusable
+publication records retain original `publish-images.yml` caller/event and leaf
+job `build`. PR candidates remain synthetic merges, and queue candidates remain
+the actual queue SHA/ref. Fork or missing PR metadata, unknown callers, source
+mismatches and local/self-hosted contexts refuse. The existing runtime trust
+model is unchanged and no actor-permission service or approval step is added.
+
+Both AMD64 and ARM64 require their complete reviewed hosted cohort, both native
+phases, original accounting, cleanup and authenticated stage disposal before
+ordinary per-image native authority exists. Automatic contexts ignore injected
+CI profile inputs and record ordinary `full` with an empty raw selector;
+publication scope is separate from CI profile selection and does not claim
+repository-wide full-check coverage. Diagnostic ARM still observes/refuses.
+Admission and offline checks do not prove a successful native run, full matrix,
+BoxFerry/Lens compatibility, or publication eligibility. The prior bounded d8
+run qualifies only that historical source. See the [scoped prerequisite contract](runtime-backends.md#scoped-issue527-prerequisite-and-experimental-candidate)
+for exact caller, source and archived-consumer rules.
+
 Run the non-publishing repository checks before a pull request:
 
 ```sh

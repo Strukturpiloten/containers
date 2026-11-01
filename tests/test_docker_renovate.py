@@ -60,6 +60,65 @@ class DockerRenovateTests(unittest.TestCase):
         cls.rules = cls.config["packageRules"]
         cls.managers = cls.config["customManagers"]
 
+    def test_exact_2981_fixture_has_unique_version_and_base_owners(self) -> None:
+        payload = "images/docker/conformance/29.8.1/payload.yaml"
+        metadata = "images/docker/docker-29-8-1-conformance-rootless/container.yaml"
+        version = next(
+            manager for manager in self.managers if manager.get("depNameTemplate") == "docker-29-8-1-compatibility"
+        )
+        pattern = re.compile(version["matchStrings"][0].replace("(?<", "(?P<"))
+        for path in (payload, metadata):
+            with self.subTest(path=path):
+                self.assertTrue(_matches_path(version["managerFilePatterns"], path))
+                matches = list(pattern.finditer((ROOT / path).read_text()))
+                self.assertEqual([match["currentValue"] for match in matches], ["29.8.1"])
+        for path in (
+            "images/docker/upstream/29/payload.yaml",
+            "images/docker/docker-29-conformance-rootless/container.yaml",
+        ):
+            self.assertFalse(_matches_path(version["managerFilePatterns"], path))
+        self.assertEqual(version["packageNameTemplate"], "moby/moby")
+        self.assertEqual(version["datasourceTemplate"], "github-tags")
+        rule = next(rule for rule in self.rules if rule.get("matchDepNames") == ["docker-29-8-1-compatibility"])
+        self.assertEqual(rule["allowedVersions"], "29.8.1")
+        self.assertTrue(rule["dependencyDashboardApproval"])
+        self.assertFalse(rule["automerge"])
+        for path in (payload, metadata):
+            owner = next(
+                manager
+                for manager in self.managers
+                if manager.get("description")
+                == (
+                    "Track digest-pinned base images in private payload manifests"
+                    if path == payload
+                    else "Track external pinned container image tags and digests in container metadata"
+                )
+            )
+            matches = list(re.finditer(owner["matchStrings"][0].replace("(?<", "(?P<"), (ROOT / path).read_text()))
+            self.assertEqual(len(matches), 1)
+            self.assertEqual(
+                matches[0]["depName"], "docker.io/library/alpine" if path == payload else "docker.io/library/debian"
+            )
+            review = [
+                rule
+                for rule in self.rules
+                if rule.get("description") == "Require manual review for exact Docker 29.8.1 fixture input changes"
+                and _matches_path(rule["matchFileNames"], path)
+            ]
+            self.assertEqual(len(review), 1)
+            self.assertTrue(review[0]["dependencyDashboardApproval"])
+            self.assertFalse(review[0]["automerge"])
+        pin = next(
+            rule
+            for rule in self.rules
+            if rule.get("allowedVersions") == r"/^3\.24$/" and "Docker" in rule["description"]
+        )
+        self.assertTrue(_matches_path(pin["matchFileNames"], payload))
+        group = next(rule for rule in self.rules if rule.get("groupName") == "Docker Alpine 3.24 base")
+        self.assertTrue(_matches_path(group["matchFileNames"], payload))
+        group = next(rule for rule in self.rules if rule.get("groupName") == "Docker Debian 13 distro base")
+        self.assertTrue(_matches_path(group["matchFileNames"], metadata))
+
     def test_generic_metadata_manager_extracts_each_distro_base_once(self) -> None:
         manager = next(
             item
@@ -170,6 +229,53 @@ class DockerRenovateTests(unittest.TestCase):
                 package = image.split(":", 1)[0]
                 self.assertEqual(_matching_group_rules(self.rules, path, package, other_version), [])
 
+    def test_conformance_pins_extract_once_and_share_exact_debian_digest_groups(self) -> None:
+        manager = next(
+            item
+            for item in self.managers
+            if item["description"] == "Track external pinned container image tags and digests in container metadata"
+        )
+        extraction = re.compile(manager["matchStrings"][0].replace("(?<", "(?P<"))
+        freeze = next(
+            rule
+            for rule in self.rules
+            if rule["description"]
+            == "Keep distro compatibility images on their declared OS release while allowing digest refreshes"
+        )
+        digest_policy = next(
+            rule
+            for rule in self.rules
+            if rule["description"] == "Squash-merge pinned container digest updates after required CI"
+        )
+        self.assertEqual(
+            {
+                key: digest_policy[key]
+                for key in ("automerge", "automergeType", "automergeStrategy", "platformAutomerge")
+            },
+            {"automerge": True, "automergeType": "pr", "automergeStrategy": "squash", "platformAutomerge": True},
+        )
+        self.assertFalse(self.config["vulnerabilityAlerts"]["dependencyDashboardApproval"])
+        path = "images/docker/docker-29-conformance-rootless/container.yaml"
+        source = (ROOT / path).read_text()
+        metadata = yaml.safe_load(source)
+        matches = list(extraction.finditer(source))
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(
+            f"{matches[0]['depName']}:{matches[0]['currentValue']}@{matches[0]['currentDigest']}",
+            metadata["build"]["args"]["DISTRO_IMAGE"]["value"],
+        )
+        self.assertEqual(
+            [item["description"] for item in self.managers if _matches_path(item["managerFilePatterns"], path)],
+            [manager["description"]],
+        )
+        groups = _matching_group_rules(self.rules, path, "docker.io/library/debian", "13")
+        self.assertEqual([rule["groupName"] for rule in groups], ["Docker Debian 13 distro base"])
+        self.assertEqual(_matching_group_rules(self.rules, path, "docker.io/library/debian", "other-tag"), [])
+        self.assertTrue(_matches_path(freeze["matchFileNames"], path))
+        self.assertFalse(freeze["enabled"])
+        self.assertEqual(set(freeze["matchUpdateTypes"]), {"major", "minor", "patch"})
+        self.assertEqual(_matching_group_rules(self.rules, path, "docker.io/library/debian", "13", "patch"), [])
+
     def test_podman_centos_stream_10_pair_uses_the_unique_external_image_manager(self) -> None:
         manager = next(
             item
@@ -277,3 +383,45 @@ class DockerRenovateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HistoricalFixtureOwnershipTests(unittest.TestCase):
+    def test_exact_bases_have_unique_extraction_groups_and_manual_review(self) -> None:
+        config = json.loads((ROOT / ".github/renovate.json").read_text())
+        manager = next(
+            item
+            for item in config["customManagers"]
+            if item["description"] == "Track external pinned container image tags and digests in container metadata"
+        )
+        extraction = re.compile(manager["matchStrings"][0].replace("(?<", "(?P<"))
+        for name, version, group in (
+            ("docker-29-8-1-conformance-rootless", "13", "Docker Debian 13 distro base"),
+            ("docker-debian-11-conformance-rootless", "11", "Docker Debian 11 distro base"),
+        ):
+            path = f"images/docker/{name}/container.yaml"
+            source = (ROOT / path).read_text()
+            matches = list(extraction.finditer(source))
+            self.assertEqual(len(matches), 1)
+            self.assertEqual((matches[0]["depName"], matches[0]["currentValue"]), ("docker.io/library/debian", version))
+            applied = _matching_rules(config["packageRules"], path, "docker.io/library/debian", version)
+            policy = dict(config)
+            for rule in applied:
+                policy.update(rule)
+            self.assertEqual(policy["groupName"], group)
+            self.assertTrue(policy["dependencyDashboardApproval"])
+            self.assertFalse(policy["automerge"])
+            changed = dict(config)
+            for rule in _matching_rules(config["packageRules"], path, "docker.io/library/debian", version, "major"):
+                changed.update(rule)
+            self.assertFalse(changed["enabled"])
+        fixed = next(
+            item for item in config["customManagers"] if item.get("depNameTemplate") == "docker-29-8-1-compatibility"
+        )
+        pattern = re.compile(fixed["matchStrings"][0].replace("(?<", "(?P<"))
+        for path in (
+            "images/docker/conformance/29.8.1/payload.yaml",
+            "images/docker/docker-29-8-1-conformance-rootless/container.yaml",
+        ):
+            self.assertEqual(
+                [match["currentValue"] for match in pattern.finditer((ROOT / path).read_text())], ["29.8.1"]
+            )

@@ -248,6 +248,7 @@
       "required": ["mode", "outerPrivilege"],
       "properties": {
         "mode": {"enum": ["rootful", "rootless"]},
+        "launcher": {"enum": ["direct", "systemd"], "default": "direct"},
         "outerPrivilege": {"enum": ["privileged", "unprivileged"]},
         "nestedRuntime": {"type": "boolean"}
       }

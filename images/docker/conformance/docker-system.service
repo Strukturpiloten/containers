@@ -1,0 +1,14 @@
+[Unit]
+Description=Isolated conformance Docker daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/start-conformance-daemon
+Delegate=yes
+TasksMax=infinity
+TimeoutStopSec=20
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

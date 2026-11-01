@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
 DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
+ARCHIVE_DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
 SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
 MIN_SUPPORT_BOUNDARY_LENGTH = 16
 RUNTIME_PROFILES = frozenset({"podman", "phpFpm", "notifyPush", "docker"})
@@ -136,6 +137,28 @@ def _build_evidence(image: Mapping[str, Any], evidence: Mapping[str, Any] | None
     }
 
 
+def _runtime_authority_view(image: Mapping[str, Any], profile: str, item: Mapping[str, Any]) -> dict[str, Any]:
+    # Delay this import: evidence_gate -> admission -> maintenance must stay acyclic.
+    from scripts.evidence_gate import EvidenceError, require_ordinary_runtime_authority  # noqa: PLC0415
+
+    qualified = True
+    try:
+        require_ordinary_runtime_authority(item, profile, image.get("tests", {}).get(profile, {}))
+    except EvidenceError:
+        qualified = False
+    result = {"status": item["status"] if qualified or item["status"] != "passed" else "nonqualifying"}
+    if not qualified or "qualification" in item or "oomAccountingStatus" in item:
+        result.update(
+            {
+                "operationalStatus": item["status"],
+                "qualification": item.get("qualification"),
+                "oomAccountingStatus": item.get("oomAccountingStatus"),
+                "nativeAuthority": "ordinary" if qualified and item["status"] == "passed" else "none",
+            }
+        )
+    return result
+
+
 def _runtime_coverage(
     image: Mapping[str, Any], evidence: Sequence[Mapping[str, Any]], build: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -172,8 +195,10 @@ def _runtime_coverage(
             or identity.get("architecture") != architecture
             or any(
                 not isinstance(identity.get(field), str) or DIGEST_RE.fullmatch(identity[field]) is None
-                for field in ("manifestDigest", "configDigest", "archiveSha256")
+                for field in ("manifestDigest", "configDigest")
             )
+            or not isinstance(identity.get("archiveSha256"), str)
+            or ARCHIVE_DIGEST_RE.fullmatch(identity["archiveSha256"]) is None
             or not isinstance(identity.get("sourceRevision"), str)
             or SHA_RE.fullmatch(identity["sourceRevision"]) is None
         ):
@@ -190,7 +215,7 @@ def _runtime_coverage(
             msg = f"Runtime evidence for {name} has no host context at {key}."
             raise MaintenanceError(msg)
         by_key[key] = {
-            "status": item["status"],
+            **_runtime_authority_view(image, str(profile), item),
             "checks": checks,
             "imageIdentity": identity,
             "host": host,

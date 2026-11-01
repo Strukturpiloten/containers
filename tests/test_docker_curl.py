@@ -20,7 +20,7 @@ DISTRO_CASES = (
         "apt-get",
         "curl",
         (
-            "apt-get install --yes --no-install-recommends busybox ca-certificates curl $engine_package "
+            "apt-get install --yes --no-install-recommends busybox ca-certificates curl $engine_selector "
             "iproute2 iptables passwd procps tar"
         ),
         r"dpkg-query --show --showformat='${binary:Package}=${Version}\n' | sort",
@@ -77,7 +77,7 @@ class DockerCurlTests(unittest.TestCase):
                 line.strip()
                 for line in branch.splitlines()
                 if line.strip().startswith(manager + " ")
-                and '"$engine_package"' in line
+                and ('"$engine_selector"' if manager == "apt-get" else '"$engine_package"') in line
                 and ("install" in line or line.strip().startswith(("apk add ", "pacman --sync --noconfirm")))
             )
             inventory = next(line.strip() for line in branch.splitlines() if '"$provenance/os-packages"' in line)
@@ -92,7 +92,9 @@ class DockerCurlTests(unittest.TestCase):
                     (install, inventory, probe),
                     (expected_install, expected_inventory, expected_probe),
                 )
-                for mode in ("rootful", "rootless")
+                for mode in (
+                    ("rootful", "rootless", "rootless-exact") if manager == "apt-get" else ("rootful", "rootless")
+                )
             )
         for mode in ("rootful", "rootless"):
             source = (ROOT / f"images/docker/upstream/{mode}.Containerfile").read_text(encoding="utf-8")
@@ -126,15 +128,38 @@ class DockerCurlTests(unittest.TestCase):
         for command, wanted in zip(actual, expected, strict=True):
             self.assertEqual(shlex.split(command), shlex.split(wanted))
 
-    def exercise(self, commands: tuple[str, str, str], package: str, fault: str = "none") -> None:
+    @staticmethod
+    def selector_setup(recipe: str) -> tuple[str, list[str], str, list[list[str]]]:
+        """Execute only the actual argument/selector preface, using a fake validator."""
+        if recipe.startswith("upstream:"):
+            return "", [], "vendor-engine", []
+        group, mode = recipe.rsplit(":", 1)
+        prefix = DISTRO_SCRIPT.read_text(encoding="utf-8").split('\nif [ "$run_as_user" = root ]; then', 1)[0]
+        args = [group.split("|", 1)[0], "vendor-engine", "root" if mode == "rootful" else "1000:1000"]
+        if mode == "rootless-exact":
+            args = ["debian-11", "docker.io", "1000:1000", "20.10.5+dfsg1-1+deb11u2"]
+            return (
+                prefix,
+                args,
+                "docker.io=20.10.5+dfsg1-1+deb11u2",
+                [["dpkg", "--validate-version", "20.10.5+dfsg1-1+deb11u2"]],
+            )
+        return prefix, args, "vendor-engine", []
+
+    def exercise(self, commands: tuple[str, str, str], package: str, fault: str = "none", *, recipe: str) -> None:
         install, inventory, _probe = commands
+        prefix, arguments, selector, validation_calls = self.selector_setup(recipe)
         with tempfile.TemporaryDirectory(prefix="docker-curl-control-") as temporary:
             directory = Path(temporary)
             tools = directory / "bin"
             tools.mkdir()
             trace = directory / "calls"
             (tools / "sort").symlink_to("/usr/bin/sort")
-            install_args = shlex.split(install.replace('"$engine_package"', "vendor-engine"))
+            install_args = shlex.split(
+                install.replace('"$engine_package"', shlex.quote(selector.split("=", 1)[0])).replace(
+                    '"$engine_selector"', shlex.quote(selector)
+                )
+            )
             query_args = shlex.split(inventory.split("|", 1)[0].split(">", 1)[0])
             package_list = f"{package}=fixture-revision\nother-package=retained-revision\n"
             version = "curl fixture-version\nProtocols: http https\n"
@@ -144,24 +169,25 @@ class DockerCurlTests(unittest.TestCase):
                 f"with pathlib.Path({str(trace)!r}).open('a') as stream:\n"
                 " stream.write(json.dumps(args)+'\\n')\n"
                 f"if args == {install_args!r}: pass\n"
+                f"elif args in {validation_calls!r}: pass\n"
                 f"elif args == {query_args!r}: sys.stdout.write({package_list!r})\n"
                 f"elif args == ['curl', '--disable', '--version']:\n"
                 f" sys.stdout.write({version!r}); sys.exit({42 if fault == 'failure' else 0})\n"
                 "else: sys.exit(97)\n"
             )
-            for name in {install_args[0], query_args[0], "curl"}:
+            for name in {install_args[0], query_args[0], "curl", *(call[0] for call in validation_calls)}:
                 if name == "curl" and fault == "missing":
                     continue
                 executable = tools / name
                 executable.write_text(body, encoding="utf-8")
                 executable.chmod(0o600 if name == "curl" and fault == "not_executable" else 0o700)
-            # Only the three checked snippets run. Never run full provisioning;
+            # Only the selector preface and three checked snippets run, with fake tools;
             # absolute image paths are mapped into this private test directory.
-            script = "set -eu\n" + "\n".join(commands)
+            script = "set -eu\n" + prefix + "\n" + "\n".join(commands)
             script = script.replace(PROVENANCE, shlex.quote(str(directory)))
             script = script.replace("/usr/bin/curl", shlex.quote(str(tools / "curl")))
             result = subprocess.run(  # noqa: S603
-                ["/bin/sh", "-c", script],
+                ["/bin/sh", "-c", script, "curl-recipe", *arguments],
                 env={"PATH": str(tools), "provenance": str(directory), "engine_package": "vendor-engine"},
                 capture_output=True,
                 text=True,
@@ -171,7 +197,7 @@ class DockerCurlTests(unittest.TestCase):
             self.assertEqual(result.stdout, "")
             self.assertEqual((directory / "os-packages").read_text(encoding="utf-8"), package_list)
             calls = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
-            expected_calls = [install_args, query_args]
+            expected_calls = [*validation_calls, install_args, query_args]
             if fault not in ("missing", "not_executable"):
                 expected_calls.append(["curl", "--disable", "--version"])
             self.assertEqual(calls, expected_calls)
@@ -185,14 +211,14 @@ class DockerCurlTests(unittest.TestCase):
         for name, package, actual, expected in self.recipes():
             with self.subTest(recipe=name):
                 self.check_commands(actual, expected)
-                self.exercise(actual, package)
+                self.exercise(actual, package, recipe=name)
 
     def test_missing_nonexecutable_or_failed_fixed_probe_fails_construction(self) -> None:
         for name, package, actual, expected in self.recipes():
             for fault in ("missing", "not_executable", "failure"):
                 with self.subTest(recipe=name, fault=fault):
                     self.check_commands(actual, expected)
-                    self.exercise(actual, package, fault)
+                    self.exercise(actual, package, fault, recipe=name)
 
     def test_removed_install_probe_or_complete_provenance_is_detected(self) -> None:
         for name, package, actual, expected in self.recipes():

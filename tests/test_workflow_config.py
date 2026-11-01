@@ -24,6 +24,41 @@ FIXTURE = {
 }
 
 
+# Independently reviewed finite exceptions: no other dependency may disable automerge.
+MANUAL_REVIEW_RULES = [
+    {
+        "matchManagers": ["custom.regex"],
+        "matchDatasources": ["github-digest", "gitlab-tags"],
+        "matchFileNames": [".github/docker-userns-policy-source.json"],
+        "matchPackageNames": ["Strukturpiloten/docker-lens", "apparmor/apparmor"],
+        "groupName": "Userns compile and unused source and parser review",
+        "dependencyDashboardApproval": True,
+        "automerge": False,
+    },
+    {
+        "matchManagers": ["custom.regex"],
+        "matchDepNames": ["docker-29-8-1-compatibility"],
+        "allowedVersions": "29.8.1",
+        "groupName": "Docker 29.8.1 compatibility fixture version",
+        "dependencyDashboardApproval": True,
+        "automerge": False,
+    },
+    {
+        "matchFileNames": [
+            r"/^images\/docker\/conformance\/29\.8\.1\/payload\.yaml$/",
+            r"/^images\/docker\/docker-29-8-1-conformance-rootless\/container\.yaml$/",
+        ],
+        "dependencyDashboardApproval": True,
+        "automerge": False,
+    },
+    {
+        "matchFileNames": [r"/^images\/docker\/docker-debian-11-conformance-rootless\/container\.yaml$/"],
+        "dependencyDashboardApproval": True,
+        "automerge": False,
+    },
+]
+
+
 class WorkflowConfigurationTests(unittest.TestCase):
     def test_invalid_configuration_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -136,9 +171,14 @@ class WorkflowConfigurationTests(unittest.TestCase):
         self.assertEqual(config["automergeStrategy"], "squash")
         self.assertTrue(config["platformAutomerge"])
         self.assertTrue(config["ignoreUnstable"])
+        manual = [rule for rule in config["packageRules"] if rule.get("automerge") is False]
+        self.assertCountEqual(
+            [{key: value for key, value in rule.items() if key != "description"} for rule in manual],
+            MANUAL_REVIEW_RULES,
+        )
         for rule in [config, *config["packageRules"]]:
             with self.subTest(rule=rule.get("description", "default")):
-                self.assertTrue(rule.get("automerge", config["automerge"]))
+                self.assertEqual(rule.get("automerge", config["automerge"]), rule not in manual)
                 self.assertFalse(rule.get("ignoreTests", False))
                 self.assertNotEqual(rule.get("requiredStatusChecks"), [])
 

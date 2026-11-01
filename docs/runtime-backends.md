@@ -1,0 +1,1483 @@
+# Native smoke-test outer runtimes
+
+`scripts.runtime_tests --outer-engine` selects a test caller's outer runtime,
+independently of the image's inner `tests.docker.mode` or `tests.podman.mode`:
+
+| Selection | Docker profile | Podman and application profiles |
+| --- | --- | --- |
+| `podman` (local default) | Podman | Podman |
+| `docker` | Docker | Docker |
+| `profile` (explicit GitHub caller) | Docker | Podman |
+
+Unknown selections/profiles fail closed; there is no engine fallback. The shared
+action selects `profile` after Buildah constructs the architecture OCI archive.
+Inner rootless execution does not imply a rootless outer runtime.
+Local development commands select `--outer-engine podman` explicitly; the local
+`test-podman-image` caller also supplies that selection internally.
+
+## Private Docker boundary
+
+The Docker backend requires an explicit OCI archive and rootful execution on a
+Linux systemd/cgroup-v2 host. It never uses ambient Docker/containerd sockets,
+client contexts or credentials. Invocation-owned containerd root/state/socket and
+Docker data/exec/config/socket paths are verified before image import. Skopeo
+converts the OCI transport; the image configuration digest and architecture must
+remain unchanged. Actual runtime versions and root identity are observed.
+
+Transient services, not installed units or global daemon configuration, run both
+daemons. Their processes and every outer container belong to one nonce-named
+slice. Exact container IDs, labels, argv, UIDs, live cgroup placement and the
+slice inode bind ownership. A separate expiry service acknowledges the original
+monotonic deadline before workloads start; it stops that inode-bound slice even
+if the Python caller is killed. Startup does not renew the aggregate budget or
+consume its cleanup reserve. Killing sudo or only dockerd is not cleanup proof.
+The original 1800-second aggregate includes startup, workloads and cleanup.
+Cleanup commands are clamped to its remaining allowance; expired or late-returning
+commands, store removal and completion envelopes cannot produce a passing result.
+
+One task-owned bridge is checked for overlapping host routes before and after
+creation. Docker-managed iptables, forwarding and masquerading changes are
+disabled. Userland-proxy and the original published-localhost, inner-network and
+DNS assertions remain; there is no host-network substitution. Actual proxy,
+route, namespace and workload behavior still requires native qualification.
+
+The existing observed 12 GiB budget covers private storage and transport files.
+Cleanup removes exact resources, drains the complete slice and verifies kernel
+cgroup, bridge and mount absence before deleting storage. Unknown ownership or
+incomplete teardown retains storage and a failed cleanup result alongside the
+original error. Global prune and ambient-store cleanup are prohibited.
+
+## CI prerequisites and evidence
+
+### PR492 compile-only user-namespace observation
+
+The dedicated userns-dryparse CI job is restricted to same-repository PR492 on
+TheRealBecks/issue442-main-reconciled, executing the workflow's immutable merge candidate on the
+AMD64 Ubuntu 26 host. Actual checkout HEAD must equal GITHUB_SHA; the source-checked PR head is
+recorded separately and verified as the merge's second parent using fixed read-only Git without
+replacement objects or lazy fetching. It independently checks the event, checkout, run/attempt,
+host distribution, AppArmor controls,
+kernel features and process capabilities. Its artifact has consumer
+containers-ubuntu26-userns-dryparse, scope hostcompile-only and qualification none.
+The planned fixture is docker-20.10-rootless, but no image build, container run, bootstrap,
+policy load or host-policy change occurs. Ordinary smoke jobs and Required CI are unchanged.
+
+[The active source manifest](../.github/docker-userns-policy-source.json) now
+selects DockerLens commit `d7f18d756fe754adea3c57e6c0cba2a906e2a780` from
+`TheRealBecks/issue158`, with exact three-file builder/helper/license sizes and
+hashes. Earlier issue127 compile/unused observations and retained failures remain
+historical and do not qualify this changed source. Public HTTPS retrieval still
+accepts only immutable allowlisted resources, without credentials or redirects,
+into private nonsymlink custody. The isolated child invokes only the fixed pure
+`mediated_profile_bytes` builder; there is no fallback or local policy rewriting.
+The dockerlens-127 name prefix is only an identifier: actual Containers
+run/attempt and fresh nonce remain the ownership binding.
+
+The selected test prerequisite is an attachment-free ordinary enforce profile
+declaring ABI4, fixed `flags=(attach_disconnected,mediate_deleted)` and thirteen
+explicit rules: file with inherit-only execution,
+capability, network, unix, D-Bus bind/send/receive, mount, remount, umount,
+pivot_root, signal send/receive, ptrace, userns create, and POSIX mqueue
+create/read/write/open/delete/setattr/getattr with type=posix. No all-rule,
+io_uring, generic/SysV queues, D-Bus eavesdrop or profile/hat transition is emitted
+or claimed. POSIX delete is supported by ABI4 and explicitly selected. Omission
+does not establish denial or mediation, and this permissive fixture prerequisite
+is not a security sandbox or equivalent to the rejected all-rule policy.
+
+The earlier all-rule candidate has a static ABI blocker: it implies io_uring
+while declared ABI4 lacks that feature, triggering unchanged fatal warnings.
+No parser, ABI, hosted cohort, feature override, warning selector or output/time
+limit is changed to accept the explicit policy. The maximum policy size for Containers-generated names is
+422 bytes for both compile/unused and active routes, below the unchanged
+1024-byte bound. The upstream AppArmor 5.0.2 semantic reference
+is commit `909affc32a13d14ae3a7ccf44d325ae63ce11baf`; its ABI4 SHA-256 remains
+`e510bb8f6788b45e48de2f859a6f94a7b8416cbac5a1051814cfce925fa911bd`.
+The GPL-2.0 parser source was a read-only syntax/permission reference; no oracle
+implementation or parser artifact is copied or redistributed here. The canonical
+SDK's [ADR0052][sdk-path-flags] records the selected paired declaration and reviewed
+provenance;
+ADR0051/R3 observations remain historical. The source review preserves the examined
+deleted-dentry guard conditionally; the expanded pathname reachability also carries
+aliasing risk. Neither this declaration nor compilation establishes serialized or
+effective numeric flag equality, connected/deleted/disconnected equivalence or
+general aliasing safety.
+
+[sdk-path-flags]: https://github.com/Strukturpiloten/docker-lens/blob/d7f18d756fe754adea3c57e6c0cba2a906e2a780/docs/decisions/0052-mediated-disconnected-path-flags.md
+
+Registry, held-task, success-receipt and owned-unload checks accept only the exact
+generated enforce label. Bootstrap/root owners and direct clean-control actors
+retain their separate bare-unconfined checks. New trusted subject refusal details
+emit schema2; exact-integer dispatch also preserves the byte-identical historical
+schema1 validator and its old predicate. Neither diagnostic version grants
+attachment, admission or cleanup authority. Retained historical leases remain
+retained; no foreign profile or wildcard cleanup is added.
+
+The original `profileObservation` remains a post-create sample. Workload
+qualification additionally requires a closed `postExecWitness` version1 component
+with ordered `ready` and `pre-close` samples on the same attached lease. Root
+selects the original task and fixed image-family RootlessKit executable, resolves
+the systemd unit's parent when needed, and requires exactly one immediate child
+with distinct user and mount namespaces. It holds task, pidfd, executable and
+namespace descriptors through matching executable SHA-256/size and generated
+enforce-label readbacks. Raw PIDs, paths, labels and namespace identities stay
+private; exported digests bind the task identities, original binding, source
+manifest and lease. Old or incomplete receipts cannot establish this claim.
+
+Each read-only checkpoint has at most five seconds inside the original work
+budget, 64 IDs across owned cgroup candidates and the held parent thread/child
+union, 512 KiB of proc/cgroup input and 96 MiB of executable input (32 MiB per
+executable). It preserves the
+original cleanup and finalizer reserves, pending-child/reader guards and close
+rules. Failure grants no new cleanup authority. The samples establish measured
+post-readiness/pre-close task evidence, not capture of an exec event, historical
+denial attribution, numeric path-flag equality or broader pathname semantics.
+
+This is source integration only. Strict no-load compilation under the original
+fatal-warning flags, fresh post-RootlessKit-exec held-task label/workload readbacks,
+the complete existing ordinary/systemd image/architecture matrix and terminal
+cleanup remain required against both immutable producer and consumer sources.
+A source gate, compile, registry row, configured inspect profile or repaired row
+does not qualify the matrix. No native success, release or image publication is
+claimed by this source change.
+
+The preinstalled, root-owned regular ELF parser must be exactly 5.0.2, without SUID/SGID or file
+capabilities. The isolated child sets and verifies NoNewPrivs=1 and zero effective, permitted,
+inheritable and ambient capabilities before same-process exec; a separate closed receipt channel
+is closed before exec. The capability bounding set need not be zero and supplies no admission.
+Fixed options bypass config/cache, select single-process compilation, explicitly enable all
+warnings and make them fatal, bind the trusted base/include directory, and skip kernel loading.
+Exact canonical bytes are stdin; there is no policy-file operand or fallback. Relevant kernel
+namespace and policy-version features must be known. Parser/ABI-4 and feature bytes, identity and
+hashes are checked before/after each query; the artifact retains exact bounded ABI-4 bytes, selected
+host facts, and only output counts/hashes and closed failure reasons.
+
+Each child has CPU, output, wall-time and owned-group termination/reaping bounds; the observation
+budget is 30 seconds, output is at most 128 KiB, and the workflow step has a one-minute timeout.
+Local tests mock parser, network and kernel observations. Substitution, drift, warnings, unsupported
+or missing facts, timeout/cancellation or uncertain child cleanup refuse the observation.
+Even a successful compile is nonqualifying: it gives no guest label, native runtime support,
+ARM64 evidence or attribution for the earlier RootlessKit failure. Loading policy needs a separately
+reviewed cohort and independent finalizer; Stage 1 has no load-stage transition.
+
+The manifest is the unique Renovate owner for the active DockerLens github-digest branch pin and
+official apparmor/apparmor GitLab-tag parser version. Both share mandatory dashboard/human review
+and disabled automerge; file hashes and parser contract must be reviewed together. Mismatched bytes
+or an unreviewed parser-version change fail closed. Historic evidence has no matching manager path.
+Existing checkout/upload Action pins and their template/generated managers are reused. Observed
+preinstalled parser/ABI hashes use the explicit diagnostics-system-tool integrity exception, not
+vendor checksums; no parser is downloaded or installed. The upstream
+[5.0.2 contract](https://gitlab.com/apparmor/apparmor/-/tree/909affc32a13d14ae3a7ccf44d325ae63ce11baf)
+defines only this compile command; no loaded cohort has been admitted.
+
+### Validate-host diagnostics
+
+The validate job captures a bounded, read-only security snapshot before repository checks and retains
+only `docker-runner-security.json` for seven days. This describes the AMD64 validate-job host and the
+collector process; it cannot establish the security context of a guest, RootlessKit, an ARM64 job,
+or a native smoke-test job. Later experiments must collect their own cohort. The snapshot cannot
+attribute a launch failure, qualify native support, or waive existing checks or runtime budgets.
+
+The closed JSON records kernel release and architecture, AppArmor enablement and its restriction
+on unprivileged user namespaces, the user-namespace limit, and optional collector-process Seccomp,
+NoNewPrivs and profile kind. It excludes hostnames, UIDs, environment values, raw paths, profile
+names and raw command output. Unavailable or malformed observations have explicit unknown states.
+Only the existing fixed system `apparmor_parser --version` may run, without elevation and only from
+a non-root collector after regular-file, ownership, permissions and ELF checks. Its bounded binary
+hash and public file identity are checked around the query; its version is an observation without
+a minimum-version admission rule. The query has a one-second limit, a 4 KiB output limit and owned
+process-group cleanup. The complete collector has a four-second observation budget and emits at
+most 8 KiB of JSON. It never loads policy, changes sysctls, installs tools or invokes a runtime.
+
+Unavailable facts are ordinary JSON; collector implementation and artifact-upload failures are
+not masked. The existing pinned `actions/upload-artifact` reference is reused. Its Jinja reference
+is already covered by Renovate's pinned-action custom manager and its generated workflow reference
+by the GitHub Actions manager. No pin or manager changes are needed. The optional OS-provided parser
+uses the existing runner-environment integrity exception: no parser version is selected and no
+independent package checksum is claimed.
+
+Docker-selected jobs require Docker CLI/daemon, containerd, systemd, `ip`,
+GNU Coreutils `timeout` and existing Skopeo tooling. Before native services or
+disk sampling, the existing command owner qualifies `gnutimeout` when present,
+otherwise `timeout`, using a strict numeric GNU version banner. A selected
+non-GNU, malformed, missing or failing provider is rejected without trying a
+different provider. The canonical absolute executable is retained privately for
+the invocation and reused by the privileged command watchdog, isolated root
+diagnostic guard and disk sampler; root does not resolve a different executable.
+Public evidence contains only `gnu-coreutils`, its numeric version and the
+`prefixed`/`unprefixed` path kind, never the executable path or raw provider output.
+After admission, public launch errors, command/sampler records and final evidence
+also redact the retained path and its escaped spellings, including sudo errors
+and late evidence rewrites. Exit statuses and unrelated actionable diagnostics
+remain available; native parser return values, argv and held binary fixture
+streams are not rewritten.
+
+Ubuntu 26.04 supplies GNU Coreutils in the official parallel
+[`gnu-coreutils` package](https://packages.ubuntu.com/resolute-updates/amd64/gnu-coreutils/download)
+(`/usr/bin/gnutimeout`); a transitional `coreutils` package version does
+not identify which implementation owns the unprefixed executable. Do not switch
+the runner's default utilities or accept an alternative provider's exit status
+as proof of descendant termination. The strict offline owner-death controls
+still require both the guard and query to die by SIGKILL before the original
+two-second deadline, followed by owned-process/group absence and reaping.
+Actual runner presence and native behavior require refreshed exact-candidate CI
+evidence; offline admission alone does not qualify a hosted runner toolchain.
+
+No new download or package-installation path is added: the existing signed
+Ubuntu build-tool installation is unchanged; missing Docker-side runner
+prerequisites fail closed. Hosted-runner packages
+lack independent project-pinned checksums: this is an explicit runner-environment
+integrity exception, not an invented pin. Actual Docker/containerd/systemd
+versions are recorded. This is an existing OS-provided prerequisite, not a new
+download, package declaration or tool-version pin. Existing Renovate runner
+extraction owns `(AMD64|ARM64)_RUNNER` in `.github/automation.yml` through the
+`github-runners` datasource; `.github/renovate.json` groups those upgrades as
+`GitHub Ubuntu runners`. Those definitions, generated consumers, image/payload
+pins and managers are unchanged; no duplicate manager is added. The shared
+resource-budget helper joins the backend/diagnostics sources as a global build
+input so provider-policy changes select every consuming runtime image.
+
+Additive `host.outerEngineSelection` and `host.outerRuntime` evidence does not
+change inner mode or archive identity. CI admission derives the expected engine
+from the exact profile and requires explicit `profile` selection, observed
+versions, rootful private storage and, for Docker, a private Unix endpoint.
+Podman version fields are never attached to Docker evidence.
+
+An early rootless Docker launch failure may add explicitly non-acceptance
+diagnostics. Read-only inspection is limited to the held, owner-verified
+container through its private endpoint. Only closed privilege, AppArmor,
+security-option and exit-state fields are recorded; raw metadata and stderr
+are not published. A current-boot kernel journal query is confined to the
+launch-to-failure window, with 64 records plus an overflow sentinel and a 64 KiB
+capture limit. Only exact RootlessKit AppArmor user-namespace-denial record
+counts or an unavailable reason are retained, never raw journal messages.
+The fixed root-side reader owns a separate query process group, kills that
+held group before reaping its direct child, and verifies group absence before
+acknowledging teardown. Reaping a sudo/timeout launcher or observing exit 137
+alone is not cleanup proof. Missing acknowledgement remains unverified.
+An independently deadline-bound root watchdog inside that query group remains
+active if the reader owner dies. Unverified query teardown blocks another
+diagnostic capture and retains this invocation's private store, even after the
+independent container/network/service/slice cleanup attempts. A later
+observation cannot clear earlier lifetime uncertainty.
+These are host-task-window observations, not proof of container causality.
+The whole diagnostic attempt has a five-second cap within the original runtime
+deadline, without consuming the 60-second cleanup reserve. Missing, truncated,
+late or zero-count observations cannot qualify a prerequisite, waive a test,
+or turn the original failure into a pass. No host security policy is changed.
+
+Offline controls do not qualify either native architecture or resolve issue #344
+and draft PR #429's systemd/delegation fixture. Its newer clean-control and OOM
+diagnostic source is integrated with the explicit outer-engine policy here:
+both independent fixture phases use Docker for GitHub's `profile` selection,
+and isolated Podman for the local `podman` selection. Neither phase falls back.
+Docker's aggregate watchdog is clipped to the existing phase deadline; startup,
+cleanup reserve and the original pair deadline are not renewed. The pinned source
+archive remains accounted outside both private stores and is verified across loads.
+
+Only validated metadata for the reviewed systemd fixture can bind the systemd
+launcher before containers exist. Run flags cannot opt a direct profile into
+descendant admission. Docker uses private cgroup namespaces and bounded guest
+runtime tmpfs mounts, without Podman's crun/systemd/annotation options. The
+original CID-owned outer scope and private slice inode must still match when
+guest PID 1 moves into a slash-bounded descendant. Resource limits are read at
+the original outer boundary, independently of the PID 1 leaf. Physical teardown
+still removes exact resources after an abnormal strict orderly shutdown; that
+shutdown remains a failure even when removal succeeds.
+
+Podman retains its complete existing conmon marker/PID custody observer. Docker
+the mandatory lifecycle-start and original before/after inner-memory hooks read the owned outer cgroup
+`memory.events` and `memory.events.local` through held host descriptors. Private
+Docker incarnation, process birth, owned slice, cgroup2 mount/root and scope
+bindings are checked around the reads; public evidence contains hashes, bounded
+counters, finite availability and monotonic windows. Missing or malformed files,
+changed identities and regressing counters cannot become zero or comparable
+deltas. Known optional counters (including `sock_throttled`) are retained when
+present, without defaulting absent fields to zero. `memory_localevents` semantics
+are retained. Other Docker hooks retain only finite OCI fields, including stopped
+state and exit code, and allocate no host counter reader. These observations remain
+unresolved and grant no lifecycle or OOM acceptance; they do not attribute inner,
+ancestor or kernel events. Raw host operands and collector output remain private.
+Conmon sources remain explicitly not applicable; no conmon identity or marker is synthesized. Strict OOM, clean-control,
+lifecycle and cleanup assertions remain. DockerLens/BoxFerry's historically
+shared outer stores have a different contract; this Python private-store adapter
+is not copied from or imposed on those callers.
+
+Runtime/action/test changes match the main publication workflow and may select
+every image. A merge can publish images and finalize releases after its gates.
+Non-publishing PR checks do not authorize that action: obtain publication
+authorization before merging. Never change the publisher or skip its gates to
+evade this boundary.
+
+### Exited guest before scoped bind
+
+A failed `subject-running` bind may include optional `guestExit` in the existing
+root failure schema 1. It is emitted only for the original source/binding-verified
+retained refusal, never as successful task/profile evidence. Exact private
+Engine inspections bracket the existing owned log capture and require stable
+terminal state, Error and creation/start/finish incarnation facts. PID0 alone
+establishes none of those facts. No PID, CID, label, timestamp, Error or log text
+is added to public or durable diagnostic output.
+
+The observer gets at most five seconds inside the original work deadline, keeping
+the 60-second cleanup reserve and 15-second finalizer head start. Existing capture
+prepayment/drain and sticky pending flags remain mandatory. Input is bounded to
+64 KiB, 64 complete LF records and 4096 UTF-8 bytes per line; Error is bounded to 4096
+bytes and published only as empty/unclassified plus byte count/digest. Log classes
+reuse reviewed literal message patterns, with unknown counts and complete-buffer
+digests. These describe observed messages, not a denied syscall or policy actor.
+The detail stays within 2048 bytes and the failure envelope within 8192. No guest
+exec, new root operation, retry, task adoption or cleanup authority follows.
+
+Missing, changing, malformed or unavailable observations keep a finite unavailable
+category and the exact original refusal. Invalid optional internal detail is
+omitted; invalid external detail rejects the receipt. Old failures, schema 1
+subject-profile validation and schema 2 diagnostic discrimination remain unchanged.
+The existing journal/systemd classifier is separate from this plain Engine-log
+classifier. A bounded diagnostic success does not qualify native startup or the
+ordinary matrix, and does not authorize dispatch, cancellation or policy changes.
+
+## Hosted unused userns custody seam
+
+Before the unchanged root bootstrap, the same PR-492-only job also runs
+`scripts/python_runtime_fd_observation.py` directly with `/usr/bin/python3 -I -B -S`
+as the ordinary job user. This separate, optional fixture observes nonstdio
+descriptor metadata before and after importing `_ctypes` in its own isolated
+child. It does not reproduce the privileged build child's complete import order,
+environment, inherited descriptors or execution context. Device/inode matches to
+the known Python executable, `_ctypes` extension or mapped libffi files identify
+objects only; they establish no OFD identity, descriptor origin or root-failure
+cause. An absence in this fixture cannot clear the original guard refusal.
+
+The fixture enumerates at most 32 nonstdio descriptors, including high-numbered
+ones, and closes its enumeration iterator before `fstat`. It never reads arbitrary
+descriptor contents or retains their symlink targets. Every snapshot explicitly
+reports `state=non-atomic` and a bounded `closedDuringSnapshot` count for entries
+that returned `EBADF`. The fixture's own closed enumeration descriptor may
+account for one entry; no disappeared descriptor's identity or origin is proven.
+An empty descriptor list, including one with a zero closed count, is not an
+atomic absence proof and cannot clear the original guard refusal. Bounded
+process mappings are used internally only to identify strict public system libffi paths and check
+their mapped device/inode; mappings and addresses are discarded. Root-owned,
+nonwritable path components, bounded symlink resolution, regular-file/mode/size
+checks and stable identities surround hashing of the known public files. Each
+file is at most 32 MiB; at most four libffi files are hashed. Missing, unsupported,
+unsafe or changed provenance is explicitly unavailable. The hashes are observed
+system-file hashes under the existing OS-tool integrity exception, not vendor
+checksums. No source-package version is inferred from a libffi filename or hash;
+package/version provenance remains unavailable in this observation.
+
+The ordinary-user parent launches only its fixed isolated system Python child,
+with clean environment, closed inherited descriptors and `/dev/null` stdin. It
+bounds combined stdout/stderr while the child lives, attempts exact-child
+termination/reaping on failure, and closes both pipes. Parent and child share
+one eight-second monotonic allowance after module startup, including a half-second
+cleanup reserve; neither hashing nor capture renews it. Before the import child,
+the parent uses the same bounded capture helper to query only fixed
+`/usr/bin/gnutimeout --version`. A strict numeric GNU banner is required; only
+closed `provider=gnu-coreutils`, numeric version and `pathKind=prefixed` survive.
+The two owned children run sequentially under that original allowance. Missing,
+bad or unqualified providers leave the observation unavailable. No mutable PATH
+selection, fallback, installation or default-utility change is introduced.
+
+An unverifiable child wait or pipe close records `cleanup=uncertain`. The
+canonical CI step additionally wraps the complete interpreter startup and
+collector in fixed `/usr/bin/gnutimeout --signal=TERM --kill-after=1s 9s`, without
+foreground mode. GNU process-group behavior permits normal TERM cleanup and
+group KILL one second later if necessary. The initial wrapper necessarily trusts
+the declared OS binary before its in-budget version check; no positive
+observation is accepted without that check. Actual hosted presence and watchdog
+semantics still require fresh CI evidence. The existing observed OS-tool
+integrity exception covers this bootstrap trust; no package, download, version
+pin or vendor checksum is added, and existing Renovate ownership is unchanged.
+The step seeds a closed unavailable JSON placeholder using Bash `printf`, writes
+collector output to a fresh private temporary file, and replaces the final
+artifact only after successful command completion. A missing provider or failed
+wrapper preserves valid unavailable JSON and fails only this optional step.
+Filesystem calls and Python process creation are not interruptible hard bounds;
+kernel-uninterruptible tasks can outlast a signal. Elapsed time is also checked
+after process creation and around bounded file reads, and overdue operations
+refuse the observation. The existing one-minute step timeout is only an outer CI
+backstop. Its complete JSON artifact is capped at 16 KiB. Validated public
+GitHub run/attempt and source identifiers support later independent comparison
+with the root artifact's observed binary hash; they are not attestations. The
+separate `python-runtime-fd-observation` artifact always reports qualification
+`none`, `policy_load_run=false` and `container_run=false`. Collection and upload
+are optional and cannot replace the original root-bootstrap outcome or renew
+the existing experiment deadline. No root call, policy operation, container
+workload or dependency/pin is added. The existing pinned upload Action and its
+template/generated Renovate ownership are reused without changes.
+
+On an early systemd-rootless guest startup failure, optional diagnostics can
+project only the fixed `user@1000.service` and dockertest `docker.service`
+states, results, status codes and PIDs. Host inspect and journal evidence retain
+priority inside the original five-second diagnostic allowance; the guest query
+does not extend startup or diagnostic deadlines. Before guest execution, the
+parent requires the held fixture/placement guard, and the root worker checks the
+private rootful daemon, exact container identity, owner, derived slice, live
+state and privilege. The unchanged placement guard refuses execution outside
+the delegated guest leaf. Raw guest output, journals, errors, command arguments,
+environment and private paths are not retained; bounded closed fields are
+optional and cannot erase legacy host evidence if unavailable or oversized.
+Host query teardown does not prove guest process death: exact-container cleanup
+remains responsible and native behavior still needs fresh hosted evidence.
+
+After a valid service projection, one separate optional private capture can classify
+the last eight messages from the exact guest's current-boot journal, matching both
+`_UID=1000` and `_SYSTEMD_USER_UNIT=docker.service`. It repeats the private-daemon,
+full-CID ownership and guest placement checks inside the same original deadline.
+Only the root worker sees raw JSON messages and their journal metadata in memory.
+Private classifier input shares the existing 64 KiB query
+cap and eight-record window; the parent receives only closed message labels and
+bounded record/unknown counts under the unchanged 2 KiB closed-wire input limit.
+Legacy service input also retains its separate 2 KiB limit. Generic permission
+errors, unreviewed formats and warnings
+remain unknown. Labels describe observed messages, not a proven cause or actor.
+Malformed, oversized, unavailable, cancelled or late classification cannot erase
+the existing service or host projection. Unverified query teardown still retains
+the sticky custody latch and exact-container cleanup responsibility. The unchanged
+1 KiB guest and 4 KiB optional diagnostic envelopes give existing service and host
+fields priority over this new field. No query is retried or given extra time.
+
+Guest manager `NoNewPrivs` remains explicitly `not-observed`: a service MainPID
+alone does not bind a live process birth/identity through a proc read, and a unit
+property would describe configuration rather than the observed process state.
+No NNP override, security-policy change, service restart or startup wait is added.
+
+After freezing the complete host, service and startup-log diagnostic, one further
+optional root capture may read unit configuration. It repeats the private-daemon
+and exact owned-container inspection, then one guarded exec makes two fixed
+`systemctl show` calls: system `user@1000.service` and the existing UID1000 user-bus
+`docker.service` contract. Each requests only `NoNewPrivileges` and
+`RestrictNamespaces`. Missing user-bus data stays unobserved. These three extra
+host query groups and two guest commands use the same original five-second
+absolute diagnostic deadline and 60-second backend cleanup reserve. They are
+additional operations, with no retry or renewed time allowance, and may not fit
+the time remaining. Configuration stdout is capped at 2 KiB while reading, with
+an overflow sentinel and the existing query-group drain; all older capture limits
+and callers retain their original defaults.
+
+Only root memory holds property text. Optional `unitNoNewPrivileges` and
+`unitRestrictNamespaces` scalars enrich available baseline service objects without
+replacing their fields. NNP accepts exact `yes` or `no`, otherwise `unknown`.
+Namespace output accepts exact `yes`, exact `no`, or a distinct, single-space
+allow-list of `cgroup ipc net mnt pid user uts time`, in any order. Recognized
+lists become `user-allowed` or `user-excluded`; other bounded syntax is `unknown`.
+Raw unit-file tilde syntax, aliases and numeric masks are not interpreted.
+Duplicate or unknown properties, malformed sections, controls and non-ASCII
+refuse the whole optional observation. A service with only unknown values gets
+no enrichment. Unavailable, oversized, cancelled or late configuration preserves
+the frozen baseline. Both the 1 KiB guest and 4 KiB complete record are previewed:
+all new configuration is dropped before any old startup-log fallback, without
+trimming previous evidence. Uncertain teardown retains the pending-reader latch
+and exact-container cleanup responsibility.
+
+These are later unit-configuration observations, separate from the earlier
+service/startup snapshot. `yes` for namespace restriction reports all namespaces
+restricted by the formatter; `no` reports no restriction from that property.
+Neither means effective process permission. Neither NNP value establishes actual
+manager NNP, inherited or implicit restrictions, installed filters, failure-time
+state, container-incarnation continuity or the actor behind a child-start error.
+Namespace enforcement depends on the installed systemd version and architecture;
+reporting a setting does not prove that a filter was installed.
+`startupLog.managerNoNewPrivs=not-observed` remains unchanged. No live-manager proc
+inspection, security override, readiness success or new native acceptance follows from this
+metadata. Legacy records without these fields remain unobserved.
+
+The configuration contract was reviewed read-only on 2026-10-29 with Context7
+followed by official sources when its versioned query did not supply formatter
+details: systemd v257's
+[D-Bus properties](https://github.com/systemd/systemd/blob/v257/src/core/dbus-execute.c),
+[property formatter](https://github.com/systemd/systemd/blob/v257/src/shared/bus-print-properties.c),
+[namespace formatter](https://github.com/systemd/systemd/blob/v257/src/shared/nsflags.c)
+and [v257 namespace flags](https://github.com/systemd/systemd/blob/v257/src/shared/nsflags.h),
+plus the current [systemd.exec manual](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html).
+These LGPL-2.1-or-later sources were linked and paraphrased without copying an
+implementation or executing an oracle. The current manual identifies systemd 262
+and includes `time`; the v257 flag set has the seven earlier namespaces. These
+references and authored fixtures do not attest installed versions or native
+behavior. The bounded consumer audit found no change needed to the separate
+DockerLens/BoxFerry acceptance contracts; failed diagnostic status remains failed.
+Only already-installed systemctl and the existing guard are reused. No dependency,
+software pin, managed extraction path or Renovate ownership changes are introduced.
+
+Official JSON output in
+[systemd v257](https://github.com/systemd/systemd/blob/v257/src/shared/logs-show.c#L1133-L1138)
+and [v259](https://github.com/systemd/systemd/blob/v259/src/shared/logs-show.c#L1168-L1173)
+adds string `__SEQNUM` and `__SEQNUM_ID` alongside cursor, timestamps and boot ID
+before `output_fields` filters the remaining journal data. The classifier accepts
+these two unused string keys and discards all metadata before returning the root
+protocol. Authored fixtures cover four- and six-metadata-field variants; they do
+not establish the actual guest's raw journal fields or installed systemd version.
+
+Message literals were reviewed read-only on 2026-10-28 using Context7
+`resolve-library-id`/`query-docs` and official-source `open`/`find`, without running
+an external oracle or copying its implementation. References are
+[RootlessKit v3.0.0 parent errors](https://github.com/rootless-containers/rootlesskit/blob/v3.0.0/pkg/parent/parent.go),
+[Moby v28.5.2 daemon configuration errors](https://github.com/moby/moby/blob/v28.5.2/cmd/dockerd/daemon.go),
+[Unix listener errors](https://github.com/moby/moby/blob/v28.5.2/daemon/listeners/listeners_linux.go),
+[network initialization errors](https://github.com/moby/moby/blob/v28.5.2/daemon/daemon.go),
+and [systemd v257 journalctl](https://github.com/systemd/systemd/blob/v257/man/journalctl.xml).
+RootlessKit/Moby sources are Apache-2.0; the systemd references are LGPL-2.1-or-later.
+These references do not attest the guest's installed versions; unmatched formats
+remain unknown. No upstream implementation or oracle executable is redistributed.
+
+Child-start message refinements were reviewed read-only on 2026-10-29 with
+Context7 and official tagged sources, without running an oracle or copying its
+implementation. RootlessKit v3.0.0's parent starts `/proc/self/exe` and wraps
+`cmd.Start` errors. Go 1.25.3's
+[`Cmd.Start`](https://github.com/golang/go/blob/go1.25.3/src/os/exec/exec.go)
+propagates [`startProcess`](https://github.com/golang/go/blob/go1.25.3/src/os/exec_posix.go)
+errors with operation `fork/exec`; its
+[`PathError.Error`](https://github.com/golang/go/blob/go1.25.3/src/io/fs/fs.go)
+joins operation, path and error text. Its
+[`Errno.Error`](https://github.com/golang/go/blob/go1.25.3/src/syscall/syscall_unix.go)
+uses the [Linux amd64 error table](https://github.com/golang/go/blob/go1.25.3/src/syscall/zerrors_linux_amd64.go).
+Go's reference source is BSD-3-Clause; RootlessKit remains Apache-2.0.
+These are source references, not evidence of the guest's compiled Go version.
+
+Three separate message labels recognize the complete existing RootlessKit parent
+error prefix followed by `fork/exec /proc/self/exe: ` and exactly `operation not
+permitted`, `permission denied` or `resource temporarily unavailable`. No extra
+text or newline is accepted for these refinements. Other suffixes, paths and
+multiline messages retain the general child-start label when its prefix matches;
+embedded or different prefixes remain unknown. A label observes text only: it
+does not establish a numeric errno, the failed syscall, a policy actor, a cause or
+guest manager `NoNewPrivs`. Authored positive and mismatch fixtures do not attest
+the failing guest's actual suffix or identify why its child failed to start.
+
+The existing diagnostics input ownership and already-installed guest journalctl
+cover this change; there is no new dependency, software pin or Renovate extractor.
+
+The stdlib-only `scripts/runtime_docker_systemd_guard.py` holds the existing
+guard and fixed user-manager argv without expanding root import paths. The
+root worker reads only a bounded stable no-follow snapshot of that literal
+sibling. Its path is declared among the conformance image inputs, so a helper
+change selects both image architectures. This extraction adds no dependency or
+operational pin; existing image-input selection owns it and no Renovate manager
+change is required.
+
+The PR-492-only `userns-custody-unused` AMD64 Ubuntu 26 job exercises two real
+unused ownership cycles: normal close and deliberate loss of the exact root
+coordinator after durable arm. An independent root observer authenticates the
+original service, waits for its finalization and process/cgroup termination,
+and disposes only known custody/control leaves. Each cycle has at most 120
+seconds, with work ending 60 seconds before its original final deadline. The
+second cycle also remains capped by the original 240-second experiment
+allowance recorded before checkout/setup; bootstrap never renews it. Unknown
+start, identity, lifetime or disposal results fail and retain owned data. The
+root-only immutable `start.json` binds the exact arm intent, generation,
+control/custody identities and original handshake end before the single service
+start. The foundation intent-read checks W; the service binder checks the
+stricter original handshake end before and after intent-read and READY. ACK
+binds that end and the protected record hash; service startup never derives a
+fresh handshake allowance.
+
+The canonical CI template contains the sole fixed root-bootstrap verifier. An
+unprivileged driver supplies a bounded connected Git commit/tree/blob proof
+and fetches the existing pinned DockerLens source closure. Root verifies the
+workflow-selected immutable merge commit, ordered event parents, exact helper
+closure and source bytes before copying or importing helpers. Root uses the
+preinstalled root-owned system Python with isolated/no-site execution; uv and
+checkout code run only unprivileged before this verification. The system
+interpreter, standard library, environment clearer and systemd clients are an explicit OS trust-base
+integrity exception, with actual versions, hashes and fresh identities recorded;
+no project/vendor checksum or new downloaded tool is claimed. Helper/source
+hashes and fresh identities are rechecked across both cycles.
+
+The installed-tool scan records its first refusal in `systemToolsFailure`, with
+closed tool (`SYSTEMCTL`, `SYSTEMD_RUN` or `ENV`), operation-site and
+failure-category identifiers (`REFUSED`, `OS_ERROR`, `TIMEOUT`, `DECODE`,
+`EMPTY_OUTPUT` or `INTERNAL`). Categories describe the failed operation, without
+inferring its cause. This diagnostic
+survives a partial scan or a later close failure; accepted `systemTools` facts
+remain separate. It includes no exception text, command output or extra host
+observations. The scan still stops at its first failure and uses the original
+commands, deadlines and before/after tool comparison. The diagnostic itself
+adds no admission or runtime authority.
+
+A hosted observation refused `ENV / READ_LINKS / REFUSED`: the initial file
+identity failed the single-link predicate. It did not record the numeric link
+count or establish a packaging cause. The three fixed preinstalled OS tools
+(`systemctl`, `systemd-run` and `env`) are borrowed executables, so their private
+reader accepts a positive link count that remains stable in the full identity
+rechecks. Only those fixed selections reach this policy. The shared `read_root`
+entrypoint still requires exactly one link, even for a directly supplied OS-tool
+path; parser, interpreter, source, custody and control files gain no exception.
+Root ownership, trusted path traversal, no-follow open, regular-file and mode
+checks, byte bounds, ELF/version checks, hashing, full descriptor/path identity
+rechecks (including link count and timestamps), command arguments and budgets
+remain in place. This bounded OS-tool contract does not establish native runtime
+qualification or claim that the earlier runner had multiple links.
+
+Preparation can add one optional `workFailure` to the existing failure diagnostic.
+It identifies a closed parent-side work site in the `CUSTODY`, `CHILD_PARENT` or
+`HOSTED` source area. The finite site/category pairs live in the helper's
+`WORK_FAILURES` table. Observation is local to preparation and its immediate
+record readback; shared callers remain unobserved by default. The collector
+keeps only closed immutable values, and the invocation's control object receives
+only a sealed tuple. No exception, raw capture, path, credential ID or authored
+source/policy content is included in the new detail.
+
+Eligible work failures are captured before cleanup can mask them. Resource
+release, retention cleanup, opaque file-read internals, unknown child lifetime
+and child-internal causes remain unobserved. A proven-dead nonzero child status
+can identify only the parent's status-validation refusal. The first completion
+deadline after child cleanup is ambiguous and receives no work label. Composed
+boot checks observe only an actual false predicate; opaque boot-read/close
+exceptions cannot acquire an outer label. A valid legacy failure diagnostic
+with invalid optional detail retains only its legacy fields; malformed base
+records, unknown root fields and duplicate keys keep their existing refusal
+behavior. Recording or capture failure adds no retry or fallback output.
+
+These diagnostics add no reads, child channel, process, probe, wait, deadline or
+runtime authority. The probe program and privilege receipts, strict custody reads,
+and borrowed OS-tool rules remain unchanged. Successful initial tool scans,
+staging and the synthetic write-denial probe do not establish a successful
+normal custody cycle or native runtime qualification. A work label cannot
+authorize readiness, cleanup or disposal of retained data.
+
+Only a freshly recorded `CHILD_PARENT / B_BUILD_STATUS_REFUSAL / REFUSED` can also add
+`buildStatusObservation` during preparation. Its three fields are integer `schema: 1`,
+`terminationForm` (`EXIT_NONZERO`, `SIGNAL_ALRM`, `SIGNAL_XCPU`, `SIGNAL_XFSZ`,
+`SIGNAL_KILL`, or `OTHER_SIGNAL`) and `receiptCheck` (`MATCH`, `EMPTY`, or `MISMATCH`).
+Absence means unobserved. The observer consumes its single attempt before any new
+qualification or parsing; identical later refusals cannot retry. Diagnostic errors
+or an invalid extra field leave the original work failure independent.
+
+This optional check is manually qualified only for the resident parent CPython
+3.14.4 final runtime. It uses the already held Popen return code and, for an exact
+Build with exact integer IDs, at most 1024 exact receipt bytes. Empty bytes need no
+parser. Nonempty bytes must be ASCII without an actual NUL; other encodings, types
+or bounds produce no extra observation. Eligible bytes go unchanged to the existing
+receipt validator once, without an observer. Schema/duplicate or JSON syntax refusal
+means `MISMATCH`; unexpected decoder, numeric-limit, recursion or allocation errors
+omit the extra observation. No codec prewarming or additional I/O is used.
+
+`MATCH` only means the held receipt passes that validator. It does not prove receipt
+close, imports, rendering, readiness or completion. `EMPTY` does not prove setup never
+ran, and signal names do not identify a cause: `SIGNAL_KILL` cannot distinguish OOM,
+a hard limit or an external sender. The sealed pair retains only two closed strings,
+adds no authority and shares the existing single bounded diagnostic write. Runtime
+qualification is a semantic review constant, not a Python installer/version selector;
+operational admission and existing Renovate managers therefore require no change.
+Qualifying another runtime requires a fresh semantic review.
+
+An optional `childGuardDeclaration` can accompany only that exact preparation
+fault and an `EXIT_NONZERO / MATCH` pair. It contains integer `schema: 1` and one
+closed `category`: `FD_FSTAT_NON_EBADF`, `FD_NOT_ALLOWLISTED`, or `RESULT_TYPE_OR_SIZE`.
+The build child reserves exit values 111, 112 and 113 respectively at those three
+existing negative guards. Every predicate, descriptor allowlist, operation order,
+limit, receipt and positive path stays unchanged; all other failures keep their
+old values. These declarations require the same single consumed attempt, the
+unchanged receipt validator once, the reviewed parent runtime, and exact held
+metadata for both manifest-pinned Source records. No source descriptor is read
+or inspected again. Source changes require manual semantic requalification.
+
+This is a producer-declared category, not proof of an actual host statement,
+errno, descriptor/object/OFD identity, origin or cause. Interpreter/native-library
+and finalization status collisions or replacement are not exhaustively excluded.
+Absence means unobserved. Declaration failures, conflicts or invalid wire data
+cannot erase an otherwise valid original fault or status pair. They cannot
+authorize readiness, runtime work, cleanup or disposal.
+
+Publication independently admits the complete control record against its existing
+32768-byte compact ASCII limit and the complete artifact envelope against its
+existing 131072-byte guard and sorted-output-plus-newline capture limit. Bounded
+pure prospective JSON checks run only when a new declaration is present. Exact
+JSON types, whole-tree budgets and at most 64-bit integer magnitudes are screened
+before any prospective encoding, including dictionary keys. Unsupported shapes,
+overflow or new-gate errors omit only declarations at the known diagnostic slots;
+all original evidence and the original single write remain. Legacy-invalid cases
+and no-declaration/normal paths keep their original serialization behavior.
+
+`.github/docker-userns-unused-admission.json` is a manually reviewed semantic
+admission based on the audited Stage-1 Ubuntu 26 observation, bound to the
+active source manifest and helper contracts. It never compares historical
+inodes, PIDs or boot IDs. Source, parser-contract or helper updates invalidate
+it. The existing Renovate source/parser manager remains the single pin owner;
+humans must review and update admission rather than automatically rewriting
+host fingerprints. The helper version authority is the selected Git tree, so
+there is no self-referential commit pin. The new template/generated job reuses
+the existing checkout/upload Action pins and runner configuration; ordinary
+validation, dry-parse and publishing consumers retain their existing behavior.
+
+The artifact reports `qualification=none`, `policy_load_run=false` and
+`container_run=false`. Its `boundaryKind=unused-coordinator` identifies the
+actual coordinator exclusion cgroup; it proves no Docker runtime-slice
+placement. No profile load/remove, container operation, runtime API, sysctl
+change or persistent unit is involved. A fixed credential-dropped child only
+queries the held parser's version or attempts a write to a synthetic root-owned
+leaf. Deliberate coordinator SIGKILL does not test cancellation of the entire
+GitHub job or runner loss. Offline tests use synthetic providers; hosted
+execution and an independent exact-source artifact audit are still required
+before considering a subsequent load/guest experiment.
+
+The bootstrap supervises only its fixed verified observer argv. It requires one
+kernel thread, no pre-existing children and waitable SIGCHLD semantics, then
+sets and verifies a process-local Linux subreaper. Capture enforces stdout and
+stderr limits while the process is alive and requires both EOFs, the recorded
+observer exit status and kernel ECHILD before acceptance. Timeout, cancellation,
+overflow or unknown child membership remain failures. Teardown uses the same
+original D, with a fixed reserve inside it; no positive minimum renews an expired
+allowance. Only this process's bounded direct/adopted child list is considered,
+and waitid/pidfd membership precedes signals. There is no process-wide scan or
+process-group sweep. Independent systemd owners remain outside this descendant
+custody and retain their existing lease/deadline and explicit cleanup proof.
+
+The fork coordinator is held immediately and cannot start custody work until
+its parent validates its exact identity and grants its pipe handshake. Failure
+teardown may terminate that still-owned child before arm; this never counts as
+the deliberate post-arm SIGKILL acceptance cycle. A failed pidfd or handshake,
+observer error or cancellation still attempts exact-child termination/reaping
+before original D, retaining unknown completion honestly. Cancellation wins
+over a pending normal close, including cancellation seen during owner
+observation. A cancellation first seen during the durable close or receipt write
+cannot publish accepted normal evidence; a final post-write check refuses
+success without overwriting terminal metadata. The initial write-denial probe
+intersects its parent five-second work and six-second cleanup caps, captured
+once at phase entry, with original bootstrap W/D. The child's independent alarm
+grants no new allowance. Handoff/event/budget files open nonblocking and must
+pass regular-file, ownership, link and bounded stable-read checks before use.
+
+Observer capture and the top-level observer decide their final return only
+after restoring prior signal handlers and propagating sticky cancellation.
+Known status, EOF and completed child cleanup do not turn cancellation into
+accepted success. No additional cleanup budget is created by these checks.
+
+The complete fixed root program is carried by the canonical step's literal
+`FIXED_ROOT_BOOTSTRAP` environment value. The short Bash step rejects an empty
+value and marks it readonly before any workspace command. Its existing caller
+capture function passes that one quoted value to isolated system Python with
+`-c`, the same nine following arguments, stdin from `/dev/null`, and job-user
+stdout capture. The decoded program, including the terminal error handler,
+remains unchanged; the YAML carrier indentation and its historical raw hash
+change. The program is neither loaded from the workspace nor evaluated by Bash.
+
+This keeps the Bash transport small while retaining the full workflow and
+ShellCheck validation. Published actionlint 1.7.12 writes a `run` script to its
+ShellCheck pipe before starting the reader; an oversized script can block on
+the available pipe capacity. Moving only the immutable program into the literal
+environment carrier avoids that defect without disabling checks, changing host
+settings or claiming an unreleased fixed tool version. Earlier cancelled or
+timed-out validation attempts remain nonpasses.
+
+## Scoped issue527 prerequisite and experimental candidate
+
+The `containers-ubuntu26-userns-active` source contract admits a maintained
+prerequisite attempt for the declared `docker-29-conformance-rootless` fixture
+and private outer Docker backend through these finite original caller tuples:
+
+| Workflow | Original event | Native leaf job | Source/ref |
+| --- | --- | --- | --- |
+| `ci.yml` | Same-repository `pull_request` | `smoke-build` | Synthetic merge SHA and `refs/pull/<number>/merge` |
+| `ci.yml` | `merge_group` / `checks_requested` | `smoke-build` | Actual queue candidate SHA/ref |
+| `ci.yml` | `workflow_dispatch` | `smoke-build` | Selected branch/tag, `full` or `docker-rootless-qualification` |
+| `publish-images.yml` | Nondeleted main `push` | `build` | Main pushed SHA/ref |
+| `publish-images.yml` | `schedule` | `build` | Main/default-branch SHA/ref and actual schedule |
+| `publish-images.yml` | `workflow_dispatch` | `build` | Selected branch/tag and `all`, `image` or `family` scope |
+
+The runner must be repository-owned GitHub-hosted Linux with the complete
+reviewed cohort for its architecture. Candidate, workflow source, actual
+checkout, build plan and OCI revision must agree. The producer and fixed root
+bootstrap independently classify the original event, workflow path, leaf job,
+ref and bounded payload facts before staging source. Same-repository PRs require
+both repository identities, head/base metadata and a matching PR number/merge
+ref; the PR head cannot replace the synthetic merge candidate. Before any tree
+traversal or stage write, producer and fixed root independently verify that the
+hash-authenticated candidate commit has exactly two ordered parents: event base,
+then event head. The webhook's cached `merge_commit_sha` is advisory: absent,
+null or a well-formed nonnull SHA is accepted even when stale, while malformed
+values refuse. It cannot select or approve a source. Only actual commit-header
+parents count; message text and signed-header continuations do not. Queue identity
+comes from the queue event rather than a constituent PR. Local reusable
+publication retains the caller workflow/event and actual leaf job `build`;
+`workflow_call`, the callee path and stage display labels cannot substitute.
+
+The existing `TRUSTED_RUNTIME` model is preserved: same-repository PRs and
+non-PR routes retain their existing runtime trust, while fork or missing PR
+metadata cannot gain this admission. There is no actor lookup, permission API,
+token service or new approval flow. Activation and trust Booleans alone do not
+grant root authority. Unknown workflows/events/jobs, unrelated sources and local
+or self-hosted contexts refuse.
+
+Automatic CI and publication contexts use effective profile `full` with an
+empty raw selector. Injected CI profile inputs cannot select bounded or
+diagnostic work there. Publication's `full` records describe ordinary per-image
+work, without asserting repository-wide full-check coverage; publication has no
+CI validation-profile input. All ordinary routes retain `focused_runtime=none`
+and workload mode `qualification`. The manual bounded profile selects exactly
+this fixture and both architectures, has its own check/concurrency class and
+cannot satisfy full `Required CI`. The full matrix, original workload and
+budgets are unchanged.
+
+The existing diagnostic route remains restricted to
+`validation_profile=docker-rootless-diagnostic` on
+`refs/heads/TheRealBecks/issue527`, `smoke-build`, and the same fixture. Known
+ASCII upper/mixed-case profile choices normalize to the canonical choice while
+all actors retain the exact raw request. Unknown, non-ASCII and malformed
+choices refuse. Diagnostic receipts retain purpose `experimental-candidate`
+and never grant ordinary qualification. Historical evidence remains
+nonqualifying. The old unused admission/bootstrap and never-load observer are
+unchanged. Admission itself records `qualification: none`; it permits an attempt,
+not native qualification, release or publication permission.
+
+Bootstrap transport/stage, native lease records, scoped receipts and disposal
+acknowledgments use schema 4. Admission uses schema 7: its maintained policy
+contains the exact `validationProfiles` allowset `full` and
+`docker-rootless-qualification`, while each actual context/receipt retains one
+canonical profile and the exact raw request. The exact maintained-caller table
+and all 34 workflow-context fields are independently checked by producer and
+root; unused caller-fact fields must be empty. Unknown, duplicate, delimited or
+contradictory allowsets refuse in both helper and fixed root bootstrap. Prior
+revision artifacts cannot be relabelled or replayed into this admission.
+The existing closed helper-file list stays at
+schema 1. Every native binding authenticates purpose, admission revision/digest,
+and the digest of the complete workflow context. Every root RPC checks those
+bindings and its immutable bootstrap commitment. Both phases must agree on that
+context and commitment, with separate owned runtimes and leases. The archived
+consumer intrinsically matches source, run, attempt and producing job; ambient
+`GITHUB_*` values cannot supply missing authority or promote experimental data.
+
+The workflow carries a separate fixed root-bootstrap literal. An unprivileged
+producer supplies a finite Git commit/tree/blob proof and the existing pinned
+SDK source closure. Before importing a helper, the literal requires the trusted
+candidate, workflow, and checkout commits to be identical, verifies every
+connected source object and source pin, and creates root-owned 0400 files in a
+0700 stage. Root Python uses fixed `-I -B -S` execution from that stage; it never
+imports the checkout under sudo. The SDK's immutable pure `profile_bytes`
+builder is reused without invoking its active `RunnerProfile` CLI. The existing
+`dockerlens-127-upstream-rootless-RUN-ATTEMPT-NONCE` spelling remains an identifier;
+it does not confer DockerLens admission or policy authority.
+
+The manually reviewed active admission requires Ubuntu 26.04, the selected
+`x86_64`/`aarch64` machine, kernel
+`7.0.0-1017-azure`, parser 5.0.2, and the exact parser, ABI, feature and Python
+3.14.4 fingerprints recorded in
+[the active admission](../.github/docker-userns-active-admission.json).
+Actual actor preflight reads the fixed AppArmor-enabled, restricted-userns and
+maximum-userns scalar files. The legacy `unprivileged_userns_clone` control must
+be `1` or explicitly absent with ENOENT; unreadable, malformed, disabled, or
+changed controls refuse. Diagnostic ARM remains observation-only and refuses
+load; maintained ARM uses its own complete finite cohort.
+
+`ImageVersion` is the workflow-reported per-job provenance value. It is frozen
+once and compared exactly across bootstrap, phase custody, receipts and evidence
+checks. It is neither an independent VM identity attestation nor a historical
+compatibility pin. The unused admission's historical image cohort is not widened
+by this contract.
+
+Maintained ARM uses the separately reviewed ARM parser and interpreter hashes
+in the admission's `cohorts.arm64` entry, including the pinned ABI 4.0 and exact
+userns/policy-v9 feature requirements. It does not borrow AMD64 executable hashes
+or weaken the single exact unconfined label contract for default-allow emulation.
+Root preflight, held version/build interpreter, no-load compiler, policy loader
+and archived importer select the same architecture predicate. Unsupported FD
+execution, missing facts and drift refuse through the existing custody path.
+The original C allocator, whole-lifetime OOM accounting and all owner/cleanup
+stages remain mandatory; this is a compatibility hypothesis for an attempt.
+
+The ARM review uses the existing trusted preinstalled-OS-tool exception.
+Historical root-bound `ImageVersion=20261026.168.1` differs from the startup
+header's `20261025.167.1`; the header-linked official image ref returned 404.
+Neither report establishes a vendor checksum or an independently verified image
+package manifest. Same-job provenance is frozen and compared, never silently
+replaced by the other value or described as VM attestation. Fingerprint drift
+requires explicit coordinated source/admission review, not automatic renewal.
+
+Each actual root actor freshly opens `.ns_name`, `.ns_level`, and `.stacked`
+directly under a held genuine `/sys/kernel/security/apparmor` securityfs
+directory. They must be exactly `root\n`, `0\n`, and `no\n`. There is no `/policy/`
+namespace read and no normalization of stacked labels. The guest's effective
+profile is read through its held task's `attr/apparmor/current` and must equal the
+generated name followed by ` (unconfined)\n`. Enforce, complain, namespace-qualified,
+stacked, and other default-allow representations refuse. A mismatch retains
+bounded raw bytes privately and exports only the source, length, digest and
+match diagnostics.
+
+The pre-exec actor namespace check is not a measured parser post-exec namespace
+attestation. This candidate explicitly relies on the independently reviewed
+trusted-fixed-OS assumption that executing the held pinned parser performs no
+AppArmor namespace transition; its receipt records `measuredPostExec: false`.
+That limitation remains visible to review and the evidence gate.
+
+Each native phase has separate root-private locked custody, the same held source
+archive identity, and the original phase deadline. A fresh same-source/VM
+no-policy owner cycle must close before arming the real independent finalizer.
+The finalizer acknowledges its exact source, PID/start incarnation, namespace,
+cgroup and deadline from a separate `system.slice` service outside the runtime
+slice and coordinator process group. Its verified runtime and stop allowances
+fit within the original deadline. It begins emergency cleanup 75 seconds before
+that deadline, ahead of the existing backend's 60-second expiry; no allowance is
+renewed.
+
+Durable load/create/remove/unload intents precede effects. The single detached
+owned systemd guest receives the exact profile option and lease label after its
+create intent; one-shot checks retain their existing options. The root helper
+binds the CID, run labels, archive/configuration identity, live task incarnation,
+cgroup and effective profile. An unknown reader, child lifetime, load, create or
+absence outcome is sticky and retains custody. Emergency cleanup cannot infer
+that an unacknowledged load/create intent succeeded or that no guest exists.
+
+A contended custody lock is retried nonblockingly within the same original
+absolute deadline. Every retry still checks the explicit release handshake
+without taking the closing coordinator's held lock; no fresh allowance or forced
+unlock is granted. Cancellation/coordinator-death causes remain sticky across
+retries, and a cleanup effect's error is never mistaken for lock contention.
+Exhaustion or an uncertain effect publishes a separate retained marker that
+blocks later state reuse and disposal, including a late release after expiry.
+
+Normal close first proves exact guest absence while the private endpoint is
+alive, including the bound task's absence and an absent or recursively empty
+exact guest cgroup. It then unloads only the exact profile and verifies registry
+absence, holds the independent finalizer's pidfd before releasing it, proves
+normal finalizer death and unit/cgroup absence, and removes custody. Only then
+may ordinary native network/image/daemon/store teardown proceed. A later native
+teardown failure remains a failure. Unverified scoped close retains the private
+runtime rather than deleting its endpoint or store.
+
+The active OS-release read first uses the existing trusted root-owned component
+resolver, then the unchanged strict bounded reader on its canonical result and
+checks that the alias still resolves consistently. Unsafe ownership/modes,
+changed contents or alias targets, and missing targets still refuse. This fixes a
+source portability defect for conventional trusted Ubuntu aliases; the failed
+trial did not establish that this read caused its root preparation exit.
+
+Failure receipts identify an actually executed producer, root bootstrap, root
+RPC or client capture boundary. They contain only a finite checkpoint/reason,
+verified routing/source hashes, completed comparison booleans and the existing
+journal's last durable phase/intent, pending-reader/child flags and last recorded
+owner disposition. Exception text, native paths, environment and raw host facts
+are excluded. A launcher that emitted no valid receipt remains explicitly
+`execution-unverified`; a printed bootstrap literal is not an emitted error or
+proof that ARM reached bootstrap.
+
+The client parses bounded nonzero root replies before failing and exports the
+redacted receipt into the native evidence and explicit always-uploaded diagnostic
+artifact before endpoint teardown. Invalid, oversized or mismatched replies
+produce a closed client failure instead. A reporting lease locator grants no
+cleanup authority: unknown/refused preparation still retains the runtime, and no
+preflight category can automatically justify absence, unload or disposal.
+Retention preserves the prior phase/intent and any uncertain durable write
+rather than replacing that history with only `retained`.
+
+The existing pure-builder call now has one scoped `WorkObserver`. Only its sealed,
+validated worksite/status/guard enumerations and the exact finite `ChildError`
+lifetime may accompany a failure. Never-started, unknown and proven-dead failures
+all keep pending/retained state and grant no cleanup or retry authority. Producer
+identity checks name the current finite validation group before each existing
+comparison, without exporting raw values or changing any expected values; a
+phase alone does not establish the cause of a previous ARM refusal.
+
+Rejected descriptor diagnostics reuse the existing successful `fstat` witness to
+report only file type bits and whether the current numeric slot matches the
+retired interpreter slot, retired receipt slot, or another slot. Reuse does not
+identify the descriptor's original owner or establish an allowlist defect.
+An other-slot regular witness may additionally match the same file identity as
+an already-read sealed source or previously visited stdio witness. A complete
+`NO_MATCH` requires all three stdio witnesses; otherwise it reports
+`STDIO_UNAVAILABLE`. These labels establish neither descriptor ownership nor a
+shared open file description, and add no descriptor probe or inventory call.
+Historical exit 112 and classification errors retain the generic refusal. The
+final builder allowlist and its existing inventory syscalls are unchanged. An unprivileged subprocess
+regression exercises the extracted production guard with real captured stdio and
+inherited descriptors; it does not qualify the root builder or native runtime.
+Producer ImageOS refusals distinguish missing/empty, explicit Ubuntu values and
+other values through finite phases. Reported provenance binds AMD64 to
+`ubuntu26` and ARM64 to `ubuntu26-arm64`; crossed pairs, whitespace and aliases
+refuse. The producer, independent fixed active bootstrap and root context checks
+agree on these exact pairs. This is reported workflow provenance, without a
+claim of physical runner attestation or compatibility. The earlier unknown ARM
+value is superseded by run `40859477908`'s finite `ubuntu26-arm64` observation.
+These diagnostic changes introduce or change no dependency pin or Renovate
+extraction/ownership rule.
+
+Builder and version/write-denial children now use two fixed source-owned Python
+stages in the same already deprivileged process. Before importing FFI, the
+launcher binds the authored interpreter/receipt/source-or-tool identities,
+requires distinct valid roles and stdio, and rejects every extra inherited
+descriptor. It then establishes and reads back NNP using the trusted ctypes
+setup, rechecks authored identities, marks only descriptors created during that
+setup close-on-exec, and executes the same held interpreter with the existing
+isolated flags and cleared environment. Payloads contain no ctypes setup; they
+still check actual kernel UID/groups, zero capabilities and `NoNewPrivs: 1`.
+Both builder and probe payloads perform their own exact final descriptor census.
+This is not a general descriptor sanitizer, and setup success grants no authority.
+The builder additionally requires `seen == allowed` after inventory: stdio 0–2
+and both validated source descriptors must all remain present. Missing roles
+refuse with generic exit 112. Extras still refuse immediately, and EBADF still
+continues before the final completeness check. The SDK loader/output tail is
+unchanged; the completeness predicate is an explicit guard strengthening.
+
+The launcher arms the wall alarm once before FFI and sets the existing CPU/core/
+file limits for the same PID across subsequent execs. Payloads never rearm the
+alarm or renew a resource budget. The parent's original absolute deadline,
+capture, privilege receipt and proven process-group death remain mandatory.
+Owned ordinary-user tests cover two-stage mechanics and the combined delayed
+alarm boundary; their root ownership, interpreter-link, supplementary-group and
+unavailable-seal exceptions are explicit test limitations. They do not qualify
+the root builder/native runtime or establish the cause of a historical native
+failure. The internal unused-custody child hash is computed from the formatted
+source; external software pins and Renovate ownership remain unchanged.
+
+The ordinary fixture normalizes capability sets only in its owned child before
+entering the unchanged production launcher. It verifies four zero capability
+sets and unchanged NNP, preserves inherited descriptors including deliberate
+extras, and forwards the same held interpreter and original allowances. A
+bounded boolean audit and an exact private parent-state comparison verify the
+boundary. This handles test-provider capability inheritance without changing
+parent state or weakening production UID/capability/NNP checks.
+
+The diagnostic ARM dispatch stops before native runtime tests after the separate
+`observe-arm` root operation. That operation authenticates the immutable stage,
+imports its verified dependencies and holds the stage lock. It collects bounded
+structured OS/kernel/machine, fixed tool/ABI/feature digests and identities,
+CPython version, fixed control values, source bindings and strict root namespace
+facts. Collection does not evaluate them as an AMD64 compatibility cohort.
+Parser version uses only the existing bounded dropped-credential version probe,
+with an interpreter digest calculated from the same job's held trusted OS file
+under the documented preinstalled-tool integrity exception. No AMD64 interpreter
+digest is borrowed for ARM, and observed values never grant admission.
+
+Before that version child can start, an exclusive root-private
+`observation-<nonce>` custody directory and pending marker are fsynced in the
+existing stage lease area. Its binding records the authenticated bootstrap,
+context, exact tools and original deadline bounds. Proven child death permits
+retiring only the exact marker after tool and marker identity rechecks. Unknown
+completion, interruption, replacement, durability failure or root crash keeps
+custody; existing stage disposal refuses any remaining lease entry. These names
+cannot address active RPC leases. No observation route constructs an active
+profile lease, compiles/builds policy, loads/unloads profiles or creates guests.
+
+The always-uploaded observation artifact has its own receipt kind, qualification
+`none`, disposition `ARM_NOT_ADMITTED`, explicit false active/native/cleanup
+authority, and only completed bounded facts plus finite failure metadata. It
+cannot satisfy the active client or native evidence gate. The root operation
+and diagnostic ARM workflow step return non-success even after complete observation.
+Diagnostic ARM loading remains refused; historical unused admission and bootstrap are unchanged.
+
+Public observation receipts use schema v2's strict purpose-specific projection.
+Private collection and custody retain their binding facts; publication removes
+raw file identities and namespace IDs, retaining only bounded verified facts
+and genuinely derived metadata checks. Valid partial observations remain
+redacted and incomplete; malformed inputs produce empty facts and a finite
+failure. Historical schema-v1 artifacts remain untouched. Neither receipt
+version can satisfy the active client or grant qualification or cleanup authority.
+
+The evidence gate requires both original clean-control/enforcement phases and
+bound scoped evidence in this exact candidate context. It rejects absent or
+mismatched receipts, host fingerprints, effective-profile evidence, task/scope
+absence, finalizer termination, pending readers, or custody disposal. This is an
+experimental qualification path; it carries no native passing result before a
+reviewed exact-source hosted run completes.
+
+The conformance image's machine-readable inputs include the new active files
+and the reused root helper closure. Renovate retains its existing two source
+manifest managers (`github-digest` and `gitlab-tags`) as the sole upstream pin
+owners, including dashboard approval and no automerge. The coordinated review
+rule now names the active admission. No manager rewrites active/unused cohort
+fingerprints or the root verifier's manifest commitment: source/parser/helper
+changes require coordinated manual re-admission and closure/proof regression
+review, without adding duplicate upstream extraction.
+
+### Mandatory Docker parent OOM lifecycle accounting
+
+For the selected private Docker systemd fixture, preparation explicitly creates
+the exact owned empty parent slice before starting containerd, dockerd or any
+guest. Creation intent survives startup timeout and an empty service registry.
+A separate closed host `--docker-parent` reader accepts only the retained owner,
+original device/inode, baseline-or-terminal purpose and original bounded deadline;
+it derives one fixed slice operand and reads fixed counter/control files. This
+is an explicit read-scope/lifetime extension of the existing sudo/GNU-timeout
+Python boundary, not arbitrary host read authority. It never weakens the live
+PID/CID contract of `--docker-outer` or enables a host controller.
+
+Fresh hierarchical/local OOM and group counters must be zero, with full-root
+cgroup2 mount semantics, `memory_localevents=false`, stable nofollow identity and
+`cgroup.events populated=0` bookends. The actual reader must share host-init's
+cgroup namespace and be outside the charged parent. Normal qualification uses
+only the original single-PID1 allocator: its exact authored command/executable,
+loaded image identity, unchanged C source, verified before-identity, no-swap and
+genuine wait-137/Docker OOM outcome supply independent killed-process authority.
+Valid null after-telemetry remains permitted. Disjoint bound outer-counter
+brackets cannot manufacture authority from matching totals or pressure counts.
+
+Terminal accounting runs inside service teardown after exact resource removal
+and all tracked producers stop, before stopping the parent slice. Empty-subtree
+bookends and an outside reader close the whole lifetime, including shutdown;
+no charged helper or restart path follows that read. Residual tasks, extra or
+late kills, local/group OOM events, missing/reset counters, identity drift or an
+unproved boundary fail accounting while exact slice cleanup still runs. No new
+kill/drain command was added. All steps share the original deadline and reserve.
+
+Even `OOMKilled=false` states stay pending until full reconciliation and every
+existing cleanup/absence predicate succeeds. Parent `oom_kill` must equal the
+sum of independently admitted original killed processes. The actual sticky flag
+is retained; reviewed Docker/containerd event semantics and reported build
+provenance do not constitute binary attestation. Unknown versions fail closed.
+The accounting property remains **no additional OOM-killed process in the bound
+ancestor and lifetime**, not absence of pressure or arbitrary cause attribution.
+
+Execution mode, operation/accounting outcome and native authority are separate.
+`oomAccountingMode=qualification` runs the original allocator and mandatory
+ledger without the optional witness. `status=passed` and
+`oomAccountingStatus=complete` can describe a completed experiment, while both
+phase and aggregate `qualification` remain `none`. Completion labels are
+finalized only after actual scoped evidence export, cleanup, all late checks
+and the original deadline; a late evidence write invalidates any passing body.
+Actual experimental scoped receipts remain attached with their original label.
+Mode or stage presence never grants native authority or selects the workload.
+
+The existing `validation_profile=docker-rootless-diagnostic` dispatch adds an
+orthogonal `focused_runtime` choice: `witness-diagnostic` is the default and
+runs diagnostic mode; `mandatory-accounting` explicitly runs qualification
+workload mode. Both are limited to the existing issue527 ref, smoke-build job
+and rootless fixture, retain `diag_only=true`, and cannot satisfy Required CI,
+normal native qualification, publication or release. Validated selection metadata
+is attached to the build plan. Unknown/inapplicable choices and wrong contexts
+refuse before build/runtime; there is no fallback. The frozen privileged context
+uses the same versioned purpose/admission binding. ARM retains its actual observation/load
+refusal, even if the AMD64 accounting experiment succeeds.
+
+For the admitted ordinary manual AMD64 and ARM64 profiles, actual host/profile readback, both
+native phases, their original mandatory accounting outcomes, complete cleanup,
+and all late checks are required before phase and aggregate
+`qualification=complete`. Missing stage or receipt refuses before native work;
+there is no unscoped normal fallback. After enforcement backend cleanup, the
+existing root `dispose-stage` operation removes the source stage and closes its
+lock before acknowledging the exact context/admission/bootstrap commitment.
+The producer validates that acknowledgment before final deadline checks and
+aggregate evidence publication. The Action retains its EXIT cleanup fallback
+until the runtime command and ordinary authority guard both succeed. A failed
+producing command or failed/uncertain evidence retirement cannot be rescued by a
+detached passing record.
+
+Arbitrary local callers remain outside maintained activation. The required
+private Docker route refuses without an admitted prerequisite. Diagnostic ARM
+observation and load refusal remain unchanged. Source admission for both
+architectures does not make the full matrix pass; each real native phase and
+aggregate must succeed. Archived maintained facts are validated intrinsically,
+so a current `publish` or `finalize` consumer does not replace the producing
+`build` identity. Valid earlier attempts in the same run remain acceptable to
+publisher/release validators; future attempts, cross-run/source/archive/config
+records, forged disposal and missing scan/publication records refuse.
+
+The earlier bounded native [run 41135616739, attempt 1](https://github.com/Strukturpiloten/containers/actions/runs/41135616739)
+validated source `d8e4a5864b45577dfe4d0152b43d888ab3c970ef`: each architecture
+passed 163 control and 194 enforcement checks, reconciled exactly one original
+allocator OOM death with zero unexplained kills, and passed profile, custody,
+disposal and scan checks. This is historical bounded fixture evidence. It does
+not validate the changed caller source, full Required CI, BoxFerry/Lens
+compatibility, or publication. Fresh exact-source independent review, complete
+gates and native acceptance remain separate requirements.
+
+The shared Action's ordinary post-runtime check, architecture publisher gate,
+release evidence verifier and catalogue all use the same trusted-metadata
+ordinary-authority decision. Experimental, missing, forged or contradictory
+required authority cannot be laundered through status/exit zero or a consumer
+claiming full scope. The catalogue preserves operational/accounting/qualification
+facts and displays nonqualifying coverage; release/documentation verification
+cannot promote it to verified runtime evidence. Actual supported direct/Podman
+ordinary contracts remain unchanged. The catalogue accepts the canonical bare
+64-hex archive hash while retaining exact prefixed manifest/configuration digests.
+Existing source/parser pins, original allocator, profile and resource limits are
+unchanged. The changed privileged closure requires a new exact-source review;
+historical evidence keeps its original source identity.
+
+The Docker guest-systemd conformance fixture may collect a separate
+[leaf-after memory witness](../images/docker/conformance/README.md#diagnostic-leaf-after-witness)
+only in explicit nonqualifying diagnostic mode, after its mandatory allocator
+has already exposed a typed outer OOM marker.
+The witness uses the existing invocation-owned guest, daemon, image and original
+budgets. Its fresh root counter baseline is purpose-tagged and never mixed with
+the mandatory allocator's samples. Controller completion and private identity
+bindings provide diagnostic observations only; the witness cannot supply a
+lifecycle-ledger kill debit or qualify the diagnostic run. All non-flag orderly
+shutdown predicates remain strict. Unknown or incomplete
+witness evidence grants no native qualification or attribution authority.
+Closed last-entered and last-completed collection stages identify where an
+unavailable witness stopped without publishing operands or exception text.
+Cleanup progress is recorded separately and cannot replace that location;
+controller completion retains its independent unavailable/failed/completed
+meaning. A completed collection operation alone does not establish valid
+accounting or successful controller termination.
+
+An unavailable leaf witness may retain a closed release/await outcome and a
+separate bounded failure capture. Exact owned CID/name binding precedes typed
+OCI state; only fixed controller failure stages and received-signal tokens
+leave private logs. One shared cap of at most two seconds is reduced by the
+existing command timeout, work deadline and cleanup reserve, without renewal.
+Unavailable observations remain unknown. Capture cannot overwrite the failed
+collection stage, establish controller completion, identify an OOM cause or
+change strict shutdown and cleanup requirements.
+
+The witness archive barrier is confined to that diagnostic actor. CREATE and
+rootfs/mount/marker preflight precede START, so preflight consumes the original
+work allowance without starting the C alarm. New root-level witness markers
+avoid the private tmpfs filesystem-view boundary; legacy allocator paths remain
+unchanged. Single PUT outcomes are never retried when uncertain. HEAD metadata
+is visibility evidence, not controller completion or OOM attribution.
+
+The guarded outer guest carries bounded HTTP through its existing Docker CLI;
+no final-guest curl, Python, target exec or new runtime authority is required.
+Decoder and CLI stderr have separate bounded regular files and exact empty-file
+custody proof. Shared deadline, complete framing, actual process outcomes and
+cleanup must all succeed before a response is usable. The distinct held HTTP
+response role cannot replace the image archive or become command stdin. Existing
+runtime-input ownership already covers the two changed Python modules, while
+the signed/pinned image and payload toolchain retains its existing update policy.
+Source research and offline shell/protocol tests do not qualify native support.
+
+The witness-only bridge synchronously preloads a single validated request
+(maximum 4096 bytes) into a fresh private FIFO before CLI launch. Its `0700`
+scratch directory and FIFO are identity-bound. Linux's selected AMD64/ARM64
+minimum one-page FIFO capacity supports that bound; `PIPE_BUF` is not treated as
+capacity. A supervisor-held read/write keeper prevents premature stdin EOF;
+the CLI receives a distinct read-only descriptor and inherits neither keeper
+nor completion-proof writer. The reviewed CLI supports response-first exit
+while stdin stays open. The supervisor retains the keeper through actual CLI
+completion, verifies custody and exact cleanup, and only then emits the trusted
+receipt. No background request writer, new dependency, host setting or renewed
+deadline is introduced; original work allowance and cleanup reserve still apply.
+
+After CLI completion, the supervisor closes its keeper and requires a bounded
+FIFO residual read to reach EOF with actual success and no remaining request
+bytes, including NUL bytes. A complete HTTP response alone cannot acknowledge an
+incomplete request transfer to CLI stdin.
+
+Finite stdin EOF can half-close the CLI's socket and cancel Go HTTP request
+context, allowing Engine's error wrapper to emit 499. The retained native HEAD
+499 does not identify the handler error or prove which event canceled that
+request. Source review and inert lifetime tests establish the transport contract;
+a new native run is still required. A 499 remains unavailable witness evidence,
+and no witness result changes original allocator admission or OOM/refusal checks.
+
+The six witness CLI routes retain their explicit reviewed Unix endpoint and
+`--tls=false`, without an explicit `--tlsverify` flag. Source review of Docker
+CLI 29.9.2 at
+[`a82e528901260c8df6073311379eac65f92db204`](https://github.com/docker/cli/tree/a82e528901260c8df6073311379eac65f92db204)
+establishes that `cli/flags/options.go` enables TLS whenever that verification
+flag was explicitly supplied, even with value false. `cli/command/cli.go` calls
+`TLSDataFromFiles` in `cli/context/tlsdata.go` before the socket bypass in
+`cli/context/docker/load.go`; the CA-file read can therefore fail before a Unix
+socket is used. This is a source-proven initialization defect in the prior
+invocation. The retained R16 native failure stopped at launch/archive image,
+before preflight, without its underlying exception. It does not prove that native
+run failed reading a CA file; a new native run remains necessary.
+
+These Apache-2.0 source references, their exact revision, license and file hashes
+are retained as private research provenance. No upstream source or executable is
+copied, translated or redistributed in this change. The historical CLI/API/image
+facts used by inert tests are version evidence, not additional operational pins.
+The regression exercises the real archive/context/backend timeout and prefix
+interfaces with only process/tool boundaries replaced; it refuses explicit
+verification flags in an independently authored certless Unix fixture before
+CREATE. Actual shell expansion covers the four wrapper routes and the complete
+bridge. These controls do not execute Docker or qualify native behavior.
+No environment fallback, endpoint discovery, runtime authority, software pin or
+Renovate consumer changes: the existing runtime-input ownership and manually
+reviewed Docker payload/update policy continue to own this consumer.
+
+The rootfs inspect contract separately permits omitted `HostConfig.Tmpfs` as an
+empty optional map. Exact Engine 29.9.2
+[`HostConfig`](https://github.com/moby/moby/blob/0367cbeb49b9d98cb0b4f51e95f7b54b4803e76c/api/types/container/hostconfig.go#L448)
+marks `Tmpfs` with `omitempty`, while `ReadonlyRootfs` is an unomitted boolean.
+CLI 29.9.2's corresponding vendored type and standard JSON template helper
+preserve this omission even for `inspect --format '{{json .}}'`. Linux inspect
+still emits its separate top-level `Mounts` list. Only absent Tmpfs defaults to
+empty: HostConfig must be an object, ReadonlyRootfs must remain explicitly false,
+and top-level Mounts must be present. Existing null/type policy, mount coverage,
+path, stopped/current identity, deadline and cleanup checks are unchanged.
+
+Engine/CLI source references use the exact revisions above under Apache-2.0;
+Go 1.26.10's
+[`encoding/json` omission semantics](https://github.com/golang/go/blob/go1.26.10/src/encoding/json/encode.go#L96)
+are BSD-3-Clause. Private R18
+research retains versioned links/provenance, and the test wire fixture is authored
+from those semantics, not copied source or a captured inspect object. The later
+native run 40998114033 records preflight/rootfs rejection and verified cleanup,
+but no full inspect or failing-conjunct facts. Neither missing Tmpfs nor an unsafe
+native rootfs cause has been observed. A native rerun is still necessary. These
+versioned references introduce no operational pin or Renovate ownership change.
+
+Image and response stream custody also binds the original private directory's
+identity, owner, mode and nonsymlink type. Held directory descriptors anchor
+fixed-name allocation and are checked around I/O; directory substitution cannot
+rebind a stream. Invalid response limits refuse before reads. The root observer's
+private copy uses the absolute witness end without changing original runtime or
+backend deadlines. Its timestamp validation makes no freshness or cause claim.
+
+
+## Direct-rootless startup pair
+
+The issue442 manual diagnostic admits only `docker-20.10-rootless`/AMD64 and
+`docker-26-rootless`/ARM64. It uses one inherited 900-second deadline established
+before bootstrap preparation, the existing cleanup reserves and combined source/
+store accounting. A receives an ordinary unprofiled privileged direct launch;
+B receives the unchanged canonical owned scoped profile. B's store, services,
+network, guest, volumes and profile lease cannot start until A's complete owned
+cleanup is acknowledged. Shared preparation stages immutable source/SDK bytes;
+it does not create B runtime resources or load its policy.
+
+Both arms use the same root-owned read-only shell gate and inert one-shot FIFO
+token. The held task must be genuine PID1 with all four UID/GID values 1000,
+its exact private cgroup and the measured effective label before release. B
+reuses the existing custody, `ActiveClient`, `ProfileLease` and independent
+owner; maintained29's UID0/systemd descendant rule and the old ARM experimental
+observation/refusal remain separate. The gate execs unchanged original launcher
+bytes/argv. Instrumentation adds shell startup and timing and can change incidental
+`SHLVL`/`PWD`; byte-identical ungated process environment is not claimed. No host
+environment capture/replay, dynamic FIFO code or new authority controller exists.
+
+Bounded observations bind installed launcher/RootlessKit hashes, architecture
+and actual versions to the immutable archive, alongside UID/GID, groups,
+capabilities, NoNewPrivs, seccomp, mappings and namespace relationships. Declared
+software versions still come from each canonical `payload.yaml`. The existing
+exact RootlessKit message classifier retains A's original nonzero native exit;
+creation success, a stopped-container cgroup error or readiness timeout is not
+an expected negative. A generic failure, unknown ownership or cleanup uncertainty
+stops before B. A running-ready B has an unknown native exit (`null`), with
+original-incarnation post-exec proof; no zero exit is fabricated.
+
+Owned Docker logs combine stdout and stderr inside the existing bounded reader;
+other queries keep their original stream selection. A 65-record tail detects
+whether the 64-record classification limit was exceeded, including an older fatal
+hidden by the tail. Byte, record, encoding or query failure retains the observed
+native exit but leaves facts incomplete and prevents B. The first work or
+cancellation failure stays primary; later cleanup liabilities are retained
+separately. Failed publication revokes pair and host-sidecar authority through
+the held private inode, without reopening an unrelated public replacement.
+
+Failed pair artifacts retain a separate closed `diagnostic-incomplete` record in
+the same filename. It keeps finite first/secondary phase, reason and error-type
+categories and known arm exits, including failures before A and during source
+cleanup. At most eight distinct causes are exported; excess diagnostics have an
+explicit overflow marker. Root helper phases distinguish import, readiness, lock
+and stage disposal. Retention rejects mismatched context, private/extra fields and
+invalid bounds. These failed records remain `qualification: none` and cannot
+satisfy the success-pair validator or aggregate. Exception messages, tracebacks,
+commands, environment values and cleanup locators are never exported.
+
+The bootstrap handoff reader compares device, inode, mode, UID/GID, link count,
+size and nanosecond modification/change times; a read-induced access-time update
+alone cannot refuse an unchanged input. Finite Boolean checkpoints distinguish
+input, proof, source, SDK, admission and trusted-context guards. Each preflight
+RPC reports its current guard/reader group, including the fixed image-file
+family, instead of a previous RPC's phase. Retained failure history and existing
+journal commits stay unchanged. A checkpoint narrows the refusal boundary; it
+does not establish a syscall/policy cause or native qualification.
+
+The aggregate certifies collection, with `qualification: none` throughout.
+Matching A-negative/B-ready observations support only `profile-dependent-startup`.
+Two matching negatives mean `profile-not-demonstrated-remedy`. Drift, missing or
+skipped records and uncertain cleanup cannot complete. Raw process/environment/
+guest-log data and sensitive profile names/paths stay private; public records
+contain closed categories, validated versions, hashes and counts. Namespace
+U/M/UM controls are unavailable and excluded from this milestone. Kernel
+attribution remains unavailable; a message, rootfs warning or version query does
+not identify the denied syscall. A later repair requires the original ungated
+launcher and complete affected-matrix smoke/enforcement evidence.
+
+The diagnostic reuses existing external SDK/policy/parser, runner, image,
+payload and Action versions. No software pin or integrity exception is added.
+The helper closure and global source-input pattern own the added standard-library
+source files; existing template/generated Action Renovate managers own reused
+Action references. Ordinary full, maintained29, publication and local Podman
+routes retain their existing boundaries.
+
+The exact `docker-29-8-1-conformance-rootless` compatibility fixture is additive;
+standard and conformance Engine 29.9.2 inputs retain their own identities and
+evidence. Schema 7 names the three distinct systemd fixtures, but the historical image
+requires `full` and the existing finite original CI/publication caller tuples.
+Manual publication selection must name that image or the Docker family.
+Experimental and two-row diagnostic selectors remain unchanged. A selected
+image must agree across event, producer, fixed-root source proof and native
+binding; absent/unknown maintained selection is not a fallback. No runtime or
+receipt schema changes, native qualification or publication follow from this
+source-policy addition. Final closure readmission remains primary-owned.
+
+## Maintained ordinary direct-rootless prerequisite
+
+Admission schema 7 keeps `maintainedDirectImages` separate from the three
+systemd fixture names. The finite direct map covers the existing upstream and
+distribution rootless rows, including AMD64-only Arch. A new catalogue name or
+architecture does not acquire authority by its spelling. Direct, exact 29.8.1
+and packaged Debian 11 callers require effective `full`, ordinary qualification
+work and no focused selection. Only the rolling systemd fixture retains bounded
+qualification and historical experimental routes.
+
+Ordinary direct work uses the flat runtime path and original image entrypoint
+and CMD. Provenance/version probes receive no profile. Exactly one detached
+daemon guest can consume a maintained `ordinary-direct` lease, after raw caller
+options are validated and its owned name/cidfile are registered. The existing
+root owner verifies all four UID fields are 1000, the exact CID cgroup scope,
+live task/incarnation and effective single profile before and after binding.
+Systemd remains UID 0 with its distinct descendant placement rule. No diagnostic
+gate, FIFO, launcher wrapper or fallback is used for ordinary admission.
+
+The Action's pre-bootstrap absolute cutoff is forwarded as integer nanoseconds
+through runtime, private backend, binding and root receipts. Float-only timeout
+APIs round toward an earlier cutoff; the independent expiry service retains the
+original cutoff minus its cleanup reserve. Bootstrap, archive import, workload,
+cleanup, stage disposal and final evidence writes cannot renew the allowance.
+A late completion remains nonqualifying even after successful native work.
+
+Direct qualification requires explicit whole-backend cleanup, the closed held-task
+lease receipt and matching source-stage disposal. The shared authority guard is
+used by the runtime Action, archive admission, release evidence and maintenance
+catalogue. Missing host/runtime facts or self-reported requirement flags cannot
+supply authority. Failed work and uncertain custody remain failures. Root receipt
+and stage-disposal envelopes remain schema 4; runtime evidence remains schema 1.
+
+The successful historical two-row diagnostic on candidate `3ca24bd9` observed
+profile-dependent startup and verified cleanup only for its selected pairs.
+Its qualification remains none. The changed source, every ordinary direct row,
+all three systemd fixtures and the other selected profiles need fresh complete
+native evidence. Source controls and generated unknown catalogue entries provide
+no native, registry, publication, release or deployment approval.
+
+
+### Bounded maintained AMD64 host observation
+
+Before a maintained AMD64 runtime lease, the existing source-authenticated staged
+helper can collect a separate `maintained-amd64-cohort-observation` receipt. Its
+schema 1 is specific to this new kind; the ARM observation's schema 2 and behavior
+remain unchanged. The route runs under the original stage lock, rejects existing
+leases or pending markers, and retains the original bootstrap deadline and
+stage-disposal trap. It collects fixed OS/kernel/interpreter facts, five fixed
+file digests and metadata checks, control values, genuine namespace hashes and a
+Boolean unconfined-actor check. Completed executable capability checks are
+reported explicitly. Raw ownership identities, labels, paths and tool output
+remain private. Reported runner-image versions are provenance, not VM attestation.
+
+The parser version child uses held interpreter/parser descriptors, dropped IDs
+and the existing durable observation-only marker. Unresolved child lifetime,
+replacement or marker custody prevents subsequent runtime; proven completion
+retires only the exact held marker. This route creates no policy, compiler,
+profile, guest or runtime lease and grants no cleanup authority. Its disposition
+is `AMD64_OBSERVATION_ONLY`, with `qualification: none`. A complete observation
+only permits the unchanged active host preflight to run: an unknown host tuple
+still refuses. It does not admit AWS or qualify a maintained image. Existing
+rootful, Podman, direct diagnostic and experimental ARM routes do not invoke it.
+The public artifact can be partial and nonqualifying after a failure. Actual host
+compatibility and any later exact admission change require separate review and
+fresh native evidence; these facts alone do not establish either.
+
+Subject binding restores its own diagnostic phase after checking the daemon.
+Finite checkpoints distinguish namespace, inspect/running, held task/UID, exact
+CID scope, actual profile label, post-readback and incarnation failures. Existing
+schema-1 failure envelopes expose only finite phases and Boolean comparisons;
+raw task/cgroup/profile values remain private. A failed bind retains the original
+refusal. A subsequent close refusal in the retained state is not a second daemon
+failure and grants no cleanup authority.
+
+An optional closed `subjectProfile` failure diagnostic classifies the already-read
+label's framing, complete name boundaries, marker syntax and finite mode. It
+keeps the first refusal while finishing safe postchecks on the same held task,
+CID and original work deadline. Death or identity loss skips dependent task
+reads; cancellation, expiry or uncertain reader/child/durability custody stops
+further observation. Tiny kernel `exe` link/metadata samples may report an
+executable category and basename correlation; they read no binary bytes and
+establish neither binary provenance nor an attachment-policy cause. Raw labels,
+names, paths and task/file identities stay private. Later matching readback
+cannot repair the failed bind. Retained close reuses this observation without
+new measurements; legacy failures remain valid and cleanup authority stays false.

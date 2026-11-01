@@ -21,6 +21,53 @@ The actionlint compatibility allowlist covers only those two labels until the
 linter's built-in inventory catches up; successful scheduling and builds are
 verified by GitHub CI.
 
+`ci.yml` offers three manual `validation_profile` choices. The default remains
+`full`; PR, merge-group and other nonmanual events ignore injected profile inputs.
+Known ASCII case variants canonicalize; whitespace, non-ASCII and unknown manual
+values fail planning.
+
+| Profile | Selected workload | Aggregate check |
+| --- | --- | --- |
+| `full` | Existing ordinary selection and complete manual matrix | `Required CI` |
+| `docker-rootless-qualification` | Only `docker-29-conformance-rootless`, AMD64/ARM64 and its two declared payload entries | `Docker fixture qualification (bounded)` |
+| `docker-rootless-diagnostic` | Existing experimental fixture route on issue527 | `Docker fixture diagnostic (not Required CI)` |
+
+The bounded qualification profile uses the existing maintained prerequisite and
+original ordinary accounting workload, with effective `focused_runtime=none`.
+The raw `witness-diagnostic` default is a selector compatibility input; it does
+not start a witness. Raw `mandatory-accounting` remains valid only for the
+experimental diagnostic profile. The actual canonical profile is a separate
+plan output and is retained in the uploaded build plan and selection artifact;
+`diag_only=false` does not mean full repository coverage.
+
+Before matrix outputs are published, the bounded guard requires exactly one
+trusted fixture declaration, both architectures, their declared runners, two
+matching payload entries, exact direct selection, no added reverse dependencies,
+matching event/ref/source and manual no-cache behavior. Missing, corrupt, empty
+or widened plans fail before scheduling workloads. The generic planner, full
+and publication defaults, resource budgets and matrix concurrency stay unchanged.
+
+One always-running aggregate derives its constant display name from the trusted
+event/input classification, including when planning fails. Recognized bounded
+and diagnostic requests never emit even a skipped check named `Required CI`.
+Unknown manual inputs retain the conservative fallback: a failing `Required CI`,
+never success or an intentional skip. The aggregate independently checks the
+requested canonical profile against its plan output and requires all selected
+validation, payload and smoke work. A bounded success covers only that workload;
+per-image native receipts and separate source/run/scan/publication checks retain
+their roles. It cannot supply full repository, release or publication proof.
+
+Concurrency uses closed `full`, `qualification`, `diagnostic`, and `invalid`
+components, separated by event and ref. Unknown input text cannot become a
+concurrency component or cancel full validation. See the
+[dispatch commands and evidence limits](operations.md#test-a-change).
+
+The selected image name is a stable catalogue identity, not a software version
+pin. This profile introduces no dependency or operational version pin. Existing
+Renovate ownership for workflow templates, generated workflows, action pins, and
+image metadata remains applicable; their extraction paths and update policies
+are unchanged.
+
 Renovate updates canonical tool/runner values and the corresponding literals in
 generated workflow YAML in the same dependency update. Its custom template
 manager tracks major-only, minor and full action tags with their commit digests,
@@ -232,3 +279,12 @@ The [operations guide](operations.md#module-map) maps the current planning, payl
 Rollback uses an expected-current-digest guard. Registry tag updates are not an
 atomic compare-and-swap operation: coordinate manual publishers and queued runs
 when performing an incident rollback.
+
+Exact Docker compatibility fixtures keep manual dependency ownership. The
+29.8.1 payload and metadata have a unique fixed-target manager and coordinated
+integrity review; base digests retain their existing unique extraction/grouping.
+The Debian 11 conformance metadata manually owns the exact signed-archive
+`docker.io` package revision, which Renovate does not auto-roll. Its external base
+uses the existing metadata manager and Debian 11 digest group. Both historical
+fixtures require dashboard review with automerge disabled. Current canonical
+Python, uv, Ruff, runner and Action pins remain unchanged by this policy.
