@@ -32,7 +32,7 @@ MERGE_OBJECT = (
 NONCE = "c" * 32
 NAME = "dockerlens-127-upstream-rootless-123-2-" + NONCE
 POLICY = (
-    f"abi <abi/4.0>,\nprofile {NAME} {{\n"
+    f"abi <abi/4.0>,\nprofile {NAME} flags=(attach_disconnected,mediate_deleted) {{\n"
     "  file,\n"
     "  capability,\n"
     "  network,\n"
@@ -563,8 +563,8 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(
             results["github-digest"],
             {
-                "currentValue": "TheRealBecks/issue152",
-                "currentDigest": "05cb8ccb896f996f3f7575ad26ec36b71e0548c0",
+                "currentValue": "TheRealBecks/issue158",
+                "currentDigest": "d7f18d756fe754adea3c57e6c0cba2a906e2a780",
             },
         )
         self.assertEqual(results["gitlab-tags"], {"currentValue": "5.0.2"})

@@ -249,7 +249,7 @@ def _scoped_phase(record: dict[str, Any], phase: dict[str, Any], *, expected_pur
             and re.fullmatch(r"[0-9a-f]{32}", scoped["lease"]) is not None
             and scoped["profileName"]
             == f"dockerlens-127-upstream-rootless-{binding.run}-{binding.attempt}-{scoped['lease']}"
-            and scoped["sourceManifestSha256"] == "2c5dfa63e3865fa3c41cbefc6cf9eb6a74bc2886bd5f33350922882f3b877057"
+            and scoped["sourceManifestSha256"] == "f17689f46276d0acac2111fad18f73198ff7c07136a97ee05b57087d687fef47"
             and scoped["state"] == "closed"
             and scoped["cleanOwnerVerified"] is True
             and scoped["ownerTerminationVerified"] is True
@@ -273,6 +273,7 @@ def _scoped_phase(record: dict[str, Any], phase: dict[str, Any], *, expected_pur
             and observation["sha256"] == hashlib.sha256((scoped["profileName"] + " (enforce)\n").encode()).hexdigest()
             and observation["taskIdentityBound"] is True
             and observation["timing"] == "post-create"
+            and prerequisite.postexec_witness_valid(scoped["postExecWitness"], scoped, complete=True)
         )
         if binding.purpose == prerequisite.EXPERIMENTAL_PURPOSE:
             # The workflow's ImageVersion is provenance and is compared only with

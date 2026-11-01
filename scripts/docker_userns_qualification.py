@@ -181,6 +181,7 @@ SCOPED_RECEIPT_KEYS = frozenset(
         "scopeAbsenceVerified",
         "profileAbsenceVerified",
         "profileObservation",
+        "postExecWitness",
         "retained",
         "readerPending",
         "childPending",
@@ -191,6 +192,96 @@ SCOPED_RECEIPT_KEYS = frozenset(
         "bootstrapSha256",
     )
 )
+
+
+POSTEXEC_CHECKPOINTS = ("ready", "pre-close")
+POSTEXEC_SAMPLE_KEYS = frozenset(
+    {
+        "checkpoint",
+        "executableSha256",
+        "executableBytes",
+        "parentTaskSha256",
+        "childTaskSha256",
+        "parentNamespaceSha256",
+        "childNamespaceSha256",
+        "labelSha256",
+        "identityMatched",
+        "parentChildMatched",
+        "namespaceSeparated",
+    }
+)
+POSTEXEC_HASH_KEYS = (
+    "executableSha256",
+    "parentTaskSha256",
+    "childTaskSha256",
+    "parentNamespaceSha256",
+    "childNamespaceSha256",
+    "labelSha256",
+)
+POSTEXEC_MAX_EXECUTABLE = 32 * 1024 * 1024
+
+
+def postexec_witness_valid(value: object, scoped: dict, *, complete: bool = False) -> bool:
+    """Validate closed source-bound checkpoint facts, never upgrade post-create evidence."""
+    if value is None:
+        return not complete
+    try:
+        if (
+            type(value) is not dict
+            or set(value) != {"schemaVersion", "bindingSha256", "sourceManifestSha256", "leaseSha256", "samples"}
+            or type(value["schemaVersion"]) is not int
+            or value["schemaVersion"] != 1
+            or any(
+                type(value[key]) is not str or re.fullmatch(r"[0-9a-f]{64}", value[key]) is None
+                for key in ("bindingSha256", "sourceManifestSha256", "leaseSha256")
+            )
+            or value["bindingSha256"] != scoped["bindingSha256"]
+            or value["sourceManifestSha256"] != scoped["sourceManifestSha256"]
+            or value["leaseSha256"] != hashlib.sha256(scoped["lease"].encode("ascii")).hexdigest()
+            or type(value["samples"]) is not list
+            or not 1 <= len(value["samples"]) <= len(POSTEXEC_CHECKPOINTS)
+            or (complete and len(value["samples"]) != len(POSTEXEC_CHECKPOINTS))
+        ):
+            return False
+        expected_label = hashlib.sha256((scoped["profileName"] + " (enforce)\n").encode("ascii")).hexdigest()
+        previous = None
+        for index, sample in enumerate(value["samples"]):
+            if (
+                type(sample) is not dict
+                or set(sample) != POSTEXEC_SAMPLE_KEYS
+                or sample["checkpoint"] != POSTEXEC_CHECKPOINTS[index]
+                or any(
+                    type(sample[key]) is not str or re.fullmatch(r"[0-9a-f]{64}", sample[key]) is None
+                    for key in POSTEXEC_HASH_KEYS
+                )
+                or type(sample["executableBytes"]) is not int
+                or not 0 < sample["executableBytes"] <= POSTEXEC_MAX_EXECUTABLE
+                or sample["labelSha256"] != expected_label
+                or any(
+                    sample[key] is not True for key in ("identityMatched", "parentChildMatched", "namespaceSeparated")
+                )
+                or sample["parentTaskSha256"] == sample["childTaskSha256"]
+                or sample["parentNamespaceSha256"] == sample["childNamespaceSha256"]
+            ):
+                return False
+            stable = {key: sample[key] for key in POSTEXEC_SAMPLE_KEYS - {"checkpoint"}}
+            if previous is not None and stable != previous:
+                return False
+            previous = stable
+    except TypeError, ValueError, KeyError, UnicodeError:
+        return False
+    return True
+
+
+def rootlesskit_components(image: str) -> tuple[str, ...]:
+    """Select the canonical installed file by the existing immutable image family."""
+    if image not in {*MAINTAINED_DIRECT_IMAGES, *MAINTAINED_IMAGES}:
+        reason = "unsupported witness image"
+        raise ValueError(reason)
+    upstream = {"docker-" + version + "-rootless" for version in ("20.10", "23", "24", "25", "26", "27", "28", "29")}
+    if image in upstream | set(MAINTAINED_IMAGES[:2]):
+        return ("usr", "local", "bin", "rootlesskit")
+    return ("usr", "bin", "rootlesskit")
 
 
 class QualificationError(Exception):

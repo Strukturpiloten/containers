@@ -1413,7 +1413,9 @@ class DiagnosticCaseScope(unittest.TestCase):
                     }
                     client = ActiveClient(ctx, "/run/containers-userns-active." + "f" * 32, identity)
                     response = scoped_receipt(candidate=proof.candidate, requested=requested)
-                    response.update(binding=asdict(client.binding), bindingSha256=client.binding.digest())
+                    response.update(
+                        binding=asdict(client.binding), bindingSha256=client.binding.digest(), postExecWitness=None
+                    )
                     ctx.command = Mock(side_effect=lambda *_args, response=response, **_kwargs: json.dumps(response))
                     client.prepare()
                     self.assertEqual(client.evidence["validationProfileRequested"], requested)

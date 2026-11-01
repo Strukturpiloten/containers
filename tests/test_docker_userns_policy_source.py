@@ -20,7 +20,7 @@ from scripts import docker_userns_policy_source as source
 
 NAME = "dockerlens-127-upstream-rootless-123-2-" + "a" * 32
 POLICY = (
-    f"abi <abi/4.0>,\nprofile {NAME} {{\n"
+    f"abi <abi/4.0>,\nprofile {NAME} flags=(attach_disconnected,mediate_deleted) {{\n"
     "  file,\n"
     "  capability,\n"
     "  network,\n"
@@ -180,8 +180,8 @@ class SourceTests(unittest.TestCase):
     def test_active_manifest_binds_exact_closure_license_and_reviewed_parser(self) -> None:
         value = source.manifest()
         self.assertEqual(value["consumer"], source.CONSUMER)
-        self.assertEqual(value["source"]["commit"], "05cb8ccb896f996f3f7575ad26ec36b71e0548c0")
-        self.assertEqual(value["source"]["ref"], "TheRealBecks/issue152")
+        self.assertEqual(value["source"]["commit"], "d7f18d756fe754adea3c57e6c0cba2a906e2a780")
+        self.assertEqual(value["source"]["ref"], "TheRealBecks/issue158")
         self.assertEqual({item["path"] for item in value["source"]["files"]}, source.FILES)
         self.assertEqual(value["source"]["license"], "MPL-2.0")
         self.assertTrue(value["source"]["managed"])
@@ -194,8 +194,8 @@ class SourceTests(unittest.TestCase):
             files,
             {
                 "scripts/native-runner-apparmor.py": (
-                    32168,
-                    "3aded1c43dfb5046c99e78ba74c3c974de3ce3ec0c68f2d05bc172acea27b3b6",
+                    32212,
+                    "b52f1724c11f008bb55d28f3a578cddf26377fdc2e53a37df9d044150eeb9468",
                 ),
                 "scripts/native_outer_diagnostic_capture.py": (
                     13870,

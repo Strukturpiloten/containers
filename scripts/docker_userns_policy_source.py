@@ -350,7 +350,7 @@ def manifest(path: Path = MANIFEST) -> dict[str, Any]:
     need(
         source["managed"] is True
         and source["repository"] == "Strukturpiloten/docker-lens"
-        and source["ref"] == "TheRealBecks/issue152"
+        and source["ref"] == "TheRealBecks/issue158"
         and type(source["commit"]) is str
         and COMMIT.fullmatch(source["commit"])
         and source["license"] == "MPL-2.0"

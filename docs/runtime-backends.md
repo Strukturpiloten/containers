@@ -63,8 +63,8 @@ The planned fixture is docker-20.10-rootless, but no image build, container run,
 policy load or host-policy change occurs. Ordinary smoke jobs and Required CI are unchanged.
 
 [The active source manifest](../.github/docker-userns-policy-source.json) now
-selects DockerLens commit `05cb8ccb896f996f3f7575ad26ec36b71e0548c0` from
-`TheRealBecks/issue152`, with exact three-file builder/helper/license sizes and
+selects DockerLens commit `d7f18d756fe754adea3c57e6c0cba2a906e2a780` from
+`TheRealBecks/issue158`, with exact three-file builder/helper/license sizes and
 hashes. Earlier issue127 compile/unused observations and retained failures remain
 historical and do not qualify this changed source. Public HTTPS retrieval still
 accepts only immutable allowlisted resources, without credentials or redirects,
@@ -74,7 +74,8 @@ The dockerlens-127 name prefix is only an identifier: actual Containers
 run/attempt and fresh nonce remain the ownership binding.
 
 The selected test prerequisite is an attachment-free ordinary enforce profile
-declaring ABI4 and thirteen explicit rules: file with inherit-only execution,
+declaring ABI4, fixed `flags=(attach_disconnected,mediate_deleted)` and thirteen
+explicit rules: file with inherit-only execution,
 capability, network, unix, D-Bus bind/send/receive, mount, remount, umount,
 pivot_root, signal send/receive, ptrace, userns create, and POSIX mqueue
 create/read/write/open/delete/setattr/getattr with type=posix. No all-rule,
@@ -86,13 +87,22 @@ is not a security sandbox or equivalent to the rejected all-rule policy.
 The earlier all-rule candidate has a static ABI blocker: it implies io_uring
 while declared ABI4 lacks that feature, triggering unchanged fatal warnings.
 No parser, ABI, hosted cohort, feature override, warning selector or output/time
-limit is changed to accept the explicit policy. Maximum policy size is 378 bytes,
-below the unchanged 1024-byte bound. The upstream AppArmor 5.0.2 semantic reference
+limit is changed to accept the explicit policy. The maximum policy size for Containers-generated names is
+422 bytes for both compile/unused and active routes, below the unchanged
+1024-byte bound. The upstream AppArmor 5.0.2 semantic reference
 is commit `909affc32a13d14ae3a7ccf44d325ae63ce11baf`; its ABI4 SHA-256 remains
 `e510bb8f6788b45e48de2f859a6f94a7b8416cbac5a1051814cfce925fa911bd`.
 The GPL-2.0 parser source was a read-only syntax/permission reference; no oracle
 implementation or parser artifact is copied or redistributed here. The canonical
-SDK's contract/ADR0051 records the reviewed source provenance.
+SDK's [ADR0052][sdk-path-flags] records the selected paired declaration and reviewed
+provenance;
+ADR0051/R3 observations remain historical. The source review preserves the examined
+deleted-dentry guard conditionally; the expanded pathname reachability also carries
+aliasing risk. Neither this declaration nor compilation establishes serialized or
+effective numeric flag equality, connected/deleted/disconnected equivalence or
+general aliasing safety.
+
+[sdk-path-flags]: https://github.com/Strukturpiloten/docker-lens/blob/d7f18d756fe754adea3c57e6c0cba2a906e2a780/docs/decisions/0052-mediated-disconnected-path-flags.md
 
 Registry, held-task, success-receipt and owned-unload checks accept only the exact
 generated enforce label. Bootstrap/root owners and direct clean-control actors
@@ -101,6 +111,26 @@ emit schema2; exact-integer dispatch also preserves the byte-identical historica
 schema1 validator and its old predicate. Neither diagnostic version grants
 attachment, admission or cleanup authority. Retained historical leases remain
 retained; no foreign profile or wildcard cleanup is added.
+
+The original `profileObservation` remains a post-create sample. Workload
+qualification additionally requires a closed `postExecWitness` version1 component
+with ordered `ready` and `pre-close` samples on the same attached lease. Root
+selects the original task and fixed image-family RootlessKit executable, resolves
+the systemd unit's parent when needed, and requires exactly one immediate child
+with distinct user and mount namespaces. It holds task, pidfd, executable and
+namespace descriptors through matching executable SHA-256/size and generated
+enforce-label readbacks. Raw PIDs, paths, labels and namespace identities stay
+private; exported digests bind the task identities, original binding, source
+manifest and lease. Old or incomplete receipts cannot establish this claim.
+
+Each read-only checkpoint has at most five seconds inside the original work
+budget, 64 IDs across owned cgroup candidates and the held parent thread/child
+union, 512 KiB of proc/cgroup input and 96 MiB of executable input (32 MiB per
+executable). It preserves the
+original cleanup and finalizer reserves, pending-child/reader guards and close
+rules. Failure grants no new cleanup authority. The samples establish measured
+post-readiness/pre-close task evidence, not capture of an exec event, historical
+denial attribution, numeric path-flag equality or broader pathname semantics.
 
 This is source integration only. Strict no-load compilation under the original
 fatal-warning flags, fresh post-RootlessKit-exec held-task label/workload readbacks,

@@ -23,7 +23,7 @@
         "/^\\.github/docker-userns-policy-source\\.json$/"
       ],
       "matchStrings": [
-        "\"repository\":\\s*\"Strukturpiloten/docker-lens\",\\s*\"ref\":\\s*\"(?<currentValue>TheRealBecks/issue152)\",\\s*\"commit\":\\s*\"(?<currentDigest>[a-f0-9]{40})\""
+        "\"repository\":\\s*\"Strukturpiloten/docker-lens\",\\s*\"ref\":\\s*\"(?<currentValue>TheRealBecks/issue158)\",\\s*\"commit\":\\s*\"(?<currentDigest>[a-f0-9]{40})\""
       ],
       "depNameTemplate": "Strukturpiloten/docker-lens",
       "packageNameTemplate": "Strukturpiloten/docker-lens",

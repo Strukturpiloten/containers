@@ -23,6 +23,7 @@ from scripts.docker_userns_qualification import (
     admitted_deadline_ns,
     context_digest,
     native_binding,
+    postexec_witness_valid,
     validate_stage_disposal,
 )
 
@@ -152,6 +153,7 @@ class ActiveClient:
             or value.get("retained") is not False
             or value.get("validationProfile") != self.provenance["validationProfile"]
             or value.get("validationProfileRequested") != self.provenance["validationProfileRequested"]
+            or not postexec_witness_valid(value.get("postExecWitness"), value)
         ):
             self.refuse_response(operation, "receipt-mismatch")
         return value
@@ -236,6 +238,21 @@ class ActiveClient:
     def bind(self, container: str) -> None:
         """Require held-task profile proof after the one owned systemd guest starts."""
         self.evidence = self.rpc("bind", {"bindingSha256": self.binding.digest(), "container": container})
+
+    def witness(self, checkpoint: str) -> None:
+        """Request only a fixed ordered read-only checkpoint on the already-bound lease."""
+        if checkpoint not in ("ready", "pre-close"):
+            self.refuse_response("witness", "receipt-mismatch")
+        value = self.rpc("witness", {"bindingSha256": self.binding.digest(), "checkpoint": checkpoint})
+        detail = value["postExecWitness"]
+        if (
+            value["state"] != "attached"
+            or detail is None
+            or detail["samples"][-1]["checkpoint"] != checkpoint
+            or not postexec_witness_valid(detail, value, complete=checkpoint == "pre-close")
+        ):
+            self.refuse_response("witness", "receipt-mismatch")
+        self.evidence = value
 
     def close(self) -> None:
         """Prove guest/profile absence before native private daemon teardown."""

@@ -19,7 +19,7 @@ from scripts.evidence_gate import (
     require_ordinary_runtime_authority,
     verify_architecture,
 )
-from tests.test_docker_userns_qualification import scoped_receipt, stage_disposal
+from tests.test_docker_userns_qualification import postexec_fixture, scoped_receipt, stage_disposal
 
 NAME = "example"
 IMAGE = "ghcr.io/strukturpiloten/example"
@@ -546,6 +546,7 @@ def ordinary_direct_runtime(image: str = "docker-20.10-rootless", architecture: 
         )
     )
     scoped.update(binding=asdict(binding), bindingSha256=binding.digest())
+    scoped["postExecWitness"] = postexec_fixture(scoped)
     record["stageDisposal"] = stage_disposal(scoped)
     return record
 

@@ -52,7 +52,7 @@ GUARD_DECLARATION_LIMIT = 96
 _GUARD_CODES = {111: GUARD_CATEGORIES[0], 112: GUARD_CATEGORIES[1], 113: GUARD_CATEGORIES[2]}
 _GUARD_CODES.update(enumerate(GUARD_CATEGORIES[3:], start=120))
 _GUARD_SOURCES = (
-    ("canonical_policy", 32168, "3aded1c43dfb5046c99e78ba74c3c974de3ce3ec0c68f2d05bc172acea27b3b6"),
+    ("canonical_policy", 32212, "b52f1724c11f008bb55d28f3a578cddf26377fdc2e53a37df9d044150eeb9468"),
     ("native_outer_diagnostic_capture", 13870, "23202211ec3b58a70c1120b0395f43663e3cacff1948609a8fb0fe2dac012962"),
 )
 _SEAL_VALUES = tuple(

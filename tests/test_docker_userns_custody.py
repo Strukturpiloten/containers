@@ -43,7 +43,7 @@ def digest(data: bytes) -> str:
 def policy(name: str) -> bytes:
     """Independent expected bytes emitted only by the test's fake builder."""
     return (
-        f"abi <abi/4.0>,\nprofile {name} {{\n"
+        f"abi <abi/4.0>,\nprofile {name} flags=(attach_disconnected,mediate_deleted) {{\n"
         "  file,\n"
         "  capability,\n"
         "  network,\n"

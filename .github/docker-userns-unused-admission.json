@@ -2,12 +2,12 @@
   "schemaVersion": 1,
   "consumer": "containers-ubuntu26-userns-unused",
   "qualification": "none",
-  "sourceManifestSha256": "2c5dfa63e3865fa3c41cbefc6cf9eb6a74bc2886bd5f33350922882f3b877057",
+  "sourceManifestSha256": "f17689f46276d0acac2111fad18f73198ff7c07136a97ee05b57087d687fef47",
   "contracts": {
     "scripts/docker_userns_custody.py": "8d38ba82d0c1798b56cf796e7965ced4fc82f64dd7b3b17857e40f1a62b40fbe",
-    "scripts/docker_userns_custody_child.py": "573b8fe68e6c7f5d09208ba6c4cd6326beea4502eb91c9950e4c6bfa55073b77",
+    "scripts/docker_userns_custody_child.py": "0ab099453295cf296417c8c1d02b9e2f11e64834050b4f7de743fd15d16d86a0",
     "scripts/docker_userns_hosted.py": "6c78600aa1a222449869410912e38a91d427520239a4eff07c02b8551cef8f04",
-    "scripts/docker_userns_policy_source.py": "e9ab050ecc1182a0fa9d3100af5bb22f08ac6cd77b5caccb6b8fa943c796ed67",
+    "scripts/docker_userns_policy_source.py": "dd8925aa59f8541d4d975d717b36a46640735f5be7014054145c419a91c704b9",
     ".github/docker-userns-helper-closure.json": "48d06e8cb16f495b32a0037d868c7d057a9040e2756c420438a2a302a7ca359f"
   },
   "cohort": {
@@ -28,7 +28,7 @@
     "kind": "manual-unused-only-semantic-admission",
     "evidenceRun": "40277997638",
     "evidenceMerge": "08cba8705b0f81f38a47c3315ce86da76418580e",
-    "limits": "Historical compile-only cohort observation remains nonqualifying for the new immutable mediated SDK source; corrected thirteen-rule ABI4 contract is selected with unchanged tools/cohort and fresh strict compile/native qualification still required; no load or guest authority follows from this record.",
+    "limits": "Historical compile-only cohort observation remains nonqualifying for the immutable DockerLens158 paired attach_disconnected,mediate_deleted thirteen-rule ABI4 source. Tools, parser, ABI and cohort remain unchanged. Fresh strict compilation and whole-matrix native workload/held-witness/private-cleanup qualification remain required; path-flag numeric equality, historical failure attribution and broader pathname semantics remain unproven. No load or guest authority follows from this record.",
     "integrityException": "preinstalled OS parser/interpreter/stdlib and systemd are observed root-owned OS trust; no vendor checksum claimed",
     "renovate": "manual review on source/contract change; never automatically rewrite cohort or content hashes"
   }

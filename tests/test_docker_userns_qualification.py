@@ -310,7 +310,7 @@ def scoped_receipt(
         controls={"enabled": True, "restricted_userns": 1, "maximum_userns": 1024, "legacy_clone": None},
         imageVersion=context["imageVersion"],
     )
-    return {
+    result = {
         "schemaVersion": 4,
         "consumer": "containers-ubuntu26-userns-active",
         "purpose": purpose,
@@ -359,6 +359,35 @@ def scoped_receipt(
             "bytes": len(label),
             "sha256": hashlib.sha256(label).hexdigest(),
         },
+    }
+    result["postExecWitness"] = postexec_fixture(result)
+    return result
+
+
+def postexec_fixture(scoped: dict) -> dict:
+    """Independently author a complete pair; never call the source witness validator to construct it."""
+    samples = [
+        {
+            "checkpoint": checkpoint,
+            "executableSha256": "a" * 64,
+            "executableBytes": 128,
+            "parentTaskSha256": "b" * 64,
+            "childTaskSha256": "c" * 64,
+            "parentNamespaceSha256": "d" * 64,
+            "childNamespaceSha256": "e" * 64,
+            "labelSha256": hashlib.sha256((scoped["profileName"] + " (enforce)\n").encode()).hexdigest(),
+            "identityMatched": True,
+            "parentChildMatched": True,
+            "namespaceSeparated": True,
+        }
+        for checkpoint in ("ready", "pre-close")
+    ]
+    return {
+        "schemaVersion": 1,
+        "bindingSha256": scoped["bindingSha256"],
+        "sourceManifestSha256": scoped["sourceManifestSha256"],
+        "leaseSha256": hashlib.sha256(scoped["lease"].encode()).hexdigest(),
+        "samples": samples,
     }
 
 

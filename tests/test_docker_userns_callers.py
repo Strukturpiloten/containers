@@ -26,7 +26,7 @@ from tests import test_docker_userns_active as active_tests
 from tests import test_maintenance as maintenance_tests
 from tests import test_release_evidence as release_tests
 from tests import test_runtime_oom_lifecycle as lifecycle_tests
-from tests.test_docker_userns_qualification import scoped_receipt, stage_disposal, workflow_context
+from tests.test_docker_userns_qualification import postexec_fixture, scoped_receipt, stage_disposal, workflow_context
 from tests.test_evidence_gate import maintained_runtime
 
 REPOSITORY = "Strukturpiloten/containers"
@@ -165,6 +165,7 @@ def caller_receipt(context: dict, phase: str) -> dict:
     receipt["profileName"] = f"dockerlens-127-upstream-rootless-{binding.run}-{binding.attempt}-{receipt['lease']}"
     observed = (receipt["profileName"] + " (enforce)\n").encode()
     receipt["profileObservation"].update(bytes=len(observed), sha256=hashlib.sha256(observed).hexdigest())
+    receipt["postExecWitness"] = postexec_fixture(receipt)
     return receipt
 
 

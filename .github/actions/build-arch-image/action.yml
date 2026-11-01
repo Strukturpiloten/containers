@@ -144,7 +144,7 @@ runs:
           from pathlib import Path
 
           CONSUMER = 'containers-ubuntu26-userns-active'
-          SOURCE_MANIFEST_SHA256 = '2c5dfa63e3865fa3c41cbefc6cf9eb6a74bc2886bd5f33350922882f3b877057'
+          SOURCE_MANIFEST_SHA256 = 'f17689f46276d0acac2111fad18f73198ff7c07136a97ee05b57087d687fef47'
           ADMISSION_SCHEMA = 7
           MAINTAINED_PROFILES = ('full', 'docker-rootless-qualification')
           ADMISSION_REVISION = 'containers558-mediated-profile-v2'
@@ -542,7 +542,7 @@ runs:
               manifest = json.loads(files['.github/docker-userns-policy-source.json'], object_pairs_hook=unique)
               source = manifest['source']
               require(source['repository'] == 'Strukturpiloten/docker-lens' and source['license'] == 'MPL-2.0'
-                  and source['commit'] == '05cb8ccb896f996f3f7575ad26ec36b71e0548c0')
+                  and source['commit'] == 'd7f18d756fe754adea3c57e6c0cba2a906e2a780')
               comparison('bootstrap-source', True)
               point('bootstrap-sdk')
               require(type(value['sdk']) is dict and set(value['sdk']) == {item['path'] for item in source['files']})

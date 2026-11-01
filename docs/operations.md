@@ -32,8 +32,13 @@ A push to `main` selects changed images and their reverse dependencies; the dail
 
 See [runtime backends](runtime-backends.md) for the explicit CI profile policy, local Podman default, private Docker prerequisites, evidence and publication boundary.
 
-The mediated-profile-v2 source integration selects the immutable DockerLens152
-builder and one exact generated enforce label. Source review and complete gates
+The mediated-profile-v2 source integration selects immutable DockerLens158 commit
+`d7f18d756fe754adea3c57e6c0cba2a906e2a780`, its fixed
+`flags=(attach_disconnected,mediate_deleted)` candidate and one exact generated
+enforce label. The finite workload claim additionally requires ordered ready and
+pre-close held original-task/RootlessKit parent/unique immediate namespace-child
+executable and enforce-label witnesses. Numeric flag equality, historical denial
+attribution and broader pathname/aliasing semantics remain unproven. Source review and complete gates
 must finish before native qualification consumes the exact producer/consumer pair.
 No producer release or image publication is required for that source dependency;
 the complete already-supported ordinary/systemd label, workload and cleanup

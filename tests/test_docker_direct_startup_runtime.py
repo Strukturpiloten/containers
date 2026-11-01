@@ -89,6 +89,7 @@ class DirectCompositionFixture:
             "scopeAbsenceVerified": False,
             "profileAbsenceVerified": False,
             "profileObservation": None,
+            "postExecWitness": None,
             "retained": False,
             "readerPending": False,
             "childPending": False,

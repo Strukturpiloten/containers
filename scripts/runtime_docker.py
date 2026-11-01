@@ -329,6 +329,12 @@ def _require_storage_driver(info: dict[str, Any]) -> None:
         raise ProbeError("daemon did not initialize a storage driver")
 
 
+def _postexec_checkpoint(ctx: RuntimeContext, checkpoint: str) -> None:
+    profile = getattr(getattr(ctx, "backend", None), "scoped_profile", None)
+    if profile is not None:
+        profile.witness(checkpoint)
+
+
 def _diagnose_failed_start(ctx: RuntimeContext, container: str, started: float, mode: str, *, api_ready: bool) -> None:
     if mode == "rootless" and not api_ready:
         diagnose_rootless_failure(ctx, container, started)
@@ -420,6 +426,7 @@ def _run_nested_docker_with_archive(
             if isinstance(getattr(ctx.backend, "oom_ledger", None), DockerOomLedger):
                 diagnostics.lifecycle_start()
 
+        _postexec_checkpoint(ctx, "ready")
         budget.checkpoint()
         archive.seek(0)
         ctx.load_fixture_archive("load synthetic nested image", container, archive)
@@ -569,6 +576,7 @@ def _run_nested_docker_with_archive(
                 "! docker network inspect docker-native-probe >/dev/null 2>&1; "
                 "! docker volume inspect docker-native-probe >/dev/null 2>&1",
             )
+        _postexec_checkpoint(ctx, "pre-close")
     except Exception:
         _diagnose_failed_start(ctx, container, started, mode, api_ready=api_ready)
         raise

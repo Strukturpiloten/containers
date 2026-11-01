@@ -5,15 +5,15 @@
   "source": {
     "managed": true,
     "repository": "Strukturpiloten/docker-lens",
-    "ref": "TheRealBecks/issue152",
-    "commit": "05cb8ccb896f996f3f7575ad26ec36b71e0548c0",
+    "ref": "TheRealBecks/issue158",
+    "commit": "d7f18d756fe754adea3c57e6c0cba2a906e2a780",
     "license": "MPL-2.0",
     "retrieval": "public-https-immutable-commit",
     "files": [
       {
         "path": "scripts/native-runner-apparmor.py",
-        "size": 32168,
-        "sha256": "3aded1c43dfb5046c99e78ba74c3c974de3ce3ec0c68f2d05bc172acea27b3b6"
+        "size": 32212,
+        "sha256": "b52f1724c11f008bb55d28f3a578cddf26377fdc2e53a37df9d044150eeb9468"
       },
       {
         "path": "scripts/native_outer_diagnostic_capture.py",

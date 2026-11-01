@@ -1,4 +1,4 @@
-"""Fixed bounded executable and startup observations for the gated direct pair.
+"""Fixed held-executable primitives and gated direct startup observations.
 
 No namespace control, kernel attribution, retry, policy operation or mutation is
 implemented here. Existing exact RootlessKit message classifiers are reused.
@@ -13,13 +13,13 @@ import os
 import re
 import select
 import stat
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from typing import TYPE_CHECKING
 
 from scripts import docker_direct_startup_contract as contract
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
     from types import ModuleType
 
     from scripts.docker_direct_startup_active import ControlPort
@@ -36,6 +36,65 @@ SECURITY_OPTION_MAX_BYTES = 128
 
 ELF_MACHINES = {"amd64": 62, "arm64": 183}
 EXPECTED_LOG_CLASS = "child-fork-exec-operation-not-permitted-message"
+
+
+@contextmanager
+def held_rootlesskit(api: ModuleType, directory: int, components: tuple[str, ...]) -> Iterator[dict]:
+    """Hold the fixed canonical image file with the existing image-reader custody guards."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+    with ExitStack() as stack:
+        root = os.open("root", flags, dir_fd=directory)
+        stack.callback(os.close, root)
+        named = [(directory, "root", root)]
+        for part in components[:-1]:
+            child = os.open(part, flags | os.O_NOFOLLOW, dir_fd=root)
+            stack.callback(os.close, child)
+            named.append((root, part, child))
+            root = child
+        for _parent, _part, held in named:
+            info = os.fstat(held)
+            api.require(info.st_uid == 0 and not info.st_mode & 0o7022)
+        descriptor = os.open(components[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root)
+        stack.callback(os.close, descriptor)
+        before = os.fstat(descriptor)
+        api.require(stat.S_ISREG(before.st_mode) and before.st_uid == 0 and before.st_nlink == 1)
+        api.require(0 < before.st_size <= ROOTLESSKIT_MAX_BYTES and not before.st_mode & 0o7022)
+        yield {"descriptor": descriptor, "identity": (before.st_dev, before.st_ino), "mark": api.mark(before)}
+        api.require(
+            api.mark(before)
+            == api.mark(os.fstat(descriptor))
+            == api.mark(os.stat(components[-1], dir_fd=root, follow_symlinks=False))
+        )
+        for parent, part, held in named:
+            current = os.stat(part, dir_fd=parent, follow_symlinks=part == "root")
+            info = os.fstat(held)
+            api.require((current.st_dev, current.st_ino) == (info.st_dev, info.st_ino))
+
+
+def held_executable_hash(
+    api: ModuleType, descriptor: int, architecture: str, deadline: int, consume: Callable[[int], None]
+) -> tuple[str, int]:
+    """Hash only an already-held bounded ELF; enforce the original per-file guards and deadline."""
+    before = os.fstat(descriptor)
+    api.require(stat.S_ISREG(before.st_mode) and before.st_uid == 0 and before.st_nlink == 1)
+    api.require(0 < before.st_size <= ROOTLESSKIT_MAX_BYTES and not before.st_mode & 0o7022)
+    try:
+        os.getxattr(descriptor, "security.capability")
+    except OSError as error:
+        api.require(error.errno == errno.ENODATA)
+    else:
+        api.require(value=False)
+    hasher, head, total = hashlib.sha256(), b"", 0
+    while chunk := os.read(descriptor, HASH_BLOCK_BYTES):
+        total += len(chunk)
+        api.require(total <= ROOTLESSKIT_MAX_BYTES)
+        consume(len(chunk))
+        head = (head + chunk[:ENGINE_VERSION_MAX_BYTES])[:ENGINE_VERSION_MAX_BYTES]
+        hasher.update(chunk)
+        api.check(deadline)
+    api.require(total == before.st_size and api.mark(before) == api.mark(os.fstat(descriptor)))
+    api.require(head[:6] == b"\x7fELF\x02\x01" and int.from_bytes(head[18:20], "little") == ELF_MACHINES[architecture])
+    return hasher.hexdigest(), total
 
 
 IMAGE_PHASES = {

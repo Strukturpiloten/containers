@@ -3,7 +3,7 @@
   "consumer": "containers-ubuntu26-userns-active",
   "purpose": "scoped-prerequisite-attempt",
   "qualification": "none",
-  "sourceManifestSha256": "2c5dfa63e3865fa3c41cbefc6cf9eb6a74bc2886bd5f33350922882f3b877057",
+  "sourceManifestSha256": "f17689f46276d0acac2111fad18f73198ff7c07136a97ee05b57087d687fef47",
   "context": {
     "repository": "Strukturpiloten/containers",
     "workflow": ".github/workflows/ci.yml",
@@ -23,7 +23,7 @@
     "kind": "reviewed-active-source-predicate-not-observation-created-authority",
     "date": "2026-11-01",
     "evidenceRun": "41102914835",
-    "limits": "Schema7 retains the finite ordinary-direct and systemd maps. The mediated-profile-v2 source contract selects the immutable DockerLens152 fixed thirteen-rule ABI4 builder, seven explicit POSIX permissions, exact owned enforce label and schema2 refusal detail. Historical schema1 diagnostics and bare-unconfined actors remain separately checked. Parser, ABI and all hosted cohorts are unchanged. Source gates do not qualify compilation or native behavior; fresh exact-source whole-matrix label/workload/cleanup qualification remains mandatory. No publication authority follows. Bounded guestExit is failure-only evidence after the original subject-running refusal: exact owned terminal readbacks and sanitized log classes under one original-work/5s clamp; neither diagnostics nor PID0 grant task binding or cleanup authority. Existing profile permissions, admission maps and all SDK/parser/cohort pins remain unchanged.",
+    "limits": "Schema7 retains the finite ordinary-direct and systemd maps. The mediated-profile-v2 contract selects immutable DockerLens158 commit d7f18d756fe754adea3c57e6c0cba2a906e2a780 with fixed attach_disconnected,mediate_deleted declaration, thirteen ABI4 rules, seven explicit POSIX permissions, exact owned enforce labels and schema2 refusal detail. Historical schema1 diagnostics and bare-unconfined actors remain separately checked. Parser, ABI and hosted cohorts are unchanged. Closed postExecWitness version1 requires ordered ready/pre-close held original-task, canonical RootlessKit parent/unique immediate namespace-child executable and enforce-label matches, bound to the original source, binding and lease. Its 5s/original-work clamp, 64 candidate IDs, 512KiB proc/cgroup input and 96MiB executable input preserve original cleanup/finalizer reserves and pending reader/child guards; no additional cleanup authority follows. The post-create profileObservation retains its original meaning. These measurements do not capture exec events, attribute historical denials, establish numeric path-flag equality or qualify broader pathname behavior. Source gates do not qualify strict compilation or native behavior; fresh exact-source whole-matrix workload/witness/private-cleanup qualification remains mandatory. No publication authority follows. Bounded guestExit remains failure-only evidence under its original rules.",
     "renovate": "Managed pins remain in docker-userns-policy-source.json; source/parser/helper changes require coordinated manual re-admission; no automatic runner fingerprints",
     "armCohort": "Deliberately selected bounded ARM compatibility hypothesis after source/ABI review; exact root-owned preinstalled tools use the existing OS-tool trust exception, not vendor checksums or VM attestation. Historical ImageVersion 20261026.168.1 and startup header 20261025.167.1 differ; no independent image/package manifest was established. Native owner/load/attachment/C/OOM/cleanup acceptance remains required."
   },
