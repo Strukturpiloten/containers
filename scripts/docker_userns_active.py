@@ -24,6 +24,7 @@ import sys
 import time
 from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import asdict
+from functools import wraps
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -87,6 +88,67 @@ FILES = (
 )
 
 
+WITNESS_FAILURE_CODES = frozenset(
+    {
+        "binding-guard",
+        "binding-kind",
+        "budget-state",
+        "budget-uncertainty",
+        "cgroup",
+        "checkpoint-budget",
+        "checkpoint-envelope",
+        "checkpoint-order",
+        "checkpoint-sample",
+        "checkpoint-stability",
+        "child-mapping",
+        "child-readback",
+        "children-census",
+        "children-readback",
+        "children-scope",
+        "executable-cap",
+        "executable-hash",
+        "executable-identity",
+        "inherited-budget",
+        "label",
+        "namespace",
+        "parent-mapping",
+        "parent-readback",
+        "pid-cap",
+        "proc-cap",
+        "proc-read",
+        "sample",
+        "scope-cap",
+        "scope-census",
+        "scope-identity",
+        "scope-readback",
+        "subject-incarnation",
+        "subject-readback",
+        "task-alive",
+        "task-identity",
+        "task-readback",
+        "task-status",
+        "thread-census",
+        "thread-children-readback",
+        "thread-identity",
+        "thread-status",
+    }
+)
+WITNESS_FAILURE_PHASES = frozenset(
+    "witness-" + checkpoint + "-" + code for checkpoint in ("ready", "pre-close") for code in WITNESS_FAILURE_CODES
+)
+CLOSE_RESPONSE_PHASES = frozenset(
+    {
+        "client-close-binding",
+        "client-close-bootstrap",
+        "client-close-command",
+        "client-close-failure-envelope",
+        "client-close-provenance",
+        "client-close-qualification",
+        "client-close-retention",
+        "client-close-schema",
+        "client-close-witness",
+    }
+)
 FAILURE_PHASES = frozenset(
     {
         "unknown",
@@ -251,6 +313,7 @@ FAILURE_PHASES = frozenset(
         "retained",
     }
 )
+FAILURE_PHASES |= WITNESS_FAILURE_PHASES | CLOSE_RESPONSE_PHASES
 FAILURE_REASONS = frozenset(
     {
         "refused",
@@ -1159,6 +1222,20 @@ def require(value: object) -> None:
     if not value:
         reason = "active-scoped-profile-refused"
         raise RefusedError(reason)
+
+
+def witness_operation[Result](code: str) -> Callable[[Callable[..., Result]], Callable[..., Result]]:
+    """Name existing operation exceptions without reading another runtime fact."""
+
+    def decorate(method: Callable[..., Result]) -> Callable[..., Result]:
+        @wraps(method)
+        def call(port: RootPort, *args: object, **kwargs: object) -> Result:
+            with port.witness_site(code):
+                return method(port, *args, **kwargs)
+
+        return call
+
+    return decorate
 
 
 def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -2190,14 +2267,43 @@ class RootPort:
             os.close(pidfd)
             os.close(descriptor)
 
+    @contextmanager
+    def witness_site(self, code: str) -> Iterator[None]:
+        """Name an existing escaping operation; successful searches discard skipped candidates."""
+        previous = getattr(self, "_witness_failure", None)
+        try:
+            yield
+        except BaseException:
+            if getattr(self, "_witness_failure", None) is None:
+                self._witness_failure = code
+            raise
+        else:
+            self._witness_failure = previous
+
+    def witness_failure(self, code: str) -> None:
+        """Keep only an internal fixed code; no operand or exception leaves the guard."""
+        self._witness_failure = code
+
+    def witness_require(self, code: str, value: object) -> None:
+        """Evaluate the existing predicate once and preserve its original refusal."""
+        if not value:
+            self.witness_failure(code)
+            require(value=False)
+
     def witness_budget(self) -> None:
         """Keep one checkpoint inside original work and every existing uncertainty guard."""
-        require(not self.cleanup and self.record["retained"] is False)
-        require(
-            all(self.record.get(key, False) is False for key in ("readerPending", "childPending", "durabilityUnknown"))
+        self.witness_require("budget-state", not self.cleanup and self.record["retained"] is False)
+        self.witness_require(
+            "budget-uncertainty",
+            all(self.record.get(key, False) is False for key in ("readerPending", "childPending", "durabilityUnknown")),
         )
-        check(self.work_until)
+        try:
+            check(self.work_until)
+        except BaseException:
+            self.witness_failure(getattr(self, "_witness_deadline", "inherited-budget"))
+            raise
 
+    @witness_operation("proc-read")
     def witness_read(self, directory: int, leaf: str) -> bytes:
         """Charge actual bounded proc bytes without broadening the fixed leaf reader."""
         self.witness_budget()
@@ -2206,70 +2312,90 @@ class RootPort:
                 "children", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory
             )
             try:
-                require(stat.S_ISREG(os.fstat(descriptor).st_mode))
+                self.witness_require("proc-read", stat.S_ISREG(os.fstat(descriptor).st_mode))
                 raw = os.read(descriptor, WITNESS_READ_LIMIT + 1)
-                require(len(raw) <= WITNESS_READ_LIMIT)
+                self.witness_require("proc-cap", len(raw) <= WITNESS_READ_LIMIT)
             finally:
                 os.close(descriptor)
         else:
             raw = proc_bytes(directory, leaf)
         self.witness_counts["procBytes"] += len(raw)
-        require(self.witness_counts["procBytes"] <= WITNESS_PROC_LIMIT)
+        self.witness_require("proc-cap", self.witness_counts["procBytes"] <= WITNESS_PROC_LIMIT)
         self.witness_budget()
         return raw
 
+    @witness_operation("task-status")
     def witness_status(self, directory: int, pid: int, uid: int) -> dict:
         """Parse only kernel parent and namespace PID facts through the held task."""
         fields = {}
         for line in self.witness_read(directory, "status").splitlines():
             key, separator, value = line.partition(b":")
             if key in {b"Pid", b"Tgid", b"Uid", b"PPid", b"NSpid"}:
-                require(separator and key not in fields)
+                self.witness_require("task-status", separator and key not in fields)
                 fields[key] = value.split()
-        require(set(fields) == {b"Pid", b"Tgid", b"Uid", b"PPid", b"NSpid"})
-        require(fields[b"Pid"] == fields[b"Tgid"] == [str(pid).encode()] and fields[b"Uid"] == [str(uid).encode()] * 4)
-        require(len(fields[b"PPid"]) == 1 and re.fullmatch(rb"0|[1-9][0-9]{0,9}", fields[b"PPid"][0]))
-        require(
-            len(fields[b"NSpid"]) >= WITNESS_PID_DEPTH
-            and all(re.fullmatch(rb"[1-9][0-9]{0,9}", value) for value in fields[b"NSpid"])
+        self.witness_require("task-status", set(fields) == {b"Pid", b"Tgid", b"Uid", b"PPid", b"NSpid"})
+        self.witness_require(
+            "task-status",
+            fields[b"Pid"] == fields[b"Tgid"] == [str(pid).encode()] and fields[b"Uid"] == [str(uid).encode()] * 4,
         )
-        require(fields[b"NSpid"][0] == str(pid).encode())
+        self.witness_require(
+            "parent-mapping", len(fields[b"PPid"]) == 1 and re.fullmatch(rb"0|[1-9][0-9]{0,9}", fields[b"PPid"][0])
+        )
+        self.witness_require(
+            "namespace",
+            len(fields[b"NSpid"]) >= WITNESS_PID_DEPTH
+            and all(re.fullmatch(rb"[1-9][0-9]{0,9}", value) for value in fields[b"NSpid"]),
+        )
+        self.witness_require("namespace", fields[b"NSpid"][0] == str(pid).encode())
         return {"parent": int(fields[b"PPid"][0]), "namespacePid": int(fields[b"NSpid"][-1])}
 
+    @witness_operation("task-identity")
     def witness_task_state(self, task: dict) -> dict:
         """Bracket executable and label reads with same-held-proc namespace and incarnation facts."""
         self.witness_budget()
         state = task_snapshot(task["directory"], task["pid"], task["uid"], reader=self.witness_read)
         status = self.witness_status(task["directory"], task["pid"], task["uid"])
         group = "0::/" + self.binding.runtime_slice + "/docker-" + self.record["subject"]["container"] + ".scope"
-        require(re.fullmatch(re.escape(group) + r"(?:/[A-Za-z0-9_.@:-]+)*\n", state["cgroup"]))
-        require(not any(part in {".", ".."} for part in state["cgroup"].split("/")))
+        self.witness_require("cgroup", re.fullmatch(re.escape(group) + r"(?:/[A-Za-z0-9_.@:-]+)*\n", state["cgroup"]))
+        self.witness_require("cgroup", not any(part in {".", ".."} for part in state["cgroup"].split("/")))
         namespaces = self.witness_namespaces(task)
-        require(
+        self.witness_require(
+            "label",
             self.witness_read(task["directory"], "attr/apparmor/current")
-            == self.record["profileName"].encode() + b" (enforce)\n"
+            == self.record["profileName"].encode() + b" (enforce)\n",
         )
-        require(not select.select([task["pidfd"]], [], [], 0)[0])
-        require(mark(os.fstat(task["exe"])) == mark(os.stat("exe", dir_fd=task["directory"])))
+        self.witness_require("task-alive", not select.select([task["pidfd"]], [], [], 0)[0])
+        self.witness_require(
+            "executable-identity", mark(os.fstat(task["exe"])) == mark(os.stat("exe", dir_fd=task["directory"]))
+        )
         self.witness_budget()
         return {**state, **status, "namespaces": namespaces, "executable": mark(os.fstat(task["exe"]))}
 
     @contextmanager
     def witness_task(self, pid: int, uid: int = 1000) -> Iterator[dict]:
         """Hold exact proc, pidfd and kernel exe link; no PID or path comes from the request."""
-        require(type(pid) is int and pid > 0)
-        self.witness_budget()
-        with ExitStack() as stack:
-            directory = os.open(f"/proc/{pid}", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
-            stack.callback(os.close, directory)
-            pidfd = os.pidfd_open(pid)
-            stack.callback(os.close, pidfd)
-            executable = os.open("exe", os.O_RDONLY | os.O_CLOEXEC, dir_fd=directory)
-            stack.callback(os.close, executable)
-            task = {"pid": pid, "uid": uid, "directory": directory, "pidfd": pidfd, "exe": executable, "stack": stack}
-            task["before"] = self.witness_task_state(task)
-            yield task
+        with self.witness_site("task-identity"):
+            self.witness_require("task-identity", type(pid) is int and pid > 0)
+            self.witness_budget()
+            with ExitStack() as stack:
+                directory = os.open(f"/proc/{pid}", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+                stack.callback(os.close, directory)
+                pidfd = os.pidfd_open(pid)
+                stack.callback(os.close, pidfd)
+                executable = os.open("exe", os.O_RDONLY | os.O_CLOEXEC, dir_fd=directory)
+                stack.callback(os.close, executable)
+                task = {
+                    "pid": pid,
+                    "uid": uid,
+                    "directory": directory,
+                    "pidfd": pidfd,
+                    "exe": executable,
+                    "stack": stack,
+                }
+                task["before"] = self.witness_task_state(task)
+                yield task
 
+    @witness_operation("namespace")
     def witness_namespaces(self, task: dict) -> tuple:
         """Hold namespace objects throughout the sample, avoiding split-stat or inode-reuse ambiguity."""
         result = []
@@ -2280,13 +2406,15 @@ class RootPort:
             result.append((info.st_dev, info.st_ino))
         return tuple(result)
 
+    @witness_operation("scope-identity")
     def witness_scope_pids(self, stack: ExitStack) -> set[int]:
         """Enumerate only the authenticated owned cgroup subtree, with finite names and input."""
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-        require(re.fullmatch(r"[0-9a-f]{64}", self.record["subject"]["container"]))
-        require(
+        self.witness_require("scope-identity", re.fullmatch(r"[0-9a-f]{64}", self.record["subject"]["container"]))
+        self.witness_require(
+            "scope-identity",
             re.fullmatch(r"[A-Za-z0-9_.@:-]+", self.binding.runtime_slice)
-            and self.binding.runtime_slice not in {".", ".."}
+            and self.binding.runtime_slice not in {".", ".."},
         )
         root = os.open("/sys/fs/cgroup", flags)
         stack.callback(os.close, root)
@@ -2294,23 +2422,28 @@ class RootPort:
         runtime = os.open(self.binding.runtime_slice, flags, dir_fd=root)
         stack.callback(os.close, runtime)
         info = os.fstat(runtime)
-        require(f"{info.st_dev}:{info.st_ino}" == self.binding.slice_identity)
+        self.witness_require("scope-identity", f"{info.st_dev}:{info.st_ino}" == self.binding.slice_identity)
         scope = os.open("docker-" + self.record["subject"]["container"] + ".scope", flags, dir_fd=runtime)
         stack.callback(os.close, scope)
         filesystem_magic(scope, 0x63677270)
         scope_info = os.fstat(scope)
         identity = (scope_info.st_dev, scope_info.st_ino)
-        require(self.witness_counts.setdefault("scopeIdentity", identity) == identity)
+        self.witness_require("scope-identity", self.witness_counts.setdefault("scopeIdentity", identity) == identity)
         result, identities = self.witness_scope_walk(stack, scope)
         runtime_after = os.stat(self.binding.runtime_slice, dir_fd=root, follow_symlinks=False)
         scope_after = os.stat(
             "docker-" + self.record["subject"]["container"] + ".scope", dir_fd=runtime, follow_symlinks=False
         )
-        require((runtime_after.st_dev, runtime_after.st_ino) == (info.st_dev, info.st_ino))
-        require((scope_after.st_dev, scope_after.st_ino) == identity)
-        require(self.witness_counts.setdefault("scopeDirectories", identities) == identities)
+        self.witness_require(
+            "scope-identity", (runtime_after.st_dev, runtime_after.st_ino) == (info.st_dev, info.st_ino)
+        )
+        self.witness_require("scope-identity", (scope_after.st_dev, scope_after.st_ino) == identity)
+        self.witness_require(
+            "scope-census", self.witness_counts.setdefault("scopeDirectories", identities) == identities
+        )
         return result
 
+    @witness_operation("scope-census")
     def witness_scope_walk(self, stack: ExitStack, scope: int) -> tuple[set[int], dict]:
         """Walk held cgroup directories without global proc enumeration or path fallback."""
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -2322,40 +2455,48 @@ class RootPort:
             self.witness_budget()
             current = os.fstat(directory)
             directory_identity = (current.st_dev, current.st_ino)
-            require(directory_identity not in seen)
+            self.witness_require("scope-identity", directory_identity not in seen)
             seen.add(directory_identity)
             identities[relative] = directory_identity
             directories += 1
-            require(directories <= WITNESS_DIRECTORY_LIMIT and depth <= WITNESS_DEPTH_LIMIT)
+            self.witness_require("scope-cap", directories <= WITNESS_DIRECTORY_LIMIT and depth <= WITNESS_DEPTH_LIMIT)
             descriptor = os.open("cgroup.procs", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory)
             try:
                 raw = os.read(descriptor, WITNESS_READ_LIMIT + 1)
             finally:
                 os.close(descriptor)
             self.witness_counts["procBytes"] += len(raw)
-            require(len(raw) <= WITNESS_READ_LIMIT and self.witness_counts["procBytes"] <= WITNESS_PROC_LIMIT)
-            require(re.fullmatch(rb"(?:[1-9][0-9]{0,9}\n)*", raw))
+            self.witness_require(
+                "proc-cap", len(raw) <= WITNESS_READ_LIMIT and self.witness_counts["procBytes"] <= WITNESS_PROC_LIMIT
+            )
+            self.witness_require("scope-census", re.fullmatch(rb"(?:[1-9][0-9]{0,9}\n)*", raw))
             members = {int(value) for value in raw.splitlines()}
-            require(len(members) == len(raw.splitlines()) and not result & members)
+            self.witness_require("scope-census", len(members) == len(raw.splitlines()) and not result & members)
             result.update(members)
             self.witness_counts["pids"].update(result)
-            require(len(self.witness_counts["pids"]) <= WITNESS_PID_LIMIT)
+            self.witness_require("pid-cap", len(self.witness_counts["pids"]) <= WITNESS_PID_LIMIT)
             with os.scandir(directory) as children:
                 for entry in children:
                     entries += 1
-                    require(entries <= WITNESS_ENTRY_LIMIT)
-                    require(not entry.is_symlink())
+                    self.witness_require("scope-cap", entries <= WITNESS_ENTRY_LIMIT)
+                    self.witness_require("scope-identity", not entry.is_symlink())
                     if entry.is_dir(follow_symlinks=False):
-                        require(re.fullmatch(r"[A-Za-z0-9_.@:-]{1,255}", entry.name) and entry.name not in {".", ".."})
-                        require(directories + len(pending) < WITNESS_DIRECTORY_LIMIT)
+                        self.witness_require(
+                            "scope-identity",
+                            re.fullmatch(r"[A-Za-z0-9_.@:-]{1,255}", entry.name) and entry.name not in {".", ".."},
+                        )
+                        self.witness_require("scope-cap", directories + len(pending) < WITNESS_DIRECTORY_LIMIT)
                         child = os.open(entry.name, flags, dir_fd=directory)
                         stack.callback(os.close, child)
                         pending.append((child, depth + 1, (*relative, entry.name)))
                         named = os.stat(entry.name, dir_fd=directory, follow_symlinks=False)
                         held = os.fstat(child)
-                        require((named.st_dev, named.st_ino) == (held.st_dev, held.st_ino))
+                        self.witness_require(
+                            "scope-identity", (named.st_dev, named.st_ino) == (held.st_dev, held.st_ino)
+                        )
         return result, identities
 
+    @witness_operation("parent-mapping")
     def witness_systemd_pid(self, container: str) -> int:
         """Use only the existing fixed placement/user-manager contract and unit."""
         contract = self.modules.capture._guest_guard_contract()  # noqa: SLF001 - reuse the authenticated literal sibling.
@@ -2368,14 +2509,15 @@ class RootPort:
                 *contract["USER_MANAGER"], "show", "docker.service", "--property=MainPID", "--value"
             ),
         )
-        require(re.fullmatch(rb"[1-9][0-9]{0,9}\n", raw) and int(raw) > 1)
+        self.witness_require("parent-mapping", re.fullmatch(rb"[1-9][0-9]{0,9}\n", raw) and int(raw) > 1)
         self.witness_budget()
         return int(raw)
 
+    @witness_operation("parent-mapping")
     def witness_parent(self, stack: ExitStack, outer: dict, candidates: set[int], guest_pid: int | None) -> dict:
         """Derive one exact unit parent or the already-bound direct PID1; no basename selection."""
         if guest_pid is None:
-            require(outer["uid"] == WITNESS_ROOTLESS_UID)
+            self.witness_require("parent-mapping", outer["uid"] == WITNESS_ROOTLESS_UID)
             return outer
         matches = []
         for pid in sorted(candidates):
@@ -2383,6 +2525,7 @@ class RootPort:
                 try:
                     task = temporary.enter_context(self.witness_task(pid))
                 except OSError, RefusedError:
+                    self._witness_failure = None
                     self.witness_budget()
                     continue
                 if (
@@ -2391,47 +2534,58 @@ class RootPort:
                 ):
                     matches.append(task)
                     stack.enter_context(temporary.pop_all())
-        require(len(matches) == 1)
+        self.witness_require("parent-mapping", len(matches) == 1)
         return matches[0]
 
+    @witness_operation("thread-census")
     def witness_thread_ids(self, directory: int) -> set[int]:
         """Enumerate only the held parent's task directory within the original shared ID bound."""
         result = set()
         with os.scandir(directory) as entries:
             for entry in entries:
                 self.witness_budget()
-                require(re.fullmatch(r"[1-9][0-9]{0,9}", entry.name) and not entry.is_symlink())
-                require(entry.is_dir(follow_symlinks=False))
+                self.witness_require(
+                    "thread-census", re.fullmatch(r"[1-9][0-9]{0,9}", entry.name) and not entry.is_symlink()
+                )
+                self.witness_require("thread-census", entry.is_dir(follow_symlinks=False))
                 tid = int(entry.name)
-                require(tid not in result)
+                self.witness_require("thread-census", tid not in result)
                 result.add(tid)
                 self.witness_counts["pids"].add(tid)
-                require(len(self.witness_counts["pids"]) <= WITNESS_PID_LIMIT)
+                self.witness_require("pid-cap", len(self.witness_counts["pids"]) <= WITNESS_PID_LIMIT)
         return result
 
+    @witness_operation("thread-identity")
     def witness_thread_state(self, directory: int, tid: int, parent: dict) -> tuple:
         """Bind a held thread's live incarnation and exact original parent thread group."""
         raw = self.witness_read(directory, "stat")
         opening, closing = raw.find(b"("), raw.rfind(b")")
-        require(opening > 0 and closing > opening and raw[:opening].strip() == str(tid).encode())
+        self.witness_require(
+            "thread-identity", opening > 0 and closing > opening and raw[:opening].strip() == str(tid).encode()
+        )
         fields = raw[closing + 1 :].split()
-        require(len(fields) > START_FIELD and fields[0] not in {b"Z", b"X", b"x"} and fields[START_FIELD].isdigit())
+        self.witness_require(
+            "thread-identity",
+            len(fields) > START_FIELD and fields[0] not in {b"Z", b"X", b"x"} and fields[START_FIELD].isdigit(),
+        )
         status = {}
         for line in self.witness_read(directory, "status").splitlines():
             key, separator, value = line.partition(b":")
             if key in {b"Pid", b"Tgid", b"Uid"}:
-                require(separator and key not in status)
+                self.witness_require("thread-status", separator and key not in status)
                 status[key] = value.split()
-        require(
+        self.witness_require(
+            "thread-status",
             status
             == {
                 b"Pid": [str(tid).encode()],
                 b"Tgid": [str(parent["pid"]).encode()],
                 b"Uid": [str(parent["uid"]).encode()] * 4,
-            }
+            },
         )
         return tid, int(fields[START_FIELD])
 
+    @witness_operation("children-census")
     def witness_parent_children(self, parent: dict) -> set[int]:
         """Reconcile all held parent threads, including nonleader forks, without a global scan."""
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -2442,7 +2596,7 @@ class RootPort:
             parent["threads"] = {}
         directory, threads = parent["threadDirectory"], parent["threads"]
         tids = self.witness_thread_ids(directory)
-        require(parent["pid"] in tids and (not threads or set(threads) == tids))
+        self.witness_require("thread-census", parent["pid"] in tids and (not threads or set(threads) == tids))
         result = set()
         for tid in sorted(tids):
             if tid not in threads:
@@ -2453,42 +2607,48 @@ class RootPort:
             thread = threads[tid]
             held = os.fstat(thread["descriptor"])
             named = os.stat(str(tid), dir_fd=directory, follow_symlinks=False)
-            require((held.st_dev, held.st_ino) == (named.st_dev, named.st_ino))
+            self.witness_require("thread-identity", (held.st_dev, held.st_ino) == (named.st_dev, named.st_ino))
             before = self.witness_thread_state(thread["descriptor"], tid, parent)
             raw = self.witness_read(thread["descriptor"], "children")
-            require(re.fullmatch(rb"(?:[1-9][0-9]{0,9} )*", raw))
+            self.witness_require("children-census", re.fullmatch(rb"(?:[1-9][0-9]{0,9} )*", raw))
             children = {int(value) for value in raw.split()}
-            require(len(children) == len(raw.split()) and not result & children and not children & tids)
+            self.witness_require(
+                "children-census", len(children) == len(raw.split()) and not result & children and not children & tids
+            )
             result.update(children)
             self.witness_counts["pids"].update(children)
-            require(len(self.witness_counts["pids"]) <= WITNESS_PID_LIMIT)
-            require(self.witness_thread_state(thread["descriptor"], tid, parent) == before)
+            self.witness_require("pid-cap", len(self.witness_counts["pids"]) <= WITNESS_PID_LIMIT)
+            self.witness_require(
+                "thread-identity", self.witness_thread_state(thread["descriptor"], tid, parent) == before
+            )
             snapshot = (held.st_dev, held.st_ino, before, tuple(sorted(children)))
-            require(thread.setdefault("snapshot", snapshot) == snapshot)
-        require(tids == self.witness_thread_ids(directory))
+            self.witness_require("thread-children-readback", thread.setdefault("snapshot", snapshot) == snapshot)
+        self.witness_require("thread-census", tids == self.witness_thread_ids(directory))
         held = os.fstat(directory)
         named = os.stat("task", dir_fd=parent["directory"], follow_symlinks=False)
-        require((held.st_dev, held.st_ino) == (named.st_dev, named.st_ino))
+        self.witness_require("thread-identity", (held.st_dev, held.st_ino) == (named.st_dev, named.st_ino))
         self.witness_budget()
         return result
 
+    @witness_operation("child-mapping")
     def witness_child(
         self, stack: ExitStack, parent: dict, candidates: set[int], identity: tuple, children: set[int]
     ) -> dict:
         """Reconcile complete immediate children before selecting one exact namespace child."""
-        require(children <= candidates and parent["pid"] not in children)
+        self.witness_require("children-scope", children <= candidates and parent["pid"] not in children)
         matches, observed = [], set()
         for pid in sorted(candidates - {parent["pid"]}):
             with ExitStack() as temporary:
                 try:
                     task = temporary.enter_context(self.witness_task(pid))
                 except OSError, RefusedError:
-                    require(pid not in children)
+                    self._witness_failure = None
+                    self.witness_require("children-scope", pid not in children)
                     self.witness_budget()
                     continue
                 state = task["before"]
                 if state["parent"] == parent["pid"]:
-                    require(pid in children)
+                    self.witness_require("children-scope", pid in children)
                     observed.add(pid)
                     info = os.fstat(task["exe"])
                     if (info.st_dev, info.st_ino) == identity and all(
@@ -2496,42 +2656,47 @@ class RootPort:
                     ):
                         matches.append(task)
                         stack.enter_context(temporary.pop_all())
-        require(observed == children and len(matches) == 1)
+        self.witness_require("child-mapping", observed == children and len(matches) == 1)
         return matches[0]
 
+    @witness_operation("executable-hash")
     def witness_executable_bytes(self, amount: int) -> None:
         """Charge all three independent file reads to one finite checkpoint allowance."""
         self.witness_counts["exeBytes"] += amount
-        require(self.witness_counts["exeBytes"] <= WITNESS_EXEC_LIMIT)
+        self.witness_require("executable-cap", self.witness_counts["exeBytes"] <= WITNESS_EXEC_LIMIT)
         self.witness_budget()
 
+    @witness_operation("sample")
     def witness_sample(self, checkpoint: str) -> dict:
         """Sample original guest, actual parent and unique child, with final held readbacks."""
         api = sys.modules[__name__]
         direct = type(self.binding) is self.modules.qualification.MaintainedDirectBinding
-        require(
+        self.witness_require(
+            "binding-kind",
             direct
             or (
                 type(self.binding) is self.modules.qualification.NativeBinding
                 and self.binding.image in self.modules.qualification.MAINTAINED_IMAGES
-            )
+            ),
         )
         subject = self.record["subject"]
         before = self.inspect(subject["container"])
-        require(
+        self.witness_require(
+            "subject-incarnation",
             before["State"]["Running"] is True
             and before["State"]["Pid"] == subject["pid"]
-            and before["State"]["StartedAt"] == subject["startedAt"]
+            and before["State"]["StartedAt"] == subject["startedAt"],
         )
         guest_pid = None if direct else self.witness_systemd_pid(subject["container"])
         with ExitStack() as stack:
             outer = stack.enter_context(self.witness_task(subject["pid"], 1000 if direct else 0))
-            require(
+            self.witness_require(
+                "subject-incarnation",
                 outer["before"]["startTicks"] == subject["startTicks"]
-                and outer["before"]["cgroup"] == subject["cgroup"]
+                and outer["before"]["cgroup"] == subject["cgroup"],
             )
             candidates = self.witness_scope_pids(stack)
-            require(outer["pid"] in candidates)
+            self.witness_require("scope-census", outer["pid"] in candidates)
             parent = self.witness_parent(stack, outer, candidates, guest_pid)
             components = self.modules.qualification.rootlesskit_components(self.binding.image)
             image = stack.enter_context(self.modules.observations.held_rootlesskit(api, outer["directory"], components))
@@ -2544,22 +2709,29 @@ class RootPort:
                 )
                 for descriptor in files
             ]
-            require(hashes[0] == hashes[1] == hashes[2])
-            require(
+            self.witness_require("executable-hash", hashes[0] == hashes[1] == hashes[2])
+            self.witness_require(
+                "executable-identity",
                 all(
                     (os.fstat(task["exe"]).st_dev, os.fstat(task["exe"]).st_ino) == image["identity"]
                     for task in (parent, child)
-                )
+                ),
             )
-            require(all(self.witness_task_state(task) == task["before"] for task in (outer, parent, child)))
+            self.witness_require(
+                "task-readback", all(self.witness_task_state(task) == task["before"] for task in (outer, parent, child))
+            )
             after_pids = self.witness_scope_pids(stack)
-            require({outer["pid"], parent["pid"], child["pid"]} <= after_pids)
-            require(self.witness_parent_children(parent) == children)
+            self.witness_require("scope-readback", {outer["pid"], parent["pid"], child["pid"]} <= after_pids)
+            self.witness_require("children-readback", self.witness_parent_children(parent) == children)
             after_child = self.witness_child(stack, parent, after_pids, image["identity"], children)
-            require(after_child["before"] == child["before"])
-            require(guest_pid is None or self.witness_systemd_pid(subject["container"]) == guest_pid)
-            require(self.inspect(subject["container"])["State"] == before["State"])
-            require(all(not select.select([task["pidfd"]], [], [], 0)[0] for task in (outer, parent, child)))
+            self.witness_require("child-readback", after_child["before"] == child["before"])
+            self.witness_require(
+                "parent-readback", guest_pid is None or self.witness_systemd_pid(subject["container"]) == guest_pid
+            )
+            self.witness_require("subject-readback", self.inspect(subject["container"])["State"] == before["State"])
+            self.witness_require(
+                "task-alive", all(not select.select([task["pidfd"]], [], [], 0)[0] for task in (outer, parent, child))
+            )
             self.witness_budget()
             return {
                 "checkpoint": checkpoint,
@@ -2579,34 +2751,49 @@ class RootPort:
         """Commit exactly two ordered read-only checkpoints without changing lifecycle authority."""
         require(self.record["state"] == "attached" and self.record["retained"] is False and not self.cleanup)
         require(type(checkpoint) is str and checkpoint in self.modules.qualification.POSTEXEC_CHECKPOINTS)
-        value = self.record.get("postExecWitness")
-        view = receipt(self)
-        require(self.modules.qualification.postexec_witness_valid(value, view))
-        samples = [] if value is None else list(value["samples"])
-        require(
-            len(samples) < len(self.modules.qualification.POSTEXEC_CHECKPOINTS)
-            and checkpoint == self.modules.qualification.POSTEXEC_CHECKPOINTS[len(samples)]
-        )
-        original = self.work_until
+        self._witness_failure = None
         try:
-            self.work_until = min(original, time.monotonic_ns() + WITNESS_SECONDS_NS)
-            self.witness_counts = {"procBytes": 0, "exeBytes": 0, "pids": set()}
-            self.guard(self.binding)
-            self.point("witness-" + checkpoint)
-            samples.append(self.witness_sample(checkpoint))
-            value = {
-                "schemaVersion": 1,
-                "bindingSha256": self.record["bindingSha256"],
-                "sourceManifestSha256": SOURCE_MANIFEST_SHA256,
-                "leaseSha256": digest(self.store.path.name.encode("ascii")),
-                "samples": samples,
-            }
-            require(self.modules.qualification.postexec_witness_valid(value, view))
-            self.witness_budget()
-            self.record["postExecWitness"] = value
-            self.commit()
+            value = self.record.get("postExecWitness")
+            view = receipt(self)
+            require(self.modules.qualification.postexec_witness_valid(value, view, diagnostic=self.witness_failure))
+            samples = [] if value is None else list(value["samples"])
+            self.witness_require(
+                "checkpoint-order",
+                len(samples) < len(self.modules.qualification.POSTEXEC_CHECKPOINTS)
+                and checkpoint == self.modules.qualification.POSTEXEC_CHECKPOINTS[len(samples)],
+            )
+            original = self.work_until
+            try:
+                checkpoint_until = time.monotonic_ns() + WITNESS_SECONDS_NS
+                self.work_until = min(original, checkpoint_until)
+                self._witness_deadline = "inherited-budget" if original <= checkpoint_until else "checkpoint-budget"
+                self.witness_counts = {"procBytes": 0, "exeBytes": 0, "pids": set()}
+                with self.witness_site("binding-guard"):
+                    self.guard(self.binding)
+                self.point("witness-" + checkpoint)
+                samples.append(self.witness_sample(checkpoint))
+                value = {
+                    "schemaVersion": 1,
+                    "bindingSha256": self.record["bindingSha256"],
+                    "sourceManifestSha256": SOURCE_MANIFEST_SHA256,
+                    "leaseSha256": digest(self.store.path.name.encode("ascii")),
+                    "samples": samples,
+                }
+                require(self.modules.qualification.postexec_witness_valid(value, view, diagnostic=self.witness_failure))
+                self.witness_budget()
+                self.record["postExecWitness"] = value
+                self.commit()
+            finally:
+                self.work_until = original
+        except BaseException:
+            code = getattr(self, "_witness_failure", None)
+            phase = "witness-" + checkpoint + "-" + code if type(code) is str else None
+            if phase in WITNESS_FAILURE_PHASES:
+                with suppress(Exception):
+                    comparison(self.record.setdefault("diagnostic", {}), phase, matched=False)
+            raise
         finally:
-            self.work_until = original
+            self._witness_failure = None
 
     def guest_exit_budget(self) -> None:
         """Stop optional reads on inherited expiry, cleanup or sticky uncertainty."""

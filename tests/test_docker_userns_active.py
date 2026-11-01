@@ -2227,6 +2227,84 @@ class FailureTransport(unittest.TestCase):
                 client.rpc("prepare", {})
             self.assertEqual(client.evidence["status"], "failed")
 
+    def test_close_rejection_names_first_existing_predicate_without_success_schema_changes(self) -> None:
+        for key, wrong, expected in (
+            ("schemaVersion", True, "schema"),
+            ("bindingSha256", "0" * 64, "binding"),
+            ("workflowContext", {}, "provenance"),
+            ("bootstrapSha256", "private-canary", "bootstrap"),
+            ("qualification", "none", "qualification"),
+            ("retained", True, "retention"),
+            ("postExecWitness", {"raw": PRIVATE}, "witness"),
+        ):
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as temporary:
+                client = client_fixture(Path(temporary))
+                value = scoped_receipt()
+                client.ctx.command = Mock(return_value=json.dumps(value))
+                self.assertEqual(client.rpc("close", {}), value)
+                self.assertEqual(client.failures, [])
+                value[key] = wrong
+                client.ctx.command.return_value = json.dumps(value)
+                client.ctx.checks = [{"exitCode": 0, "stdout": PRIVATE, "stderr": PRIVATE}]
+                with self.assertRaises(ValueError):
+                    client.rpc("close", {})
+                failure = client.failures[-1]
+                phase = "client-close-" + expected
+                self.assertEqual(failure["reason"], "receipt-mismatch")
+                self.assertEqual(failure["phase"], phase)
+                self.assertEqual(failure["comparisons"], {phase: False})
+                self.assertTrue(active.valid_failure(failure))
+                self.assertFalse(failure["cleanupAuthority"])
+                self.assertFalse(client.evidence["cleanupAuthority"])
+                self.assertNotIn(PRIVATE, client.ctx.scoped_failure_output.read_text())
+                self.assertNotIn("stdout", client.ctx.checks[-1])
+                self.assertNotIn("stderr", client.ctx.checks[-1])
+
+    def test_original_witness_refusal_precedes_separate_success_exit_close_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            client = client_fixture(Path(temporary))
+            root = bound_root_failure()
+            root.update(operation="witness", phase="witness-pre-close-children-census")
+            root["comparisons"] = {"witness-pre-close-children-census": False}
+            client.ctx.command = Mock(return_value=json.dumps(root))
+            with self.assertRaises(ValueError):
+                client.rpc("witness", {})
+            self.assertEqual(client.failures, [root])
+            value = scoped_receipt()
+            value["schemaVersion"] = True
+            value["retained"] = True
+            client.ctx.command.return_value = json.dumps(value)
+            client.ctx.checks = [{"exitCode": 0}]
+            with patch("scripts.docker_userns_active_client.postexec_witness_valid") as witness:
+                with self.assertRaises(ValueError):
+                    client.rpc("close", {})
+                witness.assert_not_called()
+            self.assertEqual(client.failures[0], root)
+            self.assertEqual(client.failures[1]["phase"], "client-close-schema")
+            self.assertEqual(client.failures[1]["reason"], "receipt-mismatch")
+            self.assertEqual(client.ctx.checks[-1]["exitCode"], 0)
+            self.assertFalse(client.evidence["cleanupAuthority"])
+
+    def test_unknown_and_malformed_codes_never_expand_failure_authority(self) -> None:
+        self.assertTrue(active.valid_failure(bound_root_failure()))
+        for code in (PRIVATE, [], {}, True):
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as temporary:
+                client = client_fixture(Path(temporary))
+                client._close_response_phase = code
+                local = client.local_failure("close", "receipt-mismatch")
+                self.assertEqual(local["phase"], "client-response")
+                self.assertEqual(local["comparisons"], {})
+                self.assertFalse(local["cleanupAuthority"])
+                self.assertTrue(active.valid_failure(local))
+                root = bound_root_failure()
+                root.update(operation="close", phase=code)
+                client.ctx.command = Mock(return_value=json.dumps(root))
+                with self.assertRaises(ValueError):
+                    client.rpc("close", {})
+                self.assertEqual(client.failures[-1]["phase"], "client-close-failure-envelope")
+                self.assertFalse(client.evidence["cleanupAuthority"])
+                self.assertNotIn(PRIVATE, client.ctx.scoped_failure_output.read_text())
+
     def test_producer_and_bootstrap_emit_only_executed_closed_failure_receipts(self) -> None:
         import io  # noqa: PLC0415
 

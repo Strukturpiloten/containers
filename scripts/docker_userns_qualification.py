@@ -221,7 +221,16 @@ POSTEXEC_HASH_KEYS = (
 POSTEXEC_MAX_EXECUTABLE = 32 * 1024 * 1024
 
 
-def postexec_witness_valid(value: object, scoped: dict, *, complete: bool = False) -> bool:
+def _postexec_failure(diagnostic: Callable[[str], None] | None, code: str) -> bool:
+    """Annotate only an existing false validator branch, without inspecting another fact."""
+    if diagnostic is not None:
+        diagnostic(code)
+    return False
+
+
+def postexec_witness_valid(
+    value: object, scoped: dict, *, complete: bool = False, diagnostic: Callable[[str], None] | None = None
+) -> bool:
     """Validate closed source-bound checkpoint facts, never upgrade post-create evidence."""
     if value is None:
         return not complete
@@ -242,7 +251,7 @@ def postexec_witness_valid(value: object, scoped: dict, *, complete: bool = Fals
             or not 1 <= len(value["samples"]) <= len(POSTEXEC_CHECKPOINTS)
             or (complete and len(value["samples"]) != len(POSTEXEC_CHECKPOINTS))
         ):
-            return False
+            return _postexec_failure(diagnostic, "checkpoint-envelope")
         expected_label = hashlib.sha256((scoped["profileName"] + " (enforce)\n").encode("ascii")).hexdigest()
         previous = None
         for index, sample in enumerate(value["samples"]):
@@ -263,13 +272,13 @@ def postexec_witness_valid(value: object, scoped: dict, *, complete: bool = Fals
                 or sample["parentTaskSha256"] == sample["childTaskSha256"]
                 or sample["parentNamespaceSha256"] == sample["childNamespaceSha256"]
             ):
-                return False
+                return _postexec_failure(diagnostic, "checkpoint-sample")
             stable = {key: sample[key] for key in POSTEXEC_SAMPLE_KEYS - {"checkpoint"}}
             if previous is not None and stable != previous:
-                return False
+                return _postexec_failure(diagnostic, "checkpoint-stability")
             previous = stable
     except TypeError, ValueError, KeyError, UnicodeError:
-        return False
+        return _postexec_failure(diagnostic, "checkpoint-envelope")
     return True
 
 

@@ -87,6 +87,7 @@ class ActiveClient:
 
     def rpc(self, operation: str, request: dict[str, Any]) -> dict[str, Any]:
         """Use the native bounded command path and closed root-side JSON protocol."""
+        self._close_response_phase = None
         raw = base64.b64encode(json.dumps(request, sort_keys=True, separators=(",", ":")).encode()).decode("ascii")
         command = [
             "/usr/bin/python3.14",
@@ -121,42 +122,86 @@ class ActiveClient:
         if type(value) is not dict:
             self.refuse_response(operation, "malformed-receipt")
         if value.get("kind") == "active-qualification-failure":
-            if not self.matches_failure(value, operation):
+            if self.response_invalid(
+                operation, "client-close-failure-envelope", not self.matches_failure(value, operation)
+            ):
                 self.refuse_response(operation, "receipt-mismatch")
             self.capture_failure(value)
             reason = "active qualification root refusal; runtime retained"
             raise ValueError(reason)
         checks = getattr(self.ctx, "checks", [])
         if (
-            (checks and checks[-1].get("exitCode") != 0)
-            or set(value) != SCOPED_RECEIPT_KEYS
-            or type(value.get("schemaVersion")) is not int
-            or value.get("schemaVersion") != PREREQUISITE_SCHEMA
-            or value.get("consumer") != protocol.CONSUMER
-            or value.get("binding") != asdict(self.binding)
-            or value.get("bindingSha256") != self.binding.digest()
-            or value.get("purpose") != self.binding.purpose
-            or value.get("admissionSha256") != self.binding.admission_sha256
-            or value.get("admissionRevision") != self.provenance["admissionRevision"]
-            or value.get("workflowContext") != self.provenance
-            or type(value.get("bootstrapSha256")) is not str
-            or re.fullmatch(r"[0-9a-f]{64}", value["bootstrapSha256"]) is None
-            or (self.evidence and value["bootstrapSha256"] != self.evidence.get("bootstrapSha256"))
-            or value.get("qualification")
-            != (
-                "none"
-                if type(self.binding) is direct.DirectDiagnosticBinding
-                else "maintained-prerequisite"
-                if self.binding.purpose == "maintained-prerequisite"
-                else "experimental-candidate-only"
+            (self.response_invalid(operation, "client-close-command", checks and checks[-1].get("exitCode") != 0))
+            or self.response_invalid(operation, "client-close-schema", set(value) != SCOPED_RECEIPT_KEYS)
+            or self.response_invalid(operation, "client-close-schema", type(value.get("schemaVersion")) is not int)
+            or self.response_invalid(
+                operation, "client-close-schema", value.get("schemaVersion") != PREREQUISITE_SCHEMA
             )
-            or value.get("retained") is not False
-            or value.get("validationProfile") != self.provenance["validationProfile"]
-            or value.get("validationProfileRequested") != self.provenance["validationProfileRequested"]
-            or not postexec_witness_valid(value.get("postExecWitness"), value)
+            or self.response_invalid(operation, "client-close-schema", value.get("consumer") != protocol.CONSUMER)
+            or self.response_invalid(operation, "client-close-binding", value.get("binding") != asdict(self.binding))
+            or self.response_invalid(
+                operation, "client-close-binding", value.get("bindingSha256") != self.binding.digest()
+            )
+            or self.response_invalid(operation, "client-close-binding", value.get("purpose") != self.binding.purpose)
+            or self.response_invalid(
+                operation, "client-close-binding", value.get("admissionSha256") != self.binding.admission_sha256
+            )
+            or self.response_invalid(
+                operation,
+                "client-close-provenance",
+                value.get("admissionRevision") != self.provenance["admissionRevision"],
+            )
+            or self.response_invalid(
+                operation, "client-close-provenance", value.get("workflowContext") != self.provenance
+            )
+            or self.response_invalid(operation, "client-close-bootstrap", type(value.get("bootstrapSha256")) is not str)
+            or self.response_invalid(
+                operation, "client-close-bootstrap", re.fullmatch(r"[0-9a-f]{64}", value["bootstrapSha256"]) is None
+            )
+            or (
+                self.response_invalid(
+                    operation,
+                    "client-close-bootstrap",
+                    self.evidence and value["bootstrapSha256"] != self.evidence.get("bootstrapSha256"),
+                )
+            )
+            or self.response_invalid(
+                operation,
+                "client-close-qualification",
+                value.get("qualification")
+                != (
+                    "none"
+                    if type(self.binding) is direct.DirectDiagnosticBinding
+                    else "maintained-prerequisite"
+                    if self.binding.purpose == "maintained-prerequisite"
+                    else "experimental-candidate-only"
+                ),
+            )
+            or self.response_invalid(operation, "client-close-retention", value.get("retained") is not False)
+            or self.response_invalid(
+                operation,
+                "client-close-provenance",
+                value.get("validationProfile") != self.provenance["validationProfile"],
+            )
+            or self.response_invalid(
+                operation,
+                "client-close-provenance",
+                value.get("validationProfileRequested") != self.provenance["validationProfileRequested"],
+            )
+            or self.response_invalid(
+                operation, "client-close-witness", not postexec_witness_valid(value.get("postExecWitness"), value)
+            )
         ):
             self.refuse_response(operation, "receipt-mismatch")
         return value
+
+    def response_invalid(self, operation: str, phase: str, value: object) -> bool:
+        """Name only the first existing close validation predicate, evaluated once."""
+        if value:
+            if operation == "close":
+                self._close_response_phase = phase
+            return True
+        return False
 
     def matches_failure(self, value: dict[str, Any], operation: str) -> bool:
         """Accept diagnostics only when their claimed verification matches this exact request."""
@@ -194,6 +239,10 @@ class ActiveClient:
             ValueError(),
         )
         value["reason"] = reason
+        phase = getattr(self, "_close_response_phase", None)
+        if operation == "close" and type(phase) is str and phase in protocol.CLOSE_RESPONSE_PHASES:
+            value["phase"] = phase
+            value["comparisons"] = {phase: False}
         return value
 
     def refuse_response(self, operation: str, code: str) -> NoReturn:

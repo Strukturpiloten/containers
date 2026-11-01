@@ -390,6 +390,196 @@ class RootWitness(unittest.TestCase):
                 else:
                     with self.assertRaises(active.RefusedError):
                         port.witness_task_state(task)
+                    self.assertEqual(
+                        port._witness_failure,
+                        {
+                            "label": "label",
+                            "cgroup": "cgroup",
+                            "executable": "executable-identity",
+                            "dead": "task-alive",
+                        }[wrong],
+                    )
+
+
+class WitnessFailureDiagnostics(unittest.TestCase):
+    port = RootWitness.port
+    sampled_port = RootWitness.sampled_port
+
+    def view(self, port: active.RootPort) -> dict:
+        return scoped_receipt() | {
+            "bindingSha256": port.record["bindingSha256"],
+            "profileName": port.record["profileName"],
+            "sourceManifestSha256": active.SOURCE_MANIFEST_SHA256,
+        }
+
+    def test_pre_close_guard_code_preserves_ready_proof_and_original_refusal(self) -> None:
+        for wrong, code in (
+            ("hash", "executable-hash"),
+            ("task", "task-readback"),
+            ("scope", "scope-readback"),
+            ("children", "children-readback"),
+            ("engine", "subject-readback"),
+            ("checkpoint", "checkpoint-stability"),
+        ):
+            port, _tasks = self.sampled_port(direct=True)
+            with (
+                self.subTest(wrong=wrong),
+                patch.object(active, "receipt", return_value=self.view(port)),
+                patch.object(active.time, "monotonic_ns", return_value=1),
+                patch.object(active.os, "fstat", return_value=SimpleNamespace(st_dev=1, st_ino=2)),
+                patch.object(active.select, "select", return_value=([], [], [])),
+            ):
+                port.collect_postexec_witness("ready")
+                ready = copy.deepcopy(port.record["postExecWitness"])
+                if wrong == "hash":
+                    port.modules.observations.held_executable_hash.side_effect = [
+                        ("a" * 64, 128),
+                        ("b" * 64, 128),
+                        ("a" * 64, 128),
+                    ]
+                elif wrong == "task":
+                    port.witness_task_state.side_effect = lambda task: task["before"] | {"startTicks": 99}
+                elif wrong == "scope":
+                    port.witness_scope_pids.side_effect = [{10, 30}, {10}]
+                elif wrong == "children":
+                    port.witness_parent_children.side_effect = [{30}, {30, 40}]
+                elif wrong == "checkpoint":
+                    port.modules.observations.held_executable_hash.return_value = ("b" * 64, 128)
+                else:
+                    port.inspect.side_effect = [port.inspect.return_value, {"State": {"Running": False}}]
+                with self.assertRaises(active.RefusedError) as raised:
+                    port.collect_postexec_witness("pre-close")
+                self.assertEqual(raised.exception.args, ("active-scoped-profile-refused",))
+                phase = "witness-pre-close-" + code
+                self.assertEqual(port.record["diagnostic"], {"phase": phase, "comparisons": {phase: False}})
+                self.assertEqual(port.record["postExecWitness"], ready)
+                self.assertEqual(port.work_until, 100_000_000_000)
+                self.assertFalse(port.cleanup)
+                self.assertFalse(port.record["retained"])
+                self.assertEqual(port.commit.call_count, 1)
+
+    def test_existing_budget_clock_distinguishes_original_and_checkpoint_cutoffs(self) -> None:
+        for original, expected in ((3, "inherited-budget"), (100_000_000_000, "checkpoint-budget")):
+            port = self.port()
+            port.work_until = original
+            port.witness_sample = Mock(side_effect=lambda _checkpoint, owner=port: owner.witness_budget())
+            with (
+                self.subTest(original=original),
+                patch.object(active, "receipt", return_value=self.view(port)),
+                patch.object(active.time, "monotonic_ns", side_effect=[1, 5_000_000_001]) as clock,
+                self.assertRaises(active.RefusedError),
+            ):
+                port.collect_postexec_witness("ready")
+            self.assertEqual(clock.call_count, 2)
+            self.assertEqual(port.record["diagnostic"]["phase"], "witness-ready-" + expected)
+            self.assertEqual(port.work_until, original)
+            port.commit.assert_not_called()
+
+    def test_read_exception_keeps_type_errno_and_private_operands_out_of_failure(self) -> None:
+        port = self.port()
+        error = PermissionError(errno.EACCES, "/private/pid/label/canary")
+        port.witness_sample = Mock(side_effect=lambda _checkpoint: port.witness_read(1, "status"))
+        with (
+            patch.object(active, "receipt", return_value=self.view(port)),
+            patch.object(active.time, "monotonic_ns", return_value=1) as clock,
+            patch.object(active, "proc_bytes", side_effect=error) as reader,
+            self.assertRaises(PermissionError) as raised,
+        ):
+            port.collect_postexec_witness("ready")
+        self.assertIs(raised.exception, error)
+        self.assertEqual(reader.call_count, 1)
+        self.assertEqual(clock.call_count, 2)
+        result = active.failure_receipt({"actor": "root", "operation": "witness", "record": port.record}, error)
+        self.assertEqual(result["phase"], "witness-ready-proc-read")
+        self.assertEqual(result["reason"], "permission-denied")
+        self.assertFalse(result["cleanupAuthority"])
+        self.assertNotIn("canary", active.encoded(result).decode())
+        self.assertTrue(active.valid_failure(result))
+
+    def test_optional_diagnostic_damage_cannot_replace_the_original_exception(self) -> None:
+        port = self.port()
+        port.record["diagnostic"] = []
+        error = PermissionError(errno.EACCES, "/private/original-canary")
+        port.witness_sample = Mock(side_effect=lambda _checkpoint: port.witness_read(1, "status"))
+        with (
+            patch.object(active, "receipt", return_value=self.view(port)),
+            patch.object(active.time, "monotonic_ns", return_value=1),
+            patch.object(active, "proc_bytes", side_effect=error),
+            self.assertRaises(PermissionError) as raised,
+        ):
+            port.collect_postexec_witness("ready")
+        self.assertIs(raised.exception, error)
+        port.commit.assert_not_called()
+        self.assertFalse(port.cleanup)
+        self.assertEqual(port.work_until, 100_000_000_000)
+
+    def test_successful_parent_search_discards_expected_candidate_refusal(self) -> None:
+        port = self.port()
+        parent = {"pid": 30, "before": {"namespacePid": 7, "namespaces": (1, 2, 3)}}
+
+        skipped_pid = 20
+
+        def task(pid: int) -> object:
+            if pid == skipped_pid:
+                port.witness_failure("task-status")
+                reason = "private-candidate"
+                raise active.RefusedError(reason)
+            return nullcontext(parent)
+
+        port.witness_task = Mock(side_effect=task)
+        with ExitStack() as stack, patch.object(active.time, "monotonic_ns", return_value=1):
+            self.assertIs(port.witness_parent(stack, {"before": {"namespaces": (1, 2, 3)}}, {20, 30}, 7), parent)
+        self.assertIsNone(port._witness_failure)
+        self.assertNotIn("diagnostic", port.record)
+        port.witness_require("subject-readback", value=True)
+        self.assertIsNone(port._witness_failure)
+
+    def test_validator_names_only_existing_failed_branch_and_preserves_result(self) -> None:
+        scoped = scoped_receipt()
+        original = scoped["postExecWitness"]
+        for wrong, code in (
+            ("envelope", "checkpoint-envelope"),
+            ("sample", "checkpoint-sample"),
+            ("stable", "checkpoint-stability"),
+        ):
+            value = copy.deepcopy(original)
+            if wrong == "envelope":
+                value["rawPrivate"] = "/private/canary"
+            elif wrong == "sample":
+                value["samples"][0]["labelSha256"] = "0" * 64
+            else:
+                value["samples"][1]["executableSha256"] = "0" * 64
+            report = Mock()
+            with self.subTest(wrong=wrong):
+                self.assertFalse(qualification.postexec_witness_valid(value, scoped, diagnostic=report))
+                report.assert_called_once_with(code)
+                self.assertFalse(qualification.postexec_witness_valid(value, scoped))
+        report = Mock()
+        self.assertTrue(qualification.postexec_witness_valid(original, scoped, complete=True, diagnostic=report))
+        self.assertTrue(qualification.postexec_witness_valid(None, scoped, diagnostic=report))
+        report.assert_not_called()
+        self.assertEqual(scoped["postExecWitness"], original)
+
+    def test_predicate_truthiness_is_not_evaluated_twice(self) -> None:
+        class Predicate:
+            def __init__(self, *, matched: bool) -> None:
+                self.matched = matched
+                self.calls = 0
+
+            def __bool__(self) -> bool:
+                self.calls += 1
+                return self.matched
+
+        for matched in (True, False):
+            port = self.port()
+            predicate = Predicate(matched=matched)
+            with self.subTest(matched=matched):
+                if matched:
+                    port.witness_require("cgroup", predicate)
+                else:
+                    with self.assertRaises(active.RefusedError):
+                        port.witness_require("cgroup", predicate)
+                self.assertEqual(predicate.calls, 1)
 
 
 class CompleteParentChildren(unittest.TestCase):
@@ -453,6 +643,17 @@ class CompleteParentChildren(unittest.TestCase):
                         named_stat.return_value = SimpleNamespace(st_dev=1, st_ino=999)
                     with self.assertRaises(active.RefusedError):
                         port.witness_parent_children(parent)
+                    self.assertEqual(
+                        port._witness_failure,
+                        {
+                            "extra": "thread-children-readback",
+                            "missing": "thread-children-readback",
+                            "duplicate": "thread-children-readback",
+                            "thread-set": "thread-census",
+                            "thread-identity": "thread-children-readback",
+                            "named-inode": "thread-identity",
+                        }[wrong],
+                    )
 
     def test_thread_census_changing_during_first_scan_refuses(self) -> None:
         port = self.port()
