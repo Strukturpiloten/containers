@@ -20,7 +20,7 @@ from typing import Any
 
 import yaml
 
-from scripts.docker_release_updates import apply_release
+from scripts.docker_release_updates import ROOT, apply_release, payload_consumers
 from scripts.release_notifications import GitHub, load_policy, validate_plan
 from scripts.upstream_releases import parse_version
 
@@ -65,21 +65,20 @@ def _run(arguments: list[str], root: Path) -> str:
     return result.stdout.strip()
 
 
-def allowed_paths(line: str) -> set[str]:
+def allowed_paths(line: str, root: Path = ROOT) -> set[str]:
     """Limit a bot branch to one payload, its consumers, and the generated catalogue."""
     if re.fullmatch(r"20\.10|[1-9]\d*", line) is None:
         raise UpdateError("Invalid Docker compatibility line")
     return {
-        f"images/docker/upstream/{line}/payload.yaml",
-        f"images/docker/docker-{line}-rootful/container.yaml",
-        f"images/docker/docker-{line}-rootless/container.yaml",
+        *_metadata_paths(line, root),
         *CATALOGUE_PATHS,
     }
 
 
 def classify_update(line: str, current: str, candidate: str) -> str:
     """Reject downgrades and compatibility-line changes before creating a PR."""
-    allowed_paths(line)
+    if re.fullmatch(r"20\.10|[1-9]\d*", line) is None:
+        raise UpdateError("Invalid Docker compatibility line")
     before, after = parse_version(current), parse_version(candidate)
     if before is None or after is None or after <= before:
         raise UpdateError("Docker update must advance a full stable version")
@@ -97,7 +96,7 @@ def _current_version(root: Path, line: str) -> str:
 
 def _assert_paths(root: Path, line: str, comparison: list[str]) -> None:
     changed = set(_run(["git", "diff", "--no-renames", "--name-only", *comparison], root).splitlines())
-    if unexpected := changed - allowed_paths(line):
+    if unexpected := changed - allowed_paths(line, root):
         raise UpdateError(f"Refusing to overwrite unrelated branch changes: {', '.join(sorted(unexpected))}")
 
 
@@ -144,7 +143,7 @@ def _pull_marker(pull: dict[str, Any]) -> tuple[str, str] | None:
     return matches[0] if len(matches) == 1 else None
 
 
-def _owned_pulls(github: GitHub, line: str, base: str, actor: str) -> list[dict[str, Any]]:
+def _owned_pulls(github: GitHub, line: str, base: str, actor: str, root: Path = ROOT) -> list[dict[str, Any]]:
     """Select only PRs with our marker, branch shape, base, repository, and file scope."""
     owned = []
     for pull in github.pages("pulls?state=all&per_page=100"):
@@ -164,7 +163,7 @@ def _owned_pulls(github: GitHub, line: str, base: str, actor: str) -> list[dict[
             continue
         files = github.pages(f"pulls/{pull['number']}/files?per_page=100")
         changed = {name for item in files for name in (item.get("filename"), item.get("previous_filename")) if name}
-        unexpected = changed - allowed_paths(line)
+        unexpected = changed - allowed_paths(line, root)
         if not changed or unexpected:
             details = ", ".join(sorted(unexpected)) if unexpected else "no changed files"
             raise UpdateError(f"Owned Docker PR #{pull['number']} has unexpected files: {details}")
@@ -181,9 +180,10 @@ def _body(line: str, version: str, update_type: str) -> str:
     )
     return (
         f"<!-- docker-engine-update:{line}:{version} -->\n\n"
-        f"Update the existing Docker Engine {line} rootful/rootless images to {version}.\n\n"
+        f"Update the existing Docker Engine {line} canonical payload consumers to {version}.\n\n"
         "The official Engine and rootless archives were downloaded and inspected on native AMD64 and ARM64 "
-        "runners. This PR updates all four archive hashes, component versions/source revisions, both image "
+        "runners. This PR updates all four archive hashes, component versions/source revisions, "
+        "all canonical consumer image "
         "versions, and the generated catalogue together. Runtime, architecture and vulnerability checks "
         "remain required. Archive hashes record the downloaded HTTPS content; they are not upstream signatures.\n\n"
         f"[Upstream release notes](https://docs.docker.com/engine/release-notes/{major}/).\n\n"
@@ -192,11 +192,10 @@ def _body(line: str, version: str, update_type: str) -> str:
     )
 
 
-def _metadata_paths(line: str) -> tuple[str, str, str]:
+def _metadata_paths(line: str, root: Path = ROOT) -> tuple[str, ...]:
     return (
         f"images/docker/upstream/{line}/payload.yaml",
-        f"images/docker/docker-{line}-rootful/container.yaml",
-        f"images/docker/docker-{line}-rootless/container.yaml",
+        *(str(path.relative_to(root)) for path in payload_consumers(root, line)),
     )
 
 
@@ -219,12 +218,20 @@ def _assert_expected_metadata(
     with tempfile.TemporaryDirectory(prefix="docker-pr-expected-") as temp:
         expected_root = Path(temp)
         trusted_base = base_ref or f"origin/{context.base}"
-        for relative in _metadata_paths(line):
+        tree = _run(["git", "ls-tree", "-r", "--name-only", trusted_base, "--", "images/docker"], context.root)
+        trusted_paths = (
+            f"images/docker/upstream/{line}/payload.yaml",
+            *sorted(path for path in tree.splitlines() if re.fullmatch(r"images/docker/[^/]+/container\.yaml", path)),
+        )
+        for relative in trusted_paths:
             target = expected_root / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(_run(["git", "show", f"{trusted_base}:{relative}"], context.root), encoding="utf-8")
+        expected_paths = _metadata_paths(line, expected_root)
+        if set(expected_paths) != set(_metadata_paths(line, context.root)):
+            raise UpdateError("Docker branch canonical consumer paths differ from trusted base")
         apply_release(line, version, context.evidence_root / line, expected_root)
-        for relative in _metadata_paths(line):
+        for relative in expected_paths:
             expected = yaml.safe_load((expected_root / relative).read_text(encoding="utf-8"))
             if _read_metadata(context, relative, ref) != expected:
                 raise UpdateError(f"Docker branch metadata differs from verified release: {relative}")
@@ -252,7 +259,7 @@ def _assert_generated_catalogue(context: PublishContext, branch_ref: str) -> Non
 
 def _assert_unmanaged_metadata(context: PublishContext, line: str) -> None:
     """Reject contributor changes outside the release scalars before updating an open PR."""
-    payload, *images = _metadata_paths(line)
+    payload, *images = _metadata_paths(line, context.root)
     managed = {
         payload: [
             ("build", "args", "ENGINE_VERSION"),
@@ -337,9 +344,9 @@ def _finish_pull(context: PublishContext, pull: dict[str, Any], update_type: str
 
 def _publish_one(context: PublishContext, update: dict[str, str]) -> None:  # noqa: PLR0915
     line, version = update["line"], update["version"]
-    allowed_paths(line)
     root, github, base = context.root, context.github, context.base
-    owned = _owned_pulls(github, line, base, context.actor)
+    allowed_paths(line, root)
+    owned = _owned_pulls(github, line, base, context.actor, root)
     if any(pull["state"] == "closed" and _pull_marker(pull)[1] == version for pull in owned):
         sys.stdout.write(f"Docker {line}: closed decision already covers {version}.\n")
         return
@@ -407,7 +414,7 @@ def _publish_one(context: PublishContext, update: dict[str, str]) -> None:  # no
     base_sha = _run(["git", "rev-parse", f"origin/{base}"], root)
     _run([sys.executable, "-m", "scripts.container_engine", "validate-versions", "--before", base_sha], root)
     _assert_paths(root, line, [])
-    paths = sorted(allowed_paths(line))
+    paths = sorted(allowed_paths(line, root))
     _run(["git", "add", "--", *paths], root)
     commit = ["git", "commit", "-m", f"Update Docker Engine {line} to {version}"]
     if orphan:

@@ -12,9 +12,11 @@ import threading
 import time
 from typing import TYPE_CHECKING, Self
 
-from scripts.runtime_tests import ProbeError
+from scripts.runtime_docker_diagnostics import qualify_gnu_timeout, redact_timeout_provider
+from scripts.runtime_errors import ProbeError
 
 if TYPE_CHECKING:
+    from pathlib import Path
     from types import TracebackType
 
     from scripts.runtime_tests import RuntimeContext
@@ -43,14 +45,16 @@ def outer_container_limits() -> tuple[str, ...]:
     )
 
 
-def verify_outer_container_limits(ctx: RuntimeContext, container: str) -> None:
+def verify_outer_container_limits(ctx: RuntimeContext, container: str, *, timeout: float | None = None) -> None:
     """Read effective cgroup v2 limits inside the outer container; fail closed."""
+    options = {} if timeout is None else {"timeout": timeout}
     raw = ctx.exec(
         "read outer Docker cgroup limits",
         container,
         "sh",
         "-euc",
         "cat /sys/fs/cgroup/cpu.max /sys/fs/cgroup/memory.max /sys/fs/cgroup/pids.max",
+        **options,
     )
     requested = {"cpus": CPU_LIMIT, "memoryBytes": MEMORY_LIMIT_BYTES, "pids": PIDS_LIMIT}
     try:
@@ -94,22 +98,56 @@ class IsolatedStoreDiskBudget:
         *,
         limit_bytes: int = STORE_LIMIT_BYTES,
         poll_seconds: float = STORE_POLL_SECONDS,
+        source_archive: Path | None = None,
     ) -> None:
         """Keep all measurements scoped to this invocation's isolated store."""
         self.ctx = ctx
         self.limit_bytes = limit_bytes
         self.poll_seconds = poll_seconds
+        self.source_archive = source_archive
+        self.source_identity: tuple[int, int, int, int, int] | None = None
+        if source_archive is not None and (
+            not source_archive.is_absolute()
+            or not source_archive.is_file()
+            or source_archive.is_symlink()
+            or source_archive.is_relative_to(ctx.directory)
+        ):
+            raise ProbeError("disk budget source must be one exact regular archive outside the owned store")
         self.peak_bytes = 0
         self.samples = 0
         self.transient_retries = 0
         self._error: str | None = None
+        self._gnu_timeout_provider: tuple[str, str, str] | None = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._poll, name="isolated-docker-disk-budget", daemon=True)
 
+    def bind_source_archive(self, identity: tuple[int, int, int, int, int]) -> None:
+        """Pin accounting to the same frozen archive inode consumed by both phases."""
+        if self.source_identity is not None and self.source_identity != identity:
+            raise ProbeError("disk budget source identity cannot be rebound")
+        self.source_identity = identity
+        self._verify_source_archive()
+
+    def _verify_source_archive(self) -> None:
+        if self.source_archive is not None and self.source_identity is not None:
+            try:
+                value = self.source_archive.stat(follow_symlinks=False)
+            except OSError as error:
+                raise ProbeError("disk budget lost custody of the pinned source archive path") from error
+            actual = value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns
+            if actual != self.source_identity or self.source_archive.is_symlink():
+                raise ProbeError("disk budget source path no longer accounts for the pinned archive inode")
+
     def _du_once(self) -> tuple[int, str, str]:
+        self._verify_source_archive()
+        if self._gnu_timeout_provider is None:
+            try:
+                self._gnu_timeout_provider = qualify_gnu_timeout(self.ctx)
+            except ValueError:
+                raise ProbeError("GNU timeout prerequisite admission failed") from None
         command = [
             *self.ctx._sudo,
-            "timeout",
+            self._gnu_timeout_provider[0],
             "--signal=KILL",
             f"{STORE_SAMPLE_TIMEOUT_SECONDS}s",
             "du",
@@ -118,6 +156,7 @@ class IsolatedStoreDiskBudget:
             "--block-size=1",
             "--",
             str(self.ctx.directory),
+            *((str(self.source_archive),) if self.source_archive is not None else ()),
         ]
         try:
             process = subprocess.Popen(
@@ -129,13 +168,14 @@ class IsolatedStoreDiskBudget:
                 env={**os.environ, "LC_ALL": "C"},
             )
         except OSError as error:
-            raise ProbeError(f"isolated Docker store disk measurement failed: {error}") from error
+            detail = redact_timeout_provider(self.ctx, str(error))
+            raise ProbeError(f"isolated Docker store disk measurement failed: {detail}") from None
         try:
             stdout, stderr = process.communicate(timeout=STORE_SAMPLE_TIMEOUT_SECONDS + 3)
-        except subprocess.TimeoutExpired as error:
+        except subprocess.TimeoutExpired:
             raise ProbeError(
                 f"isolated Docker store disk measurement timed out after {STORE_SAMPLE_TIMEOUT_SECONDS}s"
-            ) from error
+            ) from None
         finally:
             if process.poll() is None:
                 try:
@@ -149,13 +189,15 @@ class IsolatedStoreDiskBudget:
                             timeout=3,
                         )
                     except (OSError, subprocess.TimeoutExpired) as error:
-                        raise ProbeError(f"could not stop isolated disk sampler process group: {error}") from error
+                        detail = redact_timeout_provider(self.ctx, str(error))
+                        raise ProbeError(f"could not stop isolated disk sampler process group: {detail}") from None
                 except ProcessLookupError:
                     pass
                 try:
                     process.communicate(timeout=3)
-                except subprocess.TimeoutExpired as error:
-                    raise ProbeError("could not reap isolated disk sampler process group") from error
+                except subprocess.TimeoutExpired:
+                    raise ProbeError("could not reap isolated disk sampler process group") from None
+        self._verify_source_archive()
         return process.returncode, stdout, stderr
 
     def _measure(self) -> None:
@@ -173,11 +215,24 @@ class IsolatedStoreDiskBudget:
                 self.transient_retries += 1
                 time.sleep(STORE_SAMPLE_RETRY_DELAY_SECONDS * 2**attempt)
                 continue
-            raise ProbeError(f"isolated Docker store disk measurement failed (exit {status}): {stderr.strip()}")
+            detail = redact_timeout_provider(self.ctx, stderr.strip())
+            raise ProbeError(f"isolated Docker store disk measurement failed (exit {status}): {detail}")
         try:
-            size = int(stdout.split(maxsplit=1)[0])
-        except (IndexError, ValueError) as error:
-            raise ProbeError("isolated Docker store disk measurement returned no byte count") from error
+            if self.source_archive is None:
+                size = int(stdout.split(maxsplit=1)[0])
+            else:
+                expected = {str(self.ctx.directory), str(self.source_archive)}
+                measured = {}
+                for line in stdout.splitlines():
+                    count, path = line.split("\t", 1)
+                    if path not in expected or path in measured or not count.isdecimal():
+                        raise ValueError("unexpected or duplicate archive/store byte count")
+                    measured[path] = int(count)
+                if measured.keys() != expected:
+                    raise ValueError("missing archive/store byte count")
+                size = sum(measured.values())
+        except IndexError, ValueError:
+            raise ProbeError("isolated Docker store disk measurement returned no byte count") from None
         self.samples += 1
         self.peak_bytes = max(self.peak_bytes, size)
 
@@ -186,7 +241,7 @@ class IsolatedStoreDiskBudget:
             try:
                 self._measure()
             except Exception as error:  # noqa: BLE001 - report unexpected sampler failures in runtime evidence.
-                self._error = f"{type(error).__name__}: {error}"
+                self._error = redact_timeout_provider(self.ctx, f"{type(error).__name__}: {error}")
                 return
             if self.peak_bytes > self.limit_bytes:
                 return
@@ -206,13 +261,18 @@ class IsolatedStoreDiskBudget:
                 "sampleInitialRetryDelaySeconds": STORE_SAMPLE_RETRY_DELAY_SECONDS,
                 "samples": self.samples,
                 "transientRetries": self.transient_retries,
-                "error": self._error,
+                "error": redact_timeout_provider(self.ctx, self._error) if self._error is not None else None,
+                **(
+                    {"sourceArchive": redact_timeout_provider(self.ctx, str(self.source_archive))}
+                    if self.source_archive is not None
+                    else {}
+                ),
             }
         )
 
     def _failure(self) -> ProbeError | None:
         if self._error:
-            return ProbeError(self._error)
+            return ProbeError(redact_timeout_provider(self.ctx, self._error))
         if self.peak_bytes > self.limit_bytes:
             return ProbeError(
                 f"isolated Docker store exceeded {self.limit_bytes} byte budget "
@@ -222,6 +282,7 @@ class IsolatedStoreDiskBudget:
 
     def checkpoint(self) -> None:
         """Stop new nested work after any failed disk observation."""
+        self._verify_source_archive()
         failure = self._failure()
         if failure is not None:
             raise failure
@@ -231,7 +292,7 @@ class IsolatedStoreDiskBudget:
         try:
             self._measure()  # Admission before saving the offline fixture or starting the daemon.
         except ProbeError as error:
-            self._error = str(error)
+            self._error = redact_timeout_provider(self.ctx, str(error))
             self._record()
             raise
         failure = self._failure()
@@ -250,7 +311,7 @@ class IsolatedStoreDiskBudget:
         try:
             self._measure()
         except ProbeError as error:
-            self._error = str(error)
+            self._error = redact_timeout_provider(self.ctx, str(error))
         self._record()
         failure = self._failure()
         if failure is not None and error_type is None:

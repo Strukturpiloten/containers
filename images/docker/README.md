@@ -15,9 +15,20 @@ Each line has a `docker-<line>-rootful` and a `docker-<line>-rootless` image. Th
 | 26 | 26.1.4 | 1.7.18 | 1.1.12 | 2.0.2 | Legacy fixture |
 | 27 | 27.5.1 | 1.7.25 | 1.2.4 | 2.3.2 | Legacy fixture |
 | 28 | 28.5.2 | 1.7.28 | 1.3.3 | 2.3.4 | Legacy fixture |
-| 29 | 29.8.1 | 2.3.5 | 1.5.1 | 3.1.0 | Current selected fixture |
+| 29 | 29.9.2 | 2.4.2 | 1.5.2 | 3.3.0 | Maintained current line |
 
 The Engine, CLI, containerd, and runc binaries come from Docker's official static Engine archive. RootlessKit and `dockerd-rootless.sh` come from Docker's separate rootless-extras archive for the same release. These binaries are **assembled from verified upstream artifacts**, not compiled by this repository. Every payload manifest records both per-architecture SHA256 checksums, upstream URLs, component versions, and available source revision IDs. The payload build verifies SHA256 before extraction and records the observed versions under `/usr/share/strukturpiloten/docker/` in each final image. `components.txt` lists the exact inputs; `os-packages` lists installed Alpine packages. Rootful images do not install the rootless helper binaries even though both variants derive from the same checked payload.
+
+The direct rootless recipe explicitly copies the rootless helper tree with numeric
+UID/GID `0:0`. Before switching to UID 1000, its build checks the resulting
+`/usr/local/bin/rootlesskit` without executing it: the file must be regular, owned
+by UID 0, have exactly one hard link, contain between 1 byte and 32 MiB inclusive,
+and have no special, group-write, or other-write mode bits. This producer contract
+matches the direct startup reader's metadata requirements. Verified 20.10.24 AMD64
+and 26.1.4 ARM64 input archives record UID/GID 1000 ownership; that input evidence
+does not establish the metadata of a previously built image or identify which
+live metadata predicate caused a diagnostic refusal. Native qualification and
+cleanup still require their own evidence.
 
 The shared payload is a build-only OCI artifact. It is assembled once per Engine release and architecture in a build run, then supplied to both final recipes through `BUILD_PAYLOAD_IMAGE`. It has no public `container.yaml`, release tag, or invented registry digest. The final images alone have public image metadata. The pinned common runtime base is Alpine 3.24 at its multi-architecture manifest digest recorded in each image. Runtime packages receive repository updates during image builds; old static Engine binaries and their vendored dependencies do not receive fixes from an Alpine rebuild. Retire a legacy line when its compatibility value no longer justifies isolated testing.
 
@@ -29,15 +40,24 @@ Compose and Buildx are separate products and are not installed. No Compose-provi
 
 The rootful image starts `dockerd` as UID 0 with `/var/lib/docker` as its data root. The rootless image starts `dockerd-rootless.sh` as UID 1000 with a separate home data root, subordinate UID/GID ranges, RootlessKit, `slirp4netns`, and `fuse-overlayfs`. Both expose only a Unix socket inside their disposable outer container. The launcher forwards termination to the daemon. Do not share a data-root volume between versions or modes.
 
-The metadata declares `tests.docker.mode` and the required outer privilege explicitly. A rootless *inner* daemon still needs a trusted, privileged outer Podman boundary on the tested Linux runner. Rootless outer Podman started the 20.10 daemon during pilot work but failed to start its nested runc workload; this does not establish a usable unprivileged outer profile. Test jobs use an isolated rootful outer Podman store, task-owned names and volumes, bounded timeouts, and cleanup readback. No global prune is used.
+The metadata declares the inner daemon mode and required outer privilege explicitly. CI selects invocation-owned rootful Docker for Docker profiles; local invocation still defaults to isolated Podman, with no fallback. Rootless inner Docker does not establish an unprivileged outer profile. See [runtime backends](../../docs/runtime-backends.md) for prerequisites, private-store ownership, evidence and still-required native qualification. Historical pilot observations below are not transferred to the new backend.
 
-The native Docker probe limits both outer Podman runs to two CPUs, 4 GiB of memory, and 512 PIDs. The outer container uses a private cgroup namespace; after starting the nested daemon, the probe reads its effective cgroup v2 CPU, memory, and PID limits from inside it and fails if any limit is absent or looser; requested and observed values go into runtime evidence. Individual commands default to a 45-second timeout, with a 180-second allowance for archive transfers. The Docker 29 `VOLUME` data root keeps its normal Podman anonymous-volume backing and snapshotter behavior.
+The native Docker probe limits every selected outer-runtime run to two CPUs, 4 GiB of memory, and 512 PIDs. The outer container uses a private cgroup namespace; after starting the nested daemon, the probe reads its effective cgroup v2 CPU, memory, and PID limits from inside it and fails if any limit is absent or looser; requested and observed values go into runtime evidence. Individual commands default to a 45-second timeout, with a 180-second allowance for archive transfers. The Docker 29 `VOLUME` data root keeps the selected outer engine's normal anonymous-volume backing and snapshotter behavior.
 
-The task-owned Podman store has a 12 GiB **observed** disk budget, including anonymous volumes and the offline Docker fixture. The harness measures the store before starting nested work, then polls with `du --one-file-system` two seconds after each completed sample; `du` is killed after five seconds, with an eight-second outer timeout fallback. A sample that sees only files disappearing during traversal is retried once; permission or other measurement errors fail closed. Evidence records the limit, peak measured usage, sample count, transient retries, cadence, and measured overshoot. This is an admission and monitoring limit, not a hard filesystem quota: writes can pass the threshold between samples, and there is no fixed byte bound on overshoot. The probe checks the monitor before and after each nested work command and starts no further work after an excess or measurement failure. An already-running command can continue until its timeout (180 seconds for the fixture save; otherwise the configured per-command timeout, default 45 seconds and capped at 300 seconds) before owned-resource cleanup runs. The sampler and any timed-out `du` process group stop before isolated-store cleanup. No global prune is used.
+The task-owned outer-runtime store has a 12 GiB **observed** disk budget, including anonymous volumes and the offline Docker fixture. The harness measures the store before starting nested work, then polls with `du --one-file-system` two seconds after each completed sample; `du` is killed after five seconds, with an eight-second outer timeout fallback. A sample that sees only files disappearing during traversal is retried once; permission or other measurement errors fail closed. Evidence records the limit, peak measured usage, sample count, transient retries, cadence, and measured overshoot. This is an admission and monitoring limit, not a hard filesystem quota: writes can pass the threshold between samples, and there is no fixed byte bound on overshoot. The probe checks the monitor before and after each nested work command and starts no further work after an excess or measurement failure. An already-running command can continue until its timeout (180 seconds for the fixture save; otherwise the configured per-command timeout, default 45 seconds and capped at 300 seconds) before owned-resource cleanup runs. The sampler and any timed-out `du` process group stop before isolated-store cleanup. No global prune is used.
 
 Upstream build metadata declares AMD64 and ARM64. Every declared architecture and daemon mode must pass native daemon, API, network, storage, port, mount, resource-budget, and cleanup checks before publication. Consult the immutable release maintenance evidence for the results of a specific image digest. A green cross-build or emulated binary execution is not sufficient. Linux kernel and host security behavior still need dedicated host testing when they matter.
 
 ## Validation
+
+The separate [guest-systemd conformance fixture](conformance/README.md) declares
+`docker-29-conformance-rootless` on Debian 13 with the same verified upstream
+payload. It uses guest PID 1 systemd, a real UID 1000 user manager, and strict
+inner memory/no-swap/OOM and PID-effect probes under the explicit bounded rootful outer runtime policy.
+ Its metadata is a declaration; native AMD64 and ARM64 conformance remain
+unqualified until the exact candidate passes the full harness. Debian 11
+conformance remains a later issue #344 phase. Use the dedicated harness contract
+for this image.
 
 The native contract starts each daemon, checks the actual Engine and CLI/API range, confirms root mode and storage driver, loads a synthetic image into the inner daemon, and exercises named and bind mounts, a user network and DNS, a published TCP port, health/restart settings, and owned cleanup. It uses the final image itself as an offline nested fixture. Run it against one built OCI archive on a Linux runner with passwordless rootful Podman:
 
@@ -45,7 +65,7 @@ The native contract starts each daemon, checks the actual Engine and CLI/API ran
 .venv/bin/python -m scripts.runtime_tests \
   --metadata images/docker/docker-20.10-rootful/container.yaml \
   --archive /path/to/docker-20.10-rootful-amd64.oci.tar \
-  --arch amd64 --sudo --allow-privileged \
+  --arch amd64 --outer-engine podman --sudo --allow-privileged \
   --evidence /tmp/docker-20.10-rootful-evidence.json
 ```
 
@@ -86,3 +106,19 @@ sudo podman run --rm --privileged --device /dev/fuse --oom-score-adj=0 \
 ```
 
 Both modes declare a separate Docker data-root volume and use only an internal Unix socket. Rootless runs as UID 1000 with subordinate UID/GID ranges and the distribution's RootlessKit. Package-only builds prove package availability, installed binary provenance, and image construction. Publication additionally requires native daemon startup, API compatibility, nested workloads, resource-budget checks and cleanup on every declared architecture. These profiles request AMD64 and ARM64, except Arch, whose official base image provides AMD64 only. Use the immutable release maintenance evidence to establish which exact published digest passed those checks.
+
+## Exact 29.8.1 conformance input
+
+The additional `docker-29-8-1-conformance-rootless` fixture retains the exact
+DockerLens milestone input without downgrading the maintained 29.9.2 standard
+or conformance images. It reuses the existing systemd conformance architecture;
+see [its input and admission contract](conformance/README.md#exact-engine-2981-consumer-fixture).
+Both declared architectures require fresh qualification, and publication needs
+separate authorization. This child does not supply the remaining Debian 11
+systemd fixture or add a DockerLens profile.
+
+The dedicated [conformance fixtures](conformance/README.md) retain three separate
+inputs: the rolling upstream line, fixed upstream 29.8.1 and archived Debian 11
+`docker.io` 20.10.5+dfsg1-1+deb11u2. Historical fixtures require ordinary full
+qualification. Their source declarations and catalogue entries do not establish
+native completion or registry availability.

@@ -18,6 +18,36 @@
   "customManagers": [
     {
       "customType": "regex",
+      "description": "Own the fixed mediated userns SDK source branch digest",
+      "managerFilePatterns": [
+        "/^\\.github/docker-userns-policy-source\\.json$/"
+      ],
+      "matchStrings": [
+        "\"repository\":\\s*\"Strukturpiloten/docker-lens\",\\s*\"ref\":\\s*\"(?<currentValue>TheRealBecks/issue158)\",\\s*\"commit\":\\s*\"(?<currentDigest>[a-f0-9]{40})\""
+      ],
+      "depNameTemplate": "Strukturpiloten/docker-lens",
+      "packageNameTemplate": "Strukturpiloten/docker-lens",
+      "datasourceTemplate": "github-digest",
+      "versioningTemplate": "exact"
+    },
+    {
+      "customType": "regex",
+      "description": "Review the active AppArmor parser contract version against official GitLab tags",
+      "managerFilePatterns": [
+        "/^\\.github/docker-userns-policy-source\\.json$/"
+      ],
+      "matchStrings": [
+        "\"repository\":\\s*\"apparmor/apparmor\",\\s*\"expectedVersion\":\\s*\"(?<currentValue>\\d+\\.\\d+\\.\\d+)\""
+      ],
+      "depNameTemplate": "apparmor/apparmor",
+      "packageNameTemplate": "apparmor/apparmor",
+      "datasourceTemplate": "gitlab-tags",
+      "registryUrlTemplate": "https://gitlab.com",
+      "extractVersionTemplate": "^v(?<version>\\d+\\.\\d+\\.\\d+)$",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
       "description": "Update each Grype release and architecture archive checksum together",
       "managerFilePatterns": [
         "/^\\.github\\/actions\\/scan-vulnerabilities\\/action\\.yml$/"
@@ -276,6 +306,22 @@
       "depNameTemplate": "python",
       "datasourceTemplate": "python-version",
       "versioningTemplate": "python"
+    },
+    {
+      "customType": "regex",
+      "description": "Track the exact Docker 29.8.1 compatibility fixture version as a manually reviewed fixed target",
+      "managerFilePatterns": [
+        "/^images\\/docker\\/conformance\\/29\\.8\\.1\\/payload\\.yaml$/",
+        "/^images\\/docker\\/docker-29-8-1-conformance-rootless\\/container\\.yaml$/"
+      ],
+      "matchStrings": [
+        "(?:ENGINE_VERSION|version):\\s*v?(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "docker-29-8-1-compatibility",
+      "packageNameTemplate": "moby/moby",
+      "datasourceTemplate": "github-tags",
+      "extractVersionTemplate": "^docker-v(?<version>\\d+\\.\\d+\\.\\d+)$",
+      "versioningTemplate": "semver"
     }
   ],
   "github-actions": {
@@ -290,6 +336,26 @@
     "dependencyDashboardApproval": false
   },
   "packageRules": [
+    {
+      "description": "Require coordinated human review of compile, unused and active mediated qualification source/parser consumers; manually re-admit docker-userns-unused-admission.json and docker-userns-active-admission.json on source/contract changes; no automatic cohort hashes or load admission",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "github-digest",
+        "gitlab-tags"
+      ],
+      "matchFileNames": [
+        ".github/docker-userns-policy-source.json"
+      ],
+      "matchPackageNames": [
+        "Strukturpiloten/docker-lens",
+        "apparmor/apparmor"
+      ],
+      "groupName": "Userns compile and unused source and parser review",
+      "dependencyDashboardApproval": true,
+      "automerge": false
+    },
     {
       "description": "Update both Grype architecture release assets together",
       "matchManagers": [
@@ -400,7 +466,9 @@
       "description": "Keep distro compatibility images on their declared OS release while allowing digest refreshes",
       "matchFileNames": [
         "/^images\\/podman\\/podman-(?:alpine|arch|centos|debian|fedora|opensuse|ubi|ubuntu)-.+\\/container\\.yaml$/",
-        "/^images\\/docker\\/docker-(?:alpine|arch|debian|fedora|opensuse|ubuntu)(?:-.+)?-(?:rootful|rootless)\\/container\\.yaml$/"
+        "/^images\\/docker\\/docker-(?:alpine|arch|debian|fedora|opensuse|ubuntu)(?:-.+)?-(?:rootful|rootless)\\/container\\.yaml$/",
+        "/^images\\/docker\\/docker-(?:29|29-8-1)-conformance-rootless\\/container\\.yaml$/",
+        "/^images\\/docker\\/docker-debian-11-conformance-rootless\\/container\\.yaml$/"
       ],
       "matchDatasources": [
         "docker"
@@ -709,7 +777,8 @@
       ],
       "matchFileNames": [
         "/^images\\/docker\\/upstream\\/.+\\/payload\\.yaml$/",
-        "/^images\\/docker\\/docker-\\d+(?:\\.\\d+)?-(?:rootful|rootless)\\/container\\.yaml$/"
+        "/^images\\/docker\\/docker-\\d+(?:\\.\\d+)?-(?:rootful|rootless)\\/container\\.yaml$/",
+        "/^images\\/docker\\/conformance\\/29\\.8\\.1\\/payload\\.yaml$/"
       ],
       "matchPackageNames": [
         "docker.io/library/alpine"
@@ -726,7 +795,8 @@
       ],
       "matchFileNames": [
         "/^images\\/docker\\/upstream\\/.+\\/payload\\.yaml$/",
-        "/^images\\/docker\\/docker-\\d+(?:\\.\\d+)?-(?:rootful|rootless)\\/container\\.yaml$/"
+        "/^images\\/docker\\/docker-\\d+(?:\\.\\d+)?-(?:rootful|rootless)\\/container\\.yaml$/",
+        "/^images\\/docker\\/conformance\\/29\\.8\\.1\\/payload\\.yaml$/"
       ],
       "matchUpdateTypes": [
         "digest"
@@ -806,7 +876,8 @@
       ],
       "matchCurrentValue": "/^11$/",
       "matchFileNames": [
-        "/^images\\/(?:docker\\/docker|podman\\/podman)-debian-11-(?:rootful|rootless)\\/container\\.yaml$/"
+        "/^images\\/(?:docker\\/docker|podman\\/podman)-debian-11-(?:rootful|rootless)\\/container\\.yaml$/",
+        "/^images\\/docker\\/docker-debian-11-conformance-rootless\\/container\\.yaml$/"
       ],
       "matchUpdateTypes": [
         "digest"
@@ -846,7 +917,8 @@
       ],
       "matchCurrentValue": "/^13$/",
       "matchFileNames": [
-        "/^images\\/(?:docker\\/docker|podman\\/podman)-debian-13-(?:rootful|rootless)\\/container\\.yaml$/"
+        "/^images\\/(?:docker\\/docker|podman\\/podman)-debian-13-(?:rootful|rootless)\\/container\\.yaml$/",
+        "/^images\\/docker\\/docker-(?:29|29-8-1)-conformance-rootless\\/container\\.yaml$/"
       ],
       "matchUpdateTypes": [
         "digest"
@@ -1005,6 +1077,36 @@
       "rangeStrategy": "bump",
       "allowedVersions": "/^({{major}}\\.{{minor}}\\.\\d+|\\d+\\.\\d+\\.([4-9]|[1-9]\\d+))$/",
       "recreateWhen": "always"
+    },
+    {
+      "description": "Keep the reviewed Docker 29.8.1 compatibility target fixed; any archive/component change requires coordinated manual integrity review",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDepNames": [
+        "docker-29-8-1-compatibility"
+      ],
+      "allowedVersions": "29.8.1",
+      "groupName": "Docker 29.8.1 compatibility fixture version",
+      "dependencyDashboardApproval": true,
+      "automerge": false
+    },
+    {
+      "description": "Require manual review for exact Docker 29.8.1 fixture input changes",
+      "matchFileNames": [
+        "/^images\\/docker\\/conformance\\/29\\.8\\.1\\/payload\\.yaml$/",
+        "/^images\\/docker\\/docker-29-8-1-conformance-rootless\\/container\\.yaml$/"
+      ],
+      "dependencyDashboardApproval": true,
+      "automerge": false
+    },
+    {
+      "description": "Require coordinated manual review of Debian 11 conformance base and fixed docker.io 20.10.5+dfsg1-1+deb11u2 package; package scalar is manually owned, never auto-rolled",
+      "matchFileNames": [
+        "/^images\\/docker\\/docker-debian-11-conformance-rootless\\/container\\.yaml$/"
+      ],
+      "dependencyDashboardApproval": true,
+      "automerge": false
     }
   ],
   "gitIgnoredAuthors": [

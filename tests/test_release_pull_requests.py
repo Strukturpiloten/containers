@@ -18,6 +18,7 @@ from scripts.release_pull_requests import (
     _assert_expected_metadata,
     _assert_generated_catalogue,
     _assert_paths,
+    _assert_unmanaged_metadata,
     _owned_pulls,
     _publish_one,
     allowed_paths,
@@ -77,13 +78,18 @@ class ReleasePullRequestTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        for relative in allowed_paths("29") - {"docs/image-catalogue.json", "docs/image-catalogue.md"}:
+            destination = self.root / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / relative, destination)
 
     def _context(self, github: FakeGitHub) -> PublishContext:
         return PublishContext(self.root, github, "main", self.root / "evidence", ["TheRealBecks"], "release-actor")
 
     def test_paths_are_confined_to_one_existing_line_and_catalogue(self) -> None:
         paths = allowed_paths("29")
-        self.assertEqual(len(paths), 5)
+        self.assertEqual(len(paths), 6)
+        self.assertIn("images/docker/docker-29-conformance-rootless/container.yaml", paths)
         self.assertIn("images/docker/upstream/29/payload.yaml", paths)
         self.assertIn("images/docker/docker-29-rootless/container.yaml", paths)
         self.assertNotIn("images/docker/upstream/28/payload.yaml", paths)
@@ -97,6 +103,70 @@ class ReleasePullRequestTests(unittest.TestCase):
         ):
             _assert_paths(self.root, "29", ["origin/main...origin/automation/docker-engine-29-29.8.2"])
         self.assertIn("--no-renames", run.call_args.args[0])
+
+    def test_optional_inventory_controls_allowlist_and_owned_pr_scope(self) -> None:
+        optional = "images/docker/docker-29-conformance-rootless/container.yaml"
+        self.assertIn(optional, allowed_paths("29", self.root))
+        (self.root / optional).unlink()
+        self.assertEqual(
+            allowed_paths("29", self.root),
+            {
+                "images/docker/upstream/29/payload.yaml",
+                "images/docker/docker-29-rootful/container.yaml",
+                "images/docker/docker-29-rootless/container.yaml",
+                "docs/image-catalogue.json",
+                "docs/image-catalogue.md",
+            },
+        )
+        with (
+            patch("scripts.release_pull_requests._run", return_value=optional),
+            self.assertRaisesRegex(UpdateError, "unrelated branch changes"),
+        ):
+            _assert_paths(self.root, "29", [])
+        with self.assertRaisesRegex(UpdateError, "unexpected files"):
+            _owned_pulls(
+                FakeGitHub([_pull("29.8.2")], [{"filename": optional}]), "29", "main", "release-actor", self.root
+            )
+
+    def test_candidate_cannot_expand_trusted_inventory_with_plausible_filename(self) -> None:
+        extra = "images/docker/docker-29-conformance-rootful/container.yaml"
+        source = "images/docker/docker-29-conformance-rootless/container.yaml"
+        candidate = yaml.safe_load((self.root / source).read_text())
+        candidate["name"] = "docker-29-conformance-rootful"
+        candidate["image"] = "ghcr.io/strukturpiloten/docker-29-conformance-rootful"
+        candidate["tests"]["docker"]["mode"] = "rootful"
+        (self.root / extra).parent.mkdir()
+        (self.root / extra).write_text(yaml.safe_dump(candidate))
+
+        def base_show(arguments: list[str], _root: Path) -> str:
+            if arguments[1] == "ls-tree":
+                return "\n".join(
+                    str(path.relative_to(ROOT)) for path in (ROOT / "images/docker").glob("*/container.yaml")
+                )
+            return (ROOT / arguments[2].split(":", maxsplit=1)[1]).read_text()
+
+        with (
+            patch("scripts.release_pull_requests._run", side_effect=base_show),
+            patch("scripts.release_pull_requests.apply_release") as apply,
+            self.assertRaisesRegex(UpdateError, "paths differ from trusted base"),
+        ):
+            _assert_expected_metadata(self._context(FakeGitHub()), "29", NEW_VERSION)
+        apply.assert_not_called()
+
+    def test_unmanaged_protection_includes_declared_optional_singleton(self) -> None:
+        path = self.root / "images/docker/docker-29-conformance-rootless/container.yaml"
+        candidate = yaml.safe_load(path.read_text())
+        candidate["lifecycle"]["admission"] = "production"
+        path.write_text(yaml.safe_dump(candidate))
+
+        def base_show(arguments: list[str], _root: Path) -> str:
+            return (ROOT / arguments[2].split(":", maxsplit=1)[1]).read_text()
+
+        with (
+            patch("scripts.release_pull_requests._run", side_effect=base_show),
+            self.assertRaisesRegex(UpdateError, "outside release fields.*conformance-rootless"),
+        ):
+            _assert_unmanaged_metadata(self._context(FakeGitHub()), "29")
 
     def test_candidate_yaml_must_equal_fresh_evidence_applied_to_base(self) -> None:
         paths = (
@@ -115,6 +185,10 @@ class ReleasePullRequestTests(unittest.TestCase):
         apply_release("29", NEW_VERSION, evidence_dir, self.root)
 
         def base_show(arguments: list[str], _root: Path) -> str:
+            if arguments[1] == "ls-tree":
+                return "\n".join(
+                    str(path.relative_to(ROOT)) for path in (ROOT / "images/docker").glob("*/container.yaml")
+                )
             return (ROOT / arguments[2].split(":", maxsplit=1)[1]).read_text(encoding="utf-8")
 
         with patch("scripts.release_pull_requests._run", side_effect=base_show):
@@ -304,6 +378,10 @@ class ReleasePullRequestTests(unittest.TestCase):
         ):
             _publish_one(self._context(patch_github), {"line": "29", "version": "29.8.2"})
         self.assertTrue(any("--auto" in command and "--match-head-commit" in command for command in commands))
+        self.assertEqual(
+            next(command[3:] for command in commands if command[:3] == ["git", "add", "--"]),
+            sorted(allowed_paths("29", self.root)),
+        )
 
         commands.clear()
         minor_github = FakeGitHub([_pull("29.8.2", auto_merge=True)])

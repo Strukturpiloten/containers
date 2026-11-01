@@ -1,0 +1,7 @@
+{
+  "hosts": ["unix:///run/user/1000/docker.sock"],
+  "data-root": "/home/docker/.local/share/docker",
+  "exec-root": "/run/user/1000/docker",
+  "rootless": true,
+  "exec-opts": ["native.cgroupdriver=systemd"]
+}

@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "consumer": "containers-ubuntu26-userns-dryparse",
+  "qualification": "none",
+  "source": {
+    "managed": true,
+    "repository": "Strukturpiloten/docker-lens",
+    "ref": "TheRealBecks/issue158",
+    "commit": "d7f18d756fe754adea3c57e6c0cba2a906e2a780",
+    "license": "MPL-2.0",
+    "retrieval": "public-https-immutable-commit",
+    "files": [
+      {
+        "path": "scripts/native-runner-apparmor.py",
+        "size": 32212,
+        "sha256": "b52f1724c11f008bb55d28f3a578cddf26377fdc2e53a37df9d044150eeb9468"
+      },
+      {
+        "path": "scripts/native_outer_diagnostic_capture.py",
+        "size": 13870,
+        "sha256": "23202211ec3b58a70c1120b0395f43663e3cacff1948609a8fb0fe2dac012962"
+      },
+      {
+        "path": "LICENSE",
+        "size": 16726,
+        "sha256": "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04"
+      }
+    ]
+  },
+  "parser": {
+    "managed": true,
+    "repository": "apparmor/apparmor",
+    "expectedVersion": "5.0.2",
+    "contractTag": "v5.0.2",
+    "contractCommit": "909affc32a13d14ae3a7ccf44d325ae63ce11baf",
+    "integrity": "observed-preinstalled-system-tool-not-vendor-checksum"
+  }
+}

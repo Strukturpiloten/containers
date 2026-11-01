@@ -1,27 +1,50 @@
 """Native, bounded Docker daemon checks using the isolated outer Podman context."""
 
 # The synthetic resource names and shell commands are intentionally explicit in evidence.
-# ruff: noqa: EM101, EM102, PLR0915, S108, TRY003
+# ruff: noqa: EM101, EM102, PLR0915, TRY003
 
 from __future__ import annotations
 
 import json
 import socket
 import time
+from contextlib import nullcontext
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from scripts import runtime_docker_systemd
+from scripts.runtime_docker_diagnostics import diagnose_rootless_failure
+from scripts.runtime_errors import ProbeError
+from scripts.runtime_oom_diagnostics import DockerOomLedger, OomDiagnostics
 from scripts.runtime_resource_budgets import (
     IsolatedStoreDiskBudget,
     outer_container_limits,
     verify_outer_container_limits,
 )
-from scripts.runtime_tests import ProbeError
 
 MAX_HTTP_RESPONSE = 8192
+LEGACY_ROOTLESS_OOM_PROFILES = ("docker-debian-11-rootless", "docker-debian-11-conformance-rootless")
+
+
+class DockerProbePhase(Enum):
+    """Closed internal orchestration phases, never metadata or CLI selectors."""
+
+    CLEAN_CONTROL = "clean-control"
+    ENFORCEMENT = "enforcement"
+
+
+def _validate_phase(profile: dict[str, Any], phase: DockerProbePhase) -> None:
+    if not isinstance(phase, DockerProbePhase):
+        raise ProbeError("unknown internal Docker probe phase")
+    if phase is DockerProbePhase.CLEAN_CONTROL and (
+        profile.get("launcher") != "systemd" or profile.get("mode") != "rootless"
+    ):
+        raise ProbeError("clean control requires the systemd rootless Docker profile")
 
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from typing import BinaryIO
 
     from scripts.runtime_tests import RuntimeContext
 
@@ -51,11 +74,44 @@ def _wait_http(port: int, marker: bytes, *, timeout: int = 20) -> None:
     raise ProbeError(f"published nested Docker port {port} did not serve the synthetic marker: {last_result}")
 
 
-def _checked_exec(ctx: RuntimeContext, budget: IsolatedStoreDiskBudget, name: str, container: str, *args: str) -> str:
+def _checked_exec(
+    ctx: RuntimeContext,
+    budget: IsolatedStoreDiskBudget,
+    name: str,
+    container: str,
+    *args: str,
+    timeout: float | None = None,
+) -> str:
     budget.checkpoint()
-    output = ctx.exec(name, container, *args)
+    options = {} if timeout is None else {"timeout": timeout}
+    output = ctx.exec(name, container, *args, **options)
     budget.checkpoint()
     return output
+
+
+def _wait_for_systemd_api(
+    ctx: RuntimeContext, budget: IsolatedStoreDiskBudget, container: str, deadline: float
+) -> None:
+    # Only an ordinary daemon-not-ready result is retried. The unchanged strict
+    # exec guard surrounds every sample; guard/OCI/IO failures propagate directly.
+    for _sample in range(runtime_docker_systemd.STARTUP_SECONDS):
+        marker = _checked_exec(
+            ctx,
+            budget,
+            "wait for Docker daemon API",
+            container,
+            "sh",
+            "-euc",
+            "if docker info >/dev/null 2>&1; then printf API_READY; else printf API_PENDING; fi",
+            timeout=runtime_docker_systemd.startup_remaining(ctx, deadline),
+        )
+        runtime_docker_systemd.startup_remaining(ctx, deadline)
+        if marker == "API_READY":
+            return
+        if marker != "API_PENDING":
+            raise ProbeError("systemd Docker API readiness returned an invalid marker")
+        time.sleep(min(1, runtime_docker_systemd.startup_remaining(ctx, deadline)))
+    raise ProbeError("systemd Docker API exceeded its bounded startup sample count")
 
 
 def _docker(ctx: RuntimeContext, budget: IsolatedStoreDiskBudget, container: str, name: str, *args: str) -> str:
@@ -71,8 +127,25 @@ def run_docker(
     skip_nested: bool,
 ) -> None:
     """Exercise CLI, daemon API, storage, network, mounts, ports, and owned cleanup."""
+    _run_docker_phase(
+        ctx, profile, DockerProbePhase.ENFORCEMENT, allow_privileged=allow_privileged, skip_nested=skip_nested
+    )
+
+
+def _run_docker_phase(
+    ctx: RuntimeContext,
+    profile: dict[str, Any],
+    phase: DockerProbePhase,
+    *,
+    allow_privileged: bool,
+    skip_nested: bool,
+) -> None:
     mode = profile["mode"]
-    expected_uid = "1000" if mode == "rootless" else "0"
+    _validate_phase(profile, phase)
+    systemd = profile.get("launcher", "direct") == "systemd"
+    if systemd and profile["outerPrivilege"] != "privileged":
+        raise ProbeError("systemd Docker profile requires a privileged rootful outer runtime")
+    expected_uid = "1000" if mode == "rootless" and not systemd else "0"
     cli = ctx.podman(
         "Docker CLI, identity and payload provenance",
         "run",
@@ -124,29 +197,15 @@ echo setuid-only""",
         ctx.skip("nested Docker runtime", "privileged test requires trusted context")
         return
 
-    with IsolatedStoreDiskBudget(ctx) as budget:
-        _run_nested_docker(ctx, profile, expected_uid, budget)
+    shared_budget = vars(ctx).get("runtime_disk_budget")
+    with nullcontext(shared_budget) if shared_budget is not None else IsolatedStoreDiskBudget(ctx) as budget:
+        if phase is DockerProbePhase.ENFORCEMENT:
+            _run_nested_docker(ctx, profile, expected_uid, budget)
+        else:
+            _run_nested_docker(ctx, profile, expected_uid, budget, phase=phase)
 
 
-def _run_nested_docker(
-    ctx: RuntimeContext, profile: dict[str, Any], expected_uid: str, budget: IsolatedStoreDiskBudget
-) -> None:
-    mode = profile["mode"]
-    # A Docker archive of the exact built image is a version-pinned, offline fixture.
-    # The inner daemon receives no host Docker socket and the outer launcher stays Podman.
-    fixture = ctx.directory / "docker-native-fixture.tar"
-    budget.checkpoint()
-    ctx.podman(
-        "save synthetic Docker fixture",
-        "save",
-        "--format",
-        "docker-archive",
-        "--output",
-        str(fixture),
-        ctx.image_ref,
-        timeout=180,
-    )
-    budget.checkpoint()
+def _outer_options(ctx: RuntimeContext, profile: dict[str, Any], fixture: Path) -> tuple[str, ...]:
     outer_args = [
         *outer_container_limits(),
         "--device",
@@ -156,7 +215,10 @@ def _run_nested_docker(
         "--publish",
         "127.0.0.1::18080",
     ]
-    if ctx.name == "docker-debian-11-rootless":
+    if profile.get("launcher", "direct") == "systemd":
+        outer_args.extend(runtime_docker_systemd.systemd_options(ctx))
+    legacy_rootless = ctx.name in LEGACY_ROOTLESS_OOM_PROFILES
+    if legacy_rootless:
         # Native Bullseye Docker 20.10.5 predates the OOM-score fix in Moby #46626.
         # With an inherited positive score, its runc cannot lower a nested container
         # to Docker's default score of zero (Moby #46563). Normalize the privileged
@@ -166,17 +228,61 @@ def _run_nested_docker(
         outer_args.append("--privileged")
     else:
         outer_args.extend(["--security-opt", "apparmor=unconfined"])
-    budget.checkpoint()
-    container = ctx.start("start nested Docker daemon", options=tuple(outer_args))
+    return tuple(outer_args)
+
+
+def _close_oom_diagnostics(
+    ctx: RuntimeContext, diagnostics: OomDiagnostics | None, work_deadline: float | None
+) -> None:
     try:
-        budget.checkpoint()
-        verify_outer_container_limits(ctx, container)
-        if ctx.name == "docker-debian-11-rootless":
-            score = _checked_exec(
-                ctx, budget, "read legacy Docker outer OOM score", container, "cat", "/proc/1/oom_score_adj"
+        if diagnostics is not None:
+            diagnostics.close()
+    finally:
+        ctx.runtime_deadline = work_deadline
+
+
+def _stop_owned_daemon(
+    ctx: RuntimeContext, container: str, *, systemd: bool, diagnostics: OomDiagnostics | None = None
+) -> None:
+    if systemd:
+        if diagnostics is None:
+            runtime_docker_systemd.stop_guest(ctx, container)
+        else:
+            runtime_docker_systemd.stop_guest(
+                ctx, container, on_exit=diagnostics.after_exit, before_stop=diagnostics.before_stop
             )
-            ctx.assert_equal("legacy Docker outer OOM score", score, "0")
-        budget.checkpoint()
+    else:
+        ctx.podman("signal owned Docker daemon PID 1", "exec", container, "sh", "-c", "kill -TERM 1", check=False)
+        ctx.podman("wait for owned Docker daemon exit", "wait", container, timeout=30)
+
+
+def _prepare_started_daemon(
+    ctx: RuntimeContext,
+    budget: IsolatedStoreDiskBudget,
+    container: str,
+    profile: dict[str, Any],
+    deadline: float | None,
+) -> None:
+    systemd = profile.get("launcher", "direct") == "systemd"
+    legacy_rootless = ctx.name in LEGACY_ROOTLESS_OOM_PROFILES
+    if systemd and deadline is None:
+        raise ProbeError("systemd startup deadline was missing")
+    if systemd:
+        runtime_docker_systemd.wait_for_placement(ctx, budget, container, deadline)
+        ctx.exec_guard = runtime_docker_systemd.guarded_command()
+        verify_outer_container_limits(ctx, container, timeout=runtime_docker_systemd.startup_remaining(ctx, deadline))
+        runtime_docker_systemd.startup_remaining(ctx, deadline)
+    else:
+        verify_outer_container_limits(ctx, container)
+    if legacy_rootless:
+        score = _checked_exec(
+            ctx, budget, "read legacy Docker outer OOM score", container, "cat", "/proc/1/oom_score_adj"
+        )
+        ctx.assert_equal("legacy Docker outer OOM score", score, "0")
+    budget.checkpoint()
+    if systemd:
+        _wait_for_systemd_api(ctx, budget, container, deadline)
+    else:
         _checked_exec(
             ctx,
             budget,
@@ -186,8 +292,111 @@ def _run_nested_docker(
             "-euc",
             "for n in $(seq 1 45); do docker info >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1",
         )
+
+
+def _verify_daemon_user(
+    ctx: RuntimeContext,
+    budget: IsolatedStoreDiskBudget,
+    container: str,
+    expected_uid: str,
+    *,
+    systemd: bool,
+) -> None:
+    if not systemd:
         uid = _checked_exec(ctx, budget, "inspect inner daemon user", container, "id", "-u")
         ctx.assert_equal("inner daemon user", uid, expected_uid)
+
+
+def _run_nested_docker(
+    ctx: RuntimeContext,
+    profile: dict[str, Any],
+    expected_uid: str,
+    budget: IsolatedStoreDiskBudget,
+    *,
+    phase: DockerProbePhase = DockerProbePhase.ENFORCEMENT,
+) -> None:
+    with ctx.private_fixture_archive() as archive:
+        _run_nested_docker_with_archive(ctx, profile, (expected_uid, phase), budget, archive)
+
+
+def _require_api_range(version: dict[str, Any]) -> None:
+    if not version.get("ApiVersion") or not version.get("MinAPIVersion"):
+        raise ProbeError("daemon did not report API version range")
+
+
+def _require_storage_driver(info: dict[str, Any]) -> None:
+    if not info.get("Driver"):
+        raise ProbeError("daemon did not initialize a storage driver")
+
+
+def _postexec_checkpoint(ctx: RuntimeContext, checkpoint: str) -> None:
+    profile = getattr(getattr(ctx, "backend", None), "scoped_profile", None)
+    if profile is not None:
+        profile.witness(checkpoint)
+
+
+def _diagnose_failed_start(ctx: RuntimeContext, container: str, started: float, mode: str, *, api_ready: bool) -> None:
+    if mode == "rootless" and not api_ready:
+        diagnose_rootless_failure(ctx, container, started)
+
+
+def _shutdown_docker_phase(
+    ctx: RuntimeContext, container: str, *, systemd: bool, diagnostics: OomDiagnostics | None
+) -> None:
+    work_deadline = getattr(ctx, "runtime_deadline", None)
+    ctx.runtime_deadline = None
+    try:
+        if diagnostics is not None:
+            diagnostics.snapshot("before-shutdown")
+    finally:
+        try:
+            ctx.logs(container)
+        finally:
+            try:
+                _stop_owned_daemon(ctx, container, systemd=systemd, diagnostics=diagnostics)
+            finally:
+                _close_oom_diagnostics(ctx, diagnostics, work_deadline)
+
+
+def _run_nested_docker_with_archive(
+    ctx: RuntimeContext,
+    profile: dict[str, Any],
+    invocation: tuple[str, DockerProbePhase],
+    budget: IsolatedStoreDiskBudget,
+    archive: BinaryIO,
+) -> None:
+    expected_uid, phase = invocation
+    _validate_phase(profile, phase)
+    mode = profile["mode"]
+    systemd = profile.get("launcher", "direct") == "systemd"
+    if systemd:
+        runtime_docker_systemd.verify_runtime(ctx)
+    # The exact built image is an offline fixture; no host Docker socket is used.
+    fixture = ctx.directory / "docker-native-fixture.tar"
+    budget.checkpoint()
+    ctx.podman(
+        "save synthetic Docker fixture",
+        "save",
+        "--format",
+        "docker-archive",
+        ctx.image_ref,
+        timeout=180,
+        stdout=archive,
+    )
+    budget.checkpoint()
+    outer_args = _outer_options(ctx, profile, fixture)
+    budget.checkpoint()
+    deadline = runtime_docker_systemd.startup_deadline(ctx) if systemd else None
+    launch_timeout = {} if deadline is None else {"timeout": runtime_docker_systemd.startup_remaining(ctx, deadline)}
+    started = time.time()
+    container = ctx.start("start nested Docker daemon", options=tuple(outer_args), **launch_timeout)
+    api_ready = False
+    diagnostics: OomDiagnostics | None = None
+    try:
+        budget.checkpoint()
+        _prepare_started_daemon(ctx, budget, container, profile, deadline)
+        api_ready = True
+        _verify_daemon_user(ctx, budget, container, expected_uid, systemd=systemd)
         version_text = _docker(
             ctx, budget, container, "read Docker API versions", "version", "--format", "{{json .Server}}"
         )
@@ -201,22 +410,30 @@ def _run_nested_docker(
             "/usr/share/strukturpiloten/docker/engine-version",
         )
         ctx.assert_equal("daemon Engine version", version["Version"], engine_version)
-        if not version.get("ApiVersion") or not version.get("MinAPIVersion"):
-            raise ProbeError("daemon did not report API version range")
+        _require_api_range(version)
         info_text = _docker(
             ctx, budget, container, "inspect Docker storage and security", "info", "--format", "{{json .}}"
         )
         info = json.loads(info_text)
-        if not info.get("Driver"):
-            raise ProbeError("daemon did not initialize a storage driver")
+        _require_storage_driver(info)
         security = [str(value) for value in info.get("SecurityOptions", [])]
         rootless = any("rootless" in value for value in security)
         ctx.assert_equal("daemon rootless security", str(rootless).lower(), str(mode == "rootless").lower())
+        if systemd:
+            runtime_docker_systemd.verify_guest(ctx, budget, container, mode, info)
+            diagnostics = OomDiagnostics(ctx, container)
+            diagnostics.snapshot("before-ordinary-work")
+            if isinstance(getattr(ctx.backend, "oom_ledger", None), DockerOomLedger):
+                diagnostics.lifecycle_start()
 
-        _docker(
-            ctx, budget, container, "load synthetic nested image", "load", "--input", "/tmp/docker-native-fixture.tar"
-        )
+        _postexec_checkpoint(ctx, "ready")
+        budget.checkpoint()
+        archive.seek(0)
+        ctx.load_fixture_archive("load synthetic nested image", container, archive)
+        budget.checkpoint()
         nested = ctx.image_ref
+        if systemd and phase is DockerProbePhase.ENFORCEMENT:
+            runtime_docker_systemd.verify_inner_limits(ctx, budget, container, mode=mode, diagnostics=diagnostics)
         _docker(ctx, budget, container, "create isolated Docker network", "network", "create", "docker-native-probe")
         _docker(ctx, budget, container, "create isolated Docker volume", "volume", "create", "docker-native-probe")
         _checked_exec(
@@ -338,6 +555,7 @@ def _run_nested_docker(
             _wait_http(outer_port, b"docker-native-ok")
             budget.checkpoint()
             ctx.checks.append({"name": "host published port", "status": "passed", "port": outer_port})
+            verify_outer_container_limits(ctx, container)
         finally:
             ctx.exec(
                 "remove owned nested Docker resources",
@@ -358,17 +576,9 @@ def _run_nested_docker(
                 "! docker network inspect docker-native-probe >/dev/null 2>&1; "
                 "! docker volume inspect docker-native-probe >/dev/null 2>&1",
             )
+        _postexec_checkpoint(ctx, "pre-close")
+    except Exception:
+        _diagnose_failed_start(ctx, container, started, mode, api_ready=api_ready)
+        raise
     finally:
-        try:
-            ctx.logs(container)
-        finally:
-            ctx.podman(
-                "signal owned Docker daemon PID 1",
-                "exec",
-                container,
-                "sh",
-                "-c",
-                "kill -TERM 1",
-                check=False,
-            )
-            ctx.podman("wait for owned Docker daemon exit", "wait", container, timeout=30)
+        _shutdown_docker_phase(ctx, container, systemd=systemd, diagnostics=diagnostics)

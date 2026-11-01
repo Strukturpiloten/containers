@@ -13,4 +13,4 @@ RUN ENGINE_VERSION="${ENGINE_VERSION}" DOCKER_ARCH="${DOCKER_ARCH}" \
     /usr/local/bin/fetch-payload
 
 FROM scratch
-COPY --from=fetch /payload/ /payload/
+COPY --from=fetch --chown=0:0 /payload/ /payload/

@@ -67,6 +67,19 @@ GLOBAL_IMAGE_INPUTS = (
     "scripts/ci_scope.py",
     "scripts/image_inputs.py",
     "scripts/runtime_tests.py",
+    "scripts/docker_direct_startup*.py",
+    "scripts/docker_userns_*.py",
+    "scripts/__init__.py",
+    "scripts/docker_runner_security.py",
+    "scripts/runtime_docker_systemd_guard.py",
+    ".github/docker-userns-active-admission.json",
+    ".github/docker-userns-active-helper-closure.json",
+    ".github/docker-userns-policy-source.json",
+    "scripts/runtime_backends.py",
+    "scripts/runtime_docker_backend.py",
+    "scripts/runtime_docker_diagnostics.py",
+    "scripts/runtime_resource_budgets.py",
+    "scripts/runtime_docker_expiry.py",
     "scripts/oci_artifacts.py",
     "scripts/runtime_docker.py",
     "scripts/admission.py",
@@ -1530,6 +1543,7 @@ def _command_test_podman_image(args: argparse.Namespace) -> None:
                 sudo=False,
                 no_sudo=False,
                 timeout=45,
+                outer_engine="podman",
             )
         )
         if result["status"] != "passed":
