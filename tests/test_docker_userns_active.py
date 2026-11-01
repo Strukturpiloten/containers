@@ -27,6 +27,7 @@ from scripts import docker_userns_active_bootstrap_bundle as producer
 from scripts import docker_userns_custody_child as child
 from scripts import docker_userns_hosted as host
 from scripts import docker_userns_qualification as qualification
+from scripts import runtime_docker_diagnostics as capture
 from tests.test_docker_userns_qualification import PRIVATE, binding, scoped_receipt, stage_disposal, workflow_context
 
 if TYPE_CHECKING:
@@ -377,6 +378,484 @@ class NamespaceAndActor(unittest.TestCase):
                     self.assertEqual(observation["bytes"], len(raw))
                     self.assertEqual(observation["sha256"], active.digest(raw))
                     self.assertNotIn(raw.decode(), json.dumps(observation))
+
+
+class GuestExitObservation(unittest.TestCase):
+    @contextmanager
+    def fixture(
+        self, snapshots: list[dict] | None = None, raw: bytes = b"unknown private message\n"
+    ) -> Iterator[SimpleNamespace]:
+        port = active.RootPort.__new__(active.RootPort)
+        port.binding = binding()
+        cid, name = "c" * 64, "f" * 32
+        port.modules = SimpleNamespace(qualification=qualification, capture=capture)
+        port.admission = {}
+        port.store = SimpleNamespace(path=Path("/private") / name, write=Mock())
+        port.work_until, port.cleanup, port.provider = 20_000_000_000, False, "/usr/bin/timeout"
+        port.durable = ("create-intent", "create-intent")
+        port.record = {
+            "profileName": "owned-profile",
+            "state": "create-intent",
+            "retained": False,
+            "readerPending": False,
+            "childPending": False,
+            "durabilityUnknown": False,
+            "lastDurablePhase": "create-intent",
+            "lastIntent": "create-intent",
+        }
+        snapshot = {
+            "Id": cid,
+            "Image": port.binding.config_digest,
+            "Config": {
+                "Labels": {
+                    "io.strukturpiloten.runtime": port.binding.owner,
+                    "io.strukturpiloten.userns-profile": name,
+                    "org.opencontainers.image.revision": port.binding.candidate,
+                }
+            },
+            "HostConfig": {"CgroupParent": port.binding.runtime_slice},
+            "AppArmorProfile": "owned-profile",
+            "Created": "2026-11-01T01:00:00.123Z",
+            "State": {
+                "Status": "exited",
+                "Running": False,
+                "Paused": False,
+                "Restarting": False,
+                "Dead": False,
+                "Pid": 0,
+                "ExitCode": 1,
+                "OOMKilled": False,
+                "Error": PRIVATE,
+                "StartedAt": "2026-11-01T01:00:01Z",
+                "FinishedAt": "2026-11-01T01:00:02Z",
+            },
+        }
+        port.docker = Mock(side_effect=[json.dumps(value).encode() for value in (snapshots or [snapshot] * 3)])
+        port.docker_logs, port.daemon, port.guard, port.unload = Mock(return_value=raw), Mock(), Mock(), Mock()
+        lease = qualification.ProfileLease(port.binding, port)
+        lease.state = qualification.State.CREATE_INTENT
+        with (
+            patch.object(active, "namespace_snapshot", return_value={}),
+            patch.object(active.time, "monotonic_ns", return_value=1_000_000_000),
+        ):
+            yield SimpleNamespace(port=port, lease=lease, cid=cid, snapshot=snapshot)
+
+    def refuse(self, case: SimpleNamespace) -> dict:
+        with self.assertRaises(active.RefusedError) as raised:
+            case.lease.bind(case.cid)
+        result = active.failure_receipt(
+            {
+                "actor": "root",
+                "operation": "bind",
+                "binding": case.port.binding,
+                "sourceVerified": True,
+                "sourceManifestSha256": active.SOURCE_MANIFEST_SHA256,
+                "lease": "f" * 32,
+                "record": case.port.record,
+            },
+            raised.exception,
+        )
+        self.assertTrue(active.valid_failure(result))
+        self.assertIs(case.lease.state, qualification.State.RETAINED)
+        self.assertIsNone(case.lease.container)
+        self.assertEqual(result["phase"], "subject-running")
+        self.assertFalse(result["comparisons"]["subject-running"])
+        self.assertFalse(result["cleanupAuthority"])
+        self.assertNotIn("subject", case.port.record)
+        self.assertNotIn("profileObservation", case.port.record)
+        self.assertNotIn(PRIVATE, json.dumps(case.port.record))
+        self.assertNotIn(PRIVATE, json.dumps(result))
+        self.assertNotIn(case.cid, json.dumps(result))
+        case.port.unload.assert_not_called()
+        self.assertEqual(case.port.work_until, 20_000_000_000)
+        return result
+
+    def test_stable_terminal_readbacks_classify_only_bounded_messages_and_keep_refusal(self) -> None:
+        raw = (
+            b"[rootlesskit:parent] error: failed to start the child: fork/exec /proc/self/exe: permission denied\n"
+            + PRIVATE.encode()
+            + b"\n"
+        )
+        for code in (0, 1, 255):
+            with self.subTest(code=code), self.fixture(raw=raw) as case:
+                case.snapshot["State"]["ExitCode"] = code
+                case.port.docker.side_effect = [json.dumps(case.snapshot).encode()] * 3
+                result = self.refuse(case)
+                detail = result["guestExit"]
+                self.assertEqual(
+                    detail["terminal"],
+                    {"state": "exited", "exitCode": code, "oomKilled": False, "hostPidAvailable": False},
+                )
+                self.assertEqual(
+                    detail["error"],
+                    {
+                        "classification": "unclassified",
+                        "bytes": len(PRIVATE.encode()),
+                        "sha256": active.digest(PRIVATE.encode()),
+                    },
+                )
+                self.assertEqual(
+                    detail["logs"],
+                    {
+                        "availability": "classified",
+                        "bytes": len(raw),
+                        "sha256": active.digest(raw),
+                        "records": 2,
+                        "unknownRecords": 1,
+                        "classes": ["child-fork-exec-permission-denied-message"],
+                    },
+                )
+                self.assertFalse(detail["acceptanceEvidence"])
+                self.assertFalse(detail["cleanupAuthority"])
+                self.assertEqual(case.port.docker.call_count, 3)
+                case.port.docker_logs.assert_called_once_with(case.cid)
+
+    def test_invalid_or_nonterminal_engine_facts_never_authorize_extra_reads(self) -> None:
+        changes = (
+            ("Status", "running"),
+            ("Status", "created"),
+            ("Status", "restarting"),
+            ("Running", True),
+            ("Pid", False),
+            ("Pid", 1),
+            ("ExitCode", True),
+            ("ExitCode", -1),
+            ("ExitCode", 256),
+            ("OOMKilled", 0),
+            ("Paused", True),
+            ("Restarting", True),
+            ("Dead", True),
+            ("Error", "x" * 4097),
+            ("Error", "bad\x00"),
+            ("Error", "bad\r"),
+            ("Error", "\ud800"),
+            ("FinishedAt", "private-invalid-time"),
+        )
+        for key, value in changes:
+            with self.subTest(field=key, kind=type(value).__name__), self.fixture() as case:
+                case.snapshot["State"][key] = value
+                case.port.docker.side_effect = [json.dumps(case.snapshot).encode()]
+                detail = self.refuse(case)["guestExit"]
+                self.assertEqual(detail, active.guest_exit_unavailable("invalid-fields"))
+                self.assertEqual(case.port.docker.call_count, 1)
+                case.port.docker_logs.assert_not_called()
+
+    def test_initial_first_and_final_private_identity_or_incarnation_drift_is_unavailable(self) -> None:
+        changes = (
+            ("Id",),
+            ("Image",),
+            ("Created",),
+            ("AppArmorProfile",),
+            ("HostConfig", "CgroupParent"),
+            ("Config", "Labels", "io.strukturpiloten.runtime"),
+            ("Config", "Labels", "io.strukturpiloten.userns-profile"),
+            ("Config", "Labels", "org.opencontainers.image.revision"),
+            ("State", "StartedAt"),
+            ("State", "FinishedAt"),
+            ("State", "Error"),
+        )
+        for read in (1, 2):
+            for path in changes:
+                with self.subTest(read=read, field=path), self.fixture() as case:
+                    values = [copy.deepcopy(case.snapshot) for _ in range(3)]
+                    target = values[read]
+                    for key in path[:-1]:
+                        target = target[key]
+                    target[path[-1]] = (
+                        "2026-11-01T01:00:03Z"
+                        if path[-1] in {"Created", "StartedAt", "FinishedAt"}
+                        else "other-private"
+                    )
+                    case.port.docker.side_effect = [json.dumps(value).encode() for value in values]
+                    detail = self.refuse(case)["guestExit"]
+                    self.assertNotEqual(detail["availability"], "available")
+                    self.assertIsNone(detail["terminal"])
+                    self.assertIsNone(detail["error"])
+                    self.assertIsNone(detail["logs"])
+                    self.assertEqual(case.port.docker_logs.call_count, int(read == len(values) - 1))
+
+    def test_pending_cancellation_and_inherited_deadline_stop_and_restore_without_recovery(self) -> None:
+        for key in ("readerPending", "childPending", "durabilityUnknown"):
+            with self.subTest(flag=key), self.fixture() as case:
+                case.port.record[key] = True
+                self.assertEqual(self.refuse(case)["guestExit"]["availability"], "pending")
+                case.port.docker_logs.assert_not_called()
+                self.assertEqual(case.port.docker.call_count, 1)
+                self.assertTrue(case.port.record[key])
+        for step in ("inspect", "logs", "classification"):
+            for stop in (KeyboardInterrupt(), TimeoutError()):
+                with self.subTest(step=step, stop=type(stop).__name__), self.fixture() as case:
+                    if step == "inspect":
+                        case.port.docker.side_effect = [json.dumps(case.snapshot).encode(), stop]
+                    elif step == "logs":
+                        case.port.docker_logs.side_effect = stop
+                    with patch.object(
+                        capture,
+                        "classify_owned_startup_log",
+                        side_effect=stop if step == "classification" else capture.classify_owned_startup_log,
+                    ):
+                        detail = self.refuse(case)["guestExit"]
+                    self.assertEqual(
+                        detail["availability"], "cancelled" if isinstance(stop, KeyboardInterrupt) else "deadline"
+                    )
+        with self.fixture() as case, patch.object(active.time, "monotonic_ns", return_value=30_000_000_000):
+            self.assertEqual(self.refuse(case)["guestExit"]["availability"], "deadline")
+            case.port.docker_logs.assert_not_called()
+
+    def test_unowned_initial_inspect_or_successful_running_check_never_enters_observer(self) -> None:
+        for path in (
+            ("Id",),
+            ("Image",),
+            ("AppArmorProfile",),
+            ("HostConfig", "CgroupParent"),
+            ("Config", "Labels", "io.strukturpiloten.userns-profile"),
+        ):
+            with self.subTest(path=path), self.fixture() as case:
+                target = case.snapshot
+                for key in path[:-1]:
+                    target = target[key]
+                target[path[-1]] = "foreign-private"
+                case.port.docker.side_effect = [json.dumps(case.snapshot).encode()]
+                with patch.object(case.port, "observe_guest_exit") as observer, self.assertRaises(active.RefusedError):
+                    case.lease.bind(case.cid)
+                observer.assert_not_called()
+                case.port.docker_logs.assert_not_called()
+                self.assertNotIn("guestExit", case.port.record)
+                self.assertIs(case.lease.state, qualification.State.RETAINED)
+        with self.fixture() as case, patch.object(case.port, "observe_guest_exit") as observer:
+            case.snapshot["State"].update(Running=True, Pid=123)
+            case.port.require_subject_running(case.cid, case.snapshot)
+            observer.assert_not_called()
+            self.assertTrue(case.port.record["diagnostic"]["comparisons"]["subject-running"])
+        for phase, state, retained, matched in (
+            ("subject-profile", "create-intent", False, False),
+            ("subject-running", "retained", True, False),
+            ("subject-running", "create-intent", False, True),
+        ):
+            with self.subTest(phase=phase, state=state), self.fixture() as case:
+                case.port.record.update(
+                    state=state,
+                    retained=retained,
+                    diagnostic={"phase": phase, "comparisons": {"subject-running": matched}},
+                )
+                with self.assertRaises(active.RefusedError):
+                    case.port.observe_guest_exit(case.cid, case.snapshot)
+                case.port.docker.assert_not_called()
+                case.port.docker_logs.assert_not_called()
+                self.assertNotIn("guestExit", case.port.record)
+
+    def test_one_original_budget_and_affirmative_drain_keep_pending_failures_sticky(self) -> None:
+        for drained in (True, False):
+            with self.subTest(drained=drained), self.fixture() as case:
+                del case.port.docker_logs
+                case.port.docker_arguments = Mock(return_value=["fixed-owned-docker", "logs", "--tail", "65", case.cid])
+                protocol = {
+                    "teardownVerified": drained,
+                    "status": "available",
+                    "data": base64.b64encode(b"unknown\n").decode(),
+                }
+                with patch.object(capture, "capture_owned_logs", return_value=protocol) as query:
+                    result = self.refuse(case)
+                self.assertEqual(query.call_args.args[1], 6.0)
+                self.assertEqual(query.call_args.args[2], "/usr/bin/timeout")
+                self.assertEqual(result["guestExit"]["availability"], "available" if drained else "pending")
+                self.assertIs(case.port.record["readerPending"], not drained)
+
+    def test_observer_errors_do_not_replace_exact_original_exception_or_phase(self) -> None:
+        original = active.comparison
+        errors = []
+
+        def compare(progress: dict, phase: str, matched: object) -> None:
+            try:
+                original(progress, phase, matched)
+            except active.RefusedError as error:
+                errors.append(error)
+                raise
+
+        with (
+            self.fixture() as case,
+            patch.object(active, "comparison", side_effect=compare),
+            patch.object(case.port, "observe_guest_exit", side_effect=KeyboardInterrupt()),
+        ):
+            with self.assertRaises(active.RefusedError) as raised:
+                case.lease.bind(case.cid)
+            self.assertIs(raised.exception, errors[0])
+            self.assertEqual(case.port.record["diagnostic"]["phase"], "subject-running")
+            self.assertFalse(case.port.record["diagnostic"]["comparisons"]["subject-running"])
+
+    @staticmethod
+    def deadline_callbacks(case: SimpleNamespace, step: str) -> SimpleNamespace:
+        clock = [1_000_000_000]
+        original_snapshot, original_classifier = active.guest_exit_snapshot, capture.classify_owned_startup_log
+        reads = []
+
+        def snapshot(value: dict) -> tuple:
+            result = original_snapshot(value)
+            if step == "snapshot":
+                clock[0] = 6_000_000_000
+            return result
+
+        def inspect(*_arguments: str) -> bytes:
+            reads.append(True)
+            checkpoints = {"first": 2, "final": 3}
+            if step in checkpoints and len(reads) == checkpoints[step]:
+                clock[0] = 6_000_000_000
+            return json.dumps(case.snapshot).encode()
+
+        def logs(_container: str) -> bytes:
+            if step == "logs":
+                clock[0] = 6_000_000_000
+            return b"unknown\n"
+
+        def classify(raw: bytes) -> dict:
+            result = original_classifier(raw)
+            if step == "classification":
+                clock[0] = 6_000_000_000
+            return result
+
+        return SimpleNamespace(
+            snapshot=snapshot, inspect=inspect, logs=logs, classify=classify, now=lambda: clock[0], reads=reads
+        )
+
+    def test_each_read_uses_the_same_absolute_allowance_and_never_publishes_late_facts(self) -> None:
+
+        for step in ("snapshot", "first", "logs", "classification", "final"):
+            with self.subTest(step=step), self.fixture() as case:
+                events = self.deadline_callbacks(case, step)
+                case.port.docker.side_effect, case.port.docker_logs.side_effect = events.inspect, events.logs
+                with (
+                    patch.object(active.time, "monotonic_ns", side_effect=events.now),
+                    patch.object(active, "guest_exit_snapshot", side_effect=events.snapshot),
+                    patch.object(capture, "classify_owned_startup_log", side_effect=events.classify),
+                ):
+                    detail = self.refuse(case)["guestExit"]
+                self.assertEqual(detail, active.guest_exit_unavailable("deadline"))
+                expected_reads = {"snapshot": 1, "first": 2, "logs": 2, "classification": 2, "final": 3}
+                self.assertEqual(len(events.reads), expected_reads[step])
+
+    def test_invalid_complete_logs_are_unavailable_without_partial_hashes_or_raw_output(self) -> None:
+        for raw, availability in (
+            (b"partial", "invalid-framing"),
+            (b"bad\r\n", "invalid-framing"),
+            (b"\xff\n", "invalid-encoding"),
+            (b"\n" * 65, "record-limit"),
+            (b"x" * 4097 + b"\n", "record-byte-limit"),
+            (b"x" * 65536 + b"\n", "byte-limit"),
+        ):
+            with self.subTest(availability=availability), self.fixture(raw=raw) as case:
+                detail = self.refuse(case)["guestExit"]
+                self.assertEqual(detail["availability"], "available")
+                self.assertEqual(
+                    detail["logs"],
+                    {
+                        "availability": availability,
+                        "bytes": None,
+                        "sha256": None,
+                        "records": None,
+                        "unknownRecords": None,
+                        "classes": [],
+                    },
+                )
+                self.assertEqual(case.port.docker.call_count, 3)
+        with self.fixture() as case:
+            case.snapshot["State"].update(Status="dead", Dead=True, OOMKilled=True, Error="x" * 4096)
+            case.port.docker.side_effect = [json.dumps(case.snapshot).encode()] * 3
+            detail = self.refuse(case)["guestExit"]
+            self.assertEqual(
+                detail["terminal"], {"state": "dead", "exitCode": 1, "oomKilled": True, "hostPidAvailable": False}
+            )
+            self.assertEqual(detail["error"]["bytes"], 4096)
+
+    def test_closed_extension_origin_privacy_types_and_historical_failures_remain_strict(self) -> None:
+        with self.fixture(raw=b"") as case:
+            case.snapshot["State"]["Error"] = ""
+            case.port.docker.side_effect = [json.dumps(case.snapshot).encode()] * 3
+            good = self.refuse(case)
+        detail = good["guestExit"]
+        self.assertEqual(detail["error"]["classification"], "empty")
+        for path, bad in (
+            (("terminal", "exitCode"), True),
+            (("terminal", "hostPidAvailable"), True),
+            (("error", "bytes"), False),
+            (("logs", "records"), False),
+            (("logs", "classes"), [PRIVATE]),
+            (("source",), PRIVATE),
+            (("acceptanceEvidence",), True),
+            (("cleanupAuthority",), True),
+        ):
+            value = copy.deepcopy(good)
+            target = value["guestExit"]
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = bad
+            self.assertFalse(active.valid_failure(value), path)
+        for field, bad in (
+            ("actor", "client"),
+            ("operation", "prepare"),
+            ("phase", "subject-profile"),
+            ("sourceVerified", False),
+            ("bindingVerified", False),
+            ("retained", False),
+            ("reportingLease", None),
+            ("comparisons", {"subject-running": True}),
+        ):
+            value = copy.deepcopy(good)
+            value[field] = bad
+            self.assertFalse(active.valid_failure(value), field)
+        without = copy.deepcopy(good)
+        del without["guestExit"]
+        self.assertTrue(active.valid_failure(without))
+        malformed = copy.deepcopy(good)
+        malformed["guestExit"]["raw"] = PRIVATE
+        self.assertFalse(active.valid_failure(malformed))
+        self.assertIsNone(active.guest_exit_detail(malformed["guestExit"]))
+        clone = active.guest_exit_detail(detail)
+        clone["logs"]["classes"].append(PRIVATE)
+        self.assertEqual(detail["logs"]["classes"], [])
+        self.assertEqual(without["comparisons"]["subject-running"], False)
+
+    def test_internal_invalid_detail_is_omitted_and_real_client_redacts_both_failure_operations(self) -> None:
+        with self.fixture() as case:
+            good = self.refuse(case)
+            case.port.record["guestExit"]["raw"] = PRIVATE
+            omitted = active.failure_receipt(
+                {
+                    "actor": "root",
+                    "operation": "bind",
+                    "binding": case.port.binding,
+                    "sourceVerified": True,
+                    "sourceManifestSha256": active.SOURCE_MANIFEST_SHA256,
+                    "lease": "f" * 32,
+                    "record": case.port.record,
+                },
+                active.RefusedError(),
+            )
+            self.assertNotIn("guestExit", omitted)
+            self.assertEqual(omitted["phase"], "subject-running")
+            self.assertTrue(active.valid_failure(omitted))
+        for operation in ("bind", "close"):
+            with self.subTest(operation=operation), tempfile.TemporaryDirectory() as temporary:
+                client = client_fixture(Path(temporary))
+                value = copy.deepcopy(good) | {"operation": operation}
+
+                def command(
+                    _name: str, _argv: list, *, client: object = client, value: dict = value, **_kwargs: object
+                ) -> str:
+                    client.ctx.checks.append({"exitCode": 1, "stdout": PRIVATE, "stderr": PRIVATE, "error": PRIVATE})
+                    return json.dumps(value)
+
+                client.ctx.command = Mock(side_effect=command)
+                with self.assertRaises(ValueError):
+                    client.rpc(operation, {})
+                self.assertEqual(client.failures, [value])
+                self.assertFalse(client.evidence["cleanupAuthority"])
+                self.assertNotIn(PRIVATE, client.ctx.scoped_failure_output.read_text())
+                self.assertNotIn(PRIVATE, json.dumps(client.ctx.checks))
+                value["guestExit"]["raw"] = PRIVATE
+                with self.assertRaises(ValueError):
+                    client.rpc(operation, {})
+                self.assertNotIn("guestExit", client.failures[-1])
+                self.assertNotIn(PRIVATE, client.ctx.scoped_failure_output.read_text())
 
 
 class MediatedRegistryContract(unittest.TestCase):

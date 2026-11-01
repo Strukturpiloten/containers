@@ -278,6 +278,34 @@ Non-publishing PR checks do not authorize that action: obtain publication
 authorization before merging. Never change the publisher or skip its gates to
 evade this boundary.
 
+### Exited guest before scoped bind
+
+A failed `subject-running` bind may include optional `guestExit` in the existing
+root failure schema 1. It is emitted only for the original source/binding-verified
+retained refusal, never as successful task/profile evidence. Exact private
+Engine inspections bracket the existing owned log capture and require stable
+terminal state, Error and creation/start/finish incarnation facts. PID0 alone
+establishes none of those facts. No PID, CID, label, timestamp, Error or log text
+is added to public or durable diagnostic output.
+
+The observer gets at most five seconds inside the original work deadline, keeping
+the 60-second cleanup reserve and 15-second finalizer head start. Existing capture
+prepayment/drain and sticky pending flags remain mandatory. Input is bounded to
+64 KiB, 64 complete LF records and 4096 UTF-8 bytes per line; Error is bounded to 4096
+bytes and published only as empty/unclassified plus byte count/digest. Log classes
+reuse reviewed literal message patterns, with unknown counts and complete-buffer
+digests. These describe observed messages, not a denied syscall or policy actor.
+The detail stays within 2048 bytes and the failure envelope within 8192. No guest
+exec, new root operation, retry, task adoption or cleanup authority follows.
+
+Missing, changing, malformed or unavailable observations keep a finite unavailable
+category and the exact original refusal. Invalid optional internal detail is
+omitted; invalid external detail rejects the receipt. Old failures, schema 1
+subject-profile validation and schema 2 diagnostic discrimination remain unchanged.
+The existing journal/systemd classifier is separate from this plain Engine-log
+classifier. A bounded diagnostic success does not qualify native startup or the
+ordinary matrix, and does not authorize dispatch, cancellation or policy changes.
+
 ## Hosted unused userns custody seam
 
 Before the unchanged root bootstrap, the same PR-492-only job also runs

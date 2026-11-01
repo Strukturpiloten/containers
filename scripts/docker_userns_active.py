@@ -713,6 +713,201 @@ def subject_profile_diagnostic_detail(value: object) -> dict[str, Any] | None:
     return None
 
 
+GUEST_EXIT_LIMIT = 2048
+GUEST_EXIT_TEXT_LIMIT = 4096
+GUEST_EXIT_RECORD_LIMIT = 64
+GUEST_EXIT_CODE_LIMIT = 255
+GUEST_EXIT_SECONDS_NS = 5_000_000_000
+GUEST_EXIT_UNAVAILABLE = frozenset(
+    {"pending", "deadline", "cancelled", "invalid-fields", "identity-mismatch", "query-unavailable"}
+)
+GUEST_EXIT_LOG_UNAVAILABLE = frozenset(
+    {"byte-limit", "record-limit", "record-byte-limit", "invalid-framing", "invalid-encoding", "invalid-fields"}
+)
+# Closed wire labels mirror the existing capture pattern names, never its raw messages.
+GUEST_EXIT_LOG_CLASSES = frozenset(
+    {
+        "uidmap-helper-message",
+        "gidmap-helper-message",
+        "subid-range-message",
+        "uidgid-map-message",
+        "child-fork-exec-operation-not-permitted-message",
+        "child-fork-exec-permission-denied-message",
+        "child-fork-exec-resource-temporarily-unavailable-message",
+        "child-start-message",
+        "rootless-network-message",
+        "cgroup-path-message",
+        "daemon-socket-message",
+        "daemon-config-message",
+        "daemon-network-message",
+    }
+)
+
+
+def guest_exit_unavailable(availability: str) -> dict[str, Any]:
+    """Keep unavailable optional evidence closed and free of raw inputs."""
+    return {
+        "availability": availability,
+        "source": "owned-engine-inspect-and-logs",
+        "acceptanceEvidence": False,
+        "cleanupAuthority": False,
+        "terminal": None,
+        "error": None,
+        "logs": None,
+    }
+
+
+def guest_exit_logs_detail(value: object) -> dict[str, Any]:
+    """Validate only complete bounded message classifications, never free text."""
+    require(
+        type(value) is dict
+        and set(value) == {"availability", "bytes", "sha256", "records", "unknownRecords", "classes"}
+    )
+    require(type(value["availability"]) is str)
+    if value["availability"] in GUEST_EXIT_LOG_UNAVAILABLE:
+        require(
+            all(value[key] is None for key in ("bytes", "sha256", "records", "unknownRecords"))
+            and value["classes"] == []
+        )
+    else:
+        require(value["availability"] == "classified")
+        require(type(value["bytes"]) is int and 0 <= value["bytes"] <= MAX_OUTPUT)
+        require(type(value["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", value["sha256"]))
+        require(type(value["records"]) is int and 0 <= value["records"] <= GUEST_EXIT_RECORD_LIMIT)
+        require(type(value["unknownRecords"]) is int and 0 <= value["unknownRecords"] <= value["records"])
+        require(
+            type(value["classes"]) is list
+            and all(type(label) is str and label in GUEST_EXIT_LOG_CLASSES for label in value["classes"])
+        )
+        require(value["classes"] == sorted(set(value["classes"])))
+        require(len(value["classes"]) <= value["records"] - value["unknownRecords"])
+        require(value["records"] <= value["bytes"])
+        require((value["records"] == 0) == (value["bytes"] == 0))
+        if value["bytes"] == 0:
+            require(value["sha256"] == digest(b""))
+        require(bool(value["classes"]) == (value["unknownRecords"] < value["records"]))
+    return {**value, "classes": list(value["classes"])}
+
+
+def guest_exit_detail(value: object) -> dict[str, Any] | None:
+    """Validate optional terminal facts; neither their presence nor validity grants authority."""
+    try:
+        require(
+            type(value) is dict
+            and set(value)
+            == {"availability", "source", "acceptanceEvidence", "cleanupAuthority", "terminal", "error", "logs"}
+        )
+        require(len(encoded(value)) <= GUEST_EXIT_LIMIT)
+        require(
+            type(value["source"]) is str
+            and value["source"] == "owned-engine-inspect-and-logs"
+            and value["acceptanceEvidence"] is False
+            and value["cleanupAuthority"] is False
+        )
+        require(type(value["availability"]) is str)
+        if value["availability"] in GUEST_EXIT_UNAVAILABLE:
+            require(all(value[key] is None for key in ("terminal", "error", "logs")))
+            result = dict(value)
+        else:
+            require(value["availability"] == "available")
+            terminal, error = value["terminal"], value["error"]
+            require(type(terminal) is dict and set(terminal) == {"state", "exitCode", "oomKilled", "hostPidAvailable"})
+            require(type(terminal["state"]) is str and terminal["state"] in {"exited", "dead"})
+            require(type(terminal["exitCode"]) is int and 0 <= terminal["exitCode"] <= GUEST_EXIT_CODE_LIMIT)
+            require(type(terminal["oomKilled"]) is bool and terminal["hostPidAvailable"] is False)
+            require(type(error) is dict and set(error) == {"classification", "bytes", "sha256"})
+            require(type(error["bytes"]) is int and 0 <= error["bytes"] <= GUEST_EXIT_TEXT_LIMIT)
+            require(type(error["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", error["sha256"]))
+            require(
+                type(error["classification"]) is str
+                and error["classification"] == ("empty" if error["bytes"] == 0 else "unclassified")
+            )
+            if error["bytes"] == 0:
+                require(error["sha256"] == digest(b""))
+            result = {
+                **value,
+                "terminal": dict(terminal),
+                "error": dict(error),
+                "logs": guest_exit_logs_detail(value["logs"]),
+            }
+    except TypeError, ValueError, KeyError, RefusedError:
+        return None
+    return result
+
+
+def guest_exit_origin(value: dict[str, Any]) -> bool:
+    """Require the latched source-bound refusal; a stopped CID is never cleanup authority."""
+    return (
+        value["actor"] == "root"
+        and value["operation"] in {"bind", "close"}
+        and value["phase"] == "subject-running"
+        and value["reason"] == "refused"
+        and value["sourceVerified"] is True
+        and value["bindingVerified"] is True
+        and value["reportingLease"] is not None
+        and value["retained"] is True
+        and type(value["comparisons"]) is dict
+        and value["comparisons"].get("subject-running") is False
+    )
+
+
+def guest_exit_snapshot(value: dict[str, Any]) -> tuple[tuple, dict[str, Any], dict[str, Any]]:
+    """Keep incarnation/Error in memory only; return independently typed sanitized terminal facts."""
+    state = value["State"]
+    require(type(state) is dict and state["Running"] is False and type(state["Pid"]) is int and state["Pid"] == 0)
+    require(type(state["Status"]) is str and state["Status"] in {"exited", "dead"})
+    require(
+        state["Paused"] is False
+        and state["Restarting"] is False
+        and type(state["Dead"]) is bool
+        and state["Dead"] == (state["Status"] == "dead")
+    )
+    require(
+        type(state["ExitCode"]) is int
+        and 0 <= state["ExitCode"] <= GUEST_EXIT_CODE_LIMIT
+        and type(state["OOMKilled"]) is bool
+    )
+    require(type(state["Error"]) is str)
+    raw = state["Error"].encode("utf-8", errors="strict")
+    require(len(raw) <= GUEST_EXIT_TEXT_LIMIT and b"\0" not in raw and b"\r" not in raw)
+    stamps = (value["Created"], state["StartedAt"], state["FinishedAt"])
+    require(
+        all(
+            type(stamp) is str
+            and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?Z", stamp)
+            for stamp in stamps
+        )
+    )
+    labels = value["Config"]["Labels"]
+    private = (
+        value["Id"],
+        value["Image"],
+        value["HostConfig"]["CgroupParent"],
+        value["AppArmorProfile"],
+        *(
+            labels[key]
+            for key in (
+                "io.strukturpiloten.runtime",
+                "io.strukturpiloten.userns-profile",
+                "org.opencontainers.image.revision",
+            )
+        ),
+        *stamps,
+        state["Status"],
+        state["ExitCode"],
+        state["OOMKilled"],
+        raw,
+    )
+    terminal = {
+        "state": state["Status"],
+        "exitCode": state["ExitCode"],
+        "oomKilled": state["OOMKilled"],
+        "hostPidAvailable": False,
+    }
+    error = {"classification": "empty" if not raw else "unclassified", "bytes": len(raw), "sha256": digest(raw)}
+    return private, terminal, error
+
+
 def subject_observation_budget(deadline: int) -> None:
     """Reuse the original work budget while distinguishing observation expiry from a failed comparison."""
     try:
@@ -832,6 +1027,13 @@ def _failure_receipt(progress: dict[str, Any], error: BaseException) -> dict[str
         and len(encoded(result | {"subjectProfile": observation})) <= MAX_FAILURE
     ):
         result["subjectProfile"] = observation
+    startup = guest_exit_detail(record.get("guestExit"))
+    if (
+        startup is not None
+        and guest_exit_origin(result)
+        and len(encoded(result | {"guestExit": startup})) <= MAX_FAILURE
+    ):
+        result["guestExit"] = startup
     return result
 
 
@@ -848,8 +1050,12 @@ def _valid_failure(value: object, child: ModuleType | None = None) -> bool:
     if type(value) is not dict or len(encoded(value)) > MAX_FAILURE:
         return False
     template = failure_receipt({}, RefusedError())
-    if not set(template) <= set(value) <= set(template) | {"childBuild", "subjectProfile"}:
+    if not set(template) <= set(value) <= set(template) | {"childBuild", "subjectProfile", "guestExit"}:
         return False
+    if "guestExit" in value:
+        startup = guest_exit_detail(value["guestExit"])
+        if startup is None or startup != value["guestExit"] or not guest_exit_origin(value):
+            return False
     if "subjectProfile" in value:
         observation = subject_profile_diagnostic_detail(value["subjectProfile"])
         if observation is None or observation != value["subjectProfile"] or not subject_profile_origin(value):
@@ -1857,6 +2063,20 @@ class RootPort:
         )
         return value
 
+    def require_subject_running(self, container: str, before: dict[str, Any]) -> None:
+        """Latch only the original failed running comparison before optional evidence."""
+        pid = before["State"]["Pid"]
+        try:
+            comparison(
+                self.point("subject-running"),
+                "subject-running",
+                type(pid) is int and pid > 0 and before["State"]["Running"] is True,
+            )
+        except RefusedError:
+            with suppress(Exception, KeyboardInterrupt):
+                self.observe_guest_exit(container, before)
+            raise
+
     def bind_subject(self, container: str, binding: NativeBinding) -> None:
         """Verify before/after through one held task and exact container incarnation."""
         direct = type(binding) in {
@@ -1871,11 +2091,7 @@ class RootPort:
         self.point("subject-inspect")
         before = self.inspect(container)
         pid = before["State"]["Pid"]
-        comparison(
-            self.point("subject-running"),
-            "subject-running",
-            type(pid) is int and pid > 0 and before["State"]["Running"] is True,
-        )
+        self.require_subject_running(container, before)
         self.point("subject-task")
         descriptor = os.open(f"/proc/{pid}", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
         pidfd = os.pidfd_open(pid)
@@ -1954,6 +2170,95 @@ class RootPort:
         finally:
             os.close(pidfd)
             os.close(descriptor)
+
+    def guest_exit_budget(self) -> None:
+        """Stop optional reads on inherited expiry, cleanup or sticky uncertainty."""
+        require(
+            not self.cleanup
+            and all(
+                self.record.get(key, False) is False for key in ("readerPending", "childPending", "durabilityUnknown")
+            )
+        )
+        subject_observation_budget(self.work_until)
+
+    def guest_exit_log_projection(self, raw: bytes) -> dict[str, Any]:
+        """Keep pure log classification failure separate from Engine query/drain custody."""
+        try:
+            return self.modules.capture.classify_owned_startup_log(raw)
+        except self.modules.capture._UnavailableError as error_detail:  # noqa: SLF001 - share only reviewed finite capture classifications.
+            availability = str(error_detail)
+            require(availability in GUEST_EXIT_LOG_UNAVAILABLE)
+            return {
+                "availability": availability,
+                "bytes": None,
+                "sha256": None,
+                "records": None,
+                "unknownRecords": None,
+                "classes": [],
+            }
+
+    def observe_guest_exit(self, container: str, before: dict[str, Any]) -> None:
+        """Read only a stopped owned guest; preserve the exact original failed bind."""
+        diagnostic = self.record["diagnostic"]
+        require(
+            diagnostic.get("phase") == "subject-running"
+            and type(diagnostic.get("comparisons")) is dict
+            and diagnostic["comparisons"].get("subject-running") is False
+            and self.record.get("state") == "create-intent"
+            and self.record.get("retained") is False
+        )
+        original_phase, original_until = diagnostic["phase"], self.work_until
+        observation = guest_exit_unavailable("query-unavailable")
+        try:
+            if self.cleanup or any(
+                self.record.get(key, False) is not False
+                for key in ("readerPending", "childPending", "durabilityUnknown")
+            ):
+                observation = guest_exit_unavailable("pending")
+                return
+            self.work_until = min(original_until, time.monotonic_ns() + GUEST_EXIT_SECONDS_NS)
+            self.guest_exit_budget()
+            try:
+                private, terminal, error = guest_exit_snapshot(before)
+            except TypeError, KeyError, UnicodeError, RefusedError:
+                observation = guest_exit_unavailable("invalid-fields")
+                return
+            self.guest_exit_budget()
+            first = self.inspect(container)
+            self.guest_exit_budget()
+            if guest_exit_snapshot(first)[0] != private:
+                observation = guest_exit_unavailable("identity-mismatch")
+                return
+            raw = self.docker_logs(container)
+            self.guest_exit_budget()
+            logs = self.guest_exit_log_projection(raw)
+            self.guest_exit_budget()
+            final = self.inspect(container)
+            self.guest_exit_budget()
+            if guest_exit_snapshot(final)[0] != private:
+                observation = guest_exit_unavailable("identity-mismatch")
+                return
+            candidate = {**guest_exit_unavailable("available"), "terminal": terminal, "error": error, "logs": logs}
+            require(guest_exit_detail(candidate) is not None)
+            self.guest_exit_budget()
+            observation = candidate
+        except KeyboardInterrupt:
+            observation = guest_exit_unavailable("cancelled")
+        except TimeoutError:
+            observation = guest_exit_unavailable("deadline")
+        except Exception:  # noqa: BLE001 - never export raw Engine or reader errors or replace original refusal.
+            if time.monotonic_ns() >= self.work_until:
+                observation = guest_exit_unavailable("deadline")
+        finally:
+            if any(
+                self.record.get(key, False) is not False
+                for key in ("readerPending", "childPending", "durabilityUnknown")
+            ):
+                observation = guest_exit_unavailable("pending")
+            self.work_until = original_until
+            diagnostic["phase"] = original_phase
+            diagnostic.setdefault("comparisons", {})["subject-running"] = False
+            self.record.setdefault("guestExit", observation)
 
     def subject_profile_readback(
         self, task: tuple[int, bytes], observation: dict[str, Any], executable: dict[str, Any], stack: ExitStack

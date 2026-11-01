@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import hashlib
 import json
 import os
 import shlex
@@ -23,6 +24,70 @@ from scripts.runtime_docker import _run_nested_docker
 from scripts.runtime_docker_backend import DockerBackend
 from scripts.runtime_docker_systemd_guard import PLACEMENT_GUARD, USER_MANAGER, guarded_command
 from scripts.runtime_tests import DEFAULT_TIMEOUT, ProbeError, RuntimeContext
+
+
+class OwnedStartupPlainLogTests(unittest.TestCase):
+    def test_plain_messages_reuse_reviewed_first_match_labels_and_never_export_text(self) -> None:
+        private = "protected-startup-canary"
+        known = "[rootlesskit:parent] error: failed to setup UID/GID map: newuidmap /private/helper failed: " + private
+        raw = (known + "\n" + known + "\n" + private + "\n").encode()
+        result = diagnostics.classify_owned_startup_log(raw)
+        self.assertEqual(
+            result,
+            {
+                "availability": "classified",
+                "bytes": len(raw),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "records": 3,
+                "unknownRecords": 1,
+                "classes": ["uidmap-helper-message"],
+            },
+        )
+        self.assertNotIn(private, json.dumps(result))
+        self.assertNotIn("/private/helper", json.dumps(result))
+        from scripts import docker_userns_active  # noqa: PLC0415 - independently compare closed wire vocabulary.
+
+        self.assertEqual(
+            docker_userns_active.GUEST_EXIT_LOG_CLASSES, {name for name, _pattern in diagnostics.STARTUP_LOG_PATTERNS}
+        )
+
+    def test_empty_unknown_exact_record_and_total_byte_boundaries_are_complete(self) -> None:
+        for raw, records in ((b"", 0), (b"unknown\n", 1), (b"x" * 4096 + b"\n", 1), ((b"x" * 1023 + b"\n") * 64, 64)):
+            with self.subTest(length=len(raw)):
+                result = diagnostics.classify_owned_startup_log(raw)
+                self.assertEqual(result["bytes"], len(raw))
+                self.assertEqual(result["sha256"], hashlib.sha256(raw).hexdigest())
+                self.assertEqual(result["records"], records)
+                self.assertEqual(result["unknownRecords"], records)
+                self.assertEqual(result["classes"], [])
+
+    def test_invalid_framing_encoding_types_and_one_byte_record_or_input_overflow_refuse(self) -> None:
+        cases = (
+            (b"partial", "invalid-framing"),
+            (b"a\r\n", "invalid-framing"),
+            (b"a\0b\n", "invalid-framing"),
+            (b"a\x1bb\n", "invalid-framing"),
+            (b"\xff\n", "invalid-encoding"),
+            (b"\n" * 65, "record-limit"),
+            (b"x" * 4097 + b"\n", "record-byte-limit"),
+            (b"x" * 65536 + b"\n", "byte-limit"),
+            (bytearray(b"a\n"), "invalid-fields"),
+        )
+        for raw, reason in cases:
+            with self.subTest(reason=reason), self.assertRaisesRegex(diagnostics._UnavailableError, reason):
+                diagnostics.classify_owned_startup_log(raw)
+
+    def test_plain_classifier_does_not_broaden_or_reinterpret_existing_journal_parser(self) -> None:
+        raw = b"[rootlesskit:parent] error: failed to start the child: fork/exec /proc/self/exe: permission denied\n"
+        with self.assertRaises(ValueError):
+            diagnostics._classify_startup_log(raw)
+        journal = b'{"MESSAGE":"unknown"}\n'
+        with self.assertRaisesRegex(diagnostics._UnavailableError, "record-limit"):
+            diagnostics._classify_startup_log(journal * 9)
+        result = diagnostics.classify_owned_startup_log(journal)
+        self.assertEqual(result["classes"], [])
+        self.assertEqual(result["unknownRecords"], 1)
+
 
 if TYPE_CHECKING:
     from collections.abc import Callable

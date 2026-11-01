@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import math
 import os
@@ -42,6 +43,8 @@ PROTOCOL_LIMIT = 96 * 1024
 GUEST_BYTE_LIMIT = 2048
 GUEST_RECORD_LIMIT = 1024
 GUEST_LOG_RECORD_LIMIT = 8
+OWNED_LOG_RECORD_LIMIT = 64
+OWNED_LOG_LINE_LIMIT = 4096
 # Private journal metadata shares the existing capture cap; service and closed-wire input remain 2 KiB.
 GUEST_LOG_INPUT_LIMIT = BYTE_LIMIT
 DIAGNOSTIC_RECORD_LIMIT = 4096
@@ -618,6 +621,43 @@ def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
             raise _UnavailableError("invalid-fields")
         result[key] = value
     return result
+
+
+def classify_owned_startup_log(raw: bytes) -> dict[str, Any]:
+    """Classify complete bounded plain Engine logs; never return message contents."""
+    if type(raw) is not bytes:
+        raise _UnavailableError("invalid-fields")
+    if len(raw) > BYTE_LIMIT:
+        raise _UnavailableError("byte-limit")
+    if raw and not raw.endswith(b"\n"):
+        raise _UnavailableError("invalid-framing")
+    if re.search(rb"[\x00-\x08\x0b-\x1f\x7f]", raw):
+        raise _UnavailableError("invalid-framing")
+    lines = raw.split(b"\n")[:-1] if raw else []
+    if len(lines) > OWNED_LOG_RECORD_LIMIT:
+        raise _UnavailableError("record-limit")
+    if any(len(line) > OWNED_LOG_LINE_LIMIT for line in lines):
+        raise _UnavailableError("record-byte-limit")
+    try:
+        messages = [line.decode("utf-8", errors="strict") for line in lines]
+    except UnicodeError:
+        raise _UnavailableError("invalid-encoding") from None
+    classes: set[str] = set()
+    unknown = 0
+    for message in messages:
+        label = next((name for name, pattern in STARTUP_LOG_PATTERNS if re.search(pattern, message)), None)
+        if label is None:
+            unknown += 1
+        else:
+            classes.add(label)
+    return {
+        "availability": "classified",
+        "bytes": len(raw),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "records": len(lines),
+        "unknownRecords": unknown,
+        "classes": sorted(classes),
+    }
 
 
 def _classify_startup_log(raw: bytes) -> dict[str, Any]:
