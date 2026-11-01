@@ -128,6 +128,28 @@ class PlanningTests(unittest.TestCase):
         with patch.object(engine, "_changed_files", return_value=["scripts/container_engine.py"]):
             self.assertEqual(engine._selected_image_names(self.images, _options()), {"base", "app"})
 
+    def test_rootless_diagnostic_helper_only_change_selects_every_native_image(self) -> None:
+        for changed in (
+            "scripts/runtime_backends.py",
+            "scripts/runtime_docker_backend.py",
+            "scripts/runtime_docker_diagnostics.py",
+            "scripts/runtime_docker_expiry.py",
+            "scripts/runtime_resource_budgets.py",
+        ):
+            with self.subTest(changed=changed), patch.object(engine, "_changed_files", return_value=[changed]):
+                self.assertEqual(engine._selected_image_names(self.images, _options()), {"base", "app"})
+
+    def test_root_guard_change_selects_all_consumers_including_ordinary_direct(self) -> None:
+        images = engine._load_images()
+        with patch.object(engine, "_changed_files", return_value=["scripts/runtime_docker_systemd_guard.py"]):
+            plan = engine._build_plan(images, _options())
+        self.assertEqual(set(plan["selection"]["directImages"]), {image["name"] for image in images})
+        self.assertEqual(plan["selection"]["reverseDependencies"], [])
+        expected = {
+            (image["name"], architecture) for image in images for architecture in image["build"]["architectures"]
+        }
+        self.assertEqual({(row["name"], row["arch"]) for row in plan["smokeBuildMatrix"]["include"]}, expected)
+
     def test_validation_only_change_selects_no_images(self) -> None:
         for changed_file in (".github/renovate.json", "container.schema.json", "pyproject.toml", "uv.lock"):
             with (
@@ -795,3 +817,19 @@ class RepositoryValidationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MaintainedDirectInputOwnershipTests(unittest.TestCase):
+    def test_every_active_helper_is_a_global_input_for_all_direct_consumers(self) -> None:
+        import fnmatch  # noqa: PLC0415
+
+        from scripts import docker_userns_active_bootstrap_bundle as producer  # noqa: PLC0415
+        from scripts.container_engine import GLOBAL_IMAGE_INPUTS  # noqa: PLC0415
+
+        for path in (
+            *producer.FILES,
+            "scripts/docker_userns_active_client.py",
+            "scripts/docker_userns_active_bootstrap_bundle.py",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(any(fnmatch.fnmatchcase(path, pattern) for pattern in GLOBAL_IMAGE_INPUTS))

@@ -15,6 +15,42 @@ from scripts.runtime_tests import ProbeError, RuntimeContext
 
 
 class RuntimeCommandTests(unittest.TestCase):
+    def test_explicit_timeout_is_forwarded_without_zero_or_negative_default_fallback(self) -> None:
+        context = RuntimeContext.__new__(RuntimeContext)
+        context.timeout = 45
+        context.checks = []
+        result = subprocess.CompletedProcess(["fixed"], 0, "ok", "")
+        with patch("scripts.runtime_tests.subprocess.run", return_value=result) as run:
+            context.command("default", ["fixed"])
+            self.assertEqual(run.call_args.kwargs["timeout"], 45)
+            context.command("remaining", ["fixed"], timeout=0.25)
+            self.assertEqual(run.call_args.kwargs["timeout"], 0.25)
+            run.reset_mock()
+            for timeout in (0, -1, float("nan"), float("inf")):
+                with self.subTest(timeout=timeout), self.assertRaisesRegex(ProbeError, "finite and positive"):
+                    context.command("expired", ["fixed"], timeout=timeout)
+            run.assert_not_called()
+
+    def test_exec_keeps_guard_and_forwards_only_explicit_timeout(self) -> None:
+        context = RuntimeContext.__new__(RuntimeContext)
+        context.exec_guard = ("fixed-guard",)
+        context.podman = MagicMock(return_value="ok")
+        context.exec("default", "owned", "true")
+        context.podman.assert_called_with("default", "exec", "owned", "fixed-guard", "true")
+        context.exec("remaining", "owned", "true", timeout=0.25)
+        context.podman.assert_called_with("remaining", "exec", "owned", "fixed-guard", "true", timeout=0.25)
+
+    def test_start_forwards_only_explicit_timeout_and_keeps_owned_identity(self) -> None:
+        context = RuntimeContext.__new__(RuntimeContext)
+        context.image_ref = "localhost/test:runtime"
+        context.containers = []
+        context.podman = MagicMock(return_value="a" * 64)
+        context.start("default")
+        self.assertEqual(context.podman.call_args.kwargs, {})
+        context.start("bounded launch", timeout=0.25)
+        self.assertEqual(context.podman.call_args.kwargs, {"timeout": 0.25})
+        self.assertEqual(context.containers, ["a" * 64])
+
     def test_image_precedes_guest_command_and_follows_podman_options(self) -> None:
         context = RuntimeContext.__new__(RuntimeContext)
         context.image_ref = "localhost/test:runtime"
@@ -113,8 +149,10 @@ class RuntimeCommandTests(unittest.TestCase):
             context.containers = []
             context.run_containers = set()
             context.checks = []
+            context.observations = []
             context._owned_mounts = MagicMock(return_value=[])
             context.load_archive = MagicMock(return_value={})
+            context.prepare = MagicMock(return_value={"engine": "podman", "clientVersion": "podman version 5.4.2"})
             container = "b" * 64
             commands: list[list[str]] = []
 
@@ -311,7 +349,9 @@ class RuntimeCommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             context = MagicMock()
             context.checks = []
+            context.observations = []
             context.load_archive.return_value = {}
+            context.prepare.return_value = {"engine": "podman", "clientVersion": "podman version 5.4.2"}
             context.podman.return_value = "podman fixture"
             context.cleanup.side_effect = ProbeError("isolated store retained")
             evidence_path = Path(directory) / "evidence.json"
@@ -343,3 +383,167 @@ class RuntimeCommandTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OrdinaryDirectLifecycleTests(unittest.TestCase):
+    def test_work_backend_cleanup_receipt_and_stage_disposal_all_precede_qualification(self) -> None:
+        for fault in (
+            None,
+            "work",
+            "cleanup",
+            "disposal",
+            "late-cleanup",
+            "late-disposal",
+            "wrong-disposal",
+            "late-write",
+        ):
+            with self.subTest(fault=fault):
+                self._case(fault)
+
+    def _fixture(self, directory: str, fault: str | None) -> tuple:
+        from types import SimpleNamespace  # noqa: PLC0415
+
+        from scripts import docker_userns_qualification as qualification  # noqa: PLC0415
+        from scripts.runtime_docker_backend import DockerBackend  # noqa: PLC0415
+        from tests.test_evidence_gate import ordinary_direct_runtime  # noqa: PLC0415
+
+        cutoff = 10_000_000_000_000_001
+        expected = ordinary_direct_runtime()
+        scoped = expected["scopedProfile"]
+        events = []
+        clock = [9_999_800_000_000_001]
+        backend = DockerBackend(Path(directory), ())
+        backend.deadline_ns = cutoff
+        backend.deadline = qualification.deadline_seconds(cutoff)
+        scoped_client = SimpleNamespace(evidence=scoped)
+        backend.scoped_profile = scoped_client
+        ctx = SimpleNamespace(
+            backend=backend,
+            checks=[{"name": "native workload", "status": "passed"}],
+            observations=[],
+            bind_guest_profile=MagicMock(),
+        )
+
+        def prepare() -> dict:
+            events.append("prepare")
+            self.assertEqual(ctx.runtime_deadline_ns, cutoff)
+            return expected["host"]["outerRuntime"]
+
+        ctx.prepare = prepare
+
+        def load(_archive: Path) -> dict:
+            events.append("load")
+            clock[0] += 1_000_000_000
+            return expected["imageIdentity"]
+
+        ctx.load_archive = load
+        backend.prepare_scoped_profile = lambda *_args: events.append("lease")
+
+        def work(*_args: object, **_kwargs: object) -> None:
+            events.append("work")
+            clock[0] += 1_000_000_000
+            self._fail_at(fault, "work", "original native failure")
+
+        def cleanup() -> None:
+            events.append("cleanup")
+            if fault == "cleanup":
+                reason = "custody uncertain"
+                raise ProbeError(reason)
+            if fault == "late-cleanup":
+                clock[0] = cutoff
+
+        ctx.cleanup = cleanup
+        ctx.work = work
+
+        def dispose() -> dict:
+            self.assertEqual(events[-1], "cleanup")
+            self.assertEqual(ctx.runtime_deadline_ns, cutoff)
+            events.append("dispose")
+            if fault == "disposal":
+                reason = "stage retained"
+                raise ProbeError(reason)
+            if fault == "late-disposal":
+                clock[0] = cutoff
+            return self._disposal_record(expected, fault)
+
+        scoped_client.dispose_stage = dispose
+        return ctx, expected, events, clock
+
+    @staticmethod
+    def _fail_at(fault: str | None, selected: str, reason: str) -> None:
+        if fault == selected:
+            raise ProbeError(reason)
+
+    @staticmethod
+    def _disposal_record(expected: dict, fault: str | None) -> dict:
+        if fault == "wrong-disposal":
+            return expected["stageDisposal"] | {"bootstrapSha256": "f" * 64}
+        return expected["stageDisposal"]
+
+    @staticmethod
+    def _output_open(output: Path, clock: list[int], cutoff: int, fault: str | None) -> object:
+        original = Path.open
+
+        def opened(path: Path, *args: object, **kwargs: object) -> object:
+            handle = original(path, *args, **kwargs)
+            if fault != "late-write" or path != output or args[:1] != ("wb",):
+                return handle
+            proxy = MagicMock(wraps=handle)
+            proxy.__enter__.return_value = proxy
+            proxy.__exit__.side_effect = handle.__exit__
+
+            def write(body: bytes) -> int:
+                result = handle.write(body)
+                clock[0] = cutoff
+                return result
+
+            proxy.write.side_effect = write
+            return proxy
+
+        return opened
+
+    def _case(self, fault: str | None) -> None:
+        cutoff = 10_000_000_000_000_001
+        with tempfile.TemporaryDirectory() as directory:
+            ctx, expected, events, clock = self._fixture(directory, fault)
+            args = argparse.Namespace(
+                metadata=None,
+                image_name="docker-20.10-rootless",
+                arch="amd64",
+                evidence=str(Path(directory) / "evidence.json"),
+                sudo=False,
+                no_sudo=True,
+                archive="source.tar",
+                image_ref=None,
+                timeout=5,
+                allow_privileged=True,
+                skip_nested=False,
+                outer_engine="profile",
+                active_userns_stage="/run/containers-userns-active." + "f" * 32,
+                active_userns_deadline_ns=cutoff,
+            )
+            with (
+                patch.dict(
+                    "os.environ", {"GITHUB_RUN_ID": "1", "GITHUB_RUN_ATTEMPT": "2", "GITHUB_JOB": "smoke-build"}
+                ),
+                patch("time.monotonic_ns", side_effect=lambda: clock[0]),
+                patch("time.monotonic", side_effect=lambda: clock[0] / 1_000_000_000),
+                patch.object(Path, "open", self._output_open(Path(args.evidence), clock, cutoff, fault)),
+                patch.object(runtime_tests, "RuntimeContext", return_value=ctx),
+                patch(
+                    "scripts.docker_userns_active_bootstrap_bundle.context",
+                    return_value=expected["scopedProfile"]["workflowContext"],
+                ),
+                patch.object(runtime_tests, "_docker", side_effect=ctx.work),
+            ):
+                result = runtime_tests.run(args)
+            self.assertEqual(events[:5], ["prepare", "load", "lease", "work", "cleanup"])
+            self.assertEqual(
+                result["qualification"], "complete" if fault is None else "none", result.get("cleanupError")
+            )
+            self.assertEqual(result["status"], "passed" if fault is None else "failed")
+            if fault == "work":
+                self.assertIn("original native failure", result["error"])
+            if fault in {"work", "cleanup", "late-cleanup"}:
+                self.assertNotIn("dispose", events)
+            self.assertEqual(json.loads(Path(args.evidence).read_text())["qualification"], result["qualification"])

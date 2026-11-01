@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import re
 import tempfile
@@ -95,7 +96,35 @@ class ApplicationProvenanceTests(unittest.TestCase):
                     self.assertIsNotNone(updated)
                     self.assertEqual(updated.group("currentValue"), "98.76.54")
         self.assertTrue(config["automerge"])
-        self.assertFalse(any(rule.get("automerge") is False for rule in config["packageRules"]))
+        # Reviewed source/fixed-fixture exceptions must not apply to PHP updates.
+        for path in PHP_PATHS:
+            for manager in (
+                item
+                for item in config["customManagers"]
+                if any(
+                    name in " ".join(item.get("matchStrings", []))
+                    for name in ("PHP_APCU_VERSION", "PHP_IMAGICK_VERSION", "PHP_REDIS_VERSION", "COMPOSER_VERSION")
+                )
+            ):
+                for rule in (item for item in config["packageRules"] if item.get("automerge") is False):
+                    file_matches = any(
+                        re.search(pattern[1:-1], path.as_posix()) is not None
+                        if pattern.startswith("/") and pattern.endswith("/")
+                        else fnmatch.fnmatchcase(path.as_posix(), pattern)
+                        for pattern in rule.get("matchFileNames", ["**"])
+                    )
+                    package = manager.get("packageNameTemplate", manager.get("depNameTemplate"))
+                    dep = manager.get("depNameTemplate", package)
+                    matches = (
+                        file_matches
+                        and package in rule.get("matchPackageNames", [package])
+                        and dep in rule.get("matchDepNames", [dep])
+                        and "custom.regex" in rule.get("matchManagers", ["custom.regex"])
+                        and manager["datasourceTemplate"]
+                        in rule.get("matchDatasources", [manager["datasourceTemplate"]])
+                    )
+                    with self.subTest(path=path, dependency=dep, manual_rule=rule["description"]):
+                        self.assertFalse(matches)
 
     def test_existing_digest_and_patch_automerge_policy_is_preserved(self) -> None:
         config = json.loads(Path(".github/renovate.json").read_text(encoding="utf-8"))
