@@ -1,4 +1,4 @@
-"""Verify and isolate the unchanged DockerLens pure policy builder, without loading policy."""
+"""Verify and isolate the fixed DockerLens mediated policy builder, without loading policy."""
 
 from __future__ import annotations
 
@@ -129,7 +129,7 @@ sys.path.insert(0, sys.argv[2])
 spec = importlib.util.spec_from_file_location("canonical_policy", sys.argv[2] + "/native-runner-apparmor.py")
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
-value = module.profile_bytes(sys.argv[3])
+value = module.mediated_profile_bytes(sys.argv[3])
 if type(value) is not bytes or len(value) > 1024:
     raise SystemExit(1)
 sys.stdout.buffer.write(value)
@@ -350,7 +350,7 @@ def manifest(path: Path = MANIFEST) -> dict[str, Any]:
     need(
         source["managed"] is True
         and source["repository"] == "Strukturpiloten/docker-lens"
-        and source["ref"] == "TheRealBecks/issue127"
+        and source["ref"] == "TheRealBecks/issue152"
         and type(source["commit"]) is str
         and COMMIT.fullmatch(source["commit"])
         and source["license"] == "MPL-2.0"

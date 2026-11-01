@@ -42,7 +42,23 @@ def digest(data: bytes) -> str:
 
 def policy(name: str) -> bytes:
     """Independent expected bytes emitted only by the test's fake builder."""
-    return f"abi <abi/4.0>,\nprofile {name} flags=(unconfined) {{\n  userns,\n}}\n".encode("ascii")
+    return (
+        f"abi <abi/4.0>,\nprofile {name} {{\n"
+        "  file,\n"
+        "  capability,\n"
+        "  network,\n"
+        "  unix,\n"
+        "  dbus (bind, send, receive),\n"
+        "  mount,\n"
+        "  remount,\n"
+        "  umount,\n"
+        "  pivot_root,\n"
+        "  signal (send, receive),\n"
+        "  ptrace,\n"
+        "  userns create,\n"
+        "  mqueue (create, read, write, open, delete, setattr, getattr) type=posix,\n"
+        "}\n"
+    ).encode("ascii")
 
 
 def guard_source_fixture() -> tuple[child.Source, ...]:
@@ -935,7 +951,7 @@ class ChildTests(unittest.TestCase):
         self.data = (
             (
                 b"from pathlib import Path\nfrom native_outer_diagnostic_capture import PREFIX\n"
-                b"location = Path(__file__)\ndef profile_bytes(name):\n return PREFIX + name.encode()\n"
+                b"location = Path(__file__)\ndef mediated_profile_bytes(name):\n return PREFIX + name.encode()\n"
             ),
             b"PREFIX = b'complete-unchanged:'\n",
         )
@@ -1135,7 +1151,7 @@ class ChildTests(unittest.TestCase):
 
     def test_declared_result_guard_has_only_its_original_type_and_size_checks(self) -> None:
         for expression in ("'wrong type'", "b'x' * 1025"):
-            raw = f"def profile_bytes(name): return {expression}\n".encode("ascii")
+            raw = f"def mediated_profile_bytes(name): return {expression}\n".encode("ascii")
             (self.root / "source-0").write_bytes(raw)
             self.sources = (replace(self.sources[0], size=len(raw), sha256=digest(raw)), self.sources[1])
             with self.subTest(expression=expression), self.assertRaises(SystemExit) as raised:
@@ -1144,7 +1160,9 @@ class ChildTests(unittest.TestCase):
 
     def test_payload_preserves_historical_strict_guard_tail_and_does_not_renew_setup(self) -> None:
         tail = child.CODE[child.CODE.index("os.close(int(interpreter))") :]
-        # Invert only the newly required completeness bookkeeping; every prior guard byte stays pinned.
+        # Invert only completeness bookkeeping and the separately asserted fixed builder selection.
+        self.assertEqual(tail.count("module.mediated_profile_bytes(name)"), 1)
+        tail = tail.replace("module.mediated_profile_bytes(name)", "module.profile_bytes(name)", 1)
         for addition in (
             "seen = set()\n",
             "    seen.add(descriptor)\n",
@@ -1154,6 +1172,8 @@ class ChildTests(unittest.TestCase):
             tail = tail.replace(addition, "", 1)
         self.assertEqual(digest(tail.encode()), "64dbdaaf1b7abead9b0b649fd13ca2fee52246ca21cc35bfec0669af2c20d3d5")
         sdk_tail = child.CODE[child.CODE.index("class SourceLoader") :]
+        self.assertEqual(sdk_tail.count("module.mediated_profile_bytes(name)"), 1)
+        sdk_tail = sdk_tail.replace("module.mediated_profile_bytes(name)", "module.profile_bytes(name)", 1)
         self.assertEqual(digest(sdk_tail.encode()), "0473078a61fc6f5e986e2e04c886bd229b15ad42c37694e6a730db8cc81fdc62")
         for payload in (child.CODE, child.PROBE_CODE):
             imports = [node for node in ast.walk(ast.parse(payload)) if isinstance(node, ast.Import)]
@@ -1194,7 +1214,7 @@ class ChildTests(unittest.TestCase):
         path = self.root / "ambient_extra.py"
         path.write_bytes(b"raise AssertionError('workspace imported')\n")
         first = self.root / "source-0"
-        first.write_bytes(b"import ambient_extra\ndef profile_bytes(name): return b'wrong'\n")
+        first.write_bytes(b"import ambient_extra\ndef mediated_profile_bytes(name): return b'wrong'\n")
         self.sources = (
             replace(self.sources[0], size=first.stat().st_size, sha256=digest(first.read_bytes())),
             self.sources[1],
@@ -3032,7 +3052,7 @@ class OrdinaryLauncherTests(unittest.TestCase):
             writer = stack.enter_context(os.fdopen(write, "wb"))
             raw_sources = (
                 (
-                    b'import os,json,resource\ndef profile_bytes(name): return json.dumps({"pid":os.getpid(),'
+                    b'import os,json,resource\ndef mediated_profile_bytes(name): return json.dumps({"pid":os.getpid(),'
                     b'"cpu":resource.getrlimit(resource.RLIMIT_CPU),"core":resource.getrlimit(resource.RLIMIT_CORE),'
                     b'"fsize":resource.getrlimit(resource.RLIMIT_FSIZE)}).encode()\n'
                 ),

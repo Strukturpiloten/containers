@@ -52,7 +52,7 @@ GUARD_DECLARATION_LIMIT = 96
 _GUARD_CODES = {111: GUARD_CATEGORIES[0], 112: GUARD_CATEGORIES[1], 113: GUARD_CATEGORIES[2]}
 _GUARD_CODES.update(enumerate(GUARD_CATEGORIES[3:], start=120))
 _GUARD_SOURCES = (
-    ("canonical_policy", 31133, "17cc280b593466f143ba848183485b796d1e87a60b41d74ca25d49dc86241abe"),
+    ("canonical_policy", 32168, "3aded1c43dfb5046c99e78ba74c3c974de3ce3ec0c68f2d05bc172acea27b3b6"),
     ("native_outer_diagnostic_capture", 13870, "23202211ec3b58a70c1120b0395f43663e3cacff1948609a8fb0fe2dac012962"),
 )
 _SEAL_VALUES = tuple(
@@ -163,7 +163,7 @@ spec = loader.find_spec("canonical_policy")
 module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
 loader.exec_module(module)
-value = module.profile_bytes(name)
+value = module.mediated_profile_bytes(name)
 if type(value) is not bytes or len(value) > 1024:
     raise SystemExit(113)
 sys.stdout.buffer.write(value)

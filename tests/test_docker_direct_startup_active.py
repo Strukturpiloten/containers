@@ -158,7 +158,7 @@ class DirectActorTests(unittest.TestCase):
         ):
             raw = status
             links = dict(subject)
-            label = b"owned-profile (unconfined)\n"
+            label = b"owned-profile (enforce)\n"
             if fault in {"uid", "gid"}:
                 key = b"Uid" if fault == "uid" else b"Gid"
                 raw = raw.replace(key + b":\t1000\t1000\t1000\t1000", key + b":\t1000\t0\t1000\t1000")
@@ -260,7 +260,7 @@ class DirectPolicySubjectTests(unittest.TestCase):
                 with (
                     patch.object(active, "namespace_snapshot", return_value={}),
                     patch.object(active, "task_snapshot", return_value=task) as snapshot,
-                    patch.object(active, "proc_bytes", return_value=b"owned-profile (unconfined)\n"),
+                    patch.object(active, "proc_bytes", return_value=b"owned-profile (enforce)\n"),
                     patch.object(active.os, "pidfd_open", return_value=pidfd, create=True),
                     patch.object(active.select, "select", return_value=([], [], [])),
                 ):
@@ -298,7 +298,7 @@ class DirectPolicySubjectTests(unittest.TestCase):
                 "stat": stat_row,
                 "status": status,
                 "cgroup": cgroup,
-                "attr/apparmor/current": b"owned-profile (unconfined)\n",
+                "attr/apparmor/current": b"owned-profile (enforce)\n",
             }
             with self.subTest(wrong_uid_index=wrong_index), tempfile.TemporaryDirectory() as directory:
                 port = active.RootPort.__new__(active.RootPort)

@@ -32,6 +32,14 @@ A push to `main` selects changed images and their reverse dependencies; the dail
 
 See [runtime backends](runtime-backends.md) for the explicit CI profile policy, local Podman default, private Docker prerequisites, evidence and publication boundary.
 
+The mediated-profile-v2 source integration selects the immutable DockerLens152
+builder and one exact generated enforce label. Source review and complete gates
+must finish before native qualification consumes the exact producer/consumer pair.
+No producer release or image publication is required for that source dependency;
+the complete already-supported ordinary/systemd label, workload and cleanup
+matrix still needs fresh native evidence. Historical retained failures grant no
+cleanup authority, and source checks alone do not qualify this changed policy.
+
 For a bounded ordinary qualification attempt on a reviewed exact source ref,
 select the existing manual profile below after the source reviews and gates:
 

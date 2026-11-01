@@ -393,7 +393,7 @@ class ArmNativeAuthorityTests(unittest.TestCase):
             record["phases"][1]["scopedProfile"]["namespace"][key] = "0" * 64
             with self.subTest(namespace=key), self.assertRaises(EvidenceError):
                 require_ordinary_runtime_authority(record, "docker", {"mode": "rootless", "launcher": "systemd"})
-        for mode in ("enforce", "complain", "default_allow", "stacked//label"):
+        for mode in ("unconfined", "complain", "default_allow", "stacked//label"):
             record = maintained_runtime("arm64")
             scoped = record["phases"][1]["scopedProfile"]
             label = (scoped["profileName"] + " (" + mode + ")\n").encode()

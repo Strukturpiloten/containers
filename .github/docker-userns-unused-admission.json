@@ -2,12 +2,12 @@
   "schemaVersion": 1,
   "consumer": "containers-ubuntu26-userns-unused",
   "qualification": "none",
-  "sourceManifestSha256": "7f6693f40311617e4854f8c6a35cbe13b3afdd3d7a8bef58978397ba1178dbd8",
+  "sourceManifestSha256": "2c5dfa63e3865fa3c41cbefc6cf9eb6a74bc2886bd5f33350922882f3b877057",
   "contracts": {
     "scripts/docker_userns_custody.py": "8d38ba82d0c1798b56cf796e7965ced4fc82f64dd7b3b17857e40f1a62b40fbe",
-    "scripts/docker_userns_custody_child.py": "501ab230619f00cf9a54e1e8de52a3fa19e072c81fbc01c06c4fb6d2f753359c",
+    "scripts/docker_userns_custody_child.py": "573b8fe68e6c7f5d09208ba6c4cd6326beea4502eb91c9950e4c6bfa55073b77",
     "scripts/docker_userns_hosted.py": "6c78600aa1a222449869410912e38a91d427520239a4eff07c02b8551cef8f04",
-    "scripts/docker_userns_policy_source.py": "cafc4121a424b3053528a5c8284314decdcf370878666c39edc83c15b2234927",
+    "scripts/docker_userns_policy_source.py": "e9ab050ecc1182a0fa9d3100af5bb22f08ac6cd77b5caccb6b8fa943c796ed67",
     ".github/docker-userns-helper-closure.json": "48d06e8cb16f495b32a0037d868c7d057a9040e2756c420438a2a302a7ca359f"
   },
   "cohort": {
@@ -28,7 +28,7 @@
     "kind": "manual-unused-only-semantic-admission",
     "evidenceRun": "40277997638",
     "evidenceMerge": "08cba8705b0f81f38a47c3315ce86da76418580e",
-    "limits": "compile-only historical observation; fresh identities required; no load or guest qualification",
+    "limits": "Historical compile-only cohort observation remains nonqualifying for the new immutable mediated SDK source; corrected thirteen-rule ABI4 contract is selected with unchanged tools/cohort and fresh strict compile/native qualification still required; no load or guest authority follows from this record.",
     "integrityException": "preinstalled OS parser/interpreter/stdlib and systemd are observed root-owned OS trust; no vendor checksum claimed",
     "renovate": "manual review on source/contract change; never automatically rewrite cohort or content hashes"
   }

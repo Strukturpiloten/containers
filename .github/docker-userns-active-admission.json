@@ -3,7 +3,7 @@
   "consumer": "containers-ubuntu26-userns-active",
   "purpose": "scoped-prerequisite-attempt",
   "qualification": "none",
-  "sourceManifestSha256": "7f6693f40311617e4854f8c6a35cbe13b3afdd3d7a8bef58978397ba1178dbd8",
+  "sourceManifestSha256": "2c5dfa63e3865fa3c41cbefc6cf9eb6a74bc2886bd5f33350922882f3b877057",
   "context": {
     "repository": "Strukturpiloten/containers",
     "workflow": ".github/workflows/ci.yml",
@@ -21,9 +21,9 @@
   },
   "review": {
     "kind": "reviewed-active-source-predicate-not-observation-created-authority",
-    "date": "2026-10-30",
+    "date": "2026-11-01",
     "evidenceRun": "41102914835",
-    "limits": "Schema7 separates the finite ordinary-direct image/architecture map from three systemd fixtures. Direct, exact29.8.1 and packaged Debian11 attempts require full ordinary caller tuples. Historical diagnostic observations remain nonqualifying. The external SDK, profile permissions, parser and hosted OS cohorts are unchanged; new source and every required native row still need independent qualification. No publication authority follows.",
+    "limits": "Schema7 retains the finite ordinary-direct and systemd maps. The mediated-profile-v2 source contract selects the immutable DockerLens152 fixed thirteen-rule ABI4 builder, seven explicit POSIX permissions, exact owned enforce label and schema2 refusal detail. Historical schema1 diagnostics and bare-unconfined actors remain separately checked. Parser, ABI and all hosted cohorts are unchanged. Source gates do not qualify compilation or native behavior; fresh exact-source whole-matrix label/workload/cleanup qualification remains mandatory. No publication authority follows.",
     "renovate": "Managed pins remain in docker-userns-policy-source.json; source/parser/helper changes require coordinated manual re-admission; no automatic runner fingerprints",
     "armCohort": "Deliberately selected bounded ARM compatibility hypothesis after source/ABI review; exact root-owned preinstalled tools use the existing OS-tool trust exception, not vendor checksums or VM attestation. Historical ImageVersion 20261026.168.1 and startup header 20261025.167.1 differ; no independent image/package manifest was established. Native owner/load/attachment/C/OOM/cleanup acceptance remains required."
   },
@@ -37,7 +37,7 @@
     "measuredPostExec": false,
     "requirement": "Fresh actor namespace opens before invoking the held reviewed parser; no claim of post-exec parser namespace measurement"
   },
-  "revision": "containers558-ordinary-direct-v1",
+  "revision": "containers558-mediated-profile-v2",
   "maintainedContext": {
     "repository": "Strukturpiloten/containers",
     "imageOS": "ubuntu26",

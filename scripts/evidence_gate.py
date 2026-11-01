@@ -249,7 +249,7 @@ def _scoped_phase(record: dict[str, Any], phase: dict[str, Any], *, expected_pur
             and re.fullmatch(r"[0-9a-f]{32}", scoped["lease"]) is not None
             and scoped["profileName"]
             == f"dockerlens-127-upstream-rootless-{binding.run}-{binding.attempt}-{scoped['lease']}"
-            and scoped["sourceManifestSha256"] == "7f6693f40311617e4854f8c6a35cbe13b3afdd3d7a8bef58978397ba1178dbd8"
+            and scoped["sourceManifestSha256"] == "2c5dfa63e3865fa3c41cbefc6cf9eb6a74bc2886bd5f33350922882f3b877057"
             and scoped["state"] == "closed"
             and scoped["cleanOwnerVerified"] is True
             and scoped["ownerTerminationVerified"] is True
@@ -269,9 +269,8 @@ def _scoped_phase(record: dict[str, Any], phase: dict[str, Any], *, expected_pur
             and observation["source"] == "held-task-attr/apparmor/current"
             and observation["exactMatch"] is True
             and observation["singleLabel"] is True
-            and observation["bytes"] == len((scoped["profileName"] + " (unconfined)\n").encode())
-            and observation["sha256"]
-            == hashlib.sha256((scoped["profileName"] + " (unconfined)\n").encode()).hexdigest()
+            and observation["bytes"] == len((scoped["profileName"] + " (enforce)\n").encode())
+            and observation["sha256"] == hashlib.sha256((scoped["profileName"] + " (enforce)\n").encode()).hexdigest()
             and observation["taskIdentityBound"] is True
             and observation["timing"] == "post-create"
         )

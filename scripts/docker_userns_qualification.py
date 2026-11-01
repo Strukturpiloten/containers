@@ -30,7 +30,7 @@ MAX_NAMESPACES = 2**63 - 1
 CONSUMER = "containers-ubuntu26-userns-active"
 PREREQUISITE_SCHEMA = 4
 ADMISSION_SCHEMA = 7
-ADMISSION_REVISION = "containers558-ordinary-direct-v1"
+ADMISSION_REVISION = "containers558-mediated-profile-v2"
 MAINTAINED_PROFILES = ("full", "docker-rootless-qualification")
 MAINTAINED_IMAGES = (
     "docker-29-conformance-rootless",

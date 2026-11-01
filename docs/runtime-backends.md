@@ -62,14 +62,53 @@ containers-ubuntu26-userns-dryparse, scope hostcompile-only and qualification no
 The planned fixture is docker-20.10-rootless, but no image build, container run, bootstrap,
 policy load or host-policy change occurs. Ordinary smoke jobs and Required CI are unchanged.
 
-[The active source manifest](../.github/docker-userns-policy-source.json) pins the unchanged
-DockerLens TheRealBecks/issue127 candidate by commit, exact builder/helper dependency-closure
-sizes and hashes, and MPL-2.0 license bytes/provenance. Public HTTPS retrieval accepts only those
-immutable allowlisted resources, without credentials or redirects, into private nonsymlink custody.
-An isolated non-root Python child invokes only the pure profile_bytes builder. The historical
-dockerlens-127 profile-name prefix is only an identifier, not DockerLens consumer authority:
-the actual Containers run/attempt and fresh nonce bind it. The policy name and ABI-4 bytes are not
-rewritten; no native acceptance receipt or old producer admission is reused.
+[The active source manifest](../.github/docker-userns-policy-source.json) now
+selects DockerLens commit `05cb8ccb896f996f3f7575ad26ec36b71e0548c0` from
+`TheRealBecks/issue152`, with exact three-file builder/helper/license sizes and
+hashes. Earlier issue127 compile/unused observations and retained failures remain
+historical and do not qualify this changed source. Public HTTPS retrieval still
+accepts only immutable allowlisted resources, without credentials or redirects,
+into private nonsymlink custody. The isolated child invokes only the fixed pure
+`mediated_profile_bytes` builder; there is no fallback or local policy rewriting.
+The dockerlens-127 name prefix is only an identifier: actual Containers
+run/attempt and fresh nonce remain the ownership binding.
+
+The selected test prerequisite is an attachment-free ordinary enforce profile
+declaring ABI4 and thirteen explicit rules: file with inherit-only execution,
+capability, network, unix, D-Bus bind/send/receive, mount, remount, umount,
+pivot_root, signal send/receive, ptrace, userns create, and POSIX mqueue
+create/read/write/open/delete/setattr/getattr with type=posix. No all-rule,
+io_uring, generic/SysV queues, D-Bus eavesdrop or profile/hat transition is emitted
+or claimed. POSIX delete is supported by ABI4 and explicitly selected. Omission
+does not establish denial or mediation, and this permissive fixture prerequisite
+is not a security sandbox or equivalent to the rejected all-rule policy.
+
+The earlier all-rule candidate has a static ABI blocker: it implies io_uring
+while declared ABI4 lacks that feature, triggering unchanged fatal warnings.
+No parser, ABI, hosted cohort, feature override, warning selector or output/time
+limit is changed to accept the explicit policy. Maximum policy size is 378 bytes,
+below the unchanged 1024-byte bound. The upstream AppArmor 5.0.2 semantic reference
+is commit `909affc32a13d14ae3a7ccf44d325ae63ce11baf`; its ABI4 SHA-256 remains
+`e510bb8f6788b45e48de2f859a6f94a7b8416cbac5a1051814cfce925fa911bd`.
+The GPL-2.0 parser source was a read-only syntax/permission reference; no oracle
+implementation or parser artifact is copied or redistributed here. The canonical
+SDK's contract/ADR0051 records the reviewed source provenance.
+
+Registry, held-task, success-receipt and owned-unload checks accept only the exact
+generated enforce label. Bootstrap/root owners and direct clean-control actors
+retain their separate bare-unconfined checks. New trusted subject refusal details
+emit schema2; exact-integer dispatch also preserves the byte-identical historical
+schema1 validator and its old predicate. Neither diagnostic version grants
+attachment, admission or cleanup authority. Retained historical leases remain
+retained; no foreign profile or wildcard cleanup is added.
+
+This is source integration only. Strict no-load compilation under the original
+fatal-warning flags, fresh post-RootlessKit-exec held-task label/workload readbacks,
+the complete existing ordinary/systemd image/architecture matrix and terminal
+cleanup remain required against both immutable producer and consumer sources.
+A source gate, compile, registry row, configured inspect profile or repaired row
+does not qualify the matrix. No native success, release or image publication is
+claimed by this source change.
 
 The preinstalled, root-owned regular ELF parser must be exactly 5.0.2, without SUID/SGID or file
 capabilities. The isolated child sets and verifies NoNewPrivs=1 and zero effective, permitted,

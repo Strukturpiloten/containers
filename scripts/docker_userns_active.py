@@ -297,7 +297,7 @@ FAILURE_STATES = frozenset(
         "retained",
     }
 )
-SOURCE_MANIFEST_SHA256 = "7f6693f40311617e4854f8c6a35cbe13b3afdd3d7a8bef58978397ba1178dbd8"
+SOURCE_MANIFEST_SHA256 = "2c5dfa63e3865fa3c41cbefc6cf9eb6a74bc2886bd5f33350922882f3b877057"
 MAX_FAILURE = 8192
 
 
@@ -616,6 +616,103 @@ def subject_profile_origin(value: dict[str, Any]) -> bool:
     )
 
 
+SUBJECT_DETAIL_ENFORCE_SCHEMA = 2
+
+
+def subject_profile_detail_v2(value: object) -> dict[str, Any] | None:
+    """Validate schema2 refusal detail for the future enforce contract; never grant acceptance."""
+    keys = {
+        "schemaVersion",
+        "originOperation",
+        "source",
+        "bytes",
+        "sha256",
+        "framing",
+        "labelKind",
+        "expectedName",
+        "mode",
+        "postchecks",
+        "postchecksComplete",
+        "executableKind",
+        "sameExecutable",
+        "foreignLabelMatchesExecutableBasename",
+    }
+    if type(value) is not dict or set(value) != keys:
+        return None
+    try:
+        require(type(value["schemaVersion"]) is int and value["schemaVersion"] == SUBJECT_DETAIL_ENFORCE_SCHEMA)
+        require(value["originOperation"] == "bind" and value["source"] == "held-task-attr/apparmor/current")
+        require(type(value["bytes"]) is int and 0 <= value["bytes"] <= SUBJECT_LABEL_LIMIT)
+        require(type(value["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", value["sha256"]))
+        enums = {
+            "framing": {"single-ascii-lf", "non-ascii", "other"},
+            "labelKind": {
+                "bare-unconfined",
+                "single-named",
+                "stack-marker",
+                "namespace-marker",
+                "namespace-and-stack-markers",
+                "unparsed",
+            },
+            "expectedName": {"exact", "component", "absent", "unparsed"},
+            "mode": SUBJECT_MODES | {"other", "unparsed"},
+            "executableKind": {"rootlesskit", "dockerd", "shell", "multicall", "other", "unavailable"},
+            "sameExecutable": {"match", "mismatch", "unavailable", "not-attempted"},
+        }
+        require(all(type(value[key]) is str and value[key] in allowed for key, allowed in enums.items()))
+        postchecks = value["postchecks"]
+        require(type(postchecks) is dict and set(postchecks) == set(SUBJECT_POSTCHECKS))
+        require(all(type(state) is str and state in SUBJECT_CHECK_STATES for state in postchecks.values()))
+        require(
+            type(value["postchecksComplete"]) is bool
+            and value["postchecksComplete"] == all(state == "match" for state in postchecks.values())
+        )
+        require(
+            value["foreignLabelMatchesExecutableBasename"] is None
+            or type(value["foreignLabelMatchesExecutableBasename"]) is bool
+        )
+        require(
+            value["framing"] == "single-ascii-lf"
+            or (value["labelKind"], value["expectedName"], value["mode"]) == ("unparsed", "unparsed", "unparsed")
+        )
+        require(value["framing"] == "other" or value["bytes"] > 0)
+        subject_profile_dependencies(value)
+        kind = value["labelKind"]
+        if kind == "bare-unconfined":
+            require(
+                (value["expectedName"], value["mode"], value["bytes"], value["sha256"])
+                == ("absent", "unconfined", 11, digest(b"unconfined\n"))
+            )
+        elif kind == "single-named":
+            require(value["expectedName"] in {"exact", "absent"} and value["mode"] != "unparsed")
+            require((value["expectedName"], value["mode"]) != ("exact", "enforce"))
+        elif kind == "unparsed":
+            require(value["expectedName"] == "unparsed" and value["mode"] == "unparsed")
+        else:
+            require(value["expectedName"] in {"component", "absent", "unparsed"})
+        if value["sameExecutable"] in {"match", "mismatch"}:
+            require(value["executableKind"] != "unavailable")
+            require(postchecks["taskAlive"] == postchecks["taskReadback"] == "match")
+        if value["foreignLabelMatchesExecutableBasename"] is not None:
+            require(kind == "single-named" and value["expectedName"] == "absent" and value["mode"] in SUBJECT_MODES)
+            require(value["executableKind"] in {"rootlesskit", "dockerd", "shell", "multicall"})
+            require(value["sameExecutable"] == "match" and value["postchecksComplete"])
+    except TypeError, ValueError, KeyError, RefusedError:
+        return None
+    return {**value, "postchecks": dict(postchecks)}
+
+
+def subject_profile_diagnostic_detail(value: object) -> dict[str, Any] | None:
+    """Dispatch only explicit exact integer diagnostic versions; never infer mode or retry."""
+    if type(value) is not dict or type(value.get("schemaVersion")) is not int:
+        return None
+    if value["schemaVersion"] == 1:
+        return subject_profile_detail(value)
+    if value["schemaVersion"] == SUBJECT_DETAIL_ENFORCE_SCHEMA:
+        return subject_profile_detail_v2(value)
+    return None
+
+
 def subject_observation_budget(deadline: int) -> None:
     """Reuse the original work budget while distinguishing observation expiry from a failed comparison."""
     try:
@@ -728,7 +825,7 @@ def _failure_receipt(progress: dict[str, Any], error: BaseException) -> dict[str
     detail = child_build_detail(record.get("childBuild"), sys.modules.get("scripts.docker_userns_custody_child"))
     if detail is not None:
         result["childBuild"] = detail
-    observation = subject_profile_detail(record.get("subjectProfile"))
+    observation = subject_profile_diagnostic_detail(record.get("subjectProfile"))
     if (
         observation is not None
         and subject_profile_origin(result)
@@ -754,7 +851,7 @@ def _valid_failure(value: object, child: ModuleType | None = None) -> bool:
     if not set(template) <= set(value) <= set(template) | {"childBuild", "subjectProfile"}:
         return False
     if "subjectProfile" in value:
-        observation = subject_profile_detail(value["subjectProfile"])
+        observation = subject_profile_diagnostic_detail(value["subjectProfile"])
         if observation is None or observation != value["subjectProfile"] or not subject_profile_origin(value):
             return False
     if "childBuild" in value:
@@ -1697,9 +1794,13 @@ class RootPort:
         return raw.splitlines(keepends=True)
 
     def profile_present(self) -> bool:
-        """Only the exact canonical name and reviewed unconfined mode match."""
-        expected = self.record["profileName"].encode() + b" (unconfined)\n"
-        return self.registry().count(expected) == 1
+        """Only the exact canonical name and reviewed enforce mode match."""
+        name = self.record["profileName"].encode()
+        expected = name + b" (enforce)\n"
+        rows = [
+            line for line in self.registry() if line == name + b"\n" or line.startswith((name + b" ", name + b"//"))
+        ]
+        return rows == [expected]
 
     def profile_absent(self) -> bool:
         """Absence excludes every mode and similarly named stacked/namespace label."""
@@ -1793,7 +1894,7 @@ class RootPort:
             )
             self.point("subject-profile")
             raw = proc_bytes(descriptor, "attr/apparmor/current", 4096)
-            match = raw == self.record["profileName"].encode() + b" (unconfined)\n"
+            match = raw == self.record["profileName"].encode() + b" (enforce)\n"
             self.record["profileObservation"] = {
                 "source": "held-task-attr/apparmor/current",
                 "bytes": len(raw),
@@ -1891,7 +1992,7 @@ class RootPort:
         original_phase = diagnostic["phase"]
         try:
             observation = {
-                "schemaVersion": 1,
+                "schemaVersion": SUBJECT_DETAIL_ENFORCE_SCHEMA,
                 "originOperation": "bind",
                 "source": "held-task-attr/apparmor/current",
                 "bytes": len(raw),

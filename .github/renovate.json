@@ -18,12 +18,12 @@
   "customManagers": [
     {
       "customType": "regex",
-      "description": "Own the active unprivileged userns diagnostic source branch digest",
+      "description": "Own the fixed mediated userns SDK source branch digest",
       "managerFilePatterns": [
         "/^\\.github/docker-userns-policy-source\\.json$/"
       ],
       "matchStrings": [
-        "\"repository\":\\s*\"Strukturpiloten/docker-lens\",\\s*\"ref\":\\s*\"(?<currentValue>TheRealBecks/issue127)\",\\s*\"commit\":\\s*\"(?<currentDigest>[a-f0-9]{40})\""
+        "\"repository\":\\s*\"Strukturpiloten/docker-lens\",\\s*\"ref\":\\s*\"(?<currentValue>TheRealBecks/issue152)\",\\s*\"commit\":\\s*\"(?<currentDigest>[a-f0-9]{40})\""
       ],
       "depNameTemplate": "Strukturpiloten/docker-lens",
       "packageNameTemplate": "Strukturpiloten/docker-lens",
@@ -337,7 +337,7 @@
   },
   "packageRules": [
     {
-      "description": "Require coordinated human review of compile, unused and issue527 active qualification source/parser consumers; manually re-admit docker-userns-unused-admission.json and docker-userns-active-admission.json on source/contract changes; no automatic cohort hashes or load admission",
+      "description": "Require coordinated human review of compile, unused and active mediated qualification source/parser consumers; manually re-admit docker-userns-unused-admission.json and docker-userns-active-admission.json on source/contract changes; no automatic cohort hashes or load admission",
       "matchManagers": [
         "custom.regex"
       ],

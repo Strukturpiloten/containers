@@ -277,7 +277,7 @@ def actor_snapshot(port: ControlPort | RootPort, api: ModuleType, directory: int
     expected = (
         b"unconfined\n"
         if type(port.binding) is contract.DirectControlBinding
-        else port.record["profileName"].encode() + b" (unconfined)\n"
+        else port.record["profileName"].encode() + b" (enforce)\n"
     )
     api.require(label == expected)
     facts = {key.decode("ascii"): [value.decode("ascii") for value in values] for key, values in fields.items()}

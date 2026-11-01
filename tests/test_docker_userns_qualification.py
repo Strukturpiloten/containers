@@ -234,7 +234,7 @@ def workflow_context(
         "validationProfile": profile,
         "validationProfileRequested": profile if requested is None else requested,
         "purpose": purpose,
-        "admissionRevision": "containers558-ordinary-direct-v1",
+        "admissionRevision": "containers558-mediated-profile-v2",
         "admissionSha256": hashlib.sha256(admission.read_bytes()).hexdigest(),
     }
 
@@ -302,7 +302,7 @@ def scoped_receipt(
     )
     lease = "f" * 32 if phase == "clean-control" else "8" * 32
     name = "dockerlens-127-upstream-rootless-1-2-" + lease
-    label = (name + " (unconfined)\n").encode()
+    label = (name + " (enforce)\n").encode()
     cohort = admission["cohorts"][architecture]
     facts = {key: cohort[key] for key in ("osID", "osVersion", "machine", "kernel", "parserVersion")}
     facts.update(

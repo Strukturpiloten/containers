@@ -337,11 +337,11 @@ class NamespaceAndActor(unittest.TestCase):
                 port.daemon.assert_not_called()
                 port.image.assert_not_called()
 
-    def test_effective_profile_accepts_only_exact_single_unconfined_label(self) -> None:
+    def test_effective_profile_accepts_only_exact_single_enforce_label(self) -> None:
         name = "dockerlens-127-upstream-rootless-1-2-" + "f" * 32
         labels = [
             name.encode() + suffix
-            for suffix in (b" (unconfined)\n", b" (enforce)\n", b" (complain)\n", b"//&other (unconfined)\n")
+            for suffix in (b" (enforce)\n", b" (unconfined)\n", b" (complain)\n", b"//&other (enforce)\n")
         ]
         labels.append(b":nested:" + name.encode() + b" (unconfined)\n")
         for raw in labels:
@@ -377,6 +377,29 @@ class NamespaceAndActor(unittest.TestCase):
                     self.assertEqual(observation["bytes"], len(raw))
                     self.assertEqual(observation["sha256"], active.digest(raw))
                     self.assertNotIn(raw.decode(), json.dumps(observation))
+
+
+class MediatedRegistryContract(unittest.TestCase):
+    def test_only_one_exact_enforce_row_can_authorize_owned_profile_operations(self) -> None:
+        name = b"dockerlens-127-upstream-rootless-1-2-" + b"f" * 32
+        expected = name + b" (enforce)\n"
+        port = active.RootPort.__new__(active.RootPort)
+        port.record = {"profileName": name.decode()}
+        for rows, present in (
+            ([expected], True),
+            ([b"foreign (unconfined)\n", expected], True),
+            ([], False),
+            ([expected, expected], False),
+            ([name + b" (unconfined)\n"], False),
+            ([expected, name + b" (unconfined)\n"], False),
+            ([name + b" (complain)\n"], False),
+            ([name + b" (default_allow)\n"], False),
+            ([name + b"//&other (enforce)\n"], False),
+            ([b":nested://" + expected], False),
+            ([b"rootlesskit (unconfined)\n"], False),
+        ):
+            with self.subTest(rows=rows), patch.object(port, "registry", return_value=rows):
+                self.assertEqual(port.profile_present(), present)
 
 
 class FinalizerFailure(unittest.TestCase):
@@ -3586,7 +3609,7 @@ class SubjectFailureCheckpoints(unittest.TestCase):
                 calls[leaf] += 1
                 if fault == "profile" or (fault == "profile-readback" and calls[leaf] > 1):
                     return b"protected-different-label (enforce)\n"
-                return b"protected-actual-label (unconfined)\n"
+                return b"protected-actual-label (enforce)\n"
             raise AssertionError(leaf)
 
         return proc
@@ -3979,7 +4002,7 @@ class MaintainedAMD64Observation(unittest.TestCase):
 def subject_profile_fixture() -> dict:
     """Build the complete public diagnostic independently of the private collector."""
     return {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "originOperation": "bind",
         "source": "held-task-attr/apparmor/current",
         "bytes": len(b"rootlesskit (unconfined)\n"),
@@ -4305,7 +4328,7 @@ class SubjectRefusalObservation(unittest.TestCase):
     def test_raw_label_matrix_keeps_exact_acceptance_private_bytes_and_public_closed_facts(self) -> None:
         for raw, framing, kind, relation, mode in SubjectLabelClassification.cases():
             with self.subTest(raw=raw[:80]), self.fixture(raw) as case:
-                if raw == b"private-expected-canary (unconfined)\n":
+                if raw == b"private-expected-canary (enforce)\n":
                     case.lease.bind(case.cid)
                     self.assertNotIn("subjectProfile", case.port.record)
                     continue
@@ -4423,7 +4446,7 @@ class SubjectRefusalObservation(unittest.TestCase):
                 self.assertNotIn("taskAlive", case.events)
                 if options.get("commit"):
                     self.assertTrue(case.port.record["durabilityUnknown"])
-        with self.fixture(b"private-expected-canary (unconfined)\n") as case:
+        with self.fixture(b"private-expected-canary (enforce)\n") as case:
             case.lease.bind(case.cid)
             self.assertIs(case.lease.state, qualification.State.ATTACHED)
             self.assertIn("subject", case.port.record)

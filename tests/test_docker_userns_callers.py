@@ -163,7 +163,7 @@ def caller_receipt(context: dict, phase: str) -> dict:
         validationProfileRequested=context["validationProfileRequested"],
     )
     receipt["profileName"] = f"dockerlens-127-upstream-rootless-{binding.run}-{binding.attempt}-{receipt['lease']}"
-    observed = (receipt["profileName"] + " (unconfined)\n").encode()
+    observed = (receipt["profileName"] + " (enforce)\n").encode()
     receipt["profileObservation"].update(bytes=len(observed), sha256=hashlib.sha256(observed).hexdigest())
     return receipt
 

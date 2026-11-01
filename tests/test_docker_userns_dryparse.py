@@ -31,7 +31,23 @@ MERGE_OBJECT = (
 ).encode("ascii")
 NONCE = "c" * 32
 NAME = "dockerlens-127-upstream-rootless-123-2-" + NONCE
-POLICY = f"abi <abi/4.0>,\nprofile {NAME} flags=(unconfined) {{\n  userns,\n}}\n".encode("ascii")
+POLICY = (
+    f"abi <abi/4.0>,\nprofile {NAME} {{\n"
+    "  file,\n"
+    "  capability,\n"
+    "  network,\n"
+    "  unix,\n"
+    "  dbus (bind, send, receive),\n"
+    "  mount,\n"
+    "  remount,\n"
+    "  umount,\n"
+    "  pivot_root,\n"
+    "  signal (send, receive),\n"
+    "  ptrace,\n"
+    "  userns create,\n"
+    "  mqueue (create, read, write, open, delete, setattr, getattr) type=posix,\n"
+    "}\n"
+).encode("ascii")
 CONTEXT = {
     **dry.EXPECTED_CONTEXT,
     "GITHUB_SHA": MERGE,
@@ -547,8 +563,8 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(
             results["github-digest"],
             {
-                "currentValue": "TheRealBecks/issue127",
-                "currentDigest": "26bf21298c839893177c96fc2036b64e2911344f",
+                "currentValue": "TheRealBecks/issue152",
+                "currentDigest": "05cb8ccb896f996f3f7575ad26ec36b71e0548c0",
             },
         )
         self.assertEqual(results["gitlab-tags"], {"currentValue": "5.0.2"})

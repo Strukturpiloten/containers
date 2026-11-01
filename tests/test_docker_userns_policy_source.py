@@ -19,7 +19,23 @@ from unittest.mock import MagicMock, patch
 from scripts import docker_userns_policy_source as source
 
 NAME = "dockerlens-127-upstream-rootless-123-2-" + "a" * 32
-POLICY = f"abi <abi/4.0>,\nprofile {NAME} flags=(unconfined) {{\n  userns,\n}}\n".encode("ascii")
+POLICY = (
+    f"abi <abi/4.0>,\nprofile {NAME} {{\n"
+    "  file,\n"
+    "  capability,\n"
+    "  network,\n"
+    "  unix,\n"
+    "  dbus (bind, send, receive),\n"
+    "  mount,\n"
+    "  remount,\n"
+    "  umount,\n"
+    "  pivot_root,\n"
+    "  signal (send, receive),\n"
+    "  ptrace,\n"
+    "  userns create,\n"
+    "  mqueue (create, read, write, open, delete, setattr, getattr) type=posix,\n"
+    "}\n"
+).encode("ascii")
 
 
 def fixture() -> tuple[dict[str, object], dict[str, bytes]]:
@@ -164,12 +180,52 @@ class SourceTests(unittest.TestCase):
     def test_active_manifest_binds_exact_closure_license_and_reviewed_parser(self) -> None:
         value = source.manifest()
         self.assertEqual(value["consumer"], source.CONSUMER)
-        self.assertEqual(value["source"]["commit"], "26bf21298c839893177c96fc2036b64e2911344f")
-        self.assertEqual(value["source"]["ref"], "TheRealBecks/issue127")
+        self.assertEqual(value["source"]["commit"], "05cb8ccb896f996f3f7575ad26ec36b71e0548c0")
+        self.assertEqual(value["source"]["ref"], "TheRealBecks/issue152")
         self.assertEqual({item["path"] for item in value["source"]["files"]}, source.FILES)
         self.assertEqual(value["source"]["license"], "MPL-2.0")
         self.assertTrue(value["source"]["managed"])
         self.assertEqual(value["parser"]["expectedVersion"], "5.0.2")
+
+    def test_exact_mediated_sdk_closure_and_explicit_policy_are_independent(self) -> None:
+        value = source.manifest()
+        files = {item["path"]: (item["size"], item["sha256"]) for item in value["source"]["files"]}
+        self.assertEqual(
+            files,
+            {
+                "scripts/native-runner-apparmor.py": (
+                    32168,
+                    "3aded1c43dfb5046c99e78ba74c3c974de3ce3ec0c68f2d05bc172acea27b3b6",
+                ),
+                "scripts/native_outer_diagnostic_capture.py": (
+                    13870,
+                    "23202211ec3b58a70c1120b0395f43663e3cacff1948609a8fb0fe2dac012962",
+                ),
+                "LICENSE": (16726, "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04"),
+            },
+        )
+        self.assertEqual(
+            POLICY.splitlines()[2:-1],
+            [
+                b"  file,",
+                b"  capability,",
+                b"  network,",
+                b"  unix,",
+                b"  dbus (bind, send, receive),",
+                b"  mount,",
+                b"  remount,",
+                b"  umount,",
+                b"  pivot_root,",
+                b"  signal (send, receive),",
+                b"  ptrace,",
+                b"  userns create,",
+                b"  mqueue (create, read, write, open, delete, setattr, getattr) type=posix,",
+            ],
+        )
+        for token in (b"all,", b"io_uring", b"type=sysv", b"  mqueue,", b"eavesdrop", b"change_profile", b"change_hat"):
+            with self.subTest(token=token):
+                self.assertNotIn(token, POLICY)
+        self.assertEqual(source.MAX_POLICY, 1024)
 
     def test_manifest_substitutions_duplicate_keys_and_unreviewed_versions_refuse(self) -> None:
         original = source.manifest()
@@ -311,8 +367,16 @@ class SourceTests(unittest.TestCase):
             self.assertEqual(source.build(held, NAME, time.monotonic() + 1), POLICY)
         self.assertEqual(held.check.call_count, 2)
         self.assertEqual(child.call_args.args[:3], (source.BUILDER, ["/owned/private/scripts", NAME], b""))
-        self.assertIn("module.profile_bytes", source.BUILDER)
-        for forbidden in ("RunnerProfile", "consumer_mode", "main(", "--add", "--remove"):
+        self.assertIn("module.mediated_profile_bytes", source.BUILDER)
+        for forbidden in (
+            "RunnerProfile",
+            "consumer_mode",
+            "main(",
+            "--add",
+            "--remove",
+            "module.profile_bytes",
+            "getattr(",
+        ):
             self.assertNotIn(forbidden, source.BUILDER)
         with patch.object(source.os, "geteuid", return_value=0), self.assertRaises(source.RefusedError):
             source.build(held, NAME, time.monotonic() + 1)
