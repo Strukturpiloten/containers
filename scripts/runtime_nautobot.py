@@ -31,7 +31,7 @@ def run(ctx: RuntimeContext) -> None:
         timeout=180,
     )
     inspected = json.loads(ctx.podman("inspect candidate identity", "image", "inspect", ctx.image_ref))[0]
-    image = inspected["Id"]
+    image = "sha256:" + inspected["Id"].removeprefix("sha256:")
     ctx.assert_equal("no implicit migration entrypoint", json.dumps(inspected["Config"].get("Entrypoint") or []), "[]")
     ctx.assert_equal(
         "direct Nautobot startup",
