@@ -3484,6 +3484,38 @@
     },
     {
       "architectures": [
+        "amd64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/strukturbo-nautobot",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "nautobot"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "experimental",
+        "supportBoundary": "Installed-artifact CI and synthetic existing-data recovery; live rollout and target access delivery require separate acceptance."
+      },
+      "name": "strukturbo-nautobot",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "nautobot": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v0.1.0"
+    },
+    {
+      "architectures": [
         "amd64",
         "arm64"
       ],

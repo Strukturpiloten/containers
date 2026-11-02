@@ -8,6 +8,7 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from scripts import nautobot_source as source
@@ -83,6 +84,18 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(found.group("currentValue"), declaration["sourceRef"])
         self.assertEqual(found.group("depName"), declaration["repository"])
         self.assertEqual(manager["versioningTemplate"], "git")
+
+    def test_failed_authentication_does_not_echo_credentials_or_stage_content(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / source.MANIFEST
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps(source.manifest(ROOT)))
+            failure = SimpleNamespace(returncode=1, stderr=b"TOKEN_SENTINEL", stdout=b"")
+            with patch.object(source.subprocess, "run", return_value=failure), self.assertRaises(RuntimeError) as error:
+                source.prepare(root)
+            self.assertNotIn("TOKEN_SENTINEL", str(error.exception))
+            self.assertFalse((root / source.STAGED).exists())
 
     def test_renovate_covers_both_hash_locked_requirements_files(self) -> None:
         import re  # noqa: PLC0415

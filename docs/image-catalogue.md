@@ -94,6 +94,7 @@ Lifecycle is repository policy. Registry availability and runtime coverage requi
 | podman-ubuntu-24.04-rootless | maintained | isolated-test | 2026-12-31 | unknown | unknown | unknown |
 | podman-ubuntu-26.04-rootful | maintained | isolated-test | 2026-12-31 | unknown | unknown | unknown |
 | podman-ubuntu-26.04-rootless | maintained | isolated-test | 2026-12-31 | unknown | unknown | unknown |
+| strukturbo-nautobot | experimental | isolated-test | 2026-12-31 | unknown | unknown | unknown |
 | typo3-phpfpm | maintained | production | 2026-12-31 | unknown | unknown | unknown |
 
 Support boundaries and component inputs are in the accompanying JSON report.
