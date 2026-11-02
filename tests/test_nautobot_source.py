@@ -103,7 +103,7 @@ class SourceTests(unittest.TestCase):
         config = json.loads((ROOT / ".github/renovate.json").read_text())
         patterns = config["pip_requirements"]["managerFilePatterns"]
         for name in ("requirements.txt", "build-requirements.txt"):
-            path = "images/nautobot/strukturbo-nautobot/" + name
+            path = "images/strukturbo/strukturbo-nautobot/" + name
             self.assertTrue(any(re.search(pattern[1:-1], path) for pattern in patterns))
             for line in (ROOT / path).read_text().splitlines():
                 if line and not line.startswith("#"):

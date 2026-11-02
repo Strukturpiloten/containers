@@ -18,7 +18,7 @@ lifecycle:
   - nautobot
 build:
   context: .
-  containerfile: images/nautobot/strukturbo-nautobot/Containerfile
+  containerfile: images/strukturbo/strukturbo-nautobot/Containerfile
   architectures:
   - amd64
   runtimeBaseArg: BASE_IMAGE
@@ -45,7 +45,7 @@ dependencies:
     image: docker.io/library/redis
     arg: REDIS_IMAGE
 inputs:
-- images/nautobot/**
+- images/strukturbo/**
 - scripts/nautobot_source.py
 - scripts/runtime_nautobot.py
 - shared/oci-labels.env

@@ -18,7 +18,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-MANIFEST = "images/nautobot/strukturbo-nautobot/source.json"
+MANIFEST = "images/strukturbo/strukturbo-nautobot/source.json"
 STAGED = ".build-sources/strukturbo-nautobot"
 
 

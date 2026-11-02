@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 def run(ctx: RuntimeContext) -> None:
     """Use separate disposable databases; never inject app source into the image."""
     staged = verify()
-    metadata = yaml.safe_load((ROOT / "images/nautobot/strukturbo-nautobot/container.yaml").read_text())
+    metadata = yaml.safe_load((ROOT / "images/strukturbo/strukturbo-nautobot/container.yaml").read_text())
     arguments = metadata["build"]["args"]
     database = arguments["DATABASE_IMAGE"]["value"]
     redis = arguments["REDIS_IMAGE"]["value"]
