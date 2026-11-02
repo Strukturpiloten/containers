@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from scripts import runtime_nautobot
+from scripts.runtime_tests import RuntimeContext
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -19,17 +20,24 @@ class RuntimeNautobotTests(unittest.TestCase):
             with self.subTest(identifier=identifier), tempfile.TemporaryDirectory() as directory:
                 staged = Path(directory)
                 (staged / "provenance.json").write_text(json.dumps({"qualified_source_sha256": "expected"}))
-                context = Mock()
+                context = Mock(spec=RuntimeContext)
                 context._sudo = []
                 context._podman = ["podman", "--root", "/owned/store"]
                 context.image_ref = "localhost/test:runtime"
                 context.podman.side_effect = [
                     "",
                     "",
-                    json.dumps([{
-                        "Id": identifier,
-                        "Config": {"Entrypoint": [], "Cmd": ["nautobot-server", "start", "--ini", "/opt/nautobot/uwsgi.ini"]},
-                    }]),
+                    json.dumps(
+                        [
+                            {
+                                "Id": identifier,
+                                "Config": {
+                                    "Entrypoint": [],
+                                    "Cmd": ["nautobot-server", "start", "--ini", "/opt/nautobot/uwsgi.ini"],
+                                },
+                            }
+                        ]
+                    ),
                 ]
                 context.command.side_effect = ["", "Qualified installed registry source SHA-256: expected"]
                 with patch.object(runtime_nautobot, "verify", return_value=staged):
