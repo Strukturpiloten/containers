@@ -15,6 +15,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -1057,6 +1058,7 @@ class OrdinaryDirectCompositionControls(unittest.TestCase):
         backend.deadline_ns = ctx.runtime_deadline_ns
         backend.scoped_image_ref = ctx.image_ref
         client = ActiveClient.__new__(ActiveClient)
+        client._bootstrap_anchor, client._close_receipt = None, None
         client.ctx, client.stage, client.name = ctx, Path("/run/containers-userns-active." + "f" * 32), "b" * 32
         client.provenance, client.failures = {}, []
         backend.scoped_stage = client.stage
@@ -1194,3 +1196,57 @@ class OrdinaryDirectInterruptedCreateControls(unittest.TestCase):
                 self.assertEqual(ctx.backend.ordinary_direct_guest, identifier if recorded else ctx.containers[0])
                 self.assertEqual(ctx.run_containers, {ctx.backend.ordinary_direct_guest})
                 bind.assert_not_called()
+
+
+class FailedLeaseCleanupComposition(unittest.TestCase):
+    def test_existing_cleanup_seam_acknowledges_only_original_lease_and_keeps_work_failure(self) -> None:
+        from tests.test_docker_userns_active import FailedLeaseBootstrapContract  # noqa: PLC0415
+
+        effects = ExitStack()
+        self.addCleanup(effects.close)
+        for target in (
+            "subprocess.run",
+            "subprocess.Popen",
+            "scripts.docker_userns_active.main",
+            "scripts.runtime_docker_backend.DockerBackend.prepare",
+            "scripts.runtime_docker_backend.DockerBackend.cleanup",
+        ):
+            effects.enter_context(patch(target, side_effect=AssertionError("native boundary forbidden")))
+        fixture = FailedLeaseBootstrapContract()
+        for direct in (False, True):
+            for valid in (False, True):
+                with self.subTest(direct=direct, valid=valid), tempfile.TemporaryDirectory() as directory:
+                    client, expected, reply, operations = fixture.prepared(Path(directory), direct=direct)
+                    first = fixture.work_refused(client, reply)
+                    artifact = client.ctx.scoped_failure_output.read_bytes()
+                    reply.value = expected if valid else expected | {"bootstrapSha256": "f" * 64}
+                    backend = admitted_backend(Path(directory), ())
+                    backend.ready, backend.scoped_profile = True, client
+                    events = []
+                    backend._remove_containers = MagicMock(
+                        side_effect=lambda _ctx, events=events: events.append("containers")
+                    )
+                    backend._remove_network = MagicMock(
+                        side_effect=lambda _ctx, events=events: events.append("network")
+                    )
+                    backend._remove_images = MagicMock(side_effect=lambda _ctx, events=events: events.append("images"))
+                    backend._call = MagicMock(side_effect=AssertionError("backend native command forbidden"))
+                    if valid:
+                        self.assertEqual(backend._cleanup_resources(client.ctx), [])
+                        self.assertEqual(events, ["containers", "network", "images"])
+                        self.assertEqual(client._close_receipt, expected)
+                    else:
+                        with self.assertRaisesRegex(DockerBackendError, "retaining private runtime"):
+                            backend._cleanup_resources(client.ctx)
+                        self.assertEqual(events, ["containers"])
+                        self.assertIsNone(client._close_receipt)
+                        self.assertTrue(Path(directory).is_dir())
+                    backend._call.assert_not_called()
+                    self.assertEqual(operations, ["prepare", "witness", "close"])
+                    self.assertEqual(client.failures[0], first)
+                    self.assertEqual(client.evidence["qualification"], "none")
+                    self.assertEqual(client.evidence["status"], "failed")
+                    self.assertFalse(client.evidence["cleanupAuthority"])
+                    if valid:
+                        self.assertEqual(client.ctx.scoped_failure_output.read_bytes(), artifact)
+                    self.assertEqual(json.loads(client.ctx.scoped_failure_output.read_bytes())["failures"][0], first)

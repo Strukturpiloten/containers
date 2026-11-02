@@ -1478,6 +1478,21 @@ raw task/cgroup/profile values remain private. A failed bind retains the origina
 refusal. A subsequent close refusal in the retained state is not a second daemon
 failure and grants no cleanup authority.
 
+The client keeps the authenticated prepare bootstrap commitment independently of exported
+failure diagnostics, bound to the original stage, binding and acknowledged lease. A later
+same-lease close must still pass every original receipt check against that anchor. Its
+acknowledgement is retained separately: it does not replace the first work refusal, failed
+qualification or failure artifact. Missing, malformed, changed or foreign anchors and
+unacknowledged prepares continue to retain the runtime without new cleanup authority.
+
+Failure diagnostics distinguish the four existing host guards (machine shape, release shape,
+architecture and compound cohort) and the three existing child-scope guards (universe,
+unreadable required child and unlisted immediate child) in each initial/readback selection.
+The existing ready/pre-close prefix supplies the checkpoint. Legacy coarse codes remain
+accepted; schema-1 envelopes and successful evidence shapes are unchanged. These labels
+add no observations, retries, deadline renewal or admission exception and do not explain
+the precise causes of historical coarse failures.
+
 An optional closed `subjectProfile` failure diagnostic classifies the already-read
 label's framing, complete name boundaries, marker syntax and finite mode. It
 keeps the first refusal while finishing safe postchecks on the same held task,

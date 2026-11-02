@@ -2054,6 +2054,10 @@ class BoundedFailureJournal(unittest.TestCase):
                     "preflight-source",
                     "preflight-os-release",
                     "preflight-os-values",
+                    "preflight-host-machine-shape",
+                    "preflight-host-release-shape",
+                    "preflight-host-architecture",
+                    "preflight-host-cohort",
                     "preflight-host",
                     "preflight-controls",
                 ),
@@ -2105,6 +2109,7 @@ def client_fixture(directory: Path) -> ActiveClient:
     client.binding, client.stage, client.name = binding(), Path("/run/containers-userns-active." + "e" * 32), "new"
     client.provenance = workflow_context()
     client.evidence, client.failures = {}, []
+    client._bootstrap_anchor, client._close_receipt = None, None
     client.ctx = SimpleNamespace(
         checks=[],
         scoped_failure_output=directory / "failure.json",
@@ -2142,6 +2147,288 @@ def bound_root_failure() -> dict[str, object]:
         },
         active.RefusedError(PRIVATE),
     )
+
+
+class FailedLeaseBootstrapContract(unittest.TestCase):
+    def setUp(self) -> None:
+        effects = ExitStack()
+        self.addCleanup(effects.close)
+        for target in (
+            "subprocess.run",
+            "subprocess.Popen",
+            "scripts.docker_userns_active.main",
+            "scripts.runtime_docker_backend.DockerBackend.prepare",
+            "scripts.runtime_docker_backend.DockerBackend.cleanup",
+        ):
+            effects.enter_context(patch(target, side_effect=AssertionError("native boundary forbidden")))
+
+    def prepared(self, directory: Path, *, direct: bool = False) -> tuple:
+        from tests.test_evidence_gate import ordinary_direct_runtime  # noqa: PLC0415
+
+        expected = (
+            ordinary_direct_runtime()["scopedProfile"]
+            if direct
+            else scoped_receipt(purpose="maintained-prerequisite", phase="enforcement")
+        )
+        client = client_fixture(directory)
+        client.binding = qualification.native_binding(expected["binding"])
+        client.provenance = expected["workflowContext"]
+        reply = SimpleNamespace(value=expected | {"state": "loaded", "postExecWitness": None})
+        operations = []
+
+        def command(_name: str, argv: list[str], **_kwargs: object) -> str:
+            operations.append(argv[5])
+            client.ctx.checks.append({"exitCode": 1 if reply.value.get("kind") else 0, "stdout": PRIVATE})
+            return json.dumps(reply.value)
+
+        client.ctx.command = Mock(side_effect=command)
+        client.prepare()
+        self.assertEqual(operations, ["prepare"])
+        self.assertEqual(
+            client._bootstrap_anchor,
+            (client.stage, client.binding.digest(), expected["lease"], expected["bootstrapSha256"]),
+        )
+        return client, expected, reply, operations
+
+    def work_refused(self, client: ActiveClient, reply: SimpleNamespace) -> dict:
+        original = active.failure_receipt(
+            {
+                "actor": "root",
+                "operation": "witness",
+                "binding": client.binding,
+                "sourceVerified": True,
+                "sourceManifestSha256": active.SOURCE_MANIFEST_SHA256,
+                "lease": client.name,
+                "record": {
+                    "state": "attached",
+                    "lastDurablePhase": "attached",
+                    "diagnostic": {"phase": "witness-pre-close-children-scope"},
+                },
+            },
+            active.RefusedError(PRIVATE),
+        )
+        reply.value = original
+        with self.assertRaisesRegex(ValueError, "root refusal"):
+            client.witness("pre-close")
+        self.assertEqual(client.failures, [original])
+        return original
+
+    def test_authenticated_failed_lease_close_ack_preserves_first_failure_and_artifact(self) -> None:
+        for direct in (False, True):
+            with self.subTest(direct=direct), tempfile.TemporaryDirectory() as directory:
+                client, expected, reply, operations = self.prepared(Path(directory), direct=direct)
+                anchor = client._bootstrap_anchor
+                first = self.work_refused(client, reply)
+                artifact = client.ctx.scoped_failure_output.read_bytes()
+                # Exported diagnostics are not an authentication source, even if damaged.
+                client.evidence["bootstrapSha256"] = "f" * 64
+                reply.value = expected
+                client.close()
+                self.assertEqual(client._close_receipt, expected)
+                self.assertEqual(client._bootstrap_anchor, anchor)
+                self.assertEqual(client.failures, [first])
+                self.assertEqual(client.evidence["qualification"], "none")
+                self.assertEqual(client.evidence["status"], "failed")
+                self.assertFalse(client.evidence["cleanupAuthority"])
+                self.assertEqual(client.ctx.scoped_failure_output.read_bytes(), artifact)
+                self.assertEqual(operations, ["prepare", "witness", "close"])
+                self.assertNotIn(PRIVATE, json.dumps(client.ctx.checks))
+
+    def test_missing_malformed_changed_and_foreign_anchors_never_ack_or_reseed(self) -> None:
+        for fault in ("missing", "malformed", "digest", "lease", "stage", "binding", "missing-digest", "bad-digest"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                client, expected, reply, operations = self.prepared(Path(directory))
+                first = self.work_refused(client, reply)
+                reply.value = copy.deepcopy(expected)
+                if fault == "missing":
+                    client._bootstrap_anchor = None
+                elif fault == "malformed":
+                    client._bootstrap_anchor = ("private-anchor",)
+                elif fault == "digest":
+                    reply.value["bootstrapSha256"] = "f" * 64
+                elif fault == "lease":
+                    reply.value["lease"] = "a" * 32
+                elif fault == "stage":
+                    client.stage = Path("/run/containers-userns-active." + "a" * 32)
+                elif fault == "binding":
+                    client.binding = replace(client.binding, candidate="b" * 40)
+                    reply.value["binding"] = asdict(client.binding)
+                    reply.value["bindingSha256"] = client.binding.digest()
+                elif fault == "missing-digest":
+                    del reply.value["bootstrapSha256"]
+                else:
+                    reply.value["bootstrapSha256"] = PRIVATE
+                anchor = client._bootstrap_anchor
+                with self.assertRaises(ValueError):
+                    client.close()
+                self.assertIsNone(client._close_receipt)
+                self.assertEqual(client._bootstrap_anchor, anchor)
+                self.assertEqual(client.failures[0], first)
+                if fault == "binding":
+                    self.assertEqual(client.failures[-1]["phase"], "client-close-bootstrap")
+                self.assertEqual(client.evidence["qualification"], "none")
+                self.assertFalse(client.evidence["cleanupAuthority"])
+                self.assertNotIn(PRIVATE, client.ctx.scoped_failure_output.read_text())
+                self.assertEqual(operations, ["prepare", "witness", "close"])
+
+    def test_diagnostic_write_and_secondary_transport_failure_do_not_replace_first_refusal(self) -> None:
+        for secondary in ("valid", "malformed", "transport", "spoofed-failure"):
+            with self.subTest(secondary=secondary), tempfile.TemporaryDirectory() as directory:
+                client, expected, reply, operations = self.prepared(Path(directory))
+                anchor = client._bootstrap_anchor
+                with patch.object(Path, "write_bytes", side_effect=OSError(PRIVATE)):
+                    first = self.work_refused(client, reply)
+                self.assertEqual(client.evidence["artifactCapture"], "unavailable")
+                reply.value = expected
+                if secondary == "valid":
+                    client.close()
+                    self.assertEqual(client._close_receipt, expected)
+                else:
+                    if secondary == "transport":
+                        client.ctx.command.side_effect = OSError(PRIVATE)
+                    elif secondary == "malformed":
+                        reply.value = expected | {"schemaVersion": True}
+                    else:
+                        reply.value = first | {"operation": "close", "bootstrapSha256": "a" * 64}
+                    with self.assertRaises(ValueError):
+                        client.close()
+                    self.assertIsNone(client._close_receipt)
+                self.assertEqual(client._bootstrap_anchor, anchor)
+                self.assertEqual(client.failures[0], first)
+                self.assertEqual(client.evidence["qualification"], "none")
+                self.assertNotIn(PRIVATE, json.dumps(client.evidence))
+                self.assertLessEqual(len(operations), 3)
+
+    def test_unacknowledged_or_failed_prepare_cannot_seed_from_later_receipt(self) -> None:
+        for failed in (False, True):
+            with self.subTest(failed=failed), tempfile.TemporaryDirectory() as directory:
+                client = client_fixture(Path(directory))
+                if failed:
+                    client.capture_failure(bound_root_failure())
+                client.ctx.command = Mock(return_value=json.dumps(scoped_receipt()))
+                with self.assertRaisesRegex(ValueError, "unacknowledged"):
+                    client.close()
+                client.ctx.command.assert_not_called()
+                with self.assertRaises(ValueError):
+                    client.rpc("prepare" if failed else "close", {})
+                self.assertIsNone(client._bootstrap_anchor)
+                self.assertEqual(client.name, "new")
+                self.assertFalse(client.evidence["cleanupAuthority"])
+
+    def test_successful_close_keeps_original_receipt_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            client, expected, reply, operations = self.prepared(Path(directory))
+            reply.value = expected
+            client.close()
+            self.assertEqual(client.evidence, expected)
+            self.assertEqual(client._close_receipt, expected)
+            self.assertEqual(client.failures, [])
+            self.assertEqual(operations, ["prepare", "close"])
+
+
+class PreflightHostSiteContract(unittest.TestCase):
+    setUp = FailedLeaseBootstrapContract.setUp
+
+    def test_existing_host_predicates_keep_order_single_evaluation_and_closed_codes(self) -> None:
+        codes = [
+            "preflight-host-machine-shape",
+            "preflight-host-release-shape",
+            "preflight-host-architecture",
+            "preflight-host-cohort",
+        ]
+        for fault in ("machine-shape", "release-shape", "architecture", "cohort-machine", "cohort-kernel", "none"):
+            with self.subTest(fault=fault):
+                self.host_case(fault, codes)
+        self.assertIn("preflight-host", active.FAILURE_PHASES)
+
+    def host_case(self, fault: str, codes: list[str]) -> None:
+        events, reads, comparisons = [], [], []
+        values = {"osID": "ubuntu", "osVersion": "26.04", "machine": "x86_64", "kernel": "reviewed-kernel"}
+
+        class Cohort(dict):
+            def __getitem__(self, key: str) -> str:
+                reads.append(key)
+                return super().__getitem__(key)
+
+        cohort = Cohort(values)
+        machine = {"machine-shape": "private machine /", "architecture": "aarch64"}.get(fault, "x86_64")
+        release = {"release-shape": "private release /", "cohort-kernel": "unreviewed-kernel"}.get(
+            fault, "reviewed-kernel"
+        )
+        cohort["machine"] = "aarch64" if fault == "cohort-machine" else "x86_64"
+        progress = {}
+        modules = SimpleNamespace(
+            qualification=SimpleNamespace(
+                active_cohort=Mock(return_value=cohort),
+                observe_controls=Mock(side_effect=StopIteration("stop")),
+            )
+        )
+        original_comparison = active.comparison
+
+        def comparison(progress: dict, code: str, matched: object) -> None:
+            comparisons.append(code)
+            original_comparison(progress, code, matched)
+
+        def authority(*_args: object, **_kwargs: object) -> dict:
+            events.append("authority")
+            return {}
+
+        def os_release(_modules: object) -> tuple:
+            events.append("os_release")
+            return b"ID=ubuntu\nVERSION_ID=26.04\n", None
+
+        def uname() -> object:
+            events.append("uname")
+            return SimpleNamespace(machine=machine, release=release)
+
+        with (
+            patch.object(active, "preflight_authority", side_effect=authority),
+            patch.object(active, "os_release", side_effect=os_release),
+            patch.object(active.os, "uname", side_effect=uname),
+            patch.object(active, "check") as check,
+            patch.object(active, "comparison", side_effect=comparison),
+            patch.object(active.re, "fullmatch", wraps=active.re.fullmatch) as regex,
+            self.assertRaises(StopIteration if fault == "none" else active.RefusedError) as refused,
+        ):
+            active.root_preflight(
+                ROOT, {"context": {"architecture": "amd64"}, "deadlineNs": 10**18}, modules, progress=progress
+            )
+        self.assertEqual(events, ["authority", "os_release", "uname"])
+        self.assertEqual(regex.call_count, 3 if fault == "machine-shape" else 4)
+        host_count = (
+            1 if fault == "machine-shape" else 2 if fault == "release-shape" else 3 if fault == "architecture" else 4
+        )
+        self.assertEqual(
+            comparisons,
+            ["preflight-os-release", "preflight-os-values", *codes[:host_count]]
+            + (["preflight-host"] if fault == "none" else []),
+        )
+        self.assertEqual(check.call_count, 1 if fault == "none" else 0)
+        self.assertEqual(modules.qualification.observe_controls.call_count, 1 if fault == "none" else 0)
+        self.assertEqual(
+            reads,
+            ["osID", "osVersion"]
+            + (["machine"] if fault in ("cohort-machine", "cohort-kernel", "none") else [])
+            + (["kernel"] if fault in ("cohort-kernel", "none") else []),
+        )
+        if fault != "none":
+            expected = codes[host_count - 1]
+            self.assertEqual(progress["phase"], expected)
+            self.assertFalse(progress["comparisons"][expected])
+            failure = active.failure_receipt(
+                {
+                    "actor": "root",
+                    "operation": "prepare",
+                    "binding": binding(),
+                    "record": {"state": "prepared", "diagnostic": progress},
+                },
+                refused.exception,
+            )
+            self.assertEqual(failure["schemaVersion"], 1)
+            self.assertEqual(failure["phase"], expected)
+            self.assertTrue(active.valid_failure(failure))
+            self.assertFalse(failure["cleanupAuthority"])
+            self.assertNotIn("private", json.dumps(failure))
 
 
 class FailureTransport(unittest.TestCase):
@@ -2241,6 +2528,7 @@ class FailureTransport(unittest.TestCase):
                 client = client_fixture(Path(temporary))
                 value = scoped_receipt()
                 client.ctx.command = Mock(return_value=json.dumps(value))
+                client.prepare()
                 self.assertEqual(client.rpc("close", {}), value)
                 self.assertEqual(client.failures, [])
                 value[key] = wrong
