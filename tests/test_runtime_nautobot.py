@@ -56,6 +56,29 @@ class RuntimeNautobotTests(unittest.TestCase):
             removed = [call for call in context.podman.call_args_list if call.args[1:3] == ("image", "rm")]
             self.assertEqual(len(removed), 2)
 
+    def test_apparmor_workaround_requires_rootful_ci_and_observed_crun_stacking(self) -> None:
+        cases = [
+            ("true", True, True, "containers-default-0.66.0//&crun (enforce)", True),
+            ("true", True, True, "containers-default-0.66.0 (enforce)", False),
+            ("true", True, True, "containers-default-0.67.0//&crun (enforce)", False),
+            ("true", True, False, "unconfined", False),
+            ("false", True, True, "containers-default-0.66.0//&crun (enforce)", False),
+            ("true", False, True, "containers-default-0.66.0//&crun (enforce)", False),
+        ]
+        for ci, rootful, enabled, profile, expected in cases:
+            with self.subTest(ci=ci, rootful=rootful, enabled=enabled, profile=profile):
+                context = Mock(spec=RuntimeContext)
+                context._sudo = ["sudo", "-n"] if rootful else []
+                context.image_ref = "localhost/strukturbo-nautobot:synthetic-test"
+                context.podman.side_effect = [json.dumps({"apparmorEnabled": enabled}), profile]
+                with patch.dict("os.environ", {"GITHUB_ACTIONS": ci}):
+                    arguments = runtime_nautobot._fixture_compatibility(context)
+                self.assertEqual(arguments, ["--fixture-apparmor-unconfined"] if expected else [])
+                if expected:
+                    context.skip.assert_called_once()
+                else:
+                    context.skip.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
