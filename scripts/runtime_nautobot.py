@@ -18,8 +18,35 @@ if TYPE_CHECKING:
 
 def run(ctx: RuntimeContext) -> None:
     """Use separate disposable databases; never inject app source into the image."""
-    with ExitStack() as fixtures:
-        _run(ctx, fixtures)
+    try:
+        with ExitStack() as fixtures:
+            _run(ctx, fixtures)
+    except Exception:
+        _diagnose(ctx)
+        raise
+
+
+def _diagnose(ctx: RuntimeContext) -> None:
+    """Diagnostic branch only: inspect owned fixtures and runner security denials."""
+    try:
+        ctx.podman("diagnostic runtime security", "info", "--format", "{{json .Host.Security}}", check=False)
+        ctx.command(
+            "diagnostic runner security denials",
+            [*ctx._sudo, "journalctl", "-k", "--since=-10min", '--grep=apparmor="DENIED"|seccomp', "--no-pager"],
+            timeout=15,
+            check=False,
+        )
+        ids = ctx.podman(
+            "diagnostic owned fixture identities", "ps", "-aq", "--filter", "label=io.strukturbo.nautobot-qualification"
+        ).splitlines()
+        for identity in ids:
+            details = json.loads(ctx.podman("diagnostic fixture ownership", "inspect", identity))[0]
+            if not details["Name"].endswith("-database"):
+                continue
+            for path in ("/test/database-connect.log", "/test/initialize.sh.status"):
+                ctx.podman("diagnostic bootstrap connection " + path, "exec", identity, "cat", path, check=False)
+    except (RuntimeError, ValueError, KeyError, TypeError, OSError) as error:
+        ctx.checks.append({"name": "diagnostic capture", "status": "failed", "errorType": type(error).__name__})
 
 
 def _run(ctx: RuntimeContext, fixtures: ExitStack) -> None:
