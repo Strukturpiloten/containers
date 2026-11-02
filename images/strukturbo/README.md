@@ -1,4 +1,4 @@
-# Strukturbo Nautobot
+# Strukturbo application images
 
 `strukturbo-nautobot` packages Nautobot with DNS Models, Design Builder and the Strukturbo access registry. The initial image is for AMD64. The image contract version is independent of the installed application versions; see [metadata](strukturbo-nautobot/container.yaml) and the installed `/usr/share/strukturpiloten/strukturbo-nautobot.json` provenance record.
 
