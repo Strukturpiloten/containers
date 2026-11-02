@@ -2432,6 +2432,117 @@ class PreflightHostSiteContract(unittest.TestCase):
 
 
 class FailureTransport(unittest.TestCase):
+    @staticmethod
+    def readback_failure(detail: object) -> dict:
+        phase = "witness-pre-close-children-scope-initial-universe"
+        return active.failure_receipt(
+            {
+                "actor": "root",
+                "operation": "witness",
+                "binding": binding(),
+                "sourceVerified": True,
+                "sourceManifestSha256": active.SOURCE_MANIFEST_SHA256,
+                "lease": "f" * 32,
+                "record": {
+                    "state": "attached",
+                    "lastDurablePhase": "attached",
+                    "readerPending": False,
+                    "childPending": False,
+                    "retained": True,
+                    "diagnostic": {"phase": phase, "comparisons": {phase: False}, "ownedScopeReadback": detail},
+                },
+            },
+            active.RefusedError(),
+        )
+
+    def test_scope_readback_detail_is_closed_typed_and_only_acknowledged_original_witness_failure(self) -> None:
+        detail = {
+            "kind": "owned-scope-missing-child-readback-v1",
+            "missingCount": 2,
+            "complete": True,
+            "reobservedMissingCount": 1,
+        }
+        original = self.readback_failure(detail)
+        self.assertEqual(original["ownedScopeReadback"], detail)
+        self.assertTrue(active.valid_failure(original))
+        ready_phase = "witness-ready-children-scope-initial-universe"
+        self.assertTrue(active.valid_failure(original | {"phase": ready_phase, "comparisons": {ready_phase: False}}))
+        self.assertTrue(
+            active.valid_failure(self.readback_failure(detail | {"missingCount": 64, "reobservedMissingCount": 64}))
+        )
+        self.assertEqual(active.MAX_FAILURE, 8192)
+        for mutation in (
+            {"missingCount": True},
+            {"missingCount": 0},
+            {"missingCount": 65},
+            {"missingCount": "2"},
+            {"complete": 1},
+            {"complete": False},
+            {"reobservedMissingCount": True},
+            {"reobservedMissingCount": None},
+            {"reobservedMissingCount": -1},
+            {"reobservedMissingCount": 3},
+            {"kind": PRIVATE},
+            {"rawPid": 123},
+            {"rawPath": PRIVATE},
+        ):
+            malformed = detail | mutation
+            with self.subTest(mutation=mutation):
+                self.assertFalse(active.valid_failure(original | {"ownedScopeReadback": malformed}))
+                rendered = self.readback_failure(malformed)
+                self.assertNotIn("ownedScopeReadback", rendered)
+                self.assertEqual(rendered["phase"], original["phase"])
+                self.assertTrue(active.valid_failure(rendered))
+                self.assertNotIn(PRIVATE, json.dumps(rendered))
+        for mutation in (
+            {"actor": "client"},
+            {"operation": "close"},
+            {"reason": "execution-unverified"},
+            {"phase": "witness-pre-close-children-scope-readback-universe"},
+            {"reportingLease": None},
+            {"sourceVerified": False},
+            {"bindingVerified": False},
+            {"readerPending": True},
+            {"childPending": True},
+            {"comparisons": {original["phase"]: True}},
+        ):
+            with self.subTest(origin=mutation):
+                self.assertFalse(active.valid_failure(original | mutation))
+        for count in (0, 1, 2):
+            self.assertTrue(active.valid_failure(self.readback_failure(detail | {"reobservedMissingCount": count})))
+        self.assertTrue(
+            active.valid_failure(self.readback_failure(detail | {"complete": False, "reobservedMissingCount": None}))
+        )
+        self.assertTrue(active.valid_failure(bound_root_failure()))
+        with patch.object(active, "MAX_FAILURE", len(active.encoded(original)) - 1):
+            bounded = self.readback_failure(detail)
+            self.assertNotIn("ownedScopeReadback", bounded)
+            self.assertTrue(active.valid_failure(bounded))
+
+    def test_scope_readback_survives_client_failure_redaction_without_success_or_cleanup_authority(self) -> None:
+        for complete in (True, False):
+            detail = {
+                "kind": "owned-scope-missing-child-readback-v1",
+                "missingCount": 2,
+                "complete": complete,
+                "reobservedMissingCount": 1 if complete else None,
+            }
+            value = self.readback_failure(detail)
+            with tempfile.TemporaryDirectory() as temporary:
+                client = client_fixture(Path(temporary))
+                client.name = "f" * 32
+                client.ctx.checks.append({"exitCode": 1, "status": "failed", "stdout": PRIVATE, "stderr": PRIVATE})
+                client.ctx.command = Mock(return_value=json.dumps(value))
+                with self.assertRaises(ValueError):
+                    client.rpc("witness", {"checkpoint": "pre-close", "bindingSha256": client.binding.digest()})
+                self.assertEqual(client.failures, [value])
+                self.assertEqual(client.evidence["failures"][0]["ownedScopeReadback"], detail)
+                self.assertEqual(client.evidence["qualification"], "none")
+                self.assertFalse(client.evidence["cleanupAuthority"])
+                self.assertEqual(client.name, "f" * 32)
+                self.assertNotIn(PRIVATE, client.ctx.scoped_failure_output.read_text())
+                self.assertNotIn(PRIVATE, json.dumps(client.ctx.checks))
+
     def test_nonzero_error_is_captured_before_teardown_and_reporting_lease_grants_no_cleanup(self) -> None:
         from scripts.runtime_docker_backend import DockerBackend, DockerBackendError  # noqa: PLC0415
 

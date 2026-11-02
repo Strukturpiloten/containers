@@ -106,6 +106,7 @@ class RootWitness(unittest.TestCase):
 
         def sample(checkpoint: str) -> dict:
             deadlines.append(port.work_until)
+            port._witness_scope = (object(), ())
             return samples[0 if checkpoint == "ready" else 1]
 
         port.witness_sample = Mock(side_effect=sample)
@@ -124,6 +125,7 @@ class RootWitness(unittest.TestCase):
         self.assertEqual(port.record["state"], "attached")
         self.assertFalse(port.record["retained"])
         self.assertEqual(port.commit.call_count, 2)
+        self.assertIsNone(port._witness_scope)
 
     def test_failure_restores_deadline_without_committing_or_cleanup_authority(self) -> None:
         port = self.port()
@@ -300,6 +302,242 @@ class RootWitness(unittest.TestCase):
                 ):
                     port.witness_sample("ready")
                 port.modules.observations.held_rootlesskit.assert_not_called()
+
+    def readback_port(self, stack: ExitStack) -> active.RootPort:
+        port = self.port()
+        port.witness_counts = {"procBytes": 0, "pids": {10, 20, 30, 40}}
+        port._witness_child_readback = False
+        port._witness_scope = (stack, ((1, (1, 1)), (2, (1, 2))))
+        port.witness_task = Mock(side_effect=AssertionError("no task lookup after original refusal"))
+        return port
+
+    def test_missing_child_readback_reports_all_none_or_partial_without_repair_or_retry(self) -> None:
+        all_ids = b"".join(str(pid).encode() + b"\n" for pid in range(1, 65))
+        for bodies, expected, starting_bytes in (
+            ([b"30\n20\n30\n", b"40\n"], 2, 0),
+            ([b"20\n", b""], 0, 0),
+            ([b"30\n", b"30\n"], 1, 0),
+            ([all_ids, b"30\n40\n"], 2, active.WITNESS_PROC_LIMIT - len(all_ids) - len(b"30\n40\n")),
+        ):
+            with ExitStack() as stack:
+                port = self.readback_port(stack)
+                port.witness_counts["procBytes"] = starting_bytes
+                candidates, children = {10, 20}, {20, 30, 40}
+                with (
+                    self.subTest(bodies=bodies),
+                    patch.object(active.time, "monotonic_ns", return_value=1),
+                    patch.object(active.os, "fstat", side_effect=lambda fd: SimpleNamespace(st_dev=1, st_ino=fd)),
+                    patch.object(active.os, "open", side_effect=[101, 102]) as opened,
+                    patch.object(active.os, "read", side_effect=bodies) as read,
+                    patch.object(active.os, "close") as closed,
+                    patch.object(active.os, "scandir", side_effect=AssertionError("no rescan")),
+                ):
+                    for _attempt in range(2):
+                        with self.assertRaises(active.RefusedError) as refused:
+                            port.witness_child(stack, {"pid": 10}, candidates, (1, 2), children)
+                        self.assertEqual(refused.exception.args, ("active-scoped-profile-refused",))
+                    self.assertEqual([call.kwargs["dir_fd"] for call in opened.call_args_list], [1, 2])
+                    self.assertTrue(
+                        all(
+                            call.args
+                            == ("cgroup.procs", active.os.O_RDONLY | active.os.O_NOFOLLOW | active.os.O_CLOEXEC)
+                            for call in opened.call_args_list
+                        )
+                    )
+                    self.assertEqual(
+                        [call.args for call in read.call_args_list],
+                        [(101, active.WITNESS_READ_LIMIT + 1), (102, active.WITNESS_READ_LIMIT + 1)],
+                    )
+                    self.assertEqual([call.args for call in closed.call_args_list], [(101,), (102,)])
+                self.assertEqual(
+                    port.record["diagnostic"]["ownedScopeReadback"],
+                    {
+                        "kind": "owned-scope-missing-child-readback-v1",
+                        "missingCount": 2,
+                        "complete": True,
+                        "reobservedMissingCount": expected,
+                    },
+                )
+                self.assertEqual(port.witness_counts["procBytes"], starting_bytes + sum(map(len, bodies)))
+                self.assertEqual(port._witness_failure, "children-scope-initial-universe")
+                self.assertEqual(candidates, {10, 20})
+                self.assertEqual(children, {20, 30, 40})
+                port.witness_task.assert_not_called()
+                self.assertFalse(port.cleanup)
+
+    def test_missing_child_readback_keeps_primary_exception_when_diagnostic_is_incomplete(self) -> None:
+        cases = (
+            ("identity-before", {"identities": [SimpleNamespace(st_dev=1, st_ino=99)], "reads": 0}),
+            (
+                "identity-after",
+                {"identities": [SimpleNamespace(st_dev=1, st_ino=1), SimpleNamespace(st_dev=1, st_ino=99)]},
+            ),
+            ("malformed", {"raw": b"30"}),
+            ("oversized", {"raw": b"x" * (active.WITNESS_READ_LIMIT + 1)}),
+            ("aggregate", {"procBytes": active.WITNESS_PROC_LIMIT}),
+            ("pid-cap", {"pids": set(range(1, 65)), "raw": b"99\n"}),
+            ("deadline-before", {"reads": 0}),
+            ("deadline-after", {}),
+            (
+                "deadline-final",
+                {"identities": [SimpleNamespace(st_dev=1, st_ino=fd) for fd in (1, 1, 2, 2)], "reads": 2},
+            ),
+            ("io", {"error": OSError(errno.EIO, "PRIVATE_READBACK_CANARY")}),
+            ("interrupt", {"error": KeyboardInterrupt()}),
+            ("system-exit", {"error": SystemExit(1)}),
+            ("directory-cap", {"directories": tuple((fd, (1, fd)) for fd in range(65)), "reads": 0}),
+            ("wrong-owner", {"directories": ((1, (1, 1)),), "owner": None, "reads": 0}),
+        )
+        for fault, options in cases:
+            with ExitStack() as stack:
+                port = self.readback_port(stack)
+                raw = options.get("raw", b"30\n")
+                port.witness_counts.update({key: options[key] for key in ("procBytes", "pids") if key in options})
+                if "directories" in options:
+                    port._witness_scope = (options.get("owner", stack), options["directories"])
+                identities = options.get(
+                    "identities", [SimpleNamespace(st_dev=1, st_ino=1), SimpleNamespace(st_dev=1, st_ino=1)]
+                )
+                clock = {
+                    "deadline-before": [port.work_until],
+                    "deadline-after": [1, port.work_until],
+                    "deadline-final": [1, 1, 1, 1, port.work_until],
+                }.get(fault)
+                error = options.get("error")
+                primaries = []
+                original_require = port.witness_require
+
+                def require(
+                    code: str, value: object, original: object = original_require, caught: list = primaries
+                ) -> None:
+                    try:
+                        original(code, value)
+                    except active.RefusedError as primary:
+                        if code == "children-scope-initial-universe":
+                            caught.append(primary)
+                        raise
+
+                port.witness_require = require
+                original_bytes = port.witness_counts["procBytes"]
+                with (
+                    self.subTest(fault=fault),
+                    patch.object(active.time, "monotonic_ns", side_effect=clock, return_value=1),
+                    patch.object(active.os, "fstat", side_effect=identities),
+                    patch.object(active.os, "open", return_value=101) as opened,
+                    patch.object(active.os, "read", side_effect=error, return_value=raw) as read,
+                    patch.object(active.os, "close") as closed,
+                    self.assertRaises(active.RefusedError) as refused,
+                ):
+                    port.witness_child(stack, {"pid": 10}, {10, 20}, (1, 2), {20, 30})
+                self.assertIs(refused.exception, primaries[0])
+                self.assertEqual(port._witness_failure, "children-scope-initial-universe")
+                self.assertEqual(
+                    port.record["diagnostic"]["ownedScopeReadback"],
+                    {
+                        "kind": "owned-scope-missing-child-readback-v1",
+                        "missingCount": 1,
+                        "complete": False,
+                        "reobservedMissingCount": None,
+                    },
+                )
+                expected_reads = options.get("reads", 1)
+                self.assertEqual(read.call_count, expected_reads)
+                self.assertEqual(opened.call_count, read.call_count)
+                self.assertEqual(closed.call_count, read.call_count)
+                self.assertEqual(
+                    port.witness_counts["procBytes"],
+                    original_bytes + (len(raw) * expected_reads if error is None else 0),
+                )
+                self.assertFalse(port.cleanup)
+
+    def test_scope_readback_never_runs_for_success_later_guard_or_original_interrupt(self) -> None:
+        for readback, candidates, children in (
+            (False, {10, 20}, {20}),
+            (True, {10}, {20}),
+            (None, {10}, {20}),
+            (False, {10, 20}, {10}),
+        ):
+            with ExitStack() as stack:
+                port = self.readback_port(stack)
+                port._witness_child_readback = readback
+                parent = {"pid": 10, "before": {"namespaces": (1, 2, 3)}}
+                child = {"pid": 20, "exe": 20, "before": {"parent": 10, "namespaces": (4, 5, 3)}}
+                port.witness_task = Mock(return_value=nullcontext(child))
+                with (
+                    self.subTest(readback=readback, candidates=candidates, children=children),
+                    patch.object(
+                        port, "witness_missing_child_readback", side_effect=AssertionError("no diagnostic")
+                    ) as observe,
+                    patch.object(active.os, "fstat", return_value=SimpleNamespace(st_dev=1, st_ino=2)),
+                    patch.object(active.os, "open") as opened,
+                ):
+                    if children == {child["pid"]} and child["pid"] in candidates:
+                        self.assertIs(port.witness_child(stack, parent, candidates, (1, 2), children), child)
+                    else:
+                        with self.assertRaises(active.RefusedError):
+                            port.witness_child(stack, parent, candidates, (1, 2), children)
+                observe.assert_not_called()
+                opened.assert_not_called()
+                self.assertNotIn("ownedScopeReadback", port.record.get("diagnostic", {}))
+        port = self.port()
+        interrupt = KeyboardInterrupt()
+        with (
+            ExitStack() as stack,
+            patch.object(port, "witness_require", side_effect=interrupt),
+            patch.object(port, "witness_missing_child_readback") as observe,
+        ):
+            with self.assertRaises(KeyboardInterrupt) as raised:
+                port.witness_child(stack, {"pid": 10}, {10}, (1, 2), {20})
+            self.assertIs(raised.exception, interrupt)
+        observe.assert_not_called()
+
+    def test_readback_uses_only_authenticated_scope_walk_handles_in_original_stack(self) -> None:
+        port = self.port()
+        port.witness_counts = {"procBytes": 0, "pids": set()}
+        port._witness_child_readback = False
+        entry = SimpleNamespace(name="child", is_symlink=lambda: False, is_dir=lambda **_kw: True)
+        scope_fd = 3
+        leaves = {scope_fd: iter((4, 7)), 5: iter((6, 8))}
+
+        def opened(name: str, _flags: int, *, dir_fd: int | None = None) -> int:
+            if name == "cgroup.procs":
+                return next(leaves[dir_fd])
+            return {"/sys/fs/cgroup": 1, "owned.slice": 2, "docker-" + "a" * 64 + ".scope": 3, "child": 5}[name]
+
+        def named(name: str, *, dir_fd: int, follow_symlinks: bool) -> SimpleNamespace:
+            self.assertFalse(follow_symlinks)
+            self.assertEqual(dir_fd, 3 if name == "child" else 1 if name == "owned.slice" else 2)
+            return SimpleNamespace(st_dev=1, st_ino=5 if name == "child" else 2 if name == "owned.slice" else 3)
+
+        with (
+            ExitStack() as stack,
+            patch.object(active.time, "monotonic_ns", return_value=1),
+            patch.object(active, "filesystem_magic"),
+            patch.object(active.os, "fstat", side_effect=lambda fd: SimpleNamespace(st_dev=1, st_ino=fd)),
+            patch.object(active.os, "stat", side_effect=named) as statted,
+            patch.object(active.os, "open", side_effect=opened) as open_file,
+            patch.object(active.os, "close"),
+            patch.object(
+                active.os, "read", side_effect=lambda fd, _cap: {4: b"10\n20\n", 6: b"", 7: b"30\n", 8: b""}[fd]
+            ) as read,
+            patch.object(
+                active.os, "scandir", side_effect=lambda fd: nullcontext(iter([entry] if fd == scope_fd else []))
+            ) as scanned,
+        ):
+            candidates = port.witness_scope_pids(stack)
+            self.assertEqual(candidates, {10, 20})
+            self.assertEqual(port._witness_scope, (stack, ((3, (1, 3)), (5, (1, 5)))))
+            port.witness_counts["pids"].add(30)  # Already charged by the real parent-children census.
+            with self.assertRaises(active.RefusedError):
+                port.witness_child(stack, {"pid": 10}, candidates, (1, 2), {20, 30})
+            self.assertEqual(port.record["diagnostic"]["ownedScopeReadback"]["reobservedMissingCount"], 1)
+            self.assertEqual([call.args[0] for call in read.call_args_list], [4, 6, 7, 8])
+            self.assertEqual(scanned.call_count, 2)
+            self.assertEqual(statted.call_count, 3)
+            self.assertEqual(
+                [call.kwargs["dir_fd"] for call in open_file.call_args_list if call.args[0] == "cgroup.procs"],
+                [3, 5, 3, 5],
+            )
 
     def test_scope_walk_unions_unordered_and_repeated_pid_locators(self) -> None:
         port = self.port()
@@ -983,7 +1221,15 @@ class ChildScopeSiteDiagnostics(unittest.TestCase):
             code = "children-scope-" + pass_name + "-" + site
             phase = "witness-" + checkpoint + "-" + code
             self.assertIn(code, active.WITNESS_FAILURE_CODES)
-            self.assertEqual(port.record["diagnostic"], {"phase": phase, "comparisons": {phase: False}})
+            expected_diagnostic = {"phase": phase, "comparisons": {phase: False}}
+            if not readback and site == "universe":
+                expected_diagnostic["ownedScopeReadback"] = {
+                    "kind": "owned-scope-missing-child-readback-v1",
+                    "missingCount": 1,
+                    "complete": False,
+                    "reobservedMissingCount": None,
+                }
+            self.assertEqual(port.record["diagnostic"], expected_diagnostic)
             self.assertEqual(port.record.get("postExecWitness"), original)
             self.assertEqual(
                 passes,
