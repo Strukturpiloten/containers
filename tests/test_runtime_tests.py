@@ -307,6 +307,36 @@ class RuntimeCommandTests(unittest.TestCase):
             context.podman.assert_any_call("audit isolated containers", "ps", "--all", "--quiet", timeout=10)
             self.assertEqual(context.checks[-1], {"name": "cleanup isolated store", "status": "passed"})
 
+    def test_loaded_image_cleanup_removes_all_imported_aliases_by_verified_id(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            context = RuntimeContext.__new__(RuntimeContext)
+            context.directory = Path(directory)
+            context.containers = []
+            context.checks = []
+            context.image_ref = "localhost/test:runtime"
+            context.architecture = "amd64"
+            context._sudo = []
+            context._owned_mounts = MagicMock(return_value=[])
+            identifier = "sha256:" + "a" * 64
+
+            def podman(_name: str, *args: str, **_kwargs: object) -> str:
+                if args[0] == "images":
+                    return identifier
+                if args[:2] == ("image", "inspect"):
+                    return "amd64"
+                return ""
+
+            context.podman = MagicMock(side_effect=podman)
+            with (
+                patch("scripts.runtime_tests.archive_identity", return_value={"configDigest": identifier}),
+                patch("scripts.runtime_tests.shutil.rmtree"),
+            ):
+                context.load_archive(Path("owned.oci"))
+                context.cleanup()
+            context.podman.assert_any_call(
+                "cleanup owned image", "image", "rm", "--force", identifier, timeout=15, check=False
+            )
+
     def test_cleanup_failure_is_recorded_in_architecture_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             context = MagicMock()

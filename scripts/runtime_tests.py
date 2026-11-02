@@ -50,6 +50,7 @@ class RuntimeContext:
         self.run_containers: set[str] = set()
         self.checks: list[dict[str, Any]] = []
         self.image_ref = f"localhost/{image}:runtime-{os.getpid()}"
+        self.image_id: str | None = None
         self._sudo = ["sudo", "-n"] if use_sudo else []
         self._podman = [
             *self._sudo,
@@ -175,6 +176,7 @@ class RuntimeContext:
         if len(ids) != 1:
             raise ProbeError(f"expected one image in isolated store, got {len(ids)}")
         self.assert_equal("loaded image configuration digest", ids[0], identity["configDigest"])
+        self.image_id = ids[0]
         self.podman("tag runtime image", "tag", ids[0], self.image_ref)
         actual_arch = self.podman(
             "inspect image architecture", "image", "inspect", "--format", "{{.Architecture}}", self.image_ref
@@ -295,7 +297,10 @@ class RuntimeContext:
         if hasattr(self, "run_containers"):
             self.run_containers.clear()
         self.podman("unmount isolated containers", "unmount", "--all", timeout=20)
-        self.podman("cleanup owned image", "image", "rm", "--force", self.image_ref, timeout=15, check=False)
+        # OCI imports can retain their original alias as well as our runtime tag.
+        # Remove the verified configuration ID so mapped-UID layers are released too.
+        owned_image = getattr(self, "image_id", None) or self.image_ref
+        self.podman("cleanup owned image", "image", "rm", "--force", owned_image, timeout=15, check=False)
         for mount in self._owned_mounts():
             try:
                 result = subprocess.run(
