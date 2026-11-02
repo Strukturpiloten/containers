@@ -227,3 +227,14 @@ unparseable output and exception operands are never copied into that record.
 This source design and its inert offline tests
 are not evidence that either admitted architecture has executed these controls.
 Fresh exact-candidate native runs and complete gates remain required.
+
+
+## CI image-input prerequisite
+
+The first PR #580 CI run stopped before native execution because the pinned
+openSUSE Tumbleweed manifest was unavailable. Fresh anonymous registry observations
+confirmed a current manifest for both required architectures. The four existing
+Docker/Podman Tumbleweed metadata pins were refreshed together under their unchanged
+Renovate extraction and digest group. This input recovery changes no witness
+predicate or native admission rule and is not compatibility evidence. Fresh
+required native CI remains mandatory; historical failed inputs remain evidence.
