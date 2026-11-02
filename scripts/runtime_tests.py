@@ -651,6 +651,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             _notify_push(ctx)
         elif profile_name == "docker":
             _docker(ctx, profile, archive=archive, allow_privileged=args.allow_privileged, skip_nested=args.skip_nested)
+        elif profile_name == "nautobot":
+            from scripts.runtime_nautobot import run as run_nautobot  # noqa: PLC0415
+
+            run_nautobot(ctx)
         else:
             raise ProbeError(f"unsupported runtime profile {profile_name}")
         evidence["status"] = "passed"

@@ -19,3 +19,6 @@ pyproject.toml
 scripts
 tests
 uv.lock
+
+.build-sources/strukturbo-nautobot/bootstrap
+!.build-sources/strukturbo-nautobot/app/README.md

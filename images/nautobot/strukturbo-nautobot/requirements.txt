@@ -1,0 +1,3 @@
+# Runtime additions only. Core Nautobot and cryptography come from the pinned base.
+nautobot-dns-models==2.3.0 --hash=sha256:0f518fddd89c4636065bca082d4f10beba981f06e8229d4b0c20490d88c625c3
+nautobot-design-builder==3.1.2 --hash=sha256:c18a430b851c4945f00275be0c464c3efb43ce3350b84fcb0bcffbd7f1cdff59

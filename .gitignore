@@ -675,3 +675,6 @@ __marimo__/
 
 !shared/oci-labels.env
 /_site/
+
+# Authenticated, commit-pinned source staging; never commit the private repository.
+.build-sources/
