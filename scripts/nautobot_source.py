@@ -67,6 +67,22 @@ def extract(payload: bytes, destination: Path) -> None:
                 shutil.copyfileobj(stream, output)
 
 
+def check_access(root: Path = ROOT) -> None:
+    """Fail before expensive CI builds when the pinned private source is unavailable."""
+    declaration = manifest(root)
+    result = subprocess.run(
+        ["gh", "api", f"repos/{declaration['repository']}/commits/{declaration['sourceCommit']}", "--jq", ".sha"],
+        capture_output=True,
+        check=False,
+        timeout=45,
+    )
+    if result.returncode or result.stdout.decode().strip() != declaration["sourceCommit"]:
+        raise RuntimeError(
+            "Pinned private source is unavailable: STRUKTURBO_SOURCE_TOKEN or RELEASE_AUTOMATION_TOKEN "
+            "needs Contents read access to Strukturpiloten/strukturbo-bootstrap"
+        )
+
+
 def provenance(source: Path, declaration: dict[str, str], archive_sha256: str) -> dict[str, Any]:
     """Bind the wheel contents to the qualified package and dependency contract."""
     app = source / "apps/nautobot-strukturbo"
@@ -150,7 +166,18 @@ def main() -> None:
     """Fetch with the host gh client; source credentials never enter the build context."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--archive", type=Path, help="Use a previously acquired immutable source archive")
+    parser.add_argument(
+        "--check-access", action="store_true", help="Only verify source access before scheduling builds"
+    )
+    parser.add_argument("--plan", type=Path, help="Skip access checks unless this plan selects strukturbo-nautobot")
     options = parser.parse_args()
+    if options.plan:
+        selected = json.loads(options.plan.read_text())["images"]
+        if not any(image["name"] == "strukturbo-nautobot" for image in selected):
+            return
+    if options.check_access:
+        check_access()
+        return
     print(prepare(archive=options.archive))  # noqa: T201
 
 

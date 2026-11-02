@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -32,6 +33,32 @@ def archive(name: str, *, link: bool = False) -> bytes:
 
 
 class SourceTests(unittest.TestCase):
+    def test_source_access_check_binds_the_exact_commit_without_echoing_api_errors(self) -> None:
+        for accepted in (True, False):
+            response = SimpleNamespace(
+                returncode=0 if accepted else 1,
+                stdout=(source.manifest(ROOT)["sourceCommit"] + "\n").encode(),
+                stderr=b"TOKEN_SENTINEL",
+            )
+            with self.subTest(accepted=accepted), patch.object(source.subprocess, "run", return_value=response):
+                if accepted:
+                    source.check_access(ROOT)
+                else:
+                    with self.assertRaises(RuntimeError) as error:
+                        source.check_access(ROOT)
+                    self.assertNotIn("TOKEN_SENTINEL", str(error.exception))
+
+    def test_other_images_do_not_require_private_source_access(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            plan = Path(directory) / "plan.json"
+            plan.write_text(json.dumps({"images": [{"name": "podman-fixture"}]}))
+            with (
+                patch.object(sys, "argv", ["source", "--check-access", "--plan", str(plan)]),
+                patch.object(source, "check_access") as check,
+            ):
+                source.main()
+            check.assert_not_called()
+
     def test_traversal_absolute_paths_and_links_are_rejected(self) -> None:
         for name, link in (("repo/../../outside", False), ("/repo/outside", False), ("repo/link", True)):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:

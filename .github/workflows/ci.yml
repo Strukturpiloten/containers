@@ -111,6 +111,14 @@ jobs:
           set -euo pipefail
 
           uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.container_engine github-outputs build-plan.json >> "$GITHUB_OUTPUT"
+      - name: Preflight selected private source
+        if: steps.outputs.outputs.has_builds == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.STRUKTURBO_SOURCE_TOKEN || secrets.RELEASE_AUTOMATION_TOKEN }}
+        run: |
+          set -euo pipefail
+          uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.nautobot_source --check-access --plan build-plan.json
       - name: Preflight selected image inputs
         if: steps.outputs.outputs.has_builds == 'true'
         uses: ./.github/actions/preflight-images
