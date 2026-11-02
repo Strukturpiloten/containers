@@ -18,7 +18,7 @@ Renovate tracks the base and disposable fixture image tags/digests in `container
 
 ## Runtime and qualification
 
-The image inherits the upstream entrypoint and runs as UID/GID 999. Configuration is supplied at deployment time. Enable the three apps in the credential-aware Nautobot configuration; run the approved migration/static collection operation separately before starting writers. The image build performs no database migration.
+The image runs as UID/GID 999 and starts Nautobot directly. It bypasses the upstream initialization wrapper, which would otherwise run migrations and optionally create/update a superuser on startup. Configuration is supplied at deployment time. Enable the three apps in the credential-aware Nautobot configuration; run the approved migration/static collection operation separately before starting writers. The image build performs no database migration.
 
 The `nautobot` runtime profile loads the exact built OCI archive, acquires digest-pinned PostgreSQL/Redis fixtures and invokes the pinned bootstrap qualification tooling against the installed image. It uses disposable isolated containers, synthetic credentials, TLS and no live data. It checks wheel/source identity, migration consistency, registry models, object permissions, CSRF/session approval, stale/conflict rejection, audit rollback, replay, HTTPS/static/login, workers, scheduler and backup queue behavior. App source is not mounted or injected into the candidate. The complete existing-data migration and offline restore rehearsal is a separate bootstrap qualification; source-injection evidence alone does not satisfy it.
 

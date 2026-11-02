@@ -30,7 +30,14 @@ def run(ctx: RuntimeContext) -> None:
         ["uv", "sync", "--project", str(bootstrap), "--frozen", "--no-dev"],
         timeout=180,
     )
-    image = json.loads(ctx.podman("inspect candidate identity", "image", "inspect", ctx.image_ref))[0]["Id"]
+    inspected = json.loads(ctx.podman("inspect candidate identity", "image", "inspect", ctx.image_ref))[0]
+    image = inspected["Id"]
+    ctx.assert_equal("no implicit migration entrypoint", json.dumps(inspected["Config"].get("Entrypoint") or []), "[]")
+    ctx.assert_equal(
+        "direct Nautobot startup",
+        json.dumps(inspected["Config"]["Cmd"]),
+        json.dumps(["nautobot-server", "start", "--ini", "/opt/nautobot/uwsgi.ini"]),
+    )
     command = [
         *ctx._sudo,
         "env",

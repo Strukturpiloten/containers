@@ -44,4 +44,6 @@ RUN python -m pip install --no-cache-dir --no-deps --no-index /tmp/registry-whee
     && python /tmp/verify-image.py \
     && rm -rf /tmp/registry-wheels /tmp/verify-image.py
 USER 999:999
-# Inherit the upstream entrypoint. App configuration and migration are deployment responsibilities.
+# Bypass the upstream wrapper, which runs post_upgrade and can reconcile a superuser.
+ENTRYPOINT []
+CMD ["nautobot-server", "start", "--ini", "/opt/nautobot/uwsgi.ini"]
