@@ -1042,6 +1042,50 @@ def subject_executable_same(directory: int, original: dict[str, Any], deadline: 
         os.close(descriptor)
 
 
+def owned_scope_readback_detail(value: object) -> dict[str, Any] | None:
+    """Close one failed-only numeric comparison; retain no task or directory locators."""
+    if (
+        type(value) is not dict
+        or set(value) != {"kind", "missingCount", "complete", "reobservedMissingCount"}
+        or type(value["kind"]) is not str
+        or value["kind"] != "owned-scope-missing-child-readback-v1"
+        or type(value["missingCount"]) is not int
+        or not 1 <= value["missingCount"] <= WITNESS_PID_LIMIT
+        or type(value["complete"]) is not bool
+    ):
+        return None
+    count = value["reobservedMissingCount"]
+    if (value["complete"] and (type(count) is not int or not 0 <= count <= value["missingCount"])) or (
+        not value["complete"] and count is not None
+    ):
+        return None
+    return {
+        "kind": "owned-scope-missing-child-readback-v1",
+        "missingCount": value["missingCount"],
+        "complete": value["complete"],
+        "reobservedMissingCount": count,
+    }
+
+
+def owned_scope_readback_origin(value: dict[str, Any]) -> bool:
+    """Require the acknowledged root witness's original initial-universe refusal."""
+    phase = value.get("phase")
+    return (
+        value.get("actor") == "root"
+        and value.get("operation") == "witness"
+        and value.get("reason") == "refused"
+        and value.get("bindingVerified") is True
+        and value.get("sourceVerified") is True
+        and value.get("reportingLease") is not None
+        and value.get("readerPending") is False
+        and value.get("childPending") is False
+        and phase
+        in {"witness-ready-children-scope-initial-universe", "witness-pre-close-children-scope-initial-universe"}
+        and type(value.get("comparisons")) is dict
+        and value["comparisons"].get(phase) is False
+    )
+
+
 def _failure_receipt(progress: dict[str, Any], error: BaseException) -> dict[str, Any]:
     """Render only bounded finite observations from the existing operation journal."""
     record = progress.get("record") or {}
@@ -1121,6 +1165,13 @@ def _failure_receipt(progress: dict[str, Any], error: BaseException) -> dict[str
         and len(encoded(result | {"guestExit": startup})) <= MAX_FAILURE
     ):
         result["guestExit"] = startup
+    readback = owned_scope_readback_detail(diagnostic.get("ownedScopeReadback"))
+    if (
+        readback is not None
+        and owned_scope_readback_origin(result)
+        and len(encoded(result | {"ownedScopeReadback": readback})) <= MAX_FAILURE
+    ):
+        result["ownedScopeReadback"] = readback
     return result
 
 
@@ -1137,7 +1188,16 @@ def _valid_failure(value: object, child: ModuleType | None = None) -> bool:
     if type(value) is not dict or len(encoded(value)) > MAX_FAILURE:
         return False
     template = failure_receipt({}, RefusedError())
-    if not set(template) <= set(value) <= set(template) | {"childBuild", "subjectProfile", "guestExit"}:
+    readback = owned_scope_readback_detail(value.get("ownedScopeReadback"))
+    if not set(template) <= set(value) <= set(template) | {
+        "childBuild",
+        "subjectProfile",
+        "guestExit",
+        "ownedScopeReadback",
+    } or (
+        "ownedScopeReadback" in value
+        and (readback is None or readback != value["ownedScopeReadback"] or not owned_scope_readback_origin(value))
+    ):
         return False
     if "guestExit" in value:
         startup = guest_exit_detail(value["guestExit"])
@@ -2427,6 +2487,7 @@ class RootPort:
     @witness_operation("scope-identity")
     def witness_scope_pids(self, stack: ExitStack) -> set[int]:
         """Enumerate only the authenticated owned cgroup subtree, with finite names and input."""
+        self._witness_scope = None
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
         self.witness_require("scope-identity", re.fullmatch(r"[0-9a-f]{64}", self.record["subject"]["container"]))
         self.witness_require(
@@ -2447,7 +2508,8 @@ class RootPort:
         scope_info = os.fstat(scope)
         identity = (scope_info.st_dev, scope_info.st_ino)
         self.witness_require("scope-identity", self.witness_counts.setdefault("scopeIdentity", identity) == identity)
-        result, identities = self.witness_scope_walk(stack, scope)
+        held_directories = {}
+        result, identities = self.witness_scope_walk(stack, scope, held_directories=held_directories)
         runtime_after = os.stat(self.binding.runtime_slice, dir_fd=root, follow_symlinks=False)
         scope_after = os.stat(
             "docker-" + self.record["subject"]["container"] + ".scope", dir_fd=runtime, follow_symlinks=False
@@ -2459,10 +2521,13 @@ class RootPort:
         self.witness_require(
             "scope-census", self.witness_counts.setdefault("scopeDirectories", identities) == identities
         )
+        self._witness_scope = (stack, tuple(held_directories.items()))
         return result
 
     @witness_operation("scope-census")
-    def witness_scope_walk(self, stack: ExitStack, scope: int) -> tuple[set[int], dict]:
+    def witness_scope_walk(
+        self, stack: ExitStack, scope: int, *, held_directories: dict | None = None
+    ) -> tuple[set[int], dict]:
         """Walk held cgroup directories without global proc enumeration or path fallback."""
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
         pending, result, directories, entries = [(scope, 0, ())], set(), 0, 0
@@ -2478,6 +2543,8 @@ class RootPort:
             identities[relative] = directory_identity
             directories += 1
             self.witness_require("scope-cap", directories <= WITNESS_DIRECTORY_LIMIT and depth <= WITNESS_DEPTH_LIMIT)
+            if held_directories is not None:
+                held_directories[directory] = directory_identity
             descriptor = os.open("cgroup.procs", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory)
             try:
                 raw = os.read(descriptor, WITNESS_READ_LIMIT + 1)
@@ -2647,6 +2714,49 @@ class RootPort:
         self.witness_budget()
         return result
 
+    def witness_missing_child_readback(self, stack: ExitStack, missing: set[int]) -> None:
+        """Read each already-held owned object once; never repair the failed candidate universe."""
+        if getattr(self, "_witness_scope_readback_used", False):
+            return
+        self._witness_scope_readback_used = True
+        detail = {
+            "kind": "owned-scope-missing-child-readback-v1",
+            "missingCount": len(missing),
+            "complete": False,
+            "reobservedMissingCount": None,
+        }
+        if owned_scope_readback_detail(detail) is None:
+            return
+        self.record.setdefault("diagnostic", {})["ownedScopeReadback"] = detail
+        owner, directories = getattr(self, "_witness_scope", None) or (None, ())
+        if owner is not stack:
+            return
+        self.witness_require("scope-cap", 0 < len(directories) <= WITNESS_DIRECTORY_LIMIT)
+        observed = set()
+        for directory, identity in directories:
+            self.witness_budget()
+            before = os.fstat(directory)
+            self.witness_require("scope-identity", (before.st_dev, before.st_ino) == identity)
+            descriptor = os.open("cgroup.procs", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory)
+            try:
+                raw = os.read(descriptor, WITNESS_READ_LIMIT + 1)
+            finally:
+                os.close(descriptor)
+            self.witness_counts["procBytes"] += len(raw)
+            self.witness_require(
+                "proc-cap", len(raw) <= WITNESS_READ_LIMIT and self.witness_counts["procBytes"] <= WITNESS_PROC_LIMIT
+            )
+            self.witness_budget()
+            self.witness_require("scope-census", re.fullmatch(rb"(?:[1-9][0-9]{0,9}\n)*", raw))
+            members = {int(value) for value in raw.splitlines()}
+            self.witness_counts["pids"].update(members)
+            self.witness_require("pid-cap", len(self.witness_counts["pids"]) <= WITNESS_PID_LIMIT)
+            after = os.fstat(directory)
+            self.witness_require("scope-identity", (after.st_dev, after.st_ino) == identity)
+            observed.update(members)
+        self.witness_budget()
+        detail.update(complete=True, reobservedMissingCount=len(observed & missing))
+
     @witness_operation("child-mapping")
     def witness_child(
         self,
@@ -2673,7 +2783,18 @@ class RootPort:
         )
         if readback is not True and readback is not False:
             codes = ("children-scope",) * 3
-        self.witness_require(codes[0], children <= candidates and parent["pid"] not in children)
+        try:
+            self.witness_require(codes[0], children <= candidates and parent["pid"] not in children)
+        except RefusedError:
+            code = self._witness_failure
+            try:
+                # Only this already-frozen refusal suppresses diagnostic failure. Original interruption still escapes.
+                with suppress(BaseException):
+                    if readback is False and parent["pid"] not in children and children - candidates:
+                        self.witness_missing_child_readback(stack, children - candidates)
+            finally:
+                self._witness_failure = code
+            raise
         matches, observed = [], set()
         for pid in sorted(candidates - {parent["pid"]}):
             with ExitStack() as temporary:
@@ -2808,6 +2929,8 @@ class RootPort:
                 self.work_until = min(original, checkpoint_until)
                 self._witness_deadline = "inherited-budget" if original <= checkpoint_until else "checkpoint-budget"
                 self.witness_counts = {"procBytes": 0, "exeBytes": 0, "pids": set()}
+                self._witness_scope = None
+                self._witness_scope_readback_used = False
                 with self.witness_site("binding-guard"):
                     self.guard(self.binding)
                 self.point("witness-" + checkpoint)
@@ -2834,6 +2957,7 @@ class RootPort:
             raise
         finally:
             self._witness_failure = None
+            self._witness_scope = None
 
     def guest_exit_budget(self) -> None:
         """Stop optional reads on inherited expiry, cleanup or sticky uncertainty."""

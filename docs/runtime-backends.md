@@ -138,7 +138,37 @@ separate directory reads can also overlap as processes migrate. Duplicates still
 consume raw input budget but count once toward the distinct-ID limit. This union
 is not an atomic or guaranteed complete current process census. Missing required
 actors, changed directory identities and failed held-task readbacks still refuse
-the witness, without retries or additional reads.
+the witness without retrying or refreshing acceptance.
+
+Issue #573 adds one failure-only observation after the original initial-universe
+refusal: one bounded `cgroup.procs` read per already-held, authenticated scope
+directory. The private descriptor map belongs to the original witness stack;
+there is no second directory scan, path reopen, missing-PID procfs lookup or new
+provider. Held identity checks surround each read. Existing five-second, raw-byte,
+aggregate-byte, directory and 64-distinct-ID limits remain charged and unchanged.
+Errors, drift or exhausted allowance leave the observation incomplete and preserve
+the original exception, comparison, phase, qualification and cleanup ordering.
+Success performs no diagnostic I/O.
+
+Only an acknowledged root witness failure can carry optional `ownedScopeReadback`:
+`kind` is `owned-scope-missing-child-readback-v1`, `missingCount` is an integer
+from 1 through 64, `complete` is a Boolean, and `reobservedMissingCount` is an
+integer from zero through that count only when complete (otherwise null).
+Booleans are not counts. Complete means the planned pass finished its existing
+read/identity guards, not an atomic or exhaustive current-process census.
+The existing 8192-byte failure-envelope cap is unchanged;
+success receipts and witness proofs gain no fields. Clients reuse the same closed
+validator. No raw task/directory identities, paths, labels, hashes or error text
+are exported, and the detail grants no selector or cleanup authority.
+
+This is deliberately new I/O beyond issue #564's diagnostic-only source change.
+A reobserved number establishes a changed numeric observation interval, without
+proving the same child incarnation, timing cause, migration or ownership. Neither absent
+reappearance nor incomplete evidence authorizes a semantic fix. Stop after this
+one observation; do not add retries, sleeps, process draining or a refreshed
+candidate set for acceptance. Historical packets remain immutable. Three current
+producer passes and the separate Debian 11 ARM64 memory-enforcement failure retain
+their distinct status; none qualifies a changed consumer candidate.
 
 This is source integration only. Strict no-load compilation under the original
 fatal-warning flags, fresh post-RootlessKit-exec held-task label/workload readbacks,
