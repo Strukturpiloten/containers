@@ -88,8 +88,8 @@ jobs:
         shell: bash
         env:
           BEFORE: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || '' }}
-          BUILD_SCOPE: all
-          BUILD_TARGET: ""
+          BUILD_SCOPE: image
+          BUILD_TARGET: strukturbo-nautobot
           REF_NAME: ${{ github.head_ref || github.ref_name }}
           SOURCE_SHA: ${{ github.sha }}
         run: |
