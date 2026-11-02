@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import ExitStack
 from typing import TYPE_CHECKING
 
 import yaml
@@ -17,6 +18,12 @@ if TYPE_CHECKING:
 
 def run(ctx: RuntimeContext) -> None:
     """Use separate disposable databases; never inject app source into the image."""
+    with ExitStack() as fixtures:
+        _run(ctx, fixtures)
+
+
+def _run(ctx: RuntimeContext, fixtures: ExitStack) -> None:
+    """Release dependency images through Podman before deleting mapped-UID stores."""
     staged = verify()
     metadata = yaml.safe_load((ROOT / "images/strukturbo/strukturbo-nautobot/container.yaml").read_text())
     arguments = metadata["build"]["args"]
@@ -24,6 +31,7 @@ def run(ctx: RuntimeContext) -> None:
     redis = arguments["REDIS_IMAGE"]["value"]
     for name, image in (("PostgreSQL", database), ("Redis", redis)):
         ctx.podman(f"acquire disposable {name} fixture", "pull", "--quiet", image, timeout=180)
+        fixtures.callback(ctx.podman, f"release disposable {name} fixture", "image", "rm", image, timeout=120)
     bootstrap = staged / "bootstrap"
     ctx.command(
         "install locked qualification tooling",

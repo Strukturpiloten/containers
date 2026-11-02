@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from scripts import runtime_nautobot
-from scripts.runtime_tests import RuntimeContext
+from scripts.runtime_tests import ProbeError, RuntimeContext
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -24,27 +24,37 @@ class RuntimeNautobotTests(unittest.TestCase):
                 context._sudo = []
                 context._podman = ["podman", "--root", "/owned/store"]
                 context.image_ref = "localhost/test:runtime"
-                context.podman.side_effect = [
-                    "",
-                    "",
-                    json.dumps(
-                        [
-                            {
-                                "Id": identifier,
-                                "Config": {
-                                    "Entrypoint": [],
-                                    "Cmd": ["nautobot-server", "start", "--ini", "/opt/nautobot/uwsgi.ini"],
-                                },
-                            }
-                        ]
-                    ),
-                ]
+                context.podman.return_value = json.dumps(
+                    [
+                        {
+                            "Id": identifier,
+                            "Config": {
+                                "Entrypoint": [],
+                                "Cmd": ["nautobot-server", "start", "--ini", "/opt/nautobot/uwsgi.ini"],
+                            },
+                        }
+                    ]
+                )
                 context.command.side_effect = ["", "Qualified installed registry source SHA-256: expected"]
                 with patch.object(runtime_nautobot, "verify", return_value=staged):
                     runtime_nautobot.run(context)
                 command = context.command.call_args.args[1]
                 self.assertEqual(command[command.index("--image") + 1], "sha256:" + "a" * 64)
                 self.assertIn("--installed", command)
+                removed = [call for call in context.podman.call_args_list if call.args[1:3] == ("image", "rm")]
+                self.assertEqual(len(removed), 2)
+
+    def test_fixture_images_are_released_when_qualification_tool_setup_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            context = Mock(spec=RuntimeContext)
+            context.command.side_effect = ProbeError("synthetic setup failure")
+            with (
+                patch.object(runtime_nautobot, "verify", return_value=Path(directory)),
+                self.assertRaisesRegex(ProbeError, "setup failure"),
+            ):
+                runtime_nautobot.run(context)
+            removed = [call for call in context.podman.call_args_list if call.args[1:3] == ("image", "rm")]
+            self.assertEqual(len(removed), 2)
 
 
 if __name__ == "__main__":
