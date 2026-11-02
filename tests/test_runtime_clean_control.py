@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -24,6 +25,7 @@ REAL_CONTEXT = runtime_tests.RuntimeContext
 REAL_RUN = subprocess.run
 REAL_MKDTEMP = tempfile.mkdtemp
 METADATA = ROOT / "images/docker/docker-29-conformance-rootless/container.yaml"
+CONTROLS_REFUSAL = "authored mandatory-control refusal"
 
 
 class _Fixture:
@@ -412,7 +414,12 @@ class CleanControlTests(unittest.TestCase):
         self.assertIn("write named volume in nested container", results[0]["commands"])
         self.assertIn("wait for synthetic HTTP container", results[0]["exec"])
 
-    def _ordinary_phase(self, phase: runtime_docker.DockerProbePhase) -> dict:
+    def test_both_phases_controls_failure_blocks_ready_and_work_but_preserves_monitor_cleanup(self) -> None:
+        for phase in runtime_docker.DockerProbePhase:
+            with self.subTest(phase=phase):
+                self._ordinary_phase(phase, controls_refused=True)
+
+    def _ordinary_phase(self, phase: runtime_docker.DockerProbePhase, *, controls_refused: bool = False) -> dict:
         ctx = MagicMock(unsafe=True)
         ctx.directory = Path("owned-fixture-store")
         ctx.image_ref = "local:fixture"
@@ -420,6 +427,17 @@ class CleanControlTests(unittest.TestCase):
         ctx.name = "docker-29-conformance-rootless"
         ctx.start.return_value = "a" * 64
         ctx.runtime_deadline = 1
+        events = []
+        ctx.backend.scoped_profile.witness.side_effect = events.append
+        ctx.load_fixture_archive.side_effect = lambda *_args: events.append("ordinary-work-start")
+        diagnostics = MagicMock()
+
+        def controls(observed: object) -> None:
+            self.assertIs(observed, ctx)
+            events.append("native-controls")
+            if controls_refused:
+                raise ProbeError(CONTROLS_REFUSAL)
+
         outputs = {
             "read Docker API versions": json.dumps(
                 {"Version": "29.8.2", "ApiVersion": "1.53", "MinAPIVersion": "1.44"}
@@ -434,6 +452,9 @@ class CleanControlTests(unittest.TestCase):
 
         def stop(_ctx: object, _container: str, **_kwargs: object) -> None:
             self.assertIsNone(ctx.runtime_deadline)
+            self.assertIs(_ctx, ctx)
+            self.assertIs(_kwargs["diagnostics"], diagnostics)
+            events.append("shutdown")
 
         with (
             patch("scripts.runtime_docker.runtime_docker_systemd.verify_runtime"),
@@ -442,10 +463,12 @@ class CleanControlTests(unittest.TestCase):
             patch("scripts.runtime_docker._checked_exec", return_value="29.8.2") as execute,
             patch("scripts.runtime_docker.runtime_docker_systemd.verify_guest") as guest,
             patch("scripts.runtime_docker.runtime_docker_systemd.verify_inner_limits") as injection,
-            patch("scripts.runtime_docker.OomDiagnostics"),
-            patch("scripts.runtime_docker._wait_http"),
+            patch("scripts.runtime_docker.OomDiagnostics", return_value=diagnostics),
+            patch("scripts.runtime_docker_dead_nonactor_controls.require_controls", side_effect=controls) as mandatory,
+            patch("scripts.runtime_docker._wait_http") as http,
             patch("scripts.runtime_docker.verify_outer_container_limits"),
             patch("scripts.runtime_docker._stop_owned_daemon", side_effect=stop) as shutdown,
+            self.assertRaisesRegex(ProbeError, CONTROLS_REFUSAL) if controls_refused else nullcontext(),
         ):
             runtime_docker._run_nested_docker(
                 ctx,
@@ -455,7 +478,26 @@ class CleanControlTests(unittest.TestCase):
                 phase=phase,
             )
         guest.assert_called_once()
+        mandatory.assert_called_once_with(ctx)
         shutdown.assert_called_once()
+        diagnostics.close.assert_called_once_with()
+        self.assertEqual(
+            [call.args[0] for call in diagnostics.snapshot.call_args_list],
+            ["before-ordinary-work", "before-shutdown"],
+        )
+        if controls_refused:
+            self.assertEqual(events, ["native-controls", "shutdown"])
+            ctx.backend.scoped_profile.witness.assert_not_called()
+            ctx.load_fixture_archive.assert_not_called()
+            injection.assert_not_called()
+            http.assert_not_called()
+            self.assertEqual(
+                [call.args[3] for call in commands.call_args_list],
+                ["read Docker API versions", "inspect Docker storage and security"],
+            )
+        else:
+            self.assertEqual(events, ["native-controls", "ready", "ordinary-work-start", "pre-close", "shutdown"])
+            ctx.load_fixture_archive.assert_called_once()
         self.assertEqual(ctx.runtime_deadline, 1)
         self.assertGreater(ctx.start.call_args.kwargs["timeout"], 0)
         self.assertLessEqual(ctx.start.call_args.kwargs["timeout"], 45)

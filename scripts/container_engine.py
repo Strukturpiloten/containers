@@ -82,6 +82,8 @@ GLOBAL_IMAGE_INPUTS = (
     "scripts/runtime_docker_expiry.py",
     "scripts/oci_artifacts.py",
     "scripts/runtime_docker.py",
+    "scripts/runtime_docker_dead_nonactor_controls.py",
+    "tests/native_docker_dead_nonactor_fixture.py",
     "scripts/admission.py",
     "scripts/evidence_gate.py",
     "scripts/grype_pins.py",

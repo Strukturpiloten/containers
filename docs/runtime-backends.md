@@ -47,6 +47,13 @@ cgroup, bridge and mount absence before deleting storage. Unknown ownership or
 incomplete teardown retains storage and a failed cleanup result alongside the
 original error. Global prune and ambient-store cleanup are prohibited.
 
+Current rootless V2 native ready checkpoints also require the independent
+[dead-nonactor mechanism controls](docker-dead-nonactor-witness.md#mandatory-independent-native-mechanism-controls).
+The test-only private namespace/proc fixture runs through the same admitted root
+watchdog and original aggregate allowance. Its separately captured exact-candidate
+source and closed observations cannot replace workload qualification; unavailable
+facilities, any missing control or unverified cleanup fail the required step.
+
 ## CI prerequisites and evidence
 
 ### PR492 compile-only user-namespace observation
@@ -113,7 +120,7 @@ attachment, admission or cleanup authority. Retained historical leases remain
 retained; no foreign profile or wildcard cleanup is added.
 
 The original `profileObservation` remains a post-create sample. Workload
-qualification additionally requires a closed `postExecWitness` version1 component
+qualification additionally requires a closed `postExecWitness` version2 component
 with ordered `ready` and `pre-close` samples on the same attached lease. Root
 selects the original task and fixed image-family RootlessKit executable, resolves
 the systemd unit's parent when needed, and requires exactly one immediate child
@@ -121,11 +128,15 @@ with distinct user and mount namespaces. It holds task, pidfd, executable and
 namespace descriptors through matching executable SHA-256/size and generated
 enforce-label readbacks. Raw PIDs, paths, labels and namespace identities stay
 private; exported digests bind the task identities, original binding, source
-manifest and lease. Old or incomplete receipts cannot establish this claim.
+manifest and lease. Historical version1 receipts keep their original validator
+and authenticated close/disposal semantics; new success requires version2.
+The [dead-nonactor witness decision](docker-dead-nonactor-witness.md) defines the
+strict-ready anchor, pre-close-only positive dead-process proof, certified proc
+view, owner-held PID namespace, trusted-host premise and unchanged resource bounds.
 
 Each read-only checkpoint has at most five seconds inside the original work
-budget, 64 distinct IDs across owned cgroup candidates and the held parent thread/child
-union, 512 KiB of proc/cgroup input and 96 MiB of executable input (32 MiB per
+budget, 64 distinct IDs across owned cgroup candidates, the held parent thread/child
+union and realm observers, 512 KiB of proc/cgroup input and 96 MiB of executable input (32 MiB per
 executable). It preserves the
 original cleanup and finalizer reserves, pending-child/reader guards and close
 rules. Failure grants no new cleanup authority. The samples establish measured
@@ -157,7 +168,8 @@ integer from zero through that count only when complete (otherwise null).
 Booleans are not counts. Complete means the planned pass finished its existing
 read/identity guards, not an atomic or exhaustive current-process census.
 The existing 8192-byte failure-envelope cap is unchanged;
-success receipts and witness proofs gain no fields. Clients reuse the same closed
+the historical #573 change added no fields to success receipts or witness proofs.
+Clients reuse the same closed
 validator. No raw task/directory identities, paths, labels, hashes or error text
 are exported, and the detail grants no selector or cleanup authority.
 

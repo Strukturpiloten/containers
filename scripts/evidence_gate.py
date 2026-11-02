@@ -273,7 +273,7 @@ def _scoped_phase(record: dict[str, Any], phase: dict[str, Any], *, expected_pur
             and observation["sha256"] == hashlib.sha256((scoped["profileName"] + " (enforce)\n").encode()).hexdigest()
             and observation["taskIdentityBound"] is True
             and observation["timing"] == "post-create"
-            and prerequisite.postexec_witness_valid(scoped["postExecWitness"], scoped, complete=True)
+            and prerequisite.postexec_witness_valid(scoped["postExecWitness"], scoped, complete=True, current=True)
         )
         if binding.purpose == prerequisite.EXPERIMENTAL_PURPOSE:
             # The workflow's ImageVersion is provenance and is compared only with

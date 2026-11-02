@@ -332,6 +332,10 @@ def _require_storage_driver(info: dict[str, Any]) -> None:
 def _postexec_checkpoint(ctx: RuntimeContext, checkpoint: str) -> None:
     profile = getattr(getattr(ctx, "backend", None), "scoped_profile", None)
     if profile is not None:
+        if checkpoint == "ready":
+            from scripts.runtime_docker_dead_nonactor_controls import require_controls  # noqa: PLC0415
+
+            require_controls(ctx)
         profile.witness(checkpoint)
 
 

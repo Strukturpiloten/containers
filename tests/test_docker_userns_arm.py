@@ -29,7 +29,7 @@ from tests.test_docker_userns_active import (
     event_payload,
     failure_port,
 )
-from tests.test_docker_userns_qualification import scoped_receipt, workflow_context
+from tests.test_docker_userns_qualification import current_scoped_receipt, scoped_receipt, workflow_context
 from tests.test_evidence_gate import maintained_mutations, maintained_runtime
 from tests.test_runtime_oom_lifecycle import _PhaseCase
 
@@ -368,7 +368,7 @@ class ArmNativeAuthorityTests(unittest.TestCase):
                         architecture="arm64",
                         late=late,
                         phase=DockerProbePhase.ENFORCEMENT,
-                        scoped_receipt=scoped_receipt(
+                        scoped_receipt=current_scoped_receipt(
                             purpose="maintained-prerequisite", architecture="arm64", phase="enforcement"
                         ),
                     )

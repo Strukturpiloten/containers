@@ -56,6 +56,11 @@ WITNESS_READ_LIMIT = 8192
 WITNESS_DEPTH_LIMIT = 32
 WITNESS_PID_DEPTH = 2
 WITNESS_ROOTLESS_UID = 1000
+WITNESS_ANCHOR = "witness-ready-v2.json"
+WITNESS_VERSION = 2
+PROC_COMPONENT_LIMIT = 96
+PROC_PID_MAX = 9_999_999_999
+CLONE_NEWPID = 0x20000000
 PRIVATE_DIRECTORY = 0o700
 PRIVATE_FILE = 0o600
 IMMUTABLE_FILE = 0o400
@@ -137,6 +142,10 @@ WITNESS_FAILURE_CODES = frozenset(
         "thread-children-readback",
         "thread-identity",
         "thread-status",
+        "proc-resolver",
+        "pid-realm",
+        "ready-anchor",
+        "dead-nonactor",
     }
 )
 WITNESS_FAILURE_PHASES = frozenset(
@@ -1344,13 +1353,17 @@ def mark(info: os.stat_result) -> tuple[int, ...]:
     )
 
 
-def root_bytes(path: Path, limit: int = MAX_STATE) -> bytes:
+def root_bytes(path: Path, limit: int = MAX_STATE, *, immutable: bool = False) -> bytes:
     """Read one fixed root-owned regular leaf without following its final name."""
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     try:
         before = os.fstat(descriptor)
         require(
-            stat.S_ISREG(before.st_mode) and before.st_uid == 0 and before.st_nlink == 1 and not before.st_mode & 0o7022
+            stat.S_ISREG(before.st_mode)
+            and before.st_uid == 0
+            and before.st_nlink == 1
+            and not before.st_mode & 0o7022
+            and (not immutable or stat.S_IMODE(before.st_mode) == IMMUTABLE_FILE)
         )
         raw = bytearray()
         while len(raw) <= limit:
@@ -1734,6 +1747,87 @@ def filesystem_magic(descriptor: int, expected: int) -> None:
     buffer = (ctypes.c_long * 64)()
     libc = ctypes.CDLL(None, use_errno=True)
     require(libc.fstatfs(descriptor, ctypes.byref(buffer)) == 0 and buffer[0] == expected)
+
+
+class ProcView:
+    """One genuine host proc view under the documented trusted critical-subtree premise."""
+
+    def __init__(self, stack: ExitStack, charge: Callable[[int], None], seen: Callable[[int], None]) -> None:
+        """Hold the fixed root; unsupported openat2 ABIs refuse without another resolver."""
+        require(os.uname().machine in {"x86_64", "aarch64"})
+        self.charge, self.seen = charge, seen
+        self.root = os.open("/proc", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        stack.callback(os.close, self.root)
+        info = os.fstat(self.root)
+        require(stat.S_ISDIR(info.st_mode) and info.st_uid == 0)
+        filesystem_magic(self.root, 0x9FA0)
+
+    @staticmethod
+    def open(directory: int, leaf: str, flags: int) -> int:
+        """Resolve only fixed/numeric ordinary components with all three mandatory restrictions."""
+        require(
+            type(leaf) is str
+            and len(leaf) <= PROC_COMPONENT_LIMIT
+            and all(re.fullmatch(r"[A-Za-z0-9_.-]+", part) and part not in {".", ".."} for part in leaf.split("/"))
+        )
+        # Linux open_how is three u64 fields on both admitted architectures.
+        how = (ctypes.c_uint64 * 3)(flags | os.O_CLOEXEC, 0, 0x08 | 0x01 | 0x02)
+        libc = ctypes.CDLL(None, use_errno=True)
+        result = libc.syscall(
+            437, directory, ctypes.c_char_p(leaf.encode("ascii")), ctypes.byref(how), ctypes.sizeof(how)
+        )
+        if result < 0:
+            raise OSError(ctypes.get_errno(), "certified proc resolution refused")
+        return result
+
+    def pid(self, pid: int) -> int:
+        """No request-provided locators; charge every additional identity to the original ledger."""
+        require(type(pid) is int and 0 < pid <= PROC_PID_MAX)
+        self.seen(pid)
+        descriptor = self.open(self.root, str(pid), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            filesystem_magic(descriptor, 0x9FA0)
+        except BaseException:
+            os.close(descriptor)
+            raise
+        return descriptor
+
+    def link(self, directory: int, name: str) -> str:
+        """Acquire the actual no-follow proc symlink before reading its kernel-produced target."""
+        descriptor = self.open(directory, name, os.O_PATH | os.O_NOFOLLOW)
+        try:
+            require(stat.S_ISLNK(os.fstat(descriptor).st_mode))
+            filesystem_magic(descriptor, 0x9FA0)
+            target = os.readlink("", dir_fd=descriptor)
+            self.charge(len(os.fsencode(target)))
+            return target
+        finally:
+            os.close(descriptor)
+
+    def self_pid(self) -> int:
+        """Require the fixed proc self link to identify this observer in the selected numeric view."""
+        target = self.link(self.root, "self")
+        require(re.fullmatch(r"[1-9][0-9]{0,9}", target) and int(target) == os.getpid())
+        return int(target)
+
+    def pid_namespace(self, stack: ExitStack, directory: int) -> tuple[int, int, int]:
+        """Authenticate one literal pid magic link, then deliberately leave scoped lookup."""
+        ns = self.open(directory, "ns", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            target = self.link(ns, "pid")
+            matched = re.fullmatch(r"pid:\[([1-9][0-9]{0,19})\]", target)
+            require(matched is not None)
+            # This fixed final jump cannot retain BENEATH/IN_ROOT either. The held
+            # link is evidence, not an atomic follow; the trusted mount premise applies.
+            descriptor = os.open("pid", os.O_RDONLY | os.O_CLOEXEC, dir_fd=ns)
+            stack.callback(os.close, descriptor)
+            filesystem_magic(descriptor, 0x6E736673)
+            kind = fcntl.ioctl(descriptor, 0xB703)  # NS_GET_NSTYPE
+            info = os.fstat(descriptor)
+            require(kind == CLONE_NEWPID and info.st_ino == int(matched[1]))
+            return info.st_dev, info.st_ino, kind
+        finally:
+            os.close(ns)
 
 
 def namespace_snapshot(_modules: SimpleNamespace, admission: dict[str, Any]) -> dict[str, Any]:
@@ -2385,22 +2479,165 @@ class RootPort:
     def witness_read(self, directory: int, leaf: str) -> bytes:
         """Charge actual bounded proc bytes without broadening the fixed leaf reader."""
         self.witness_budget()
-        if leaf == "children":
-            descriptor = os.open(
-                "children", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory
-            )
-            try:
-                self.witness_require("proc-read", stat.S_ISREG(os.fstat(descriptor).st_mode))
-                raw = os.read(descriptor, WITNESS_READ_LIMIT + 1)
-                self.witness_require("proc-cap", len(raw) <= WITNESS_READ_LIMIT)
-            finally:
-                os.close(descriptor)
-        else:
-            raw = proc_bytes(directory, leaf)
-        self.witness_counts["procBytes"] += len(raw)
+        self.witness_require(
+            "proc-read",
+            leaf in {"stat", "status", "cgroup", "cmdline", "attr/apparmor/current", "children"}
+            or re.fullmatch(r"fdinfo/[0-9]{1,10}", leaf),
+        )
+        descriptor = self._witness_proc.open(directory, leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            filesystem_magic(descriptor, 0x9FA0)
+            self.witness_require("proc-read", stat.S_ISREG(os.fstat(descriptor).st_mode))
+            raw = os.read(descriptor, WITNESS_READ_LIMIT + 1)
+            self.witness_proc_bytes(len(raw))
+            self.witness_require("proc-cap", len(raw) <= WITNESS_READ_LIMIT)
+            return raw
+        finally:
+            os.close(descriptor)
+
+    def witness_proc_bytes(self, amount: int) -> None:
+        """Charge actual proc and kernel-link bytes, including failed cap-plus-one reads."""
+        self.witness_counts["procBytes"] += amount
         self.witness_require("proc-cap", self.witness_counts["procBytes"] <= WITNESS_PROC_LIMIT)
         self.witness_budget()
-        return raw
+
+    def witness_pid(self, pid: int) -> None:
+        """Cover actors, threads, nonactors and realm observers with the same finite ledger."""
+        self.witness_counts["pids"].add(pid)
+        self.witness_require("pid-cap", len(self.witness_counts["pids"]) <= WITNESS_PID_LIMIT)
+        self.witness_budget()
+
+    @witness_operation("pid-realm")
+    def witness_realm(self, stack: ExitStack) -> tuple:
+        """Overlap the original owner's held namespace with this callback's entire sample."""
+        view = self._witness_proc
+        pidfd = self.owner_handle("owner", realm_stack=stack, proc=view, reader=self.witness_read)
+        stack.callback(os.close, pidfd)
+        self._witness_owner_pidfd = pidfd
+        observer = view.pid(view.self_pid())
+        stack.callback(os.close, observer)
+        self._witness_observer = observer
+        init = view.pid(1)
+        stack.callback(os.close, init)
+        expected = tuple(self.record["owners"]["owner"]["pidNamespace"])
+        self.witness_require(
+            "pid-realm", view.pid_namespace(stack, observer) == view.pid_namespace(stack, init) == expected
+        )
+        return expected
+
+    @witness_operation("ready-anchor")
+    def witness_ready_anchor(self) -> dict:
+        """Only a complete source/lease-bound atomic ready commit can authorize exclusion."""
+        value = self.record["postExecWitness"]
+        self.witness_require(
+            "ready-anchor",
+            self.modules.qualification.postexec_witness_valid(value, receipt(self), current=True)
+            and len(value["samples"]) == 1,
+        )
+        raw = root_bytes(self.store.path / WITNESS_ANCHOR, immutable=True)
+        self.witness_require("ready-anchor", digest(raw) == value["readyAnchorSha256"])
+        anchor = json.loads(raw, object_pairs_hook=unique)
+        self.witness_require(
+            "ready-anchor",
+            type(anchor) is dict
+            and set(anchor)
+            == {"schemaVersion", "bindingSha256", "sourceManifestSha256", "leaseSha256", "sample", "realm", "roles"}
+            and type(anchor["schemaVersion"]) is int
+            and anchor["schemaVersion"] == WITNESS_VERSION
+            and all(anchor[key] == value[key] for key in ("bindingSha256", "sourceManifestSha256", "leaseSha256"))
+            and anchor["sample"] == value["samples"][0]
+            and set(anchor["roles"]) == {"outer", "parent", "child"},
+        )
+        for role, task in anchor["roles"].items():
+            self.witness_require(
+                "ready-anchor",
+                type(task) is dict
+                and set(task) == {"pid", "state"}
+                and type(task["pid"]) is int
+                and task["pid"] > 0
+                and task["state"]["pid"] == task["pid"]
+                and digest(encoded(task["state"])) == anchor["sample"][role + "TaskSha256"],
+            )
+        self.witness_require("ready-anchor", digest(encoded(anchor["realm"])) == anchor["sample"]["realmSha256"])
+        return anchor
+
+    @witness_operation("dead-nonactor")
+    def witness_dead_state(self, task: dict, parent: dict) -> dict:
+        """Freshly correlate held zombie proc state and a readable whole-process pidfd twice."""
+        states = []
+        for _bracket in range(2):
+            raw = self.witness_read(task["directory"], "stat")
+            opening, closing = raw.find(b"("), raw.rfind(b")")
+            self.witness_require(
+                "dead-nonactor",
+                opening > 0 and closing > opening and raw[:opening].strip() == str(task["pid"]).encode(),
+            )
+            fields = raw[closing + 1 :].split()
+            self.witness_require(
+                "dead-nonactor",
+                len(fields) > START_FIELD
+                and fields[0] == b"Z"
+                and fields[1] == str(parent["pid"]).encode()
+                and re.fullmatch(rb"[1-9][0-9]*", fields[START_FIELD]),
+            )
+            status = {}
+            for line in self.witness_read(task["directory"], "status").splitlines():
+                key, separator, value = line.partition(b":")
+                if key in {b"State", b"Pid", b"Tgid", b"PPid", b"Uid", b"NSpid"}:
+                    self.witness_require("dead-nonactor", separator and key not in status)
+                    status[key] = value.split()
+            self.witness_require(
+                "dead-nonactor",
+                set(status) == {b"State", b"Pid", b"Tgid", b"PPid", b"Uid", b"NSpid"}
+                and status[b"State"] == [b"Z", b"(zombie)"]
+                and status[b"Pid"] == status[b"Tgid"] == [str(task["pid"]).encode()]
+                and status[b"PPid"] == [str(parent["pid"]).encode()]
+                and status[b"Uid"] == [str(parent["uid"]).encode()] * 4
+                and len(status[b"NSpid"]) >= WITNESS_PID_DEPTH
+                and all(re.fullmatch(rb"[1-9][0-9]{0,9}", part) for part in status[b"NSpid"])
+                and status[b"NSpid"][0] == str(task["pid"]).encode()
+                and bool(select.select([task["pidfd"]], [], [], 0)[0]),
+            )
+            fdinfo = {}
+            for line in self.witness_read(self._witness_observer, "fdinfo/" + str(task["pidfd"])).splitlines():
+                key, separator, value = line.partition(b":")
+                if key in {b"Pid", b"NSpid"}:
+                    self.witness_require("dead-nonactor", separator and key not in fdinfo)
+                    fdinfo[key] = value.split()
+            self.witness_require(
+                "dead-nonactor",
+                fdinfo == {b"Pid": status[b"Pid"], b"NSpid": status[b"NSpid"]}
+                and bool(select.select([task["pidfd"]], [], [], 0)[0]),
+            )
+            states.append(
+                {
+                    "pid": task["pid"],
+                    "startTicks": int(fields[START_FIELD]),
+                    "status": {
+                        key.decode("ascii"): [part.decode("ascii") for part in value] for key, value in status.items()
+                    },
+                    "procIdentity": (os.fstat(task["directory"]).st_dev, os.fstat(task["directory"]).st_ino),
+                }
+            )
+        self.witness_require("dead-nonactor", states[0] == states[1])
+        return states[0]
+
+    @witness_operation("dead-nonactor")
+    def witness_dead(self, stack: ExitStack, missing: set[int], parent: dict, anchor: dict) -> list[dict]:
+        """Reject every reserved locator before any lookup; prove all groups before exclusion."""
+        reserved = {task["pid"] for task in anchor["roles"].values()}
+        self.witness_require("dead-nonactor", not missing & reserved)
+        result = []
+        for pid in sorted(missing):
+            self.witness_budget()
+            directory = self._witness_proc.pid(pid)
+            stack.callback(os.close, directory)
+            pidfd = os.pidfd_open(pid, 0)
+            stack.callback(os.close, pidfd)
+            task = {"pid": pid, "directory": directory, "pidfd": pidfd}
+            task["before"] = self.witness_dead_state(task, parent)
+            result.append(task)
+        return result
 
     @witness_operation("task-status")
     def witness_status(self, directory: int, pid: int, uid: int) -> dict:
@@ -2456,9 +2693,9 @@ class RootPort:
             self.witness_require("task-identity", type(pid) is int and pid > 0)
             self.witness_budget()
             with ExitStack() as stack:
-                directory = os.open(f"/proc/{pid}", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+                directory = self._witness_proc.pid(pid)
                 stack.callback(os.close, directory)
-                pidfd = os.pidfd_open(pid)
+                pidfd = os.pidfd_open(pid, 0)
                 stack.callback(os.close, pidfd)
                 executable = os.open("exe", os.O_RDONLY | os.O_CLOEXEC, dir_fd=directory)
                 stack.callback(os.close, executable)
@@ -2478,6 +2715,9 @@ class RootPort:
         """Hold namespace objects throughout the sample, avoiding split-stat or inode-reuse ambiguity."""
         result = []
         for kind in WITNESS_NAMESPACES:
+            if kind == "pid":
+                result.append(self._witness_proc.pid_namespace(task["stack"], task["directory"])[:2])
+                continue
             descriptor = os.open("ns/" + kind, os.O_RDONLY | os.O_CLOEXEC, dir_fd=task["directory"])
             task["stack"].callback(os.close, descriptor)
             info = os.fstat(descriptor)
@@ -2674,7 +2914,7 @@ class RootPort:
         """Reconcile all held parent threads, including nonleader forks, without a global scan."""
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
         if "threadDirectory" not in parent:
-            parent["threadDirectory"] = os.open("task", flags, dir_fd=parent["directory"])
+            parent["threadDirectory"] = self._witness_proc.open(parent["directory"], "task", flags)
             parent["stack"].callback(os.close, parent["threadDirectory"])
             filesystem_magic(parent["threadDirectory"], 0x9FA0)
             parent["threads"] = {}
@@ -2684,7 +2924,7 @@ class RootPort:
         result = set()
         for tid in sorted(tids):
             if tid not in threads:
-                descriptor = os.open(str(tid), flags, dir_fd=directory)
+                descriptor = self._witness_proc.open(directory, str(tid), flags)
                 parent["stack"].callback(os.close, descriptor)
                 filesystem_magic(descriptor, 0x9FA0)
                 threads[tid] = {"descriptor": descriptor}
@@ -2826,6 +3066,25 @@ class RootPort:
         self.witness_budget()
 
     @witness_operation("sample")
+    def witness_begin(self, stack: ExitStack, checkpoint: str) -> tuple:
+        """Certify and hold the original realm before any candidate or missing-task lookup."""
+        with self.witness_site("proc-resolver"):
+            self._witness_proc = ProcView(stack, self.witness_proc_bytes, self.witness_pid)
+        realm = self.witness_realm(stack)
+        anchor = self.witness_ready_anchor() if checkpoint == "pre-close" else None
+        if anchor is not None:
+            self.witness_require("pid-realm", encoded(realm) == encoded(anchor["realm"]))
+        return realm, anchor
+
+    def witness_dead_readback(self, image_stack: ExitStack, dead: list[dict], parent: dict) -> None:
+        """Finish the original image's exit-time identity checks before all final dead proofs."""
+        image_stack.close()
+        for task in dead:
+            self.witness_require("dead-nonactor", self.witness_dead_state(task, parent) == task["before"])
+        self.witness_require("pid-realm", not select.select([self._witness_owner_pidfd], [], [], 0)[0])
+        self.witness_budget()
+
+    @witness_operation("sample")
     def witness_sample(self, checkpoint: str) -> dict:
         """Sample original guest, actual parent and unique child, with final held readbacks."""
         api = sys.modules[__name__]
@@ -2848,6 +3107,7 @@ class RootPort:
         )
         guest_pid = None if direct else self.witness_systemd_pid(subject["container"])
         with ExitStack() as stack:
+            realm, anchor = self.witness_begin(stack, checkpoint)
             outer = stack.enter_context(self.witness_task(subject["pid"], 1000 if direct else 0))
             self.witness_require(
                 "subject-incarnation",
@@ -2857,11 +3117,31 @@ class RootPort:
             candidates = self.witness_scope_pids(stack)
             self.witness_require("scope-census", outer["pid"] in candidates)
             parent = self.witness_parent(stack, outer, candidates, guest_pid)
+            if anchor is not None:
+                self.witness_require(
+                    "ready-anchor",
+                    all(
+                        task["pid"] == anchor["roles"][role]["pid"]
+                        and encoded(task["before"]) == encoded(anchor["roles"][role]["state"])
+                        for role, task in (("outer", outer), ("parent", parent))
+                    ),
+                )
             components = self.modules.qualification.rootlesskit_components(self.binding.image)
-            image = stack.enter_context(self.modules.observations.held_rootlesskit(api, outer["directory"], components))
+            image_stack = stack.enter_context(ExitStack())
+            image = image_stack.enter_context(
+                self.modules.observations.held_rootlesskit(api, outer["directory"], components)
+            )
             children = self.witness_parent_children(parent)
+            dead = self.witness_dead(stack, children - candidates, parent, anchor) if anchor is not None else []
+            live_children = children - {task["pid"] for task in dead}
             self._witness_child_readback = False
-            child = self.witness_child(stack, parent, candidates, image["identity"], children)
+            child = self.witness_child(stack, parent, candidates, image["identity"], live_children)
+            roles = {
+                role: {"pid": task["pid"], "state": task["before"]}
+                for role, task in (("outer", outer), ("parent", parent), ("child", child))
+            }
+            if anchor is not None:
+                self.witness_require("ready-anchor", encoded(roles) == encoded(anchor["roles"]))
             files = [image["descriptor"], parent["exe"], child["exe"]]
             hashes = [
                 self.modules.observations.held_executable_hash(
@@ -2882,9 +3162,10 @@ class RootPort:
             )
             after_pids = self.witness_scope_pids(stack)
             self.witness_require("scope-readback", {outer["pid"], parent["pid"], child["pid"]} <= after_pids)
+            self.witness_require("scope-readback", after_pids == candidates)
             self.witness_require("children-readback", self.witness_parent_children(parent) == children)
             self._witness_child_readback = True
-            after_child = self.witness_child(stack, parent, after_pids, image["identity"], children)
+            after_child = self.witness_child(stack, parent, candidates, image["identity"], live_children)
             self.witness_require("child-readback", after_child["before"] == child["before"])
             self.witness_require(
                 "parent-readback", guest_pid is None or self.witness_systemd_pid(subject["container"]) == guest_pid
@@ -2893,8 +3174,8 @@ class RootPort:
             self.witness_require(
                 "task-alive", all(not select.select([task["pidfd"]], [], [], 0)[0] for task in (outer, parent, child))
             )
-            self.witness_budget()
-            return {
+            self.witness_dead_readback(image_stack, dead, parent)
+            sample = {
                 "checkpoint": checkpoint,
                 "executableSha256": hashes[0][0],
                 "executableBytes": hashes[0][1],
@@ -2906,7 +3187,23 @@ class RootPort:
                 "identityMatched": True,
                 "parentChildMatched": True,
                 "namespaceSeparated": True,
+                "outerTaskSha256": digest(encoded(outer["before"])),
+                "realmSha256": digest(encoded(realm)),
+                "deadNonactorCount": len(dead),
+                "deadNonactorSha256": digest(encoded([task["before"] for task in dead])),
+                "coverageComplete": True,
             }
+            if checkpoint == "ready":
+                self._witness_anchor = {
+                    "schemaVersion": 2,
+                    "bindingSha256": self.record["bindingSha256"],
+                    "sourceManifestSha256": SOURCE_MANIFEST_SHA256,
+                    "leaseSha256": digest(self.store.path.name.encode("ascii")),
+                    "sample": sample,
+                    "realm": realm,
+                    "roles": roles,
+                }
+            return sample
 
     def collect_postexec_witness(self, checkpoint: str) -> None:
         """Commit exactly two ordered read-only checkpoints without changing lifecycle authority."""
@@ -2916,7 +3213,11 @@ class RootPort:
         try:
             value = self.record.get("postExecWitness")
             view = receipt(self)
-            require(self.modules.qualification.postexec_witness_valid(value, view, diagnostic=self.witness_failure))
+            require(
+                self.modules.qualification.postexec_witness_valid(
+                    value, view, current=True, diagnostic=self.witness_failure
+                )
+            )
             samples = [] if value is None else list(value["samples"])
             self.witness_require(
                 "checkpoint-order",
@@ -2935,14 +3236,27 @@ class RootPort:
                     self.guard(self.binding)
                 self.point("witness-" + checkpoint)
                 samples.append(self.witness_sample(checkpoint))
+                if checkpoint == "ready":
+                    raw_anchor = encoded(self._witness_anchor)
+                    # An orphaned or partially written fixed leaf cannot be retried
+                    # into success. Only the following atomic state commit binds it.
+                    write_leaf(self.store.path, WITNESS_ANCHOR, raw_anchor)
+                    anchor_digest = digest(raw_anchor)
+                else:
+                    anchor_digest = value["readyAnchorSha256"]
                 value = {
-                    "schemaVersion": 1,
+                    "schemaVersion": 2,
                     "bindingSha256": self.record["bindingSha256"],
                     "sourceManifestSha256": SOURCE_MANIFEST_SHA256,
                     "leaseSha256": digest(self.store.path.name.encode("ascii")),
+                    "readyAnchorSha256": anchor_digest,
                     "samples": samples,
                 }
-                require(self.modules.qualification.postexec_witness_valid(value, view, diagnostic=self.witness_failure))
+                require(
+                    self.modules.qualification.postexec_witness_valid(
+                        value, view, current=True, diagnostic=self.witness_failure
+                    )
+                )
                 self.witness_budget()
                 self.record["postExecWitness"] = value
                 self.commit()
@@ -2958,6 +3272,8 @@ class RootPort:
         finally:
             self._witness_failure = None
             self._witness_scope = None
+            self._witness_proc = None
+            self._witness_anchor = None
 
     def guest_exit_budget(self) -> None:
         """Stop optional reads on inherited expiry, cleanup or sticky uncertainty."""
@@ -3360,9 +3676,24 @@ class RootPort:
         ready = json.loads(root_bytes(ready_path), object_pairs_hook=unique)
         require(
             set(ready)
-            == {"schemaVersion", "bindingSha256", "deadlineNs", "pid", "startTicks", "pgid", "cgroup", "namespace"}
-            and ready["schemaVersion"] == 1
+            == {
+                "schemaVersion",
+                "bindingSha256",
+                "sourceManifestSha256",
+                "leaseSha256",
+                "deadlineNs",
+                "pid",
+                "startTicks",
+                "pgid",
+                "cgroup",
+                "namespace",
+                "pidNamespace",
+            }
+            and type(ready["schemaVersion"]) is int
+            and ready["schemaVersion"] == WITNESS_VERSION
             and ready["bindingSha256"] == self.binding.digest()
+            and ready["sourceManifestSha256"] == SOURCE_MANIFEST_SHA256
+            and ready["leaseSha256"] == digest(self.store.path.name.encode("ascii"))
             and ready["deadlineNs"] == self.binding.deadline_ns
             and type(ready["pid"]) is int
             and ready["pid"] > 0
@@ -3374,14 +3705,27 @@ class RootPort:
         self.verify_owner(kind)
         return ready
 
-    def owner_handle(self, kind: str) -> int:
+    def owner_handle(
+        self,
+        kind: str,
+        *,
+        realm_stack: ExitStack | None = None,
+        proc: ProcView | None = None,
+        reader: Callable[[int, str], bytes] | None = None,
+    ) -> int:
         """Acquire a pidfd before permitting the independently owned task to exit."""
         ready = self.record["owners"][kind]
-        descriptor = os.open(f"/proc/{ready['pid']}", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
-        pidfd = os.pidfd_open(ready["pid"])
+        descriptor = (
+            proc.pid(ready["pid"])
+            if proc is not None
+            else os.open(f"/proc/{ready['pid']}", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        )
+        pidfd = None
         try:
-            current = task_snapshot(descriptor, ready["pid"])
-            require(proc_bytes(descriptor, "attr/apparmor/current", 4096) == b"unconfined\n")
+            pidfd = os.pidfd_open(ready["pid"], 0)
+            read = proc_bytes if reader is None else reader
+            current = task_snapshot(descriptor, ready["pid"], reader=reader)
+            require(read(descriptor, "attr/apparmor/current") == b"unconfined\n")
             for kind_name in ("user", "mnt", "cgroup"):
                 info = os.stat("ns/" + kind_name, dir_fd=descriptor, follow_symlinks=True)
                 require(info.st_ino == ready["namespace"][kind_name])
@@ -3391,13 +3735,25 @@ class RootPort:
                 and os.getpgid(ready["pid"]) == ready["pgid"]
                 and ready["pgid"] != self.record["coordinatorPgid"]
                 and ready["pid"] != self.record["coordinatorPid"]
-                and proc_bytes(descriptor, "cmdline").rstrip(b"\0").split(b"\0")
+                and read(descriptor, "cmdline").rstrip(b"\0").split(b"\0")
                 == [arg.encode() for arg in self.record["ownerIntents"][kind]["argv"]]
                 and not select.select([pidfd], [], [], 0)[0]
-                and task_snapshot(descriptor, ready["pid"]) == current
+                and task_snapshot(descriptor, ready["pid"], reader=reader) == current
             )
+            if realm_stack is not None:
+                require(
+                    proc is not None
+                    and type(ready["schemaVersion"]) is int
+                    and ready["schemaVersion"] == WITNESS_VERSION
+                    and ready["sourceManifestSha256"] == SOURCE_MANIFEST_SHA256
+                    and ready["leaseSha256"] == digest(self.store.path.name.encode("ascii"))
+                    and tuple(ready["pidNamespace"]) == proc.pid_namespace(realm_stack, descriptor)
+                    and not select.select([pidfd], [], [], 0)[0]
+                    and task_snapshot(descriptor, ready["pid"], reader=reader) == current
+                )
         except BaseException:
-            os.close(pidfd)
+            if pidfd is not None:
+                os.close(pidfd)
             raise
         else:
             return pidfd
@@ -3569,6 +3925,10 @@ class RootPort:
             "owner-closed.json",
             "cli",
         }
+        if (self.store.path / WITNESS_ANCHOR).exists():
+            # The exact private fixed leaf may be an orphan from failed ready
+            # publication. Disposal never interprets its contents as authority.
+            known.add(WITNESS_ANCHOR)
         require({path.name for path in self.store.path.iterdir()} == known)
         require({path.name for path in (self.store.path / "cli").iterdir()} == {"config.json"})
         require(root_bytes(self.store.path / "cli/config.json") == b"{}\n")
@@ -3730,23 +4090,25 @@ def owner_main(stage: Path, bootstrap: dict[str, Any], modules: SimpleNamespace,
     """Run independently of coordinator and runtime slice under the original expiry."""
     require(kind in {"probe", "owner"})
     store = Store(stage, name)
+    lifetime = ExitStack()
     try:
         record = store.read()
         port = RootPort(stage, bootstrap, modules, store, record)
         binding = port.binding
         require(binding.digest() == record["bindingSha256"] and binding.deadline_ns <= bootstrap["deadlineNs"])
         unit = port.owner_unit(kind)
-        descriptor = os.open(f"/proc/{os.getpid()}", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
-        try:
-            observed = task_snapshot(descriptor, os.getpid())
-        finally:
-            os.close(descriptor)
+        view = ProcView(lifetime, lambda _amount: None, lambda _pid: None)
+        own_proc = view.pid(view.self_pid())
+        lifetime.callback(os.close, own_proc)
+        pid_namespace = view.pid_namespace(lifetime, own_proc)
+        observed = task_snapshot(own_proc, os.getpid())
         require(observed["cgroup"] == "0::/system.slice/" + unit + "\n" and os.getpgid(0) != record["coordinatorPgid"])
         descriptor = os.open(
             f"/proc/{record['coordinatorPid']}", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
         )
-        coordinator = os.pidfd_open(record["coordinatorPid"])
+        coordinator = None
         try:
+            coordinator = os.pidfd_open(record["coordinatorPid"])
             require(task_snapshot(descriptor, record["coordinatorPid"], bootstrap["uid"]) == record["coordinatorTask"])
             require(not select.select([coordinator], [], [], 0)[0])
             require(namespace_snapshot(modules, port.admission) == record["namespace"])
@@ -3755,8 +4117,11 @@ def owner_main(stage: Path, bootstrap: dict[str, Any], modules: SimpleNamespace,
                 kind + "-ready.json",
                 encoded(
                     {
-                        "schemaVersion": 1,
+                        "schemaVersion": 2,
                         "bindingSha256": binding.digest(),
+                        "sourceManifestSha256": SOURCE_MANIFEST_SHA256,
+                        "leaseSha256": digest(store.path.name.encode("ascii")),
+                        "pidNamespace": pid_namespace,
                         "deadlineNs": binding.deadline_ns,
                         "pid": os.getpid(),
                         "pgid": os.getpgid(0),
@@ -3775,10 +4140,16 @@ def owner_main(stage: Path, bootstrap: dict[str, Any], modules: SimpleNamespace,
                 signal.signal(number, cancel)
             return owner_loop(port, coordinator, kind, cancelled)
         finally:
-            os.close(descriptor)
-            os.close(coordinator)
+            try:
+                os.close(descriptor)
+            finally:
+                if coordinator is not None:
+                    os.close(coordinator)
     finally:
-        store.close()
+        try:
+            lifetime.close()
+        finally:
+            store.close()
 
 
 def request_value(raw_argument: str) -> dict[str, Any]:

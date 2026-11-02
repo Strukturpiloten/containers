@@ -19,7 +19,9 @@ from scripts.evidence_gate import (
     require_ordinary_runtime_authority,
     verify_architecture,
 )
-from tests.test_docker_userns_qualification import postexec_fixture, scoped_receipt, stage_disposal
+from tests.test_docker_userns_qualification import current_scoped_receipt as scoped_receipt
+from tests.test_docker_userns_qualification import postexec_v2_fixture as postexec_fixture
+from tests.test_docker_userns_qualification import stage_disposal
 
 NAME = "example"
 IMAGE = "ghcr.io/strukturpiloten/example"

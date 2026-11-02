@@ -314,7 +314,7 @@ class ActiveClient:
             value["state"] != "attached"
             or detail is None
             or detail["samples"][-1]["checkpoint"] != checkpoint
-            or not postexec_witness_valid(detail, value, complete=checkpoint == "pre-close")
+            or not postexec_witness_valid(detail, value, complete=checkpoint == "pre-close", current=True)
         ):
             self.refuse_response("witness", "receipt-mismatch")
         self.evidence = value

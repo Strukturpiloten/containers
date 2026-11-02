@@ -391,6 +391,28 @@ def postexec_fixture(scoped: dict) -> dict:
     }
 
 
+def postexec_v2_fixture(scoped: dict) -> dict:
+    """Explicit current evidence; the historical v1 fixture remains unchanged."""
+    value = postexec_fixture(scoped)
+    value.update(schemaVersion=2, readyAnchorSha256="f" * 64)
+    for sample in value["samples"]:
+        sample.update(
+            outerTaskSha256="1" * 64,
+            realmSha256="2" * 64,
+            deadNonactorCount=0,
+            deadNonactorSha256=hashlib.sha256(b"[]\n").hexdigest(),
+            coverageComplete=True,
+        )
+    return value
+
+
+def current_scoped_receipt(**kwargs: object) -> dict:
+    """Request v2 explicitly wherever a new success is being exercised."""
+    value = scoped_receipt(**kwargs)
+    value["postExecWitness"] = postexec_v2_fixture(value)
+    return value
+
+
 def stage_disposal(scoped: dict) -> dict:
     """Only the same immutable stage's disposal can finish a maintained pair."""
     return {

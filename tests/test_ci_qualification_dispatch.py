@@ -19,7 +19,7 @@ from scripts.evidence_gate import EvidenceError, require_ordinary_runtime_author
 from tests import test_ci_diagnostic_dispatch as workflow_tests
 from tests import test_docker_userns_active as root_tests
 from tests import test_runtime_oom_lifecycle as lifecycle_tests
-from tests.test_docker_userns_qualification import scoped_receipt, workflow_context
+from tests.test_docker_userns_qualification import current_scoped_receipt, workflow_context
 from tests.test_evidence_gate import maintained_runtime
 
 PROFILE = "docker-rootless-qualification"
@@ -465,7 +465,7 @@ class BoundedAdmissionTests(unittest.TestCase):
                         ledger=True,
                         stage="owned-stage",
                         architecture=architecture,
-                        scoped_receipt=scoped_receipt(
+                        scoped_receipt=current_scoped_receipt(
                             purpose="maintained-prerequisite",
                             architecture=architecture,
                             phase="enforcement",
@@ -478,7 +478,7 @@ class BoundedAdmissionTests(unittest.TestCase):
                 self.assertEqual(result["focusedRuntime"], "none")
 
     def test_actual_bounded_pair_requires_both_native_phases_and_no_missing_stage_fallback(self) -> None:
-        original = lifecycle_tests.scoped_receipt
+        original = lifecycle_tests.current_scoped_receipt
 
         def bounded(**kwargs: object) -> dict:
             return original(**kwargs, requested=PROFILE)
@@ -486,7 +486,7 @@ class BoundedAdmissionTests(unittest.TestCase):
         for architecture in ("amd64", "arm64"):
             with (
                 self.subTest(architecture=architecture),
-                patch.object(lifecycle_tests, "scoped_receipt", side_effect=bounded),
+                patch.object(lifecycle_tests, "current_scoped_receipt", side_effect=bounded),
             ):
                 result, _events = lifecycle_tests.PairAuthorityTests().pair(architecture=architecture, maintained=True)
                 self.assertEqual(result["qualification"], "complete")

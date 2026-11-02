@@ -24,7 +24,7 @@ from scripts.evidence_gate import EvidenceError, _read, require_ordinary_runtime
 from scripts.runtime_docker import DockerProbePhase
 from scripts.runtime_docker_backend import DockerBackend, DockerBackendError
 from scripts.runtime_errors import ProbeError
-from tests.test_docker_userns_qualification import scoped_receipt, stage_disposal
+from tests.test_docker_userns_qualification import current_scoped_receipt, scoped_receipt, stage_disposal
 
 OWNER = "c" * 32
 SERVER = {"Version": "29.4.2", "GitCommit": "d329809"}
@@ -719,7 +719,7 @@ class _PhaseCase:
 
 def experimental_receipt() -> dict:
     """Build actual experimental authority and cleanup labels without a normal grant."""
-    return scoped_receipt(phase="enforcement")
+    return current_scoped_receipt(phase="enforcement")
 
 
 class _PhaseScopedReceipt:
@@ -749,7 +749,7 @@ def _phase_scope(context: SimpleNamespace, budget: _PhaseBudget, case: _PhaseCas
     context.scoped_calls += 1
     if not case.scope_missing:
         receipt = (
-            scoped_receipt(phase=case.phase.value, architecture=case.architecture)
+            current_scoped_receipt(phase=case.phase.value, architecture=case.architecture)
             if case.scoped_receipt is None
             else case.scoped_receipt
         )
@@ -891,7 +891,9 @@ class PhaseExecutionTests(unittest.TestCase):
         )
         fixture_context = (case.scoped_receipt or {}).get("workflowContext")
         if fixture_context is None:
-            fixture_context = scoped_receipt(phase=case.phase.value, architecture=case.architecture)["workflowContext"]
+            fixture_context = current_scoped_receipt(phase=case.phase.value, architecture=case.architecture)[
+                "workflowContext"
+            ]
         with (
             patch.dict(
                 os.environ,
@@ -1143,7 +1145,7 @@ class ProducerAuthorityTests(unittest.TestCase):
                         ledger=True,
                         stage="owned-stage",
                         phase=phase,
-                        scoped_receipt=scoped_receipt(purpose="maintained-prerequisite", phase=phase.value),
+                        scoped_receipt=current_scoped_receipt(purpose="maintained-prerequisite", phase=phase.value),
                     )
                 )
                 self.assertEqual(result["status"], "passed")
@@ -1157,6 +1159,54 @@ class ProducerAuthorityTests(unittest.TestCase):
                     self.assertNotIn("stageDisposal", result)
                     self.assertNotIn("stage.dispose", events)
 
+    def test_historical_witness_cannot_qualify_new_work_after_complete_runtime_cleanup(self) -> None:
+        for purpose in ("experimental-candidate", "maintained-prerequisite"):
+            for phase in (DockerProbePhase.CLEAN_CONTROL, DockerProbePhase.ENFORCEMENT):
+                with self.subTest(purpose=purpose, phase=phase):
+                    historical = scoped_receipt(purpose=purpose, phase=phase.value)
+                    original = copy.deepcopy(historical)
+                    result, context, _budget, _archive, events = self.execute(
+                        _PhaseCase(
+                            engine="docker",
+                            ledger=True,
+                            stage="owned-stage",
+                            phase=phase,
+                            focused="mandatory-accounting" if purpose == "experimental-candidate" else "none",
+                            scoped_receipt=historical,
+                        )
+                    )
+                    self.assertEqual(historical, original)
+                    self.assertEqual(result["scopedProfile"]["postExecWitness"]["schemaVersion"], 1)
+                    self.assertEqual(context.probe_calls, 1)
+                    self.assertEqual(context.cleanup_calls, 1)
+                    self.assertTrue(result["cleanupVerified"])
+                    self.assertIn("cleanup", events)
+                    self.assertEqual(result["status"], "failed")
+                    self.assertEqual(result["qualification"], "none")
+                    self.assertNotEqual(result["oomAccountingStatus"], "complete")
+
+    def test_current_witness_requires_anchor_complete_coverage_and_stable_realm(self) -> None:
+        for fault in ("missing-anchor", "incomplete-coverage", "realm-drift"):
+            with self.subTest(fault=fault):
+                receipt = current_scoped_receipt(purpose="maintained-prerequisite", phase="enforcement")
+                witness = receipt["postExecWitness"]
+                if fault == "missing-anchor":
+                    del witness["readyAnchorSha256"]
+                elif fault == "incomplete-coverage":
+                    witness["samples"][1]["coverageComplete"] = False
+                else:
+                    witness["samples"][1]["realmSha256"] = "3" * 64
+                result, context, _budget, _archive, events = self.execute(
+                    _PhaseCase(engine="docker", ledger=True, stage="owned-stage", scoped_receipt=receipt)
+                )
+                self.assertEqual(context.probe_calls, 1)
+                self.assertEqual(context.cleanup_calls, 1)
+                self.assertTrue(result["cleanupVerified"])
+                self.assertIn("cleanup", events)
+                self.assertEqual(result["status"], "failed")
+                self.assertEqual(result["qualification"], "none")
+                self.assertNotEqual(result["oomAccountingStatus"], "complete")
+
     def test_maintained_late_failures_never_publish_completion(self) -> None:
         for late in ("export", "deadline", "check", "disposal", "disposal-cancel"):
             with self.subTest(late=late):
@@ -1166,7 +1216,7 @@ class ProducerAuthorityTests(unittest.TestCase):
                         ledger=True,
                         stage="owned-stage",
                         late=late,
-                        scoped_receipt=scoped_receipt(purpose="maintained-prerequisite", phase="enforcement"),
+                        scoped_receipt=current_scoped_receipt(purpose="maintained-prerequisite", phase="enforcement"),
                     )
                 )
                 self.assertEqual(result["status"], "failed")
@@ -1249,7 +1299,7 @@ class PairAuthorityTests(unittest.TestCase):
                     phase=phase,
                     stage="owned-stage" if engine == "docker" else None,
                     focused="mandatory-accounting" if engine == "docker" and not maintained else "none",
-                    scoped_receipt=scoped_receipt(
+                    scoped_receipt=current_scoped_receipt(
                         purpose="maintained-prerequisite", phase=phase.value, architecture=architecture
                     )
                     if maintained
@@ -1312,7 +1362,7 @@ class PairAuthorityTests(unittest.TestCase):
         self.assertEqual(result["qualification"], "none")
         self.assertTrue(all(phase["qualification"] == "none" for phase in result["phases"]))
         self.assertTrue(
-            all(phase["scopedProfile"] == scoped_receipt(phase=phase["phase"]) for phase in result["phases"])
+            all(phase["scopedProfile"] == current_scoped_receipt(phase=phase["phase"]) for phase in result["phases"])
         )
 
     def test_actual_pair_late_archive_and_deadline_failures_clear_all_completion_labels(self) -> None:

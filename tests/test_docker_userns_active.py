@@ -28,7 +28,14 @@ from scripts import docker_userns_custody_child as child
 from scripts import docker_userns_hosted as host
 from scripts import docker_userns_qualification as qualification
 from scripts import runtime_docker_diagnostics as capture
-from tests.test_docker_userns_qualification import PRIVATE, binding, scoped_receipt, stage_disposal, workflow_context
+from tests.test_docker_userns_qualification import (
+    PRIVATE,
+    binding,
+    current_scoped_receipt,
+    scoped_receipt,
+    stage_disposal,
+    workflow_context,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -921,7 +928,7 @@ class FinalizerFailure(unittest.TestCase):
 
 class QualificationEvidence(unittest.TestCase):
     def fixture(self) -> tuple[dict[str, object], dict[str, object]]:
-        scoped = scoped_receipt()
+        scoped = current_scoped_receipt()
         context = binding()
         identity = {
             "archiveSha256": context.archive_sha256,
