@@ -45,8 +45,9 @@ def _diagnose(ctx: RuntimeContext) -> None:
                 continue
             for path in ("/test/database-connect.log", "/test/initialize.sh.status"):
                 ctx.podman("diagnostic bootstrap connection " + path, "exec", identity, "cat", path, check=False)
-    except (RuntimeError, ValueError, KeyError, TypeError, OSError) as error:
-        ctx.checks.append({"name": "diagnostic capture", "status": "failed", "errorType": type(error).__name__})
+    except (RuntimeError, ValueError, KeyError, TypeError, OSError, AttributeError) as error:
+        if hasattr(ctx, "checks"):
+            ctx.checks.append({"name": "diagnostic capture", "status": "failed", "errorType": type(error).__name__})
 
 
 def _run(ctx: RuntimeContext, fixtures: ExitStack) -> None:
