@@ -896,9 +896,123 @@ class HeldExecutable(unittest.TestCase):
         runtime_docker._postexec_checkpoint(SimpleNamespace(), "pre-close")
 
 
+class ChildScopeSiteDiagnostics(unittest.TestCase):
+    port = RootWitness.port
+    sampled_port = RootWitness.sampled_port
+    view = WitnessFailureDiagnostics.view
+
+    def setUp(self) -> None:
+        effects = ExitStack()
+        self.addCleanup(effects.close)
+        for target in (
+            "subprocess.run",
+            "subprocess.Popen",
+            "scripts.docker_userns_active.main",
+            "scripts.runtime_docker_backend.DockerBackend.prepare",
+            "scripts.runtime_docker_backend.DockerBackend.cleanup",
+        ):
+            effects.enter_context(patch(target, side_effect=AssertionError("native boundary forbidden")))
+
+    def test_all_three_original_guards_have_literal_initial_readback_ready_and_preclose_codes(self) -> None:
+        for direct in (False, True):
+            for checkpoint in ("ready", "pre-close"):
+                for readback in (False, True):
+                    for site in ("universe", "unreadable-required-child", "unlisted-immediate-child"):
+                        with self.subTest(direct=direct, checkpoint=checkpoint, readback=readback, site=site):
+                            self.selection_case(direct=direct, checkpoint=checkpoint, readback=readback, site=site)
+
+    def test_unavailable_or_damaged_private_pass_keeps_legacy_refusal_without_source_work(self) -> None:
+        for private_pass in (None, 0, "private pass", object()):
+            port = self.port()
+            port._witness_child_readback = private_pass
+            port.witness_task = Mock(side_effect=AssertionError("task acquisition forbidden"))
+            with ExitStack() as stack, self.assertRaises(active.RefusedError) as refused:
+                port.witness_child(stack, {"pid": 10}, {10}, (1, 2), {30})
+            self.assertEqual(refused.exception.args, ("active-scoped-profile-refused",))
+            self.assertEqual(port._witness_failure, "children-scope")
+            port.witness_task.assert_not_called()
+
+    def selection_case(self, *, direct: bool, checkpoint: str, readback: bool, site: str) -> None:
+        port, _tasks = self.sampled_port(direct=direct)
+        with (
+            patch.object(active, "receipt", return_value=self.view(port)),
+            patch.object(active.time, "monotonic_ns", return_value=1),
+            patch.object(active.os, "fstat", return_value=SimpleNamespace(st_dev=1, st_ino=2)),
+            patch.object(active.select, "select", return_value=([], [], [])),
+        ):
+            if checkpoint == "pre-close":
+                port.collect_postexec_witness("ready")
+            original = copy.deepcopy(port.record.get("postExecWitness"))
+            for mock in (
+                port.witness_task,
+                port.witness_scope_pids,
+                port.witness_parent_children,
+                port.modules.observations.held_executable_hash,
+            ):
+                mock.reset_mock()
+            reader = port.witness_task.side_effect
+            passes = []
+            child_pid = 30
+            private = "private required child"
+
+            def selected(
+                stack: ExitStack,
+                parent: dict,
+                candidates: set,
+                identity: tuple,
+                children: set,
+            ) -> dict:
+                passes.append(port._witness_child_readback)
+                if port._witness_child_readback != readback:
+                    return active.RootPort.witness_child(port, stack, parent, candidates, identity, children)
+                children = {"universe": children | {99}, "unlisted-immediate-child": set()}.get(site, children)
+
+                def task(pid: int, *args: object) -> object:
+                    if site == "unreadable-required-child" and pid == child_pid:
+                        raise active.RefusedError(private)
+                    return reader(pid, *args)
+
+                with patch.object(port.witness_task, "side_effect", task):
+                    return active.RootPort.witness_child(port, stack, parent, candidates, identity, children)
+
+            port.witness_child = Mock(side_effect=selected)
+            with self.assertRaises(active.RefusedError) as refused:
+                port.collect_postexec_witness(checkpoint)
+            self.assertEqual(refused.exception.args, ("active-scoped-profile-refused",))
+            pass_name = "readback" if readback else "initial"
+            code = "children-scope-" + pass_name + "-" + site
+            phase = "witness-" + checkpoint + "-" + code
+            self.assertIn(code, active.WITNESS_FAILURE_CODES)
+            self.assertEqual(port.record["diagnostic"], {"phase": phase, "comparisons": {phase: False}})
+            self.assertEqual(port.record.get("postExecWitness"), original)
+            self.assertEqual(
+                passes,
+                [False, True] if readback else [False],
+            )
+            self.assertEqual(port.witness_scope_pids.call_count, 2 if readback else 1)
+            self.assertEqual(port.witness_parent_children.call_count, 2 if readback else 1)
+            self.assertEqual(port.modules.observations.held_executable_hash.call_count, 3 if readback else 0)
+            task_calls = [(10, 1000)] if direct else [(10, 0), (10,), (20,), (30,)]
+            child_calls = [(30,)] if direct else [(10,), (30,)]
+            task_calls += child_calls * (int(readback) + int(site != "universe"))
+            self.assertEqual([item.args for item in port.witness_task.call_args_list], task_calls)
+            self.assertEqual(port.work_until, 100_000_000_000)
+            self.assertFalse(port.cleanup)
+            self.assertFalse(port.record["retained"])
+            failure = active.failure_receipt(
+                {"actor": "root", "operation": "witness", "binding": binding(), "record": port.record},
+                refused.exception,
+            )
+            self.assertEqual(failure["schemaVersion"], 1)
+            self.assertTrue(active.valid_failure(failure))
+            self.assertFalse(failure["cleanupAuthority"])
+            self.assertNotIn("private required child", active.encoded(failure).decode())
+
+
 class WitnessIntegration(unittest.TestCase):
     def test_client_sends_no_subject_selectors_and_rejects_bad_checkpoint(self) -> None:
         client = ActiveClient.__new__(ActiveClient)
+        client._bootstrap_anchor, client._close_receipt = None, None
         client.binding = SimpleNamespace(digest=lambda: "a" * 64)
         client.evidence = {"original": True}
         scoped = scoped_receipt()

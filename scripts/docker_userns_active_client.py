@@ -70,11 +70,13 @@ class ActiveClient:
         self.name = "new"
         self.evidence: dict[str, Any] = {}
         self.failures: list[dict[str, Any]] = []
+        self._bootstrap_anchor: tuple[Path, str, str, str] | None = None
+        self._close_receipt: dict[str, Any] | None = None
 
     def prepare(self) -> None:
         """Acquire authority only after the backend records this pending client."""
         backend = self.ctx.backend
-        self.evidence = self.rpc(
+        value = self.rpc(
             "prepare",
             {
                 "binding": asdict(self.binding),
@@ -83,7 +85,9 @@ class ActiveClient:
                 "coordinatorPid": os.getpid(),
             },
         )
-        self.name = self.evidence["lease"]
+        self._bootstrap_anchor = (self.stage, self.binding.digest(), value["lease"], value["bootstrapSha256"])
+        self.evidence = value
+        self.name = value["lease"]
 
     def rpc(self, operation: str, request: dict[str, Any]) -> dict[str, Any]:
         """Use the native bounded command path and closed root-side JSON protocol."""
@@ -162,7 +166,7 @@ class ActiveClient:
                 self.response_invalid(
                     operation,
                     "client-close-bootstrap",
-                    self.evidence and value["bootstrapSha256"] != self.evidence.get("bootstrapSha256"),
+                    not self.bootstrap_matches(operation, value),
                 )
             )
             or self.response_invalid(
@@ -194,6 +198,18 @@ class ActiveClient:
         ):
             self.refuse_response(operation, "receipt-mismatch")
         return value
+
+    def bootstrap_matches(self, operation: str, value: dict[str, Any]) -> bool:
+        """Compare later replies with only the original acknowledged prepare identity."""
+        lease = value["lease"]
+        if type(lease) is not str or re.fullmatch(r"[0-9a-f]{32}", lease) is None:
+            return False
+        if self._bootstrap_anchor is None:
+            return operation == "prepare" and self.name == "new" and not self.evidence and not self.failures
+        return (
+            self._bootstrap_anchor == (self.stage, self.binding.digest(), lease, value["bootstrapSha256"])
+            and lease == self.name
+        )
 
     def response_invalid(self, operation: str, phase: str, value: object) -> bool:
         """Name only the first existing close validation predicate, evaluated once."""
@@ -308,7 +324,11 @@ class ActiveClient:
         if self.name == "new":
             reason = "unacknowledged active qualification retains private runtime"
             raise ValueError(reason)
-        self.evidence = self.rpc("close", {"bindingSha256": self.binding.digest(), "container": None})
+        self._close_receipt = None
+        value = self.rpc("close", {"bindingSha256": self.binding.digest(), "container": None})
+        self._close_receipt = value
+        if not self.failures:
+            self.evidence = value
 
     def dispose_stage(self) -> dict[str, Any]:
         """Finish the existing root stage before maintained pair publication."""

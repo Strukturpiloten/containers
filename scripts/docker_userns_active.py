@@ -105,6 +105,12 @@ WITNESS_FAILURE_CODES = frozenset(
         "children-census",
         "children-readback",
         "children-scope",
+        "children-scope-initial-universe",
+        "children-scope-initial-unreadable-required-child",
+        "children-scope-initial-unlisted-immediate-child",
+        "children-scope-readback-universe",
+        "children-scope-readback-unreadable-required-child",
+        "children-scope-readback-unlisted-immediate-child",
         "executable-cap",
         "executable-hash",
         "executable-identity",
@@ -182,6 +188,10 @@ FAILURE_PHASES = frozenset(
         "preflight-os-release",
         "preflight-os-values",
         "preflight-host",
+        "preflight-host-machine-shape",
+        "preflight-host-release-shape",
+        "preflight-host-architecture",
+        "preflight-host-cohort",
         "preflight-controls",
         "preflight-parser-hash",
         "preflight-abi-hash",
@@ -1484,8 +1494,8 @@ def collect_host_facts(
     facts.update(os_facts)
     progress["phase"] = "preflight-host"
     actual = os.uname()
-    require(re.fullmatch(r"[A-Za-z0-9_.+-]{1,128}", actual.machine))
-    require(re.fullmatch(r"[A-Za-z0-9_.+-]{1,128}", actual.release))
+    comparison(progress, "preflight-host-machine-shape", re.fullmatch(r"[A-Za-z0-9_.+-]{1,128}", actual.machine))
+    comparison(progress, "preflight-host-release-shape", re.fullmatch(r"[A-Za-z0-9_.+-]{1,128}", actual.release))
     host_facts = {"machine": actual.machine, "kernel": actual.release}
     evaluate("host", host_facts)
     facts.update(host_facts)
@@ -1508,8 +1518,16 @@ def root_preflight(
                 facts["osID"] == cohort["osID"] == "ubuntu" and facts["osVersion"] == cohort["osVersion"] == "26.04",
             )
         else:
-            require(facts["machine"] == {"amd64": "x86_64", "arm64": "aarch64"}[context["architecture"]])
-            require(facts["machine"] == cohort["machine"] and facts["kernel"] == cohort["kernel"])
+            comparison(
+                progress,
+                "preflight-host-architecture",
+                facts["machine"] == {"amd64": "x86_64", "arm64": "aarch64"}[context["architecture"]],
+            )
+            comparison(
+                progress,
+                "preflight-host-cohort",
+                facts["machine"] == cohort["machine"] and facts["kernel"] == cohort["kernel"],
+            )
             comparison(progress, "preflight-host", matched=True)
 
     facts: dict[str, Any] = {}
@@ -2631,10 +2649,31 @@ class RootPort:
 
     @witness_operation("child-mapping")
     def witness_child(
-        self, stack: ExitStack, parent: dict, candidates: set[int], identity: tuple, children: set[int]
+        self,
+        stack: ExitStack,
+        parent: dict,
+        candidates: set[int],
+        identity: tuple,
+        children: set[int],
     ) -> dict:
         """Reconcile complete immediate children before selecting one exact namespace child."""
-        self.witness_require("children-scope", children <= candidates and parent["pid"] not in children)
+        readback = getattr(self, "_witness_child_readback", None)
+        codes = (
+            (
+                "children-scope-readback-universe",
+                "children-scope-readback-unreadable-required-child",
+                "children-scope-readback-unlisted-immediate-child",
+            )
+            if readback is True
+            else (
+                "children-scope-initial-universe",
+                "children-scope-initial-unreadable-required-child",
+                "children-scope-initial-unlisted-immediate-child",
+            )
+        )
+        if readback is not True and readback is not False:
+            codes = ("children-scope",) * 3
+        self.witness_require(codes[0], children <= candidates and parent["pid"] not in children)
         matches, observed = [], set()
         for pid in sorted(candidates - {parent["pid"]}):
             with ExitStack() as temporary:
@@ -2642,12 +2681,12 @@ class RootPort:
                     task = temporary.enter_context(self.witness_task(pid))
                 except OSError, RefusedError:
                     self._witness_failure = None
-                    self.witness_require("children-scope", pid not in children)
+                    self.witness_require(codes[1], pid not in children)
                     self.witness_budget()
                     continue
                 state = task["before"]
                 if state["parent"] == parent["pid"]:
-                    self.witness_require("children-scope", pid in children)
+                    self.witness_require(codes[2], pid in children)
                     observed.add(pid)
                     info = os.fstat(task["exe"])
                     if (info.st_dev, info.st_ino) == identity and all(
@@ -2700,6 +2739,7 @@ class RootPort:
             components = self.modules.qualification.rootlesskit_components(self.binding.image)
             image = stack.enter_context(self.modules.observations.held_rootlesskit(api, outer["directory"], components))
             children = self.witness_parent_children(parent)
+            self._witness_child_readback = False
             child = self.witness_child(stack, parent, candidates, image["identity"], children)
             files = [image["descriptor"], parent["exe"], child["exe"]]
             hashes = [
@@ -2722,6 +2762,7 @@ class RootPort:
             after_pids = self.witness_scope_pids(stack)
             self.witness_require("scope-readback", {outer["pid"], parent["pid"], child["pid"]} <= after_pids)
             self.witness_require("children-readback", self.witness_parent_children(parent) == children)
+            self._witness_child_readback = True
             after_child = self.witness_child(stack, parent, after_pids, image["identity"], children)
             self.witness_require("child-readback", after_child["before"] == child["before"])
             self.witness_require(
