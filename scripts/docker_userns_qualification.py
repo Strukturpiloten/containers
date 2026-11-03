@@ -29,8 +29,8 @@ LEGACY_CLONE = Path("/proc/sys/kernel/unprivileged_userns_clone")
 MAX_NAMESPACES = 2**63 - 1
 CONSUMER = "containers-ubuntu26-userns-active"
 PREREQUISITE_SCHEMA = 4
-ADMISSION_SCHEMA = 7
-ADMISSION_REVISION = "containers558-mediated-profile-v2"
+ADMISSION_SCHEMA = 8
+ADMISSION_REVISION = "containers577-observed-kernel-v1"
 MAINTAINED_PROFILES = ("full", "docker-rootless-qualification")
 MAINTAINED_IMAGES = (
     "docker-29-conformance-rootless",
@@ -228,7 +228,7 @@ def _postexec_failure(diagnostic: Callable[[str], None] | None, code: str) -> bo
     return False
 
 
-def postexec_witness_valid(
+def _postexec_witness_v1_valid(
     value: object, scoped: dict, *, complete: bool = False, diagnostic: Callable[[str], None] | None = None
 ) -> bool:
     """Validate closed source-bound checkpoint facts, never upgrade post-create evidence."""
@@ -280,6 +280,82 @@ def postexec_witness_valid(
     except TypeError, ValueError, KeyError, UnicodeError:
         return _postexec_failure(diagnostic, "checkpoint-envelope")
     return True
+
+
+POSTEXEC_V2_SAMPLE_KEYS = POSTEXEC_SAMPLE_KEYS | {
+    "outerTaskSha256",
+    "realmSha256",
+    "deadNonactorCount",
+    "deadNonactorSha256",
+    "coverageComplete",
+}
+POSTEXEC_EMPTY_DEAD = hashlib.sha256(b"[]\n").hexdigest()
+POSTEXEC_VERSION = 2
+POSTEXEC_PID_LIMIT = 64
+
+
+def postexec_witness_valid(
+    value: object,
+    scoped: dict,
+    *,
+    complete: bool = False,
+    current: bool = False,
+    diagnostic: Callable[[str], None] | None = None,
+) -> bool:
+    """Route historical bytes unchanged; current success requires closed v2 coverage."""
+    if value is None:
+        return not complete
+    if (
+        type(value) is not dict
+        or type(value.get("schemaVersion")) is not int
+        or value["schemaVersion"] != POSTEXEC_VERSION
+    ):
+        if current:
+            return _postexec_failure(diagnostic, "checkpoint-envelope")
+        return _postexec_witness_v1_valid(value, scoped, complete=complete, diagnostic=diagnostic)
+    return _postexec_witness_v2_valid(value, scoped, complete=complete, diagnostic=diagnostic)
+
+
+def _postexec_witness_v2_valid(
+    value: dict, scoped: dict, *, complete: bool, diagnostic: Callable[[str], None] | None
+) -> bool:
+    """Validate v2 coverage independently before applying the original live-role predicates."""
+    try:
+        if (
+            set(value)
+            != {"schemaVersion", "bindingSha256", "sourceManifestSha256", "leaseSha256", "readyAnchorSha256", "samples"}
+            or type(value["readyAnchorSha256"]) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", value["readyAnchorSha256"]) is None
+            or type(value["samples"]) is not list
+        ):
+            return _postexec_failure(diagnostic, "checkpoint-envelope")
+        historical = {key: item for key, item in value.items() if key != "readyAnchorSha256"}
+        historical["schemaVersion"] = 1
+        historical["samples"] = []
+        previous = None
+        for index, sample in enumerate(value["samples"]):
+            if (
+                type(sample) is not dict
+                or set(sample) != POSTEXEC_V2_SAMPLE_KEYS
+                or sample["coverageComplete"] is not True
+                or type(sample["deadNonactorCount"]) is not int
+                or not 0 <= sample["deadNonactorCount"] <= POSTEXEC_PID_LIMIT
+                or any(
+                    type(sample[key]) is not str or re.fullmatch(r"[0-9a-f]{64}", sample[key]) is None
+                    for key in ("outerTaskSha256", "realmSha256", "deadNonactorSha256")
+                )
+                or (index == 0 and sample["deadNonactorCount"] != 0)
+                or ((sample["deadNonactorCount"] == 0) != (sample["deadNonactorSha256"] == POSTEXEC_EMPTY_DEAD))
+            ):
+                return _postexec_failure(diagnostic, "checkpoint-sample")
+            stable = (sample["outerTaskSha256"], sample["realmSha256"])
+            if previous is not None and previous != stable:
+                return _postexec_failure(diagnostic, "checkpoint-stability")
+            previous = stable
+            historical["samples"].append({key: sample[key] for key in POSTEXEC_SAMPLE_KEYS})
+        return _postexec_witness_v1_valid(historical, scoped, complete=complete, diagnostic=diagnostic)
+    except TypeError, ValueError, KeyError, UnicodeError:
+        return _postexec_failure(diagnostic, "checkpoint-envelope")
 
 
 def rootlesskit_components(image: str) -> tuple[str, ...]:
@@ -780,7 +856,6 @@ def _validate_cohorts(cohorts: object) -> None:
         "osID",
         "osVersion",
         "machine",
-        "kernel",
         "parserVersion",
         "parserSha256",
         "abiSha256",
@@ -797,7 +872,6 @@ def _validate_cohorts(cohorts: object) -> None:
             or cohort["osID"] != "ubuntu"
             or cohort["osVersion"] != "26.04"
             or cohort["machine"] != {"amd64": "x86_64", "arm64": "aarch64"}[architecture]
-            or cohort["kernel"] != "7.0.0-1017-azure"
             or cohort["parserVersion"] != "5.0.2"
             or cohort["interpreter"] != "/usr/bin/python3.14"
             or cohort["pythonVersion"] != [3, 14, 4, "final", 0]

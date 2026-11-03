@@ -1,3 +1,4 @@
+---
 # yaml-language-server: $schema=../../../container.schema.json
 schemaVersion: 1
 name: podman-opensuse-tumbleweed-rootless
@@ -27,7 +28,7 @@ build:
   runtimeBaseArg: DISTRO_IMAGE
   args:
     DISTRO_IMAGE:
-      value: registry.opensuse.org/opensuse/tumbleweed:latest@sha256:6fd5004406983816029c5cb235d10ebc15925cbd3288d795c3726257772d5ad4
+      value: registry.opensuse.org/opensuse/tumbleweed:latest@sha256:8d4f87f611d22a9ff8fe2bbd6b32d80692c1e307f9e7e59e116c3be343fa4187
       type: external-image
     HOME_DIR: {value: /home/podman, type: static}
     RUN_AS_USER: {value: podman, type: static}

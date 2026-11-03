@@ -163,6 +163,10 @@ class RuntimeContext:
         """One distinct, output-only response inode for the optional witness."""
         return self._private_fixture_stream("response")
 
+    def private_native_controls_response(self) -> AbstractContextManager[BinaryIO]:
+        """Keep mandatory mechanism results separate from the later witness response."""
+        return self._private_fixture_stream("native-controls-response")
+
     def _private_directory_identity(self, observed: os.stat_result) -> tuple[int, int, int]:
         if (
             not stat.S_ISDIR(observed.st_mode)
@@ -192,7 +196,11 @@ class RuntimeContext:
 
     @contextmanager
     def _private_fixture_stream(self, role: str) -> Iterator[BinaryIO]:
-        filenames = {"image": "docker-native-fixture.tar", "response": "docker-native-witness-response.bin"}
+        filenames = {
+            "image": "docker-native-fixture.tar",
+            "response": "docker-native-witness-response.bin",
+            "native-controls-response": "docker-native-controls-response.bin",
+        }
         if not isinstance(role, str) or role not in filenames:
             raise ProbeError("unknown private fixture stream role")
         self._verify_fixture_directory()
@@ -227,18 +235,36 @@ class RuntimeContext:
             os.close(directory)
 
     def reset_witness_response(self, response: BinaryIO) -> None:
-        self._fixture_descriptor(response, role="response")
+        self._reset_fixture_response(response, role="response")
+
+    def reset_native_controls_response(self, response: BinaryIO) -> None:
+        """Reset only the held fixed mechanism-control response inode."""
+        self._reset_fixture_response(response, role="native-controls-response")
+
+    def _reset_fixture_response(self, response: BinaryIO, *, role: str) -> None:
+        if role not in {"response", "native-controls-response"}:
+            raise ProbeError("unknown private response role")
+        self._fixture_descriptor(response, role=role)
         response.seek(0)
         response.truncate(0)
-        self._fixture_descriptor(response, role="response")
+        self._fixture_descriptor(response, role=role)
 
     def read_witness_response(self, response: BinaryIO, limit: int) -> bytes:
+        return self._read_fixture_response(response, limit, role="response")
+
+    def read_native_controls_response(self, response: BinaryIO, limit: int) -> bytes:
+        """Read bounded mechanism results with the same original custody guards."""
+        return self._read_fixture_response(response, limit, role="native-controls-response")
+
+    def _read_fixture_response(self, response: BinaryIO, limit: int, *, role: str) -> bytes:
+        if role not in {"response", "native-controls-response"}:
+            raise ProbeError("unknown private response role")
         if type(limit) is not int or not 0 <= limit <= MAX_WITNESS_RESPONSE_BYTES:
             raise ProbeError("witness response limit is unsupported")
-        self._fixture_descriptor(response, role="response")
+        self._fixture_descriptor(response, role=role)
         response.seek(0)
         result = response.read(limit + 1)
-        self._fixture_descriptor(response, role="response")
+        self._fixture_descriptor(response, role=role)
         if len(result) > limit:
             raise ProbeError("witness response exceeded its byte bound")
         return result
@@ -268,7 +294,7 @@ class RuntimeContext:
 
     def _fixture_output_descriptor(self, output: BinaryIO) -> int:
         entry = self._fixture_archives.get(id(output))
-        if entry is None or entry[3] not in {"image", "response"}:
+        if entry is None or entry[3] not in {"image", "response", "native-controls-response"}:
             raise ProbeError("binary output stream role unavailable")
         return self._fixture_descriptor(output, role=entry[3])
 

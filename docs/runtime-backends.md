@@ -47,6 +47,13 @@ cgroup, bridge and mount absence before deleting storage. Unknown ownership or
 incomplete teardown retains storage and a failed cleanup result alongside the
 original error. Global prune and ambient-store cleanup are prohibited.
 
+Current rootless V2 native ready checkpoints also require the independent
+[dead-nonactor mechanism controls](docker-dead-nonactor-witness.md#mandatory-independent-native-mechanism-controls).
+The test-only private namespace/proc fixture runs through the same admitted root
+watchdog and original aggregate allowance. Its separately captured exact-candidate
+source and closed observations cannot replace workload qualification; unavailable
+facilities, any missing control or unverified cleanup fail the required step.
+
 ## CI prerequisites and evidence
 
 ### PR492 compile-only user-namespace observation
@@ -113,7 +120,7 @@ attachment, admission or cleanup authority. Retained historical leases remain
 retained; no foreign profile or wildcard cleanup is added.
 
 The original `profileObservation` remains a post-create sample. Workload
-qualification additionally requires a closed `postExecWitness` version1 component
+qualification additionally requires a closed `postExecWitness` version2 component
 with ordered `ready` and `pre-close` samples on the same attached lease. Root
 selects the original task and fixed image-family RootlessKit executable, resolves
 the systemd unit's parent when needed, and requires exactly one immediate child
@@ -121,11 +128,15 @@ with distinct user and mount namespaces. It holds task, pidfd, executable and
 namespace descriptors through matching executable SHA-256/size and generated
 enforce-label readbacks. Raw PIDs, paths, labels and namespace identities stay
 private; exported digests bind the task identities, original binding, source
-manifest and lease. Old or incomplete receipts cannot establish this claim.
+manifest and lease. Historical version1 receipts keep their original validator
+and authenticated close/disposal semantics; new success requires version2.
+The [dead-nonactor witness decision](docker-dead-nonactor-witness.md) defines the
+strict-ready anchor, pre-close-only positive dead-process proof, certified proc
+view, owner-held PID namespace, trusted-host premise and unchanged resource bounds.
 
 Each read-only checkpoint has at most five seconds inside the original work
-budget, 64 distinct IDs across owned cgroup candidates and the held parent thread/child
-union, 512 KiB of proc/cgroup input and 96 MiB of executable input (32 MiB per
+budget, 64 distinct IDs across owned cgroup candidates, the held parent thread/child
+union and realm observers, 512 KiB of proc/cgroup input and 96 MiB of executable input (32 MiB per
 executable). It preserves the
 original cleanup and finalizer reserves, pending-child/reader guards and close
 rules. Failure grants no new cleanup authority. The samples establish measured
@@ -157,7 +168,8 @@ integer from zero through that count only when complete (otherwise null).
 Booleans are not counts. Complete means the planned pass finished its existing
 read/identity guards, not an atomic or exhaustive current-process census.
 The existing 8192-byte failure-envelope cap is unchanged;
-success receipts and witness proofs gain no fields. Clients reuse the same closed
+the historical #573 change added no fields to success receipts or witness proofs.
+Clients reuse the same closed
 validator. No raw task/directory identities, paths, labels, hashes or error text
 are exported, and the detail grants no selector or cleanup authority.
 
@@ -339,6 +351,30 @@ Conmon sources remain explicitly not applicable; no conmon identity or marker is
 lifecycle and cleanup assertions remain. DockerLens/BoxFerry's historically
 shared outer stores have a different contract; this Python private-store adapter
 is not copied from or imposed on those callers.
+
+The inner-memory event observer queries bounded past Engine history after the
+original wait/inspect and enforcement decision. It does not start a live event
+subscription or certify subscription readiness; `historyCompleteness` remains
+`unknown`, even when an OOM/die pair is observed. The public
+[Docker wait contract](https://docs.docker.com/reference/cli/docker/container/wait/)
+describes termination and exit status, not synchronization of every OOM field or
+kernel-victim attribution. This contract distinction does not establish event
+lag or an engine defect in a recorded failure.
+
+The observer's existing identity inspect also projects a separate optional
+`laterState` version 1 for the same exact container ID and StartedAt. It contains
+only OOMKilled, Running and error-present Booleans, a finite status, an exit code,
+and a validated UTC FinishedAt (including Docker's zero-time sentinel). Times are
+daemon-reported: nonzero FinishedAt must lie between the original start and the
+later bracketed daemon clock, rather than the earlier event-query cutoff. Missing
+or malformed optional state is explicitly unavailable while valid identity,
+clock and event evidence remains intact; changed identity or clock still refuses.
+No raw Error, PID or path is exported. This adds no command, actor, polling,
+deadline renewal or capacity allowance. A later true flag never replaces the
+original state, repairs the failed allocator check, admits it to the lifetime
+ledger, identifies a kernel victim or enforcing limit, or supplies qualification
+or cleanup authority. Outer OOM flags and
+ancestor counters likewise cannot substitute for the required original evidence.
 
 Runtime/action/test changes match the main publication workflow and may select
 every image. A merge can publish images and finalize releases after its gates.
@@ -730,9 +766,13 @@ and no-declaration/normal paths keep their original serialization behavior.
 
 `.github/docker-userns-unused-admission.json` is a manually reviewed semantic
 admission based on the audited Stage-1 Ubuntu 26 observation, bound to the
-active source manifest and helper contracts. It never compares historical
-inodes, PIDs or boot IDs. Source, parser-contract or helper updates invalidate
-it. The existing Renovate source/parser manager remains the single pin owner;
+active source manifest and helper contracts. Its current schema 2 omits kernel
+release from policy: the observer acquires the actual bounded release once into
+the invocation's frozen cohort, and later observations and leases must match it.
+Schema 1 and injected kernel policy keys refuse current admission. The existing
+historical image-version policy, tool hashes and unused-only authority remain.
+It never compares historical inodes, PIDs or boot IDs. Source, parser-contract or
+helper updates invalidate it. The existing Renovate source/parser manager remains the single pin owner;
 humans must review and update admission rather than automatically rewriting
 host fingerprints. The helper version authority is the selected Git tree, so
 there is no self-referential commit pin. The new template/generated job reuses
@@ -860,7 +900,7 @@ unchanged. Admission itself records `qualification: none`; it permits an attempt
 not native qualification, release or publication permission.
 
 Bootstrap transport/stage, native lease records, scoped receipts and disposal
-acknowledgments use schema 4. Admission uses schema 7: its maintained policy
+acknowledgments use schema 4. Admission uses schema 8: its maintained policy
 contains the exact `validationProfiles` allowset `full` and
 `docker-rootless-qualification`, while each actual context/receipt retains one
 canonical profile and the exact raw request. The exact maintained-caller table
@@ -888,10 +928,22 @@ builder is reused without invoking its active `RunnerProfile` CLI. The existing
 it does not confer DockerLens admission or policy authority.
 
 The manually reviewed active admission requires Ubuntu 26.04, the selected
-`x86_64`/`aarch64` machine, kernel
-`7.0.0-1017-azure`, parser 5.0.2, and the exact parser, ABI, feature and Python
-3.14.4 fingerprints recorded in
+`x86_64`/`aarch64` machine, parser 5.0.2, and the exact parser, ABI, feature and
+Python 3.14.4 fingerprints recorded in
 [the active admission](../.github/docker-userns-active-admission.json).
+Kernel release is a bounded, sanitized observation, not a supported-version pin,
+a cloud-provider selector or proof of kernel source identity. GitHub owns the
+hosted kernel build; the reported release does not independently verify its
+internal version or source. Schema 8 and revision
+`containers577-observed-kernel-v1` supersede the exact-kernel policy. Current
+admission rejects prior schemas/revisions and injected kernel policy keys;
+historical evidence keeps its original meaning and cannot acquire current authority.
+The actual release remains in preflight and root receipts: fresh guard reads must
+match the invocation's original preflight, both systemd phases must report the
+same kernel, and native mechanism controls must match the current `uname` result.
+Different matrix jobs may report different releases. Every actual capability,
+ABI, namespace, workload and cleanup check remains mandatory; a valid release
+string alone grants no qualification and implies no blanket kernel support.
 Actual actor preflight reads the fixed AppArmor-enabled, restricted-userns and
 maximum-userns scalar files. The legacy `unprivileged_userns_clone` control must
 be `1` or explicitly absent with ENOENT; unreadable, malformed, disabled, or
@@ -920,7 +972,8 @@ header's `20261025.167.1`; the header-linked official image ref returned 404.
 Neither report establishes a vendor checksum or an independently verified image
 package manifest. Same-job provenance is frozen and compared, never silently
 replaced by the other value or described as VM attestation. Fingerprint drift
-requires explicit coordinated source/admission review, not automatic renewal.
+of pinned tools or features requires explicit coordinated source/admission review,
+not automatic renewal; kernel release remains per-invocation evidence.
 
 Each actual root actor freshly opens `.ns_name`, `.ns_level`, and `.stacked`
 directly under a held genuine `/sys/kernel/security/apparmor` securityfs
@@ -1424,7 +1477,7 @@ routes retain their existing boundaries.
 
 The exact `docker-29-8-1-conformance-rootless` compatibility fixture is additive;
 standard and conformance Engine 29.9.2 inputs retain their own identities and
-evidence. Schema 7 names the three distinct systemd fixtures, but the historical image
+evidence. Schema 8 names the three distinct systemd fixtures, but the historical image
 requires `full` and the existing finite original CI/publication caller tuples.
 Manual publication selection must name that image or the Docker family.
 Experimental and two-row diagnostic selectors remain unchanged. A selected
@@ -1435,7 +1488,7 @@ source-policy addition. Final closure readmission remains primary-owned.
 
 ## Maintained ordinary direct-rootless prerequisite
 
-Admission schema 7 keeps `maintainedDirectImages` separate from the three
+Admission schema 8 keeps `maintainedDirectImages` separate from the three
 systemd fixture names. The finite direct map covers the existing upstream and
 distribution rootless rows, including AMD64-only Arch. A new catalogue name or
 architecture does not acquire authority by its spelling. Direct, exact 29.8.1
@@ -1493,9 +1546,10 @@ replacement or marker custody prevents subsequent runtime; proven completion
 retires only the exact held marker. This route creates no policy, compiler,
 profile, guest or runtime lease and grants no cleanup authority. Its disposition
 is `AMD64_OBSERVATION_ONLY`, with `qualification: none`. A complete observation
-only permits the unchanged active host preflight to run: an unknown host tuple
-still refuses. It does not admit AWS or qualify a maintained image. Existing
-rootful, Podman, direct diagnostic and experimental ARM routes do not invoke it.
+only permits active host preflight to run. It never grants compatibility or
+qualification from the observed kernel name or cloud flavor; the complete
+remaining host, capability, native workload and cleanup checks still decide.
+Existing rootful, Podman, direct diagnostic and experimental ARM routes do not invoke it.
 The public artifact can be partial and nonqualifying after a failure. Actual host
 compatibility and any later exact admission change require separate review and
 fresh native evidence; these facts alone do not establish either.
@@ -1516,7 +1570,7 @@ qualification or failure artifact. Missing, malformed, changed or foreign anchor
 unacknowledged prepares continue to retain the runtime without new cleanup authority.
 
 Failure diagnostics distinguish the four existing host guards (machine shape, release shape,
-architecture and compound cohort) and the three existing child-scope guards (universe,
+architecture and admitted machine) and the three existing child-scope guards (universe,
 unreadable required child and unlisted immediate child) in each initial/readback selection.
 The existing ready/pre-close prefix supplies the checkpoint. Legacy coarse codes remain
 accepted; schema-1 envelopes and successful evidence shapes are unchanged. These labels
@@ -1534,3 +1588,26 @@ establish neither binary provenance nor an attachment-policy cause. Raw labels,
 names, paths and task/file identities stay private. Later matching readback
 cannot repair the failed bind. Retained close reuses this observation without
 new measurements; legacy failures remain valid and cleanup authority stays false.
+
+The owned scope census also distinguishes its existing guard sites using closed
+`scope-directory-stability`, `scope-pid-grammar`, `scope-readback-pid-grammar`,
+`scope-outer-membership` and `scope-walk` codes under the original ready/pre-close
+prefix. The shared initial/final scope walk uses the same grammar code; the
+readback grammar code names the separate existing held missing-child diagnostic
+read. The coarse `scope-census` code remains valid for historical failures. These
+labels change no predicate, reads, ordering, budgets or cleanup authority. A
+secondary diagnostic refusal still cannot replace the first failed witness.
+Historical scope-census failures cannot be assigned a new subsite retrospectively.
+
+## Kernel observation and dependency ownership
+
+Kernel policy removal changes no software version, download, runner label, Action,
+image digest or dependency extraction. Existing Renovate managers track the external
+SDK/source and parser-version declarations, image digests and Action pins. OS
+parser/interpreter fingerprints in admission remain manually reviewed. No manager
+extracts the kernel strings removed from either admission. Those managers and their
+paths/grouping/approvals remain unchanged. The unused admission's real hosted
+helper content hash is refreshed with its source; no checksum is invented.
+Historical observed releases and upstream ABI examples remain evidence, not
+operational allowlists. Native controls, original budgets and failure/cleanup
+authority remain unchanged.

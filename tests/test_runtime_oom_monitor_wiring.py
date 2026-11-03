@@ -12,6 +12,7 @@ from scripts.runtime_errors import ProbeError
 
 CID = "a" * 64
 WORK_REFUSAL = "authored work refusal"
+CONTROLS_REFUSAL = "authored mandatory-control refusal"
 
 
 class MonitorWiringTests(unittest.TestCase):
@@ -45,7 +46,12 @@ class MonitorWiringTests(unittest.TestCase):
             with self.subTest(phase=phase):
                 self._failed_work_phase(phase)
 
-    def _failed_work_phase(self, phase: runtime_docker.DockerProbePhase) -> None:
+    def test_both_phases_controls_failure_blocks_ready_and_work_but_retains_observer(self) -> None:
+        for phase in runtime_docker.DockerProbePhase:
+            with self.subTest(phase=phase):
+                self._failed_work_phase(phase, controls_refused=True)
+
+    def _failed_work_phase(self, phase: runtime_docker.DockerProbePhase, *, controls_refused: bool = False) -> None:
         ctx, budget, diagnostics = MagicMock(unsafe=True), MagicMock(), MagicMock()
         ctx.directory = Path("owned-store-fixture")
         ctx.image_ref = "local:fixture"
@@ -55,6 +61,13 @@ class MonitorWiringTests(unittest.TestCase):
         ctx.start.return_value = CID
         events = []
         diagnostics.snapshot.side_effect = events.append
+        ctx.backend.scoped_profile.witness.side_effect = lambda checkpoint: events.append("witness-" + checkpoint)
+
+        def controls(observed: object) -> None:
+            self.assertIs(observed, ctx)
+            events.append("native-controls")
+            if controls_refused:
+                raise ProbeError(CONTROLS_REFUSAL)
 
         def load_fixture(_name: str, _container: str, _archive: object) -> str:
             events.append("ordinary-work-start")
@@ -77,12 +90,13 @@ class MonitorWiringTests(unittest.TestCase):
             patch.object(runtime_docker.runtime_docker_systemd, "verify_runtime"),
             patch.object(runtime_docker, "_prepare_started_daemon"),
             patch.object(runtime_docker, "_checked_exec", return_value="29.8.2"),
-            patch.object(runtime_docker, "_docker", side_effect=docker),
+            patch.object(runtime_docker, "_docker", side_effect=docker) as commands,
             patch.object(runtime_docker.runtime_docker_systemd, "verify_guest"),
             patch.object(runtime_docker.runtime_docker_systemd, "verify_inner_limits") as limits,
             patch.object(runtime_docker, "OomDiagnostics", return_value=diagnostics),
+            patch("scripts.runtime_docker_dead_nonactor_controls.require_controls", side_effect=controls) as mandatory,
             patch.object(runtime_docker.runtime_docker_systemd, "stop_guest") as stop,
-            self.assertRaisesRegex(ProbeError, "authored work refusal"),
+            self.assertRaisesRegex(ProbeError, CONTROLS_REFUSAL if controls_refused else WORK_REFUSAL),
         ):
             runtime_docker._run_nested_docker(
                 ctx,
@@ -91,7 +105,22 @@ class MonitorWiringTests(unittest.TestCase):
                 budget,
                 phase=phase,
             )
-        self.assertEqual(events, ["before-ordinary-work", "ordinary-work-start", "before-shutdown"])
+        mandatory.assert_called_once_with(ctx)
+        if controls_refused:
+            self.assertEqual(events, ["before-ordinary-work", "native-controls", "before-shutdown"])
+            ctx.backend.scoped_profile.witness.assert_not_called()
+            ctx.load_fixture_archive.assert_not_called()
+        else:
+            self.assertEqual(
+                events,
+                ["before-ordinary-work", "native-controls", "witness-ready", "ordinary-work-start", "before-shutdown"],
+            )
+            ctx.backend.scoped_profile.witness.assert_called_once_with("ready")
+            ctx.load_fixture_archive.assert_called_once()
+        self.assertEqual(
+            [call.args[3] for call in commands.call_args_list],
+            ["read Docker API versions", "inspect Docker storage and security"],
+        )
         stop.assert_called_once_with(ctx, CID, on_exit=diagnostics.after_exit, before_stop=diagnostics.before_stop)
         diagnostics.close.assert_called_once_with()
         limits.assert_not_called()  # Refused before load, never pretend injection ran.

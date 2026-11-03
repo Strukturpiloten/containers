@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, patch
 
 from scripts import runtime_docker_diagnostics as diagnostics
+from scripts import runtime_docker_systemd as systemd
 from scripts.runtime_docker import _run_nested_docker
 from scripts.runtime_docker_backend import DockerBackend
 from scripts.runtime_docker_systemd_guard import PLACEMENT_GUARD, USER_MANAGER, guarded_command
@@ -2692,10 +2693,149 @@ class MemoryEventObservationTests(unittest.TestCase):
     def request(self) -> list[str]:
         return ["guest-memory-events", CONTAINER, "c" * 32, "rootless", CONTAINER, self.started, str(self.start + 10)]
 
-    def identity(self) -> dict[str, Any]:
-        return self.protocol(
-            json.dumps({"id": CONTAINER, "startedAt": self.started}).encode() + b'\n"2026-10-31T22:00:00.000000020Z"'
+    def identity(self, later_state: dict[str, Any] | None = None) -> dict[str, Any]:
+        identity = {"id": CONTAINER, "startedAt": self.started}
+        if later_state is not None:
+            identity["laterState"] = later_state
+        return self.protocol(json.dumps(identity).encode() + b'\n"2026-10-31T22:00:00.000000020Z"')
+
+    def later_state(self, **changes: object) -> dict[str, Any]:
+        return {
+            "oomKilled": True,
+            "running": False,
+            "status": "exited",
+            "exitCode": 137,
+            "finishedAt": "2026-10-31T22:00:00.000000012Z",
+            "errorPresent": False,
+            **changes,
+        }
+
+    def state_capture(self, identity: dict[str, Any]) -> tuple[dict, MagicMock]:
+        raw = self.wire(self.event("die", 1), self.event("oom", 2))
+        with (
+            patch.object(
+                diagnostics, "_guest_owned_capture", return_value={"status": "available", "teardownVerified": True}
+            ),
+            patch.object(diagnostics, "_query_capture", side_effect=[identity, self.protocol(raw)]) as capture,
+            patch.object(
+                diagnostics.time,
+                "time_ns",
+                side_effect=[self.start + 15, self.start + 25, self.start + 26, self.start + 27],
+            ) as clock,
+            patch.object(diagnostics.time, "monotonic", return_value=1),
+        ):
+            result = diagnostics._memory_event_capture(Path("/private"), self.request(), 4, "/timeout")
+        self.assertEqual(result["status"], "available")
+        self.assertEqual(capture.call_count, 2)
+        self.assertEqual(clock.call_count, 4)
+        self.assertTrue(all(call.args[1:] == (4, "/timeout") for call in capture.call_args_list))
+        return json.loads(base64.b64decode(result["data"])), capture
+
+    def test_later_state_uses_the_existing_inspect_and_later_daemon_clock_only(self) -> None:
+        for killed in (False, True):
+            for finished in (
+                "0001-01-01T00:00:00Z",
+                "0001-01-01T00:00:00.000000000Z",
+                "2026-10-31T22:00:00.000000012Z",
+            ):
+                state = self.later_state(oomKilled=killed, finishedAt=finished)
+                with self.subTest(killed=killed, finished=finished):
+                    result, capture = self.state_capture(self.identity(state))
+                self.assertEqual(
+                    result["laterState"],
+                    {
+                        "schemaVersion": 1,
+                        "sameContainerIncarnation": True,
+                        "timeAuthority": "daemon-reported",
+                        "availability": "observed",
+                        **state,
+                    },
+                )
+                self.assertEqual(result["historyCompleteness"], "unknown")
+                arguments = " ".join(capture.call_args_list[0].args[0])
+                self.assertIn("laterState", arguments)
+                self.assertIn("ne .State.Error", arguments)
+                self.assertNotIn("json .State.Error", arguments)
+                self.assertNotIn("json .State.Pid", arguments)
+                self.assertNotIn(PRIVATE_MARKER, json.dumps(result))
+
+    def test_malformed_optional_state_preserves_legacy_identity_time_and_event_results(self) -> None:
+        changes = (
+            [{field: value} for field in ("oomKilled", "running", "errorPresent") for value in (None, 1, "false")]
+            + [{"exitCode": value} for value in (-1, 256, True, "137")]
+            + [
+                {"status": PRIVATE_MARKER},
+                {"status": 1},
+                {"finishedAt": PRIVATE_MARKER},
+                {"finishedAt": "2026-10-31T21:59:59Z"},
+                {"finishedAt": "2026-10-31T22:00:00.000000021Z"},
+                {"finishedAt": "2026-02-30T22:00:00Z"},
+                {"finishedAt": "2026-10-31T22:00:00+00:00"},
+                {"error": PRIVATE_MARKER},
+                {"pid": 123},
+                {"path": PRIVATE_MARKER},
+            ]
         )
+        for changed in changes:
+            with self.subTest(changed=changed):
+                result, _capture = self.state_capture(self.identity(self.later_state(**changed)))
+                self.assertEqual(result["laterState"]["availability"], "unavailable")
+                self.assertEqual(result["availability"], "observed")
+                self.assertEqual(result["historyCompleteness"], "unknown")
+                self.assertEqual([event["action"] for event in result["records"]], ["die", "oom"])
+                self.assertNotIn(PRIVATE_MARKER, json.dumps(result))
+        legacy, _capture = self.state_capture(self.identity())
+        self.assertEqual(legacy["laterState"]["availability"], "unavailable")
+
+    def test_valid_later_state_cannot_bypass_exact_identity_or_clock_checks(self) -> None:
+        for changed in ({"id": "b" * 64}, {"startedAt": "2026-10-31T22:00:00.000000001Z"}, {"unexpected": True}):
+            frame = {"id": CONTAINER, "startedAt": self.started, "laterState": self.later_state(), **changed}
+            with (
+                self.subTest(changed=changed),
+                patch.object(
+                    diagnostics, "_guest_owned_capture", return_value={"status": "available", "teardownVerified": True}
+                ),
+                patch.object(
+                    diagnostics,
+                    "_query_capture",
+                    return_value=self.protocol(json.dumps(frame).encode() + b'\n"2026-10-31T22:00:00.000000020Z"'),
+                ) as capture,
+                patch.object(diagnostics.time, "time_ns", side_effect=[self.start + 15, self.start + 25]),
+            ):
+                result = diagnostics._memory_event_capture(Path("/private"), self.request(), 4, "/timeout")
+            self.assertNotEqual(result["status"], "available")
+            self.assertEqual(capture.call_count, 1)
+
+    def test_later_false_and_true_cannot_repair_original_enforcement_failure_or_admit_allocator(self) -> None:
+        for later in (False, True):
+            with self.subTest(later=later):
+                ctx = self.context()
+                ctx.checks = []
+                ctx.backend.oom_ledger = MagicMock()
+                ctx.qualification, ctx.cleanupVerified, ctx.oomAccountingStatus = "none", False, "incomplete"
+                state = {"StartedAt": self.started, "OOMKilled": False, "ExitCode": 137}
+                projection, _capture = self.state_capture(self.identity(self.later_state(oomKilled=later)))
+                error = systemd._AllocatorAfterError("original allocator after-read was absent", {})
+                with (
+                    patch.object(systemd, "_allocator_telemetry", side_effect=error),
+                    patch.object(diagnostics, "_capture", return_value=json.dumps(projection).encode()),
+                    patch.object(diagnostics.time, "monotonic", return_value=1),
+                    patch.object(diagnostics.time, "time_ns", return_value=self.start + 11),
+                    self.assertRaisesRegex(ProbeError, "lacked genuine Docker OOM-kill evidence"),
+                ):
+                    try:
+                        systemd._memory_probe_result(ctx, {}, "", "137", state)
+                    finally:
+                        diagnostics.observe_memory_events(ctx, CONTAINER, ("rootless", "memory", CONTAINER), state, 4)
+                self.assertFalse(state["OOMKilled"])
+                self.assertEqual(ctx.checks[-1]["status"], "failed")
+                self.assertFalse(ctx.checks[-1]["enforcementSatisfied"])
+                self.assertEqual(ctx.observations[-1]["laterState"]["oomKilled"], later)
+                self.assertEqual(ctx.observations[-1]["authority"], "observation-only")
+                self.assertEqual(
+                    (ctx.qualification, ctx.cleanupVerified, ctx.oomAccountingStatus), ("none", False, "incomplete")
+                )
+                ctx.backend.oom_ledger.admit_original.assert_not_called()
 
     def test_one_exact_cid_query_keeps_fixed_bounds_and_original_deadline(self) -> None:
         raw = self.wire(self.event("die", 1), self.event("oom", 2))

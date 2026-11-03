@@ -247,7 +247,10 @@ The existing `ci.yml` full and bounded qualification manual profiles admit a mai
 attempt on repository-owned GitHub-hosted Linux for this fixture and its private
 outer Docker backend. Root derives the purpose and selected manual ref from the
 fixed event and connected candidate source proof, with candidate/workflow/checkout
-source equality and the complete reviewed cohort for the selected architecture. Full selection keeps
+source equality and the complete reviewed OS/tool/ABI/feature contract for the
+selected architecture. Kernel releases are bounded per-job evidence, not internal
+GitHub build pins; within-job drift refuses and all native controls remain
+mandatory. Full selection keeps
 `focused_runtime=none` and the original qualification workload. Each phase must
 supply genuine, context/admission-bound host/profile and cleanup evidence; both
 original ledgers must finalize. Existing root stage disposal must succeed and

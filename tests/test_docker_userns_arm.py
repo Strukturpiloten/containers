@@ -29,7 +29,7 @@ from tests.test_docker_userns_active import (
     event_payload,
     failure_port,
 )
-from tests.test_docker_userns_qualification import scoped_receipt, workflow_context
+from tests.test_docker_userns_qualification import current_scoped_receipt, scoped_receipt, workflow_context
 from tests.test_evidence_gate import maintained_mutations, maintained_runtime
 from tests.test_runtime_oom_lifecycle import _PhaseCase
 
@@ -38,7 +38,6 @@ ARM = {
     "osID": "ubuntu",
     "osVersion": "26.04",
     "machine": "aarch64",
-    "kernel": "7.0.0-1017-azure",
     "parserVersion": "5.0.2",
     "parserSha256": "51d0cac5d322d688892e5bfd9283262bab55fdced1c85a107cb2a92bc71e0e36",
     "interpreter": "/usr/bin/python3.14",
@@ -75,7 +74,7 @@ def host_controls(fault: str | None) -> dict:
 
 
 class ArmRootAdmissionTests(unittest.TestCase):
-    def preflight(self, fault: str | None) -> dict:
+    def preflight(self, fault: str | None, release: str = "7.0.0-fixture-arm64") -> dict:
         context = workflow_context(purpose="maintained-prerequisite", architecture="arm64")
         if fault == "ImageOS":
             context["imageOS"] = "ubuntu26"
@@ -127,7 +126,7 @@ class ArmRootAdmissionTests(unittest.TestCase):
                 "uname",
                 return_value=SimpleNamespace(
                     machine="x86_64" if fault == "machine" else "aarch64",
-                    release="unknown" if fault == "kernel" else ARM["kernel"],
+                    release="invalid release /private" if fault == "kernel" else release,
                 ),
             ),
             patch.object(active, "collect_cohort_files", side_effect=files),
@@ -151,6 +150,17 @@ class ArmRootAdmissionTests(unittest.TestCase):
         )
         self.assertNotEqual(policy["cohorts"]["amd64"]["parserSha256"], ARM["parserSha256"])
         self.assertNotEqual(policy["cohorts"]["amd64"]["interpreterSha256"], ARM["interpreterSha256"])
+
+    def test_observed_kernel_flavors_do_not_select_authority_or_bypass_host_controls(self) -> None:
+        for release in ("7.0.0-1014-aws", "7.1.0-42-azure"):
+            with self.subTest(release=release):
+                self.assertEqual(self.preflight(None, release)["kernel"], release)
+                for fault in ("disabled", "restriction", "policyVersion9Sha256", "interpreterSha256"):
+                    with (
+                        self.subTest(fault=fault),
+                        self.assertRaises((active.RefusedError, qualification.QualificationError)),
+                    ):
+                        self.preflight(fault, release)
 
     def test_crossed_tools_platform_missing_features_and_controls_refuse_before_load(self) -> None:
         for fault in (
@@ -368,7 +378,7 @@ class ArmNativeAuthorityTests(unittest.TestCase):
                         architecture="arm64",
                         late=late,
                         phase=DockerProbePhase.ENFORCEMENT,
-                        scoped_receipt=scoped_receipt(
+                        scoped_receipt=current_scoped_receipt(
                             purpose="maintained-prerequisite", architecture="arm64", phase="enforcement"
                         ),
                     )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import errno
 import hashlib
 import json
@@ -234,7 +235,7 @@ def workflow_context(
         "validationProfile": profile,
         "validationProfileRequested": profile if requested is None else requested,
         "purpose": purpose,
-        "admissionRevision": "containers558-mediated-profile-v2",
+        "admissionRevision": "containers577-observed-kernel-v1",
         "admissionSha256": hashlib.sha256(admission.read_bytes()).hexdigest(),
     }
 
@@ -304,8 +305,9 @@ def scoped_receipt(
     name = "dockerlens-127-upstream-rootless-1-2-" + lease
     label = (name + " (enforce)\n").encode()
     cohort = admission["cohorts"][architecture]
-    facts = {key: cohort[key] for key in ("osID", "osVersion", "machine", "kernel", "parserVersion")}
+    facts = {key: cohort[key] for key in ("osID", "osVersion", "machine", "parserVersion")}
     facts.update(
+        kernel="7.0.0-fixture-host",
         files={key: {"sha256": value} for key, value in cohort.items() if key.endswith("Sha256")},
         controls={"enabled": True, "restricted_userns": 1, "maximum_userns": 1024, "legacy_clone": None},
         imageVersion=context["imageVersion"],
@@ -389,6 +391,28 @@ def postexec_fixture(scoped: dict) -> dict:
         "leaseSha256": hashlib.sha256(scoped["lease"].encode()).hexdigest(),
         "samples": samples,
     }
+
+
+def postexec_v2_fixture(scoped: dict) -> dict:
+    """Explicit current evidence; the historical v1 fixture remains unchanged."""
+    value = postexec_fixture(scoped)
+    value.update(schemaVersion=2, readyAnchorSha256="f" * 64)
+    for sample in value["samples"]:
+        sample.update(
+            outerTaskSha256="1" * 64,
+            realmSha256="2" * 64,
+            deadNonactorCount=0,
+            deadNonactorSha256=hashlib.sha256(b"[]\n").hexdigest(),
+            coverageComplete=True,
+        )
+    return value
+
+
+def current_scoped_receipt(**kwargs: object) -> dict:
+    """Request v2 explicitly wherever a new success is being exercised."""
+    value = scoped_receipt(**kwargs)
+    value["postExecWitness"] = postexec_v2_fixture(value)
+    return value
 
 
 def stage_disposal(scoped: dict) -> dict:
@@ -553,8 +577,10 @@ class PurposeAdmissionBindingTests(unittest.TestCase):
         for key, value in (
             ("schemaVersion", 1),
             ("schemaVersion", 5),
+            ("schemaVersion", 7),
             ("schemaVersion", True),
             ("revision", "unknown"),
+            ("revision", "containers558-mediated-profile-v2"),
             ("purpose", "maintained-prerequisite"),
             ("qualification", "complete"),
             ("maintainedArchitectures", {"amd64": "maintained-prerequisite", "arm64": "refuse-load"}),
@@ -563,9 +589,17 @@ class PurposeAdmissionBindingTests(unittest.TestCase):
             with self.subTest(key=key), self.assertRaises(qualification.QualificationError):
                 qualification.admission_document(json.dumps({**admission, key: value}).encode())
 
+    def test_kernel_policy_keys_are_refused_in_each_current_architecture_cohort(self) -> None:
+        admission, _digest = self.admission()
+        for architecture in ("amd64", "arm64"):
+            changed = copy.deepcopy(admission)
+            changed["cohorts"][architecture]["kernel"] = "7.0.0-1017-azure"
+            with self.subTest(architecture=architecture), self.assertRaises(qualification.QualificationError):
+                qualification.admission_document(json.dumps(changed).encode())
+
     def test_historical_image_requires_exact_maintained_full_context(self) -> None:
         admission, digest = self.admission()
-        self.assertEqual(admission["schemaVersion"], 7)
+        self.assertEqual(admission["schemaVersion"], 8)
         self.assertEqual(
             admission["maintainedContext"]["images"],
             [
