@@ -928,7 +928,12 @@ def _memory_event_arguments(directory: Path, request: list[str], *command: str) 
     if command:
         arguments = [*docker, *command]
     else:
-        identity = '{"id":{{json .Id}},"startedAt":{{json .State.StartedAt}}}'
+        identity = (
+            '{"id":{{json .Id}},"startedAt":{{json .State.StartedAt}},'
+            '"laterState":{"oomKilled":{{json .State.OOMKilled}},"running":{{json .State.Running}},'
+            '"status":{{json .State.Status}},"exitCode":{{json .State.ExitCode}},'
+            '"finishedAt":{{json .State.FinishedAt}},"errorPresent":{{json (ne .State.Error "")}}}}'
+        )
         script = (
             shlex.join([*docker, "inspect", "--format", identity, workload])
             + "; "
@@ -938,19 +943,51 @@ def _memory_event_arguments(directory: Path, request: list[str], *command: str) 
     return [*inspect[:-4], "exec", container, *contract["guarded_command"](*arguments)]
 
 
-def _memory_event_bounds(raw: bytes, request: list[str], before: int, after: int) -> tuple[int, int]:
+def _later_memory_state(value: object, started: int, clock: int) -> dict[str, Any]:
+    """Project only advisory daemon state from the same later incarnation read."""
+    common = {"schemaVersion": 1, "sameContainerIncarnation": True, "timeAuthority": "daemon-reported"}
+    unavailable = {**common, "availability": "unavailable", "reason": "invalid-fields"}
+    fields = {"oomKilled", "running", "status", "exitCode", "finishedAt", "errorPresent"}
+    if (
+        type(value) is not dict
+        or value.keys() != fields
+        or any(type(value[key]) is not bool for key in ("oomKilled", "running", "errorPresent"))
+        or type(value["exitCode"]) is not int
+        or not 0 <= value["exitCode"] <= 255
+        or type(value["status"]) is not str
+        or value["status"] not in {"created", "restarting", "running", "removing", "paused", "exited", "dead"}
+        or type(value["finishedAt"]) is not str
+    ):
+        return unavailable
+    finished = value["finishedAt"]
+    if re.fullmatch(r"0001-01-01T00:00:00(?:\.0{1,9})?Z", finished) is None:
+        try:
+            timestamp = _event_timestamp(finished)
+        except _UnavailableError, ValueError, OverflowError, OSError:
+            return unavailable
+        if not started <= timestamp <= clock:
+            return unavailable
+    return {**common, "availability": "observed", **value}
+
+
+def _memory_event_bounds(raw: bytes, request: list[str], before: int, after: int) -> tuple[int, int, dict[str, Any]]:
     lines = raw.splitlines()
     if len(lines) != 2:
         raise _UnavailableError("invalid-fields")
     observed = json.loads(lines[0], object_pairs_hook=_unique_object)
     clock = _event_timestamp(json.loads(lines[1]))
     started, cutoff = _event_timestamp(request[5]), int(request[6])
-    if observed != {"id": request[4], "startedAt": request[5]} or not 0 < started <= cutoff < before <= clock <= after:
+    if (
+        type(observed) is not dict
+        or observed.keys() - {"id", "startedAt", "laterState"}
+        or {key: observed.get(key) for key in ("id", "startedAt")} != {"id": request[4], "startedAt": request[5]}
+        or not 0 < started <= cutoff < before <= clock <= after
+    ):
         raise _UnavailableError("invalid-fields")
     # A regressed clock cannot turn --until into a future stream endpoint.
     if time.time_ns() <= cutoff:
         raise _UnavailableError("invalid-fields")
-    return started, cutoff
+    return started, cutoff, _later_memory_state(observed.get("laterState"), started, clock)
 
 
 def _memory_event_result(projection: dict[str, Any], cutoff: int, deadline: float) -> dict[str, Any]:
@@ -990,7 +1027,7 @@ def _memory_event_capture(
         after = time.time_ns()
         if identity.get("status") != "available" or identity.get("teardownVerified") is not True:
             return identity
-        started, cutoff = _memory_event_bounds(
+        started, cutoff, later_state = _memory_event_bounds(
             base64.b64decode(identity["data"], validate=True), request, before, after
         )
         until = f"{cutoff // 1_000_000_000}.{cutoff % 1_000_000_000:09d}"
@@ -1028,6 +1065,7 @@ def _memory_event_capture(
                 "eventQueryStartedMonotonic": query_started,
                 "eventQueryFinishedMonotonic": query_finished,
                 "clockValidation": "daemon-realtime-bracketed",
+                "laterState": later_state,
             }
         )
         # All parsing and projection remain inside the original absolute budget.

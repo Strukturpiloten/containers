@@ -352,6 +352,30 @@ lifecycle and cleanup assertions remain. DockerLens/BoxFerry's historically
 shared outer stores have a different contract; this Python private-store adapter
 is not copied from or imposed on those callers.
 
+The inner-memory event observer queries bounded past Engine history after the
+original wait/inspect and enforcement decision. It does not start a live event
+subscription or certify subscription readiness; `historyCompleteness` remains
+`unknown`, even when an OOM/die pair is observed. The public
+[Docker wait contract](https://docs.docker.com/reference/cli/docker/container/wait/)
+describes termination and exit status, not synchronization of every OOM field or
+kernel-victim attribution. This contract distinction does not establish event
+lag or an engine defect in a recorded failure.
+
+The observer's existing identity inspect also projects a separate optional
+`laterState` version 1 for the same exact container ID and StartedAt. It contains
+only OOMKilled, Running and error-present Booleans, a finite status, an exit code,
+and a validated UTC FinishedAt (including Docker's zero-time sentinel). Times are
+daemon-reported: nonzero FinishedAt must lie between the original start and the
+later bracketed daemon clock, rather than the earlier event-query cutoff. Missing
+or malformed optional state is explicitly unavailable while valid identity,
+clock and event evidence remains intact; changed identity or clock still refuses.
+No raw Error, PID or path is exported. This adds no command, actor, polling,
+deadline renewal or capacity allowance. A later true flag never replaces the
+original state, repairs the failed allocator check, admits it to the lifetime
+ledger, identifies a kernel victim or enforcing limit, or supplies qualification
+or cleanup authority. Outer OOM flags and
+ancestor counters likewise cannot substitute for the required original evidence.
+
 Runtime/action/test changes match the main publication workflow and may select
 every image. A merge can publish images and finalize releases after its gates.
 Non-publishing PR checks do not authorize that action: obtain publication
