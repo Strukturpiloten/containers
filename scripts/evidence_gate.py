@@ -42,9 +42,38 @@ def _runtime_skips(record: dict[str, Any], *, nested_disabled: bool, profile: st
             continue
         intentional_nested = nested_disabled and check.get("reason") == "disabled in metadata"
         documented_scope = profile == "notifyPush" and check.get("name") == "integration scope"
-        if not intentional_nested and not documented_scope:
+        fixture_compatibility = profile == "nautobot" and _known_nautobot_fixture_skip(record, check)
+        if not intentional_nested and not documented_scope and not fixture_compatibility:
             msg = f"Runtime check {check.get('name')} was skipped without a declared exemption."
             raise EvidenceError(msg)
+
+
+def _known_nautobot_fixture_skip(record: dict[str, Any], check: dict[str, Any]) -> bool:
+    """Admit only the documented rootful Ubuntu fixture AppArmor exception."""
+    if (
+        record.get("image") != "strukturbo-nautobot"
+        or check.get("name") != "fixture AppArmor enforcement"
+        or check.get("reason")
+        != "GitHub Ubuntu stacked crun profiles block PostgreSQL signals; disposable fixtures use unconfined AppArmor"
+    ):
+        return False
+    probes = {
+        item.get("name"): item.get("stdout", "")
+        for item in record["checks"]
+        if isinstance(item, dict) and item.get("status") == "passed"
+    }
+    try:
+        security = json.loads(probes.get("inspect fixture confinement", ""))
+    except TypeError, ValueError:
+        return False
+    stacking = probes.get("inspect fixture AppArmor stacking", "")
+    return (
+        isinstance(security, dict)
+        and security.get("apparmorEnabled") is True
+        and security.get("rootless") is False
+        and isinstance(stacking, str)
+        and stacking.strip().startswith("containers-default-0.66.0//&crun")
+    )
 
 
 def verify_architecture(  # noqa: PLR0913
