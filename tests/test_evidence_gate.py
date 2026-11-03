@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.evidence_gate import EvidenceError, main, verify_architecture
+from scripts.evidence_gate import EvidenceError, _runtime_skips, main, verify_architecture
 
 NAME = "example"
 IMAGE = "ghcr.io/strukturpiloten/example"
@@ -144,6 +144,67 @@ class ArchitectureEvidenceTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(EvidenceError, "without a declared exemption"):
             self._verify(runtime=skipped)
+
+
+class NautobotFixtureExemptionTests(unittest.TestCase):
+    @staticmethod
+    def _record() -> dict:
+        return {
+            "image": "strukturbo-nautobot",
+            "checks": [
+                {
+                    "name": "inspect fixture confinement",
+                    "status": "passed",
+                    "stdout": json.dumps({"apparmorEnabled": True, "rootless": False}),
+                },
+                {
+                    "name": "inspect fixture AppArmor stacking",
+                    "status": "passed",
+                    "stdout": "containers-default-0.66.0//&crun (mixed)\n",
+                },
+                {
+                    "name": "fixture AppArmor enforcement",
+                    "status": "skipped",
+                    "reason": (
+                        "GitHub Ubuntu stacked crun profiles block PostgreSQL signals; "
+                        "disposable fixtures use unconfined AppArmor"
+                    ),
+                },
+            ],
+        }
+
+    def test_observed_known_fixture_exception_is_accepted(self) -> None:
+        _runtime_skips(self._record(), nested_disabled=False, profile="nautobot")
+
+    def test_exception_requires_exact_scope_and_successful_probes(self) -> None:
+        for change in (
+            {"name": "another image", "image": "example"},
+            {"name": "another profile", "profile": "docker"},
+            {"name": "missing probe", "remove": 0},
+            {"name": "failed probe", "index": 0, "key": "status", "value": "failed"},
+            {"name": "invalid JSON", "index": 0, "key": "stdout", "value": "not JSON"},
+            {"name": "non-object JSON", "index": 0, "key": "stdout", "value": "[]"},
+            {"name": "rootless", "index": 0, "key": "stdout", "value": '{"apparmorEnabled":true,"rootless":true}'},
+            {
+                "name": "AppArmor off",
+                "index": 0,
+                "key": "stdout",
+                "value": '{"apparmorEnabled":false,"rootless":false}',
+            },
+            {"name": "other profile version", "index": 1, "key": "stdout", "value": "containers-default-0.67.0//&crun"},
+            {"name": "unstacked", "index": 1, "key": "stdout", "value": "containers-default-0.66.0 (enforce)"},
+            {"name": "other skip", "index": 2, "key": "name", "value": "installed registry"},
+            {"name": "other reason", "index": 2, "key": "reason", "value": "unsupported"},
+        ):
+            with self.subTest(case=change["name"]):
+                record = self._record()
+                record["image"] = change.get("image", record["image"])
+                if "remove" in change:
+                    record["checks"].pop(change["remove"])
+                if "index" in change:
+                    record["checks"][change["index"]][change["key"]] = change["value"]
+                with self.assertRaises(EvidenceError):
+                    _runtime_skips(record, nested_disabled=False, profile=change.get("profile", "nautobot"))
 
 
 if __name__ == "__main__":
