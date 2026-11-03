@@ -1,0 +1,51 @@
+# yaml-language-server: $schema=../../../container.schema.json
+schemaVersion: 1
+name: strukturbo-nautobot
+version: v0.1.0
+image: ghcr.io/strukturpiloten/strukturbo-nautobot
+title: Strukturbo Nautobot
+description: Nautobot with DNS Models, Design Builder and the qualified Strukturbo
+  access registry
+tests:
+  nautobot: {}
+lifecycle:
+  state: experimental
+  admission: isolated-test
+  reviewAfter: '2026-12-31'
+  supportBoundary: Installed-artifact CI and synthetic existing-data recovery; live
+    rollout and target access delivery require separate acceptance.
+  requiredRuntimeProfiles:
+  - nautobot
+build:
+  context: .
+  containerfile: images/strukturbo/strukturbo-nautobot/Containerfile
+  architectures:
+  - amd64
+  runtimeBaseArg: BASE_IMAGE
+  args:
+    BASE_IMAGE:
+      value: docker.io/networktocode/nautobot:3.2.8@sha256:7818c7a0d0a9ca3eeb5af4e379f432653dceabcd9ccf654dea4458b547a6f6f9
+      type: external-image
+    DATABASE_IMAGE:
+      value: ghcr.io/cloudnative-pg/postgresql:18.6-system-trixie@sha256:348997438269fddc0e2825e00594367ad61751adb08a7698a0a14f793b0dc2ce
+      type: external-image
+    REDIS_IMAGE:
+      value: docker.io/library/redis:8.10.3-alpine@sha256:896f241f438ab6a210cfb24f573b84bea721a4cbe67f1b4fd07eb638b3b02a7b
+      type: external-image
+dependencies:
+  internal: []
+  external:
+  - name: base
+    image: docker.io/networktocode/nautobot
+    arg: BASE_IMAGE
+  - name: database
+    image: ghcr.io/cloudnative-pg/postgresql
+    arg: DATABASE_IMAGE
+  - name: redis
+    image: docker.io/library/redis
+    arg: REDIS_IMAGE
+inputs:
+- images/strukturbo/**
+- scripts/nautobot_source.py
+- scripts/runtime_nautobot.py
+- shared/oci-labels.env

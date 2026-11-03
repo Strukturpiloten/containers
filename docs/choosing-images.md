@@ -4,6 +4,7 @@ Start with the task, then pick the exact image and architecture from the [catalo
 
 | Need | Image family | What it includes and omits |
 | --- | --- | --- |
+| Run the Strukturbo Nautobot app bundle | [Strukturbo Nautobot](strukturbo-nautobot.md) | Pinned registry app, DNS Models and Design Builder; installed-artifact testing, with deployment and recovery acceptance in the bootstrap repository. |
 | Test Docker daemon, CLI, API, and nested containers | [Docker Engine](../images/docker/README.md) | Separate rootful/rootless images from exact upstream lines or distribution packages; no host Docker socket, Compose, or Buildx. Isolated compatibility fixture. |
 | Test Podman CLI, package behavior, and nested containers | [Podman](../images/podman/README.md) | Exact upstream-source lines or distro packages; separate rootful/rootless images. Host kernel, booted systemd, and host security policy are outside the fixture. |
 | Supply PHP-FPM for a Nextcloud deployment | [Nextcloud PHP-FPM](../images/nextcloud/nextcloud-phpfpm/README.md) | PHP, extensions, and utilities; application code, web server, configuration, cron, and data come from your stack. |

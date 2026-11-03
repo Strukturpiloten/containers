@@ -1,0 +1,49 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE} AS build
+USER 0
+COPY images/strukturbo/strukturbo-nautobot/build-requirements.txt /tmp/build-requirements.txt
+RUN python -m pip install --no-cache-dir --no-deps --only-binary=:all: --require-hashes -r /tmp/build-requirements.txt
+COPY .build-sources/strukturbo-nautobot/app/ /source/app/
+WORKDIR /source/app
+ARG SOURCE_DATE_EPOCH
+RUN mkdir /wheels && python -c "import importlib.metadata, tomllib; from pathlib import Path; from uv_build import build_wheel; expected=tomllib.loads(Path('pyproject.toml').read_text())['build-system']['requires']; assert expected == ['uv_build=='+importlib.metadata.version('uv_build')]; build_wheel('/wheels')"
+
+FROM ${BASE_IMAGE} AS final
+ARG OCI_BASE_DIGEST=""
+ARG OCI_BASE_NAME=""
+ARG OCI_CREATED=""
+ARG OCI_DESCRIPTION=""
+ARG OCI_DOCUMENTATION=""
+ARG OCI_LICENSES=""
+ARG OCI_REVISION=""
+ARG OCI_SOURCE=""
+ARG OCI_TITLE=""
+ARG OCI_URL=""
+ARG OCI_VENDOR=""
+ARG OCI_VERSION=""
+LABEL org.opencontainers.image.base.digest="${OCI_BASE_DIGEST}" \
+      org.opencontainers.image.base.name="${OCI_BASE_NAME}" \
+      org.opencontainers.image.created="${OCI_CREATED}" \
+      org.opencontainers.image.description="${OCI_DESCRIPTION}" \
+      org.opencontainers.image.documentation="${OCI_DOCUMENTATION}" \
+      org.opencontainers.image.licenses="${OCI_LICENSES}" \
+      org.opencontainers.image.revision="${OCI_REVISION}" \
+      org.opencontainers.image.source="${OCI_SOURCE}" \
+      org.opencontainers.image.title="${OCI_TITLE}" \
+      org.opencontainers.image.url="${OCI_URL}" \
+      org.opencontainers.image.vendor="${OCI_VENDOR}" \
+      org.opencontainers.image.version="${OCI_VERSION}"
+USER 0
+COPY images/strukturbo/strukturbo-nautobot/requirements.txt /tmp/strukturbo-requirements.txt
+RUN python -m pip install --no-cache-dir --no-deps --only-binary=:all: --require-hashes -r /tmp/strukturbo-requirements.txt && rm /tmp/strukturbo-requirements.txt
+COPY --from=build /wheels/ /tmp/registry-wheels/
+COPY .build-sources/strukturbo-nautobot/provenance.json /usr/share/strukturpiloten/strukturbo-nautobot.json
+COPY images/strukturbo/strukturbo-nautobot/verify-image.py /tmp/verify-image.py
+RUN python -m pip install --no-cache-dir --no-deps --no-index /tmp/registry-wheels/*.whl \
+    && python -m pip check \
+    && python /tmp/verify-image.py \
+    && rm -rf /tmp/registry-wheels /tmp/verify-image.py
+USER 999:999
+# Bypass the upstream wrapper, which runs post_upgrade and can reconcile a superuser.
+ENTRYPOINT []
+CMD ["nautobot-server", "start", "--ini", "/opt/nautobot/uwsgi.ini"]

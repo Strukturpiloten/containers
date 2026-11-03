@@ -14,6 +14,10 @@ inputs:
     required: false
     default: "false"
 
+  source-token:
+    description: Read-only token for the private pinned Strukturbo source.
+    required: false
+    default: ""
 runs:
   using: composite
   steps:
@@ -51,6 +55,14 @@ runs:
         name: payload-${{ fromJSON(inputs.entry).payloadName }}-${{ fromJSON(inputs.entry).arch }}
         path: ${{ runner.temp }}/payload
 
+    - name: Acquire pinned Strukturbo source
+      if: fromJSON(inputs.entry).name == 'strukturbo-nautobot'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.source-token }}
+      run: |
+        set -euo pipefail
+        uv run --frozen --python "${PYTHON_VERSION}" python -m scripts.nautobot_source
     - name: Build image archive
       id: build
       shell: bash

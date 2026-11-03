@@ -15,12 +15,13 @@ from scripts.policy import semver_tags
 
 CANONICAL_URL = "https://containers.strukturpiloten.de"
 SOURCE_URL = "https://github.com/Strukturpiloten/containers"
-FAMILIES = ("docker", "podman", "nextcloud", "typo3")
+FAMILIES = ("docker", "podman", "nextcloud", "typo3", "strukturbo")
 FAMILY_LABELS = {
     "docker": "Docker Engine",
     "podman": "Podman",
     "nextcloud": "Nextcloud",
     "typo3": "TYPO3",
+    "strukturbo": "Strukturbo",
 }
 GUIDES = {
     "docker": "/families/docker/",
@@ -28,6 +29,7 @@ GUIDES = {
     "nextcloud-phpfpm": "/guides/nextcloud-phpfpm/",
     "nextcloud-notifypush": "/guides/nextcloud-notifypush/",
     "typo3-phpfpm": "/guides/typo3-phpfpm/",
+    "strukturbo-nautobot": "/guides/strukturbo-nautobot/",
 }
 
 

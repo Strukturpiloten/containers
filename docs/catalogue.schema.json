@@ -57,7 +57,7 @@
         "image": {"type": "string"},
         "description": {"type": "string"},
         "title": {"type": "string"},
-        "family": {"enum": ["docker", "podman", "nextcloud", "typo3"]},
+        "family": {"enum": ["docker", "podman", "nextcloud", "typo3", "strukturbo"]},
         "imageVersion": {"type": "string"},
         "softwareVersion": {"type": ["string", "null"]},
         "phpBaseTag": {"type": ["string", "null"]},

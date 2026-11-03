@@ -276,6 +276,19 @@
       "depNameTemplate": "python",
       "datasourceTemplate": "python-version",
       "versioningTemplate": "python"
+    },
+    {
+      "customType": "regex",
+      "description": "Track the private Strukturbo bootstrap source branch and immutable commit",
+      "managerFilePatterns": [
+        "/^images/strukturbo/strukturbo-nautobot/source\\.json$/"
+      ],
+      "matchStrings": [
+        "\"repository\":\\s*\"(?<depName>[^\"]+)\"[\\s\\S]*?\"sourceRef\":\\s*\"(?<currentValue>[^\"]+)\"[\\s\\S]*?\"sourceCommit\":\\s*\"(?<currentDigest>[a-f0-9]{40})\""
+      ],
+      "datasourceTemplate": "git-refs",
+      "packageNameTemplate": "https://github.com/{{{depName}}}.git",
+      "versioningTemplate": "git"
     }
   ],
   "github-actions": {
@@ -1005,9 +1018,21 @@
       "rangeStrategy": "bump",
       "allowedVersions": "/^({{major}}\\.{{minor}}\\.\\d+|\\d+\\.\\d+\\.([4-9]|[1-9]\\d+))$/",
       "recreateWhen": "always"
+    },
+    {
+      "description": "Group Strukturbo application inputs behind the existing CI gates",
+      "matchFileNames": [
+        "images/strukturbo/strukturbo-nautobot/**"
+      ],
+      "groupName": "strukturbo-nautobot inputs"
     }
   ],
   "gitIgnoredAuthors": [
     "/^41898282\\+github-actions\\[bot\\]@users\\.noreply\\.github\\.com$/"
-  ]
+  ],
+  "pip_requirements": {
+    "managerFilePatterns": [
+      "/(^|/)(?:build-)?requirements\\.txt$/"
+    ]
+  }
 }

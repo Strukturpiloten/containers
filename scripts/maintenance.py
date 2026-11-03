@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
 MIN_SUPPORT_BOUNDARY_LENGTH = 16
-RUNTIME_PROFILES = frozenset({"podman", "phpFpm", "notifyPush", "docker"})
+RUNTIME_PROFILES = frozenset({"podman", "phpFpm", "notifyPush", "docker", "nautobot"})
 
 
 class MaintenanceError(ValueError):
