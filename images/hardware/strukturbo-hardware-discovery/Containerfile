@@ -1,0 +1,14 @@
+ARG FEDORA_IMAGE
+FROM ${FEDORA_IMAGE}
+RUN dnf --assumeyes install --setopt=install_weak_deps=False ca-certificates python3 util-linux pciutils usbutils dmidecode lshw iproute ethtool smartmontools nvme-cli lsscsi sg3_utils rdma-core \
+    && update-ca-trust && dnf clean all && rm -rf /var/cache/dnf /var/log/dnf* \
+    && mkdir -p /usr/share/strukturbo \
+    && rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' | sort > /usr/share/strukturbo/packages.txt
+RUN mkdir -p /host/sys /host/proc && touch /host/proc/cpuinfo /host/proc/meminfo
+ARG OCI_REVISION=""
+ARG OCI_VERSION=""
+LABEL org.opencontainers.image.source="https://github.com/Strukturpiloten/containers" \
+      org.opencontainers.image.revision="${OCI_REVISION}" \
+      org.opencontainers.image.version="${OCI_VERSION}"
+RUN python3 --version
+CMD ["/bin/bash"]

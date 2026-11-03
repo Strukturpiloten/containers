@@ -1,0 +1,25 @@
+ARG FEDORA_IMAGE
+FROM ${FEDORA_IMAGE}
+RUN dnf --assumeyes install --setopt=install_weak_deps=False distribution-gpg-keys ca-certificates python3 python3-pefile systemd systemd-ukify systemd-boot-unsigned bubblewrap util-linux cpio binutils zstd xz gzip tar openssl curl git dosfstools kmod shadow-utils dnf5 \
+    && update-ca-trust && dnf clean all && rm -rf /var/cache/dnf /var/log/dnf* \
+    && mkdir -p /usr/share/strukturbo \
+    && rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' | sort > /usr/share/strukturbo/packages.txt
+ARG MKOSI_VERSION
+ARG MKOSI_COMMIT
+ARG MKOSI_SHA256
+ADD --checksum=sha256:${MKOSI_SHA256} https://codeload.github.com/systemd/mkosi/tar.gz/${MKOSI_COMMIT} /tmp/mkosi.tar.gz
+RUN echo "${MKOSI_SHA256}  /tmp/mkosi.tar.gz" | sha256sum --check --strict \
+    && mkdir -p /opt/mkosi \
+    && tar -xzf /tmp/mkosi.tar.gz --strip-components=1 -C /opt/mkosi \
+    && printf '#!/bin/sh\nexec python3 -m mkosi "$@"\n' > /usr/local/bin/mkosi \
+    && chmod 0755 /usr/local/bin/mkosi \
+    && rm /tmp/mkosi.tar.gz
+ENV PYTHONPATH=/opt/mkosi
+ARG OCI_REVISION=""
+ARG OCI_VERSION=""
+LABEL org.opencontainers.image.source="https://github.com/Strukturpiloten/containers" \
+      org.opencontainers.image.revision="${OCI_REVISION}" \
+      org.opencontainers.image.version="${OCI_VERSION}"
+RUN test "$(mkosi --version)" = "mkosi ${MKOSI_VERSION}" \
+    && mkosi --version > /usr/share/strukturbo/mkosi-version
+CMD ["/bin/bash"]

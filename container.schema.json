@@ -102,7 +102,7 @@
           "minItems": 1,
           "uniqueItems": true,
           "items": {
-            "enum": ["podman", "phpFpm", "notifyPush", "docker", "nautobot"]
+            "enum": ["podman", "phpFpm", "notifyPush", "docker", "nautobot", "hardware"]
           }
         }
       }
@@ -225,6 +225,9 @@
         },
         "nautobot": {
           "$ref": "#/$defs/nautobotTest"
+        },
+        "hardware": {
+          "$ref": "#/$defs/hardwareTest"
         }
       }
     },
@@ -347,6 +350,14 @@
             "$ref": "#/$defs/externalDependency"
           }
         }
+      }
+    },
+    "hardwareTest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role"],
+      "properties": {
+        "role": {"enum": ["builder", "discovery", "admin"]}
       }
     }
   }

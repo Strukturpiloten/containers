@@ -101,6 +101,22 @@ class GeneratedSnapshotTests(unittest.TestCase):
         self.assertEqual(repair.generated_changes(self.root, self.base, completed), {})
         self.assertEqual(repair._git(self.root, "status", "--porcelain"), "")
 
+    def test_mkosi_update_regenerates_archive_checksum_without_executing_pr_code(self) -> None:
+        path = repair.mkosi_source.METADATA_PATH
+        text = (ROOT / path).read_text()
+        added = self.commit({path: text})
+        self.base = self.commit(repair.generated_changes(self.root, added, added))
+        image = yaml.safe_load(text)
+        image["build"]["args"]["MKOSI_VERSION"]["value"] = "98.76.54"
+        image["build"]["args"]["MKOSI_COMMIT"]["value"] = "b" * 40
+        text = yaml.safe_dump(image, sort_keys=False)
+        head = self.commit({path: text})
+        with patch.object(repair.mkosi_source, "verified_checksum", return_value="c" * 64):
+            changes = repair.generated_changes(self.root, self.base, head)
+            self.assertEqual(repair.mkosi_source.pins(changes[path]), ("98.76.54", "b" * 40, "c" * 64))
+            self.assertEqual((self.root / path).read_text(), text)
+            self.assert_idempotent(head, changes)
+
     def test_podman_update_regenerates_catalogue_without_modifying_checkout(self) -> None:
         image = yaml.safe_load((self.root / IMAGE).read_text())
         image["version"] = "v98.76.55"

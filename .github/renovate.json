@@ -289,6 +289,20 @@
       "datasourceTemplate": "git-refs",
       "packageNameTemplate": "https://github.com/{{{depName}}}.git",
       "versioningTemplate": "git"
+    },
+    {
+      "customType": "regex",
+      "description": "Track pinned mkosi release and immutable source commit in the hardware builder",
+      "managerFilePatterns": [
+        "/^images\\/hardware\\/strukturbo-hardware-builder\\/container\\.yaml$/"
+      ],
+      "matchStrings": [
+        "MKOSI_VERSION:\\s*\\n\\s*value:\\s*[\\\"\\']?(?<currentValue>\\d+(?:\\.\\d+){0,2})[\\\"\\']?[\\s\\S]*?MKOSI_COMMIT:\\s*\\n\\s*value:\\s*(?<currentDigest>[a-f0-9]{40})"
+      ],
+      "depNameTemplate": "systemd/mkosi",
+      "datasourceTemplate": "github-tags",
+      "extractVersionTemplate": "^v(?<version>.+)$",
+      "versioningTemplate": "semver-coerced"
     }
   ],
   "github-actions": {
@@ -1025,6 +1039,19 @@
         "images/strukturbo/strukturbo-nautobot/**"
       ],
       "groupName": "strukturbo-nautobot inputs"
+    },
+    {
+      "description": "Keep hardware tools on the qualified Fedora 44 host family",
+      "matchFileNames": [
+        "images/hardware/**"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "registry.fedoraproject.org/fedora"
+      ],
+      "allowedVersions": "/^44$/"
     }
   ],
   "gitIgnoredAuthors": [

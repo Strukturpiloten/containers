@@ -18,6 +18,7 @@ from pathlib import Path
 import yaml
 
 from scripts import container_engine as engine
+from scripts import mkosi_source
 from scripts.maintenance import catalogue, markdown_catalogue
 from scripts.metadata_schema import validate_metadata_schema
 from scripts.release_notifications import GitHub
@@ -165,6 +166,19 @@ def _python_configuration(root: Path, before: dict, head: dict) -> tuple[str, di
     return text, config
 
 
+def _metadata_text(root: Path, before: dict, path: str, text: str, changes: dict[str, str]) -> str:
+    if path != mkosi_source.METADATA_PATH:
+        return text
+    previous = _read(root, before, path) if path in before else None
+    try:
+        updated = mkosi_source.synchronize(previous, text)
+    except mkosi_source.MkosiPinError as exc:
+        raise RepairError(str(exc)) from exc
+    if updated != text:
+        changes[path] = updated
+    return updated
+
+
 def generated_changes(root: Path, base: str, head_sha: str) -> dict[str, str]:
     """Render data from an immutable PR, never importing or checking out its code.
 
@@ -186,10 +200,12 @@ def generated_changes(root: Path, base: str, head_sha: str) -> dict[str, str]:
         output = path.replace("/workflow-templates/", "/workflows/").removesuffix(".j2")
         if output in before and output in head:
             _action_updates(_read(root, before, output), _read(root, head, output), updates)
+    metadata_changes: dict[str, str] = {}
     images = []
     for path in sorted(head):
         if METADATA.fullmatch(path) and "_example" not in Path(path).parts:
-            image = yaml.safe_load(_read(root, head, path))
+            text = _metadata_text(root, before, path, _read(root, head, path), metadata_changes)
+            image = yaml.safe_load(text)
             if not isinstance(image, dict):
                 raise RepairError(f"Expected image metadata mapping: {path}")
             validate_metadata_schema(image, schema_path=root / "container.schema.json", display_path=path)
@@ -197,7 +213,7 @@ def generated_changes(root: Path, base: str, head_sha: str) -> dict[str, str]:
     if not images:
         raise RepairError("No image metadata found")
     config_text, config = _python_configuration(root, before, head)
-    changes = {CONFIG: config_text}
+    changes = {CONFIG: config_text, **metadata_changes}
     stage_count = engine._stage_count(images)
     environment = engine._workflow_environment()
     for path, original_source in sources.items():
