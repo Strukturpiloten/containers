@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import os
 from contextlib import ExitStack
 from typing import TYPE_CHECKING
 
@@ -20,6 +21,34 @@ def run(ctx: RuntimeContext) -> None:
     """Use separate disposable databases; never inject app source into the image."""
     with ExitStack() as fixtures:
         _run(ctx, fixtures)
+
+
+def _fixture_compatibility(ctx: RuntimeContext) -> list[str]:
+    """Keep the Ubuntu runner workaround explicit and confined to CI fixtures."""
+    if not ctx._sudo or os.environ.get("GITHUB_ACTIONS") != "true":
+        return []
+    security = json.loads(ctx.podman("inspect fixture confinement", "info", "--format", "{{json .Host.Security}}"))
+    if not security.get("apparmorEnabled"):
+        return []
+    profile = ctx.podman(
+        "inspect fixture AppArmor stacking",
+        "run",
+        "--rm",
+        "--network=none",
+        "--read-only",
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges",
+        "--entrypoint=/bin/cat",
+        ctx.image_ref,
+        "/proc/1/attr/current",
+    )
+    if not profile.strip().startswith("containers-default-0.66.0//&crun"):
+        return []
+    ctx.skip(
+        "fixture AppArmor enforcement",
+        "GitHub Ubuntu stacked crun profiles block PostgreSQL signals; disposable fixtures use unconfined AppArmor",
+    )
+    return ["--fixture-apparmor-unconfined"]
 
 
 def _run(ctx: RuntimeContext, fixtures: ExitStack) -> None:
@@ -60,6 +89,7 @@ def _run(ctx: RuntimeContext, fixtures: ExitStack) -> None:
         "--redis-image",
         redis,
     ]
+    command.extend(_fixture_compatibility(ctx))
     command.extend("--podman-arg=" + argument for argument in ctx._podman[ctx._podman.index("podman") + 1 :])
     output = ctx.command("installed registry, HTTPS, TLS, login, workers and queue", command, timeout=1200)
     marker = "Qualified installed registry source SHA-256: "
