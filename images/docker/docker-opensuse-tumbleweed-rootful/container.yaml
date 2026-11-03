@@ -1,3 +1,4 @@
+---
 # yaml-language-server: $schema=../../../container.schema.json
 schemaVersion: 1
 name: docker-opensuse-tumbleweed-rootful
@@ -19,7 +20,7 @@ build:
   runtimeBaseArg: DISTRO_IMAGE
   args:
     DISTRO_IMAGE:
-      value: registry.opensuse.org/opensuse/tumbleweed:latest@sha256:ddf872140360395e0f4aa2b189d0b3af89d9899aef45b2a55dc4d370a307688f
+      value: registry.opensuse.org/opensuse/tumbleweed:latest@sha256:8d4f87f611d22a9ff8fe2bbd6b32d80692c1e307f9e7e59e116c3be343fa4187
       type: external-image
     DISTRO_ID:
       value: opensuse-tumbleweed

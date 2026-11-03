@@ -1,3 +1,4 @@
+---
 name: Build architecture image
 description: Build one image for one architecture and upload its OCI archive.
 
@@ -145,9 +146,9 @@ runs:
 
           CONSUMER = 'containers-ubuntu26-userns-active'
           SOURCE_MANIFEST_SHA256 = 'f17689f46276d0acac2111fad18f73198ff7c07136a97ee05b57087d687fef47'
-          ADMISSION_SCHEMA = 7
+          ADMISSION_SCHEMA = 8
           MAINTAINED_PROFILES = ('full', 'docker-rootless-qualification')
-          ADMISSION_REVISION = 'containers558-mediated-profile-v2'
+          ADMISSION_REVISION = 'containers577-observed-kernel-v1'
           DIRECT_PROFILE = 'docker-direct-rootless-diagnostic'
           DIRECT_PURPOSE = 'direct-startup-diagnostic'
           DIRECT_REF = 'refs/heads/TheRealBecks/issue442-direct-startup-20261031'

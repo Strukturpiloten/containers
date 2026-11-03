@@ -186,6 +186,27 @@ class ActiveBootstrapProof(unittest.TestCase):
 
 
 class NamespaceAndActor(unittest.TestCase):
+    def test_fresh_host_release_drift_refuses_before_namespace_or_runtime_checks(self) -> None:
+        port = active.RootPort.__new__(active.RootPort)
+        port.stage, port.bootstrap = ROOT, {}
+        port.binding, port.work_until, port.cleanup = binding(), 1000, False
+        port.record = {
+            "bootstrapSha256": active.digest(b"fixture"),
+            "readerPending": False,
+            "childPending": False,
+            "preflight": {"kernel": "7.0.0-1014-aws"},
+        }
+        port.preflight = Mock(return_value={"kernel": "7.1.0-42-azure"})
+        with (
+            patch.object(active, "check"),
+            patch.object(active, "verify_stage"),
+            patch.object(active, "root_bytes", return_value=b"fixture"),
+            patch.object(active, "namespace_snapshot") as namespace,
+            self.assertRaises(active.RefusedError),
+        ):
+            port.guard(port.binding)
+        namespace.assert_not_called()
+
     def test_real_non_securityfs_directory_never_passes_filesystem_gate(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             descriptor = os.open(temporary, os.O_RDONLY | os.O_DIRECTORY)
@@ -979,7 +1000,7 @@ class QualificationEvidence(unittest.TestCase):
                 ("profileObservation", "exactMatch", False),
                 ("binding", "architecture", "arm64"),
                 ("namespace", "stacked", "0" * 64),
-                ("preflight", "kernel", "different"),
+                ("preflight", "kernel", "invalid release /private"),
                 ("parserExecutionNamespace", "measuredPostExec", True),
             ):
                 with self.subTest(section=section, key=key):
@@ -2047,7 +2068,9 @@ class BoundedFailureJournal(unittest.TestCase):
                 side_effect=lambda path, *_args: admission if path.name.endswith("active-admission.json") else manifest,
             ),
             patch.object(
-                active.os, "uname", return_value=SimpleNamespace(machine=cohort["machine"], release=cohort["kernel"])
+                active.os,
+                "uname",
+                return_value=SimpleNamespace(machine=cohort["machine"], release="7.0.0-fixture-host"),
             ),
             patch.object(active, "check"),
             self.assertRaises(PermissionError),
@@ -2343,14 +2366,21 @@ class PreflightHostSiteContract(unittest.TestCase):
             "preflight-host-architecture",
             "preflight-host-cohort",
         ]
-        for fault in ("machine-shape", "release-shape", "architecture", "cohort-machine", "cohort-kernel", "none"):
+        for fault in ("machine-shape", "release-shape", "architecture", "cohort-machine", "none"):
             with self.subTest(fault=fault):
                 self.host_case(fault, codes)
         self.assertIn("preflight-host", active.FAILURE_PHASES)
 
-    def host_case(self, fault: str, codes: list[str]) -> None:
+        for release in ("", "private\nrelease", "private\x00release", "x" * 129):
+            with self.subTest(release=release):
+                self.host_case("release-shape", codes, release=release)
+        for release in ("7.0.0-1014-aws", "7.1.0-42-azure"):
+            with self.subTest(release=release):
+                self.host_case("none", codes, release=release)
+
+    def host_case(self, fault: str, codes: list[str], *, release: str | None = None) -> None:
         events, reads, comparisons = [], [], []
-        values = {"osID": "ubuntu", "osVersion": "26.04", "machine": "x86_64", "kernel": "reviewed-kernel"}
+        values = {"osID": "ubuntu", "osVersion": "26.04", "machine": "x86_64"}
 
         class Cohort(dict):
             def __getitem__(self, key: str) -> str:
@@ -2359,8 +2389,8 @@ class PreflightHostSiteContract(unittest.TestCase):
 
         cohort = Cohort(values)
         machine = {"machine-shape": "private machine /", "architecture": "aarch64"}.get(fault, "x86_64")
-        release = {"release-shape": "private release /", "cohort-kernel": "unreviewed-kernel"}.get(
-            fault, "reviewed-kernel"
+        release = (
+            release if release is not None else {"release-shape": "private release /"}.get(fault, "observed-kernel")
         )
         cohort["machine"] = "aarch64" if fault == "cohort-machine" else "x86_64"
         progress = {}
@@ -2414,9 +2444,7 @@ class PreflightHostSiteContract(unittest.TestCase):
         self.assertEqual(modules.qualification.observe_controls.call_count, 1 if fault == "none" else 0)
         self.assertEqual(
             reads,
-            ["osID", "osVersion"]
-            + (["machine"] if fault in ("cohort-machine", "cohort-kernel", "none") else [])
-            + (["kernel"] if fault in ("cohort-kernel", "none") else []),
+            ["osID", "osVersion"] + (["machine"] if fault in ("cohort-machine", "none") else []),
         )
         if fault != "none":
             expected = codes[host_count - 1]

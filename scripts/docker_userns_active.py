@@ -1599,7 +1599,7 @@ def root_preflight(
             comparison(
                 progress,
                 "preflight-host-cohort",
-                facts["machine"] == cohort["machine"] and facts["kernel"] == cohort["kernel"],
+                facts["machine"] == cohort["machine"],
             )
             comparison(progress, "preflight-host", matched=True)
 

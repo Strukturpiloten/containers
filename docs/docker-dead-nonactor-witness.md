@@ -3,13 +3,14 @@
 Containers #577 owns this semantic correction. It does not identify the cause of
 the six missing numeric observations from #573, authorize a native run, or
 establish DockerLens/application acceptance. Native mechanism controls and fresh
-exact-candidate CI remain required before qualification. No image, workflow,
-dependency pin, helper-closure member or policy cap changes with this decision.
+exact-candidate CI remain required before qualification. No image, runner selection,
+matrix, dependency pin, helper-closure member or policy cap changes with this decision.
 
 ## Authority and trust boundary
 
-The admitted kernel, root OS/runtime, root coordinator and existing independent
-root owner are trusted. During a sample, no untrusted actor or concurrent
+The kernel satisfying the actual capability/ABI/native controls, root OS/runtime,
+root coordinator and existing independent root owner are trusted. During a sample,
+no untrusted actor or concurrent
 privileged operation may mutate or propagate mounts into the critical host proc
 subtree. This is an operating premise, not a measurement made by the lease lock.
 Privileged compatibility guests are not containment for malicious host-root
@@ -165,6 +166,11 @@ They do not discharge supported-kernel native controls. Retained versus reaped
 pidfds, numeric reuse, a Z leader with live threads, cross-view correlation and
 final fresh reads must still be exercised independently on admitted kernels and
 architectures, followed by complete gates and fresh exact-candidate native CI.
+Hosted kernel releases remain observed per-job evidence and are not pinned to
+GitHub's internal kernel versions. Admission schema 8 retains all OS, architecture,
+tool-integrity, ABI, isolation and native checks; same-job release drift refuses.
+Historical failures remain nonqualifying rather than being reinterpreted under
+this current policy.
 
 
 ## Mandatory independent native mechanism controls
@@ -233,8 +239,11 @@ Fresh exact-candidate native runs and complete gates remain required.
 
 The first PR #580 CI run stopped before native execution because the pinned
 openSUSE Tumbleweed manifest was unavailable. Fresh anonymous registry observations
-confirmed a current manifest for both required architectures. The four existing
-Docker/Podman Tumbleweed metadata pins were refreshed together under their unchanged
-Renovate extraction and digest group. This input recovery changes no witness
+confirmed a current manifest for both required architectures. The rolling registry
+later removed that replacement too; the pre-gate input check preserved that
+failure, and fresh anonymous index, digest-readback and child/config hash, size and
+platform checks verified the new input. The four existing Docker/Podman Tumbleweed
+metadata pins were refreshed together under their unchanged Renovate extraction
+and digest group. This input recovery changes no witness
 predicate or native admission rule and is not compatibility evidence. Fresh
 required native CI remains mandatory; historical failed inputs remain evidence.

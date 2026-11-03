@@ -154,7 +154,9 @@ def _scoped_preflight(scoped: dict[str, Any]) -> bool:
     controls, namespace = facts["controls"], scoped["namespace"]
     keys = ("parserSha256", "abiSha256", "namespaceMaskSha256", "policyVersion9Sha256", "interpreterSha256")
     return (
-        all(facts[key] == cohort[key] for key in ("osID", "osVersion", "machine", "kernel", "parserVersion"))
+        all(facts[key] == cohort[key] for key in ("osID", "osVersion", "machine", "parserVersion"))
+        and type(facts["kernel"]) is str
+        and re.fullmatch(r"[A-Za-z0-9_.+-]{1,128}", facts["kernel"]) is not None
         and all(facts["files"][key]["sha256"] == cohort[key] for key in keys)
         and facts["imageVersion"] == scoped["imageVersion"]
         and controls["enabled"] is True
@@ -420,6 +422,7 @@ def require_ordinary_runtime_authority(record: dict[str, Any], profile: str, con
         or record.get("workflowContext") != first["scopedProfile"]["workflowContext"]
         or first["scopedProfile"]["workflowContext"] != last["scopedProfile"]["workflowContext"]
         or first["scopedProfile"]["bootstrapSha256"] != last["scopedProfile"]["bootstrapSha256"]
+        or first["scopedProfile"]["preflight"]["kernel"] != last["scopedProfile"]["preflight"]["kernel"]
         or first["scopedProfile"]["binding"]["owner"] == last["scopedProfile"]["binding"]["owner"]
         or first["scopedProfile"]["lease"] == last["scopedProfile"]["lease"]
         or record.get("stageDisposal") != last.get("stageDisposal")

@@ -724,7 +724,7 @@ class HostedTests(unittest.TestCase):
             hosted.receive(connection, self.record.lease.deadline_ns)
         self.assertEqual(connection.getsockopt.call_count, 0)
 
-    def test_manual_admission_invalidates_changed_source_contract_and_helper_content(self) -> None:
+    def manual_host_inputs(self) -> tuple[Path, dict, dict]:
         root = Path(__file__).resolve().parents[1]
         receipt = {
             "interpreter": {"path": "/root-owned-system-python", "sha256": hosted.digest(b"OS ELF")},
@@ -744,12 +744,17 @@ class HostedTests(unittest.TestCase):
                 root / ".github/docker-userns-helper-closure.json",
             ]
         }
+        return root, receipt, files
+
+    def test_manual_admission_invalidates_changed_source_contract_and_helper_content(self) -> None:
+        root, receipt, files = self.manual_host_inputs()
 
         def read(path: Path, _limit: int = 32768) -> tuple[bytes, object]:
             return files[str(path)], None
 
         with (
             patch.object(hosted, "read_root", side_effect=read),
+            patch.object(hosted.os, "uname", return_value=SimpleNamespace(release="7.0.0-fixture-host")),
             patch.object(hosted.os, "open", return_value=12345),
             patch.object(child, "bytes_at", return_value=b"OS ELF"),
         ):
@@ -765,6 +770,52 @@ class HostedTests(unittest.TestCase):
                 with self.subTest(name=name), self.assertRaises(custody.CustodyError):
                     hosted.HostPort(root, receipt, self.fixture.clock, MagicMock())
                 files[str(root / name)] = original
+
+    def test_unused_current_policy_binds_actual_kernel_once_and_refuses_old_or_malformed_policy(self) -> None:
+        root, receipt, files = self.manual_host_inputs()
+        policy_path = root / ".github/docker-userns-unused-admission.json"
+        original = files[str(policy_path)]
+        for release in ("7.0.0-1014-aws", "7.1.0-42-azure", "", "bad\nrelease", "bad\x00release", "x" * 97):
+            with (
+                self.subTest(release=release),
+                patch.object(hosted, "read_root", side_effect=lambda path, *_args: (files[str(path)], None)),
+                patch.object(hosted.os, "uname", return_value=SimpleNamespace(release=release)) as uname,
+                patch.object(hosted.os, "open", return_value=12345),
+                patch.object(child, "bytes_at", return_value=b"OS ELF"),
+            ):
+                if release in ("7.0.0-1014-aws", "7.1.0-42-azure"):
+                    port = hosted.HostPort(root, receipt, self.fixture.clock, MagicMock())
+                    self.assertEqual(port.admission.cohort.kernel, release)
+                    uname.assert_called_once_with()
+                    port.observer = None
+                    with (
+                        patch.object(
+                            hosted,
+                            "safe_path",
+                            return_value=SimpleNamespace(read_text=lambda: 'ID=ubuntu\nVERSION_ID="26.04"\n'),
+                        ),
+                        patch.object(
+                            hosted.os,
+                            "uname",
+                            return_value=SimpleNamespace(machine="x86_64", release="changed-release"),
+                        ),
+                        self.assertRaises(custody.CustodyError),
+                    ):
+                        port.observe(MagicMock())
+                else:
+                    with self.assertRaises(custody.CustodyError):
+                        hosted.HostPort(root, receipt, self.fixture.clock, MagicMock())
+        for changed in (
+            {"schemaVersion": 1},
+            {"cohort": {**json.loads(original)["cohort"], "kernel": "old-policy-pin"}},
+        ):
+            files[str(policy_path)] = json.dumps({**json.loads(original), **changed}).encode()
+            with (
+                self.subTest(changed=changed),
+                patch.object(hosted, "read_root", side_effect=lambda path, *_args: (files[str(path)], None)),
+                self.assertRaises(custody.CustodyError),
+            ):
+                hosted.HostPort(root, receipt, self.fixture.clock, MagicMock())
 
     def test_manager_readback_rejects_wrong_cgroup_bounds_argv_and_root_ownership(self) -> None:
         lease = self.record.lease

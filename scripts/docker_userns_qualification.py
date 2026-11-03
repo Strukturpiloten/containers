@@ -29,8 +29,8 @@ LEGACY_CLONE = Path("/proc/sys/kernel/unprivileged_userns_clone")
 MAX_NAMESPACES = 2**63 - 1
 CONSUMER = "containers-ubuntu26-userns-active"
 PREREQUISITE_SCHEMA = 4
-ADMISSION_SCHEMA = 7
-ADMISSION_REVISION = "containers558-mediated-profile-v2"
+ADMISSION_SCHEMA = 8
+ADMISSION_REVISION = "containers577-observed-kernel-v1"
 MAINTAINED_PROFILES = ("full", "docker-rootless-qualification")
 MAINTAINED_IMAGES = (
     "docker-29-conformance-rootless",
@@ -856,7 +856,6 @@ def _validate_cohorts(cohorts: object) -> None:
         "osID",
         "osVersion",
         "machine",
-        "kernel",
         "parserVersion",
         "parserSha256",
         "abiSha256",
@@ -873,7 +872,6 @@ def _validate_cohorts(cohorts: object) -> None:
             or cohort["osID"] != "ubuntu"
             or cohort["osVersion"] != "26.04"
             or cohort["machine"] != {"amd64": "x86_64", "arm64": "aarch64"}[architecture]
-            or cohort["kernel"] != "7.0.0-1017-azure"
             or cohort["parserVersion"] != "5.0.2"
             or cohort["interpreter"] != "/usr/bin/python3.14"
             or cohort["pythonVersion"] != [3, 14, 4, "final", 0]

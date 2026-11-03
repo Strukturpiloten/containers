@@ -31,6 +31,7 @@ from scripts import docker_userns_custody as custody
 from scripts import docker_userns_custody_child as child
 
 NS = 1_000_000_000
+ADMISSION_SCHEMA = 2
 CYCLE_NS = 120 * NS
 LIMIT = 32768
 _PUBLICATION_INT_BITS = 64
@@ -928,7 +929,12 @@ class HostPort:
             json.loads(raw, object_pairs_hook=unique),
             {"schemaVersion", "consumer", "qualification", "sourceManifestSha256", "contracts", "cohort", "review"},
         )
-        need(value["schemaVersion"] == 1 and value["consumer"] == custody.CONSUMER and value["qualification"] == "none")
+        need(
+            type(value["schemaVersion"]) is int
+            and value["schemaVersion"] == ADMISSION_SCHEMA
+            and value["consumer"] == custody.CONSUMER
+            and value["qualification"] == "none"
+        )
         need(value["sourceManifestSha256"] == digest(manifest))
         contracts = value["contracts"]
         need(
@@ -944,7 +950,11 @@ class HostPort:
         )
         for path, expected in contracts.items():
             need(digest(read_root(stage / path, child.MAX_SOURCE * 4)[0]) == expected)
-        cohort = dict(exact(value["cohort"], set(custody.Cohort.__dataclass_fields__)))
+        cohort = dict(exact(value["cohort"], set(custody.Cohort.__dataclass_fields__) - {"kernel"}))
+        # Kernel release is bound once to this invocation, never selected by policy.
+        release = os.uname().release
+        need(type(release) is str and re.fullmatch(r"[A-Za-z0-9_.+-]{1,96}", release))
+        cohort["kernel"] = release
         cohort["namespace_mask"] = tuple(cohort["namespace_mask"])
         authority = custody.BootstrapAuthority(
             receipt["interpreter"]["sha256"], tuple(receipt["helpers"]["scripts/" + name] for name in custody.HELPERS)

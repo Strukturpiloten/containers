@@ -117,10 +117,13 @@ the actual queue SHA/ref. Fork or missing PR metadata, unknown callers, source
 mismatches and local/self-hosted contexts refuse. The existing runtime trust
 model is unchanged and no actor-permission service or approval step is added.
 
-Both AMD64 and ARM64 require their complete reviewed hosted cohort, both native
-phases, original accounting, cleanup and authenticated stage disposal before
-ordinary per-image native authority exists. Automatic contexts ignore injected
-CI profile inputs and record ordinary `full` with an empty raw selector;
+Both AMD64 and ARM64 require their complete reviewed OS/tool/ABI/feature contract,
+both native phases, original accounting, cleanup and authenticated stage disposal
+before ordinary per-image native authority exists. Hosted kernel releases are observed
+and bound within each job rather than pinned to internal GitHub build versions;
+different jobs may report different releases. A changed release never bypasses
+capability, isolation, native mechanism, workload or cleanup checks. Automatic
+contexts ignore injected CI profile inputs and record ordinary `full` with an empty raw selector;
 publication scope is separate from CI profile selection and does not claim
 repository-wide full-check coverage. Diagnostic ARM still observes/refuses.
 Admission and offline checks do not prove a successful native run, full matrix,

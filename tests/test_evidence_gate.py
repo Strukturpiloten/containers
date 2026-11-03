@@ -152,7 +152,7 @@ def _mutate_maintained_phase(fault: str, changed: dict) -> None:
     elif fault == "cleanup":
         last["cleanupVerified"] = False
     elif fault == "cohort":
-        last["scopedProfile"]["preflight"]["kernel"] = "unknown"
+        last["scopedProfile"]["preflight"]["kernel"] = "invalid release /private"
     elif fault == "archive":
         last["imageIdentity"]["archiveSha256"] = "f" * 64
     elif fault == "owner":
@@ -236,6 +236,26 @@ def maintained_mutations(architecture: str = "amd64") -> list[tuple[str, dict]]:
 
 
 class MaintainedPrerequisiteEvidenceTests(unittest.TestCase):
+    def test_kernel_release_is_per_job_evidence_with_same_job_phase_consistency(self) -> None:
+        configuration = {"launcher": "systemd", "mode": "rootless"}
+        for architecture in ("amd64", "arm64"):
+            for release in ("7.0.0-1014-aws", "7.1.0-42-azure"):
+                record = maintained_runtime(architecture)
+                for phase in record["phases"]:
+                    phase["scopedProfile"]["preflight"]["kernel"] = release
+                with self.subTest(architecture=architecture, release=release), patch.dict("os.environ", {}, clear=True):
+                    require_ordinary_runtime_authority(record, "docker", configuration)
+                    changed = copy.deepcopy(record)
+                    changed["phases"][1]["scopedProfile"]["preflight"]["kernel"] = "different-valid-release"
+                    with self.assertRaises(EvidenceError):
+                        require_ordinary_runtime_authority(changed, "docker", configuration)
+                    for invalid in ("", "bad\nrelease", "bad\x00release", "x" * 129):
+                        changed = copy.deepcopy(record)
+                        for phase in changed["phases"]:
+                            phase["scopedProfile"]["preflight"]["kernel"] = invalid
+                        with self.subTest(invalid=invalid), self.assertRaises(EvidenceError):
+                            require_ordinary_runtime_authority(changed, "docker", configuration)
+
     def test_archived_maintained_authority_is_intrinsic_and_environment_cannot_supply_it(self) -> None:
         configuration = {"launcher": "systemd", "mode": "rootless"}
         for environment in ({}, {"GITHUB_RUN_ID": "999", "GITHUB_JOB": "build", "GITHUB_SHA": "f" * 40}):
