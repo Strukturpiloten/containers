@@ -69,7 +69,7 @@ configuration or release artifacts. Reviewed bootstrap rendering supplies
 `/configuration/kea4.json`, `kea6.json` and `nginx.conf`; `/artifacts` is read-only,
 `/leases` persists Kea leases, and `/run` is temporary. Run DHCP with only
 `NET_RAW` and `NET_BIND_SERVICE`; run nginx as an unprivileged UID with all
-capabilities dropped. HTTP uses explicit service-IP listeners on18080 and an
+capabilities dropped. HTTP uses explicit service-IP listeners on 18080 and an
 exact signed route allowlist.
 
 `strukturbo-provisioning-lab-authority` is a separate Unbound/radvd fixture for
