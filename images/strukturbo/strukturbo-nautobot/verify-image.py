@@ -12,7 +12,7 @@ distribution = importlib.metadata.distribution("nautobot-strukturbo")
 actual = {
     str(p): hashlib.sha256(Path(distribution.locate_file(p)).read_bytes()).hexdigest()
     for p in distribution.files
-    if str(p).startswith("nautobot_strukturbo/") and str(p).endswith((".py", ".html"))
+    if str(p).startswith("nautobot_strukturbo/") and str(p).endswith((".py", ".html", ".json"))
 }
 if actual != record["package_files"]:
     msg = "Installed registry package differs from the qualified source"

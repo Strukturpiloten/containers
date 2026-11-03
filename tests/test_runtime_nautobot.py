@@ -15,11 +15,67 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class RuntimeNautobotTests(unittest.TestCase):
+    def test_hardware_image_requires_exact_staged_source_and_json_provenance(self) -> None:
+        for tampered in (False, True):
+            with self.subTest(tampered=tampered), tempfile.TemporaryDirectory() as directory:
+                staged = Path(directory)
+                record = {
+                    "appVersion": "0.2.0",
+                    "repository": "Strukturpiloten/strukturbo-bootstrap",
+                    "sourceRef": "main",
+                    "sourceCommit": "a" * 40,
+                    "qualified_source_sha256": "expected",
+                    "versions": {"nautobot-strukturbo": "0.2.0"},
+                    "package_files": {"nautobot_strukturbo/hardware.schema.json": "b" * 64},
+                }
+                (staged / "provenance.json").write_text(json.dumps(record))
+                installed = {**record, "package_files": dict(record["package_files"])}
+                if tampered:
+                    installed["package_files"]["nautobot_strukturbo/hardware.schema.json"] = "c" * 64
+                context = Mock(spec=RuntimeContext)
+                context._sudo = []
+                context._podman = ["podman", "--root", "/owned/store"]
+                context.image_ref = "localhost/test:runtime"
+
+                def podman(
+                    _label: str, *args: str, _record: dict[str, object] = installed, **_kwargs: object
+                ) -> str:
+                    if args[:2] == ("image", "inspect"):
+                        return json.dumps(
+                            [
+                                {
+                                    "Id": "d" * 64,
+                                    "Config": {
+                                        "Entrypoint": [],
+                                        "Cmd": ["nautobot-server", "start", "--ini", "/opt/nautobot/uwsgi.ini"],
+                                    },
+                                }
+                            ]
+                        )
+                    if args[0] == "run":
+                        return json.dumps(_record)
+                    return ""
+
+                context.podman.side_effect = podman
+                context.assert_equal.side_effect = lambda _label, actual, expected: self.assertEqual(actual, expected)
+                context.command.side_effect = [
+                    "",
+                    "Installed app qualified against its image-recorded package files and dependency contract.",
+                ]
+                with patch.object(runtime_nautobot, "verify", return_value=staged):
+                    if tampered:
+                        with self.assertRaises(AssertionError):
+                            runtime_nautobot.run(context)
+                    else:
+                        runtime_nautobot.run(context)
+
     def test_both_podman_inspect_id_formats_use_the_qualified_cli_contract(self) -> None:
         for identifier in ("a" * 64, "sha256:" + "a" * 64):
             with self.subTest(identifier=identifier), tempfile.TemporaryDirectory() as directory:
                 staged = Path(directory)
-                (staged / "provenance.json").write_text(json.dumps({"qualified_source_sha256": "expected"}))
+                (staged / "provenance.json").write_text(
+                    json.dumps({"appVersion": "0.1.0", "qualified_source_sha256": "expected"})
+                )
                 context = Mock(spec=RuntimeContext)
                 context._sudo = []
                 context._podman = ["podman", "--root", "/owned/store"]
