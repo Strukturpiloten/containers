@@ -1,0 +1,39 @@
+# yaml-language-server: $schema=../../../container.schema.json
+schemaVersion: 1
+name: strukturbo-hardware-discovery
+version: v0.1.0
+image: ghcr.io/strukturpiloten/strukturbo-hardware-discovery
+title: Strukturbo hardware discovery
+description: Fedora 44 prebuilt discovery tools for Strukturbo Hardware OS; no target
+  package installation
+build:
+  context: .
+  containerfile: images/hardware/strukturbo-hardware-discovery/Containerfile
+  architectures:
+  - amd64
+  scheduled: false
+  runtimeBaseArg: FEDORA_IMAGE
+  args:
+    FEDORA_IMAGE:
+      value: registry.fedoraproject.org/fedora:44@sha256:b414c09be79dd1f32529b55b096b6bb30435d82ee16fbdbbabf8985eb5f86db0
+      type: external-image
+dependencies:
+  internal: []
+  external:
+  - name: fedora-44
+    image: registry.fedoraproject.org/fedora
+    arg: FEDORA_IMAGE
+inputs:
+- images/hardware/strukturbo-hardware-discovery/**
+- shared/oci-labels.env
+tests:
+  hardware:
+    role: discovery
+lifecycle:
+  state: experimental
+  admission: isolated-test
+  reviewAfter: '2026-12-31'
+  supportBoundary: Local x86-64 qualification only; no firmware executor, private
+    collector source or production-hardware acceptance is included.
+  requiredRuntimeProfiles:
+  - hardware

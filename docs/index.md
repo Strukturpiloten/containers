@@ -11,6 +11,7 @@ Start with the [image catalogue](image-catalogue.md) to see every declared image
 | Verify signatures, provenance, SBOMs, and release evidence | [Verify published artifacts](verify-artifacts.md) |
 | Check evidence, support scope, and report a concern | [Security and support](security-and-support.md) |
 | Read JSON or Markdown exports | [Catalogue data and discovery](data-and-discovery.md) |
+| Select the Strukturbo hardware builder, discovery or administrator tools | [Hardware tools](../images/hardware/README.md) |
 | Change a recipe or metadata | [Contributing](../CONTRIBUTING.md) |
 | Build, release, or recover a publication | [Operations](operations.md) |
 | Track upstream releases and maintain Docker/Podman version lines | [Upstream release automation](upstream-releases.md) |

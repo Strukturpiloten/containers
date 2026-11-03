@@ -590,6 +590,31 @@ def _docker(
     run_docker(ctx, profile, archive=archive, allow_privileged=allow_privileged, skip_nested=skip_nested)
 
 
+def _hardware(ctx: RuntimeContext, profile: dict[str, Any]) -> None:
+    tools = {
+        "builder": ("mkosi", "ukify", "dnf5", "bwrap", "cpio", "zstd", "openssl"),
+        "discovery": ("python3", "lscpu", "lspci", "dmidecode", "ethtool", "smartctl", "nvme", "rdma"),
+        "admin": ("bash", "jq", "dig", "ip", "ss", "curl", "openssl", "tcpdump", "ssh"),
+    }
+    role = profile["role"]
+    options = ("--read-only", "--network=none", "--cap-drop=all", "--security-opt=no-new-privileges")
+    for tool in tools[role]:
+        ctx.run(f"hardware {role} tool {tool}", "sh", "-c", f"command -v {tool}", options=options)
+    ctx.run("recorded distribution packages", "test", "-s", "/usr/share/strukturbo/packages.txt", options=options)
+    if role == "builder":
+        expected = ctx.run("pinned mkosi package version", "mkosi", "--version", options=options)
+        recorded = ctx.run("recorded mkosi version", "cat", "/usr/share/strukturbo/mkosi-version", options=options)
+        ctx.assert_equal("mkosi version", expected, recorded)
+    elif role == "discovery":
+        ctx.run("CPU discovery JSON", "lscpu", "--json", options=options)
+    else:
+        ctx.assert_equal(
+            "admin default command",
+            ctx.podman("inspect admin command", "image", "inspect", "--format", "{{json .Config.Cmd}}", ctx.image_ref),
+            '["/bin/bash"]',
+        )
+
+
 def _signal_interrupt(_signum: int, _frame: Any) -> None:
     raise KeyboardInterrupt
 
@@ -654,6 +679,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             _php_fpm(ctx, profile)
         elif profile_name == "notifyPush":
             _notify_push(ctx)
+        elif profile_name == "hardware":
+            _hardware(ctx, profile)
         elif profile_name == "docker":
             _docker(ctx, profile, archive=archive, allow_privileged=args.allow_privileged, skip_nested=args.skip_nested)
         elif profile_name == "nautobot":

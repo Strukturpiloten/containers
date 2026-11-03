@@ -3490,6 +3490,102 @@
         "reason": "No successful build result supplied.",
         "status": "unknown"
       },
+      "image": "ghcr.io/strukturpiloten/strukturbo-hardware-admin",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "hardware"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "experimental",
+        "supportBoundary": "Local x86-64 qualification only; no firmware executor, private collector source or production-hardware acceptance is included."
+      },
+      "name": "strukturbo-hardware-admin",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "hardware": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v0.1.0"
+    },
+    {
+      "architectures": [
+        "amd64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/strukturbo-hardware-builder",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "hardware"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "experimental",
+        "supportBoundary": "Local x86-64 qualification only; no firmware executor, private collector source or production-hardware acceptance is included."
+      },
+      "name": "strukturbo-hardware-builder",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "hardware": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v0.1.0"
+    },
+    {
+      "architectures": [
+        "amd64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/strukturbo-hardware-discovery",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "hardware"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "experimental",
+        "supportBoundary": "Local x86-64 qualification only; no firmware executor, private collector source or production-hardware acceptance is included."
+      },
+      "name": "strukturbo-hardware-discovery",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "hardware": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v0.1.0"
+    },
+    {
+      "architectures": [
+        "amd64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
       "image": "ghcr.io/strukturpiloten/strukturbo-nautobot",
       "lifecycle": {
         "admission": "isolated-test",
