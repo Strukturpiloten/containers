@@ -130,8 +130,13 @@ WITNESS_FAILURE_CODES = frozenset(
         "sample",
         "scope-cap",
         "scope-census",
+        "scope-directory-stability",
         "scope-identity",
+        "scope-outer-membership",
+        "scope-pid-grammar",
         "scope-readback",
+        "scope-readback-pid-grammar",
+        "scope-walk",
         "subject-incarnation",
         "subject-readback",
         "task-alive",
@@ -2759,12 +2764,12 @@ class RootPort:
         )
         self.witness_require("scope-identity", (scope_after.st_dev, scope_after.st_ino) == identity)
         self.witness_require(
-            "scope-census", self.witness_counts.setdefault("scopeDirectories", identities) == identities
+            "scope-directory-stability", self.witness_counts.setdefault("scopeDirectories", identities) == identities
         )
         self._witness_scope = (stack, tuple(held_directories.items()))
         return result
 
-    @witness_operation("scope-census")
+    @witness_operation("scope-walk")
     def witness_scope_walk(
         self, stack: ExitStack, scope: int, *, held_directories: dict | None = None
     ) -> tuple[set[int], dict]:
@@ -2794,7 +2799,7 @@ class RootPort:
             self.witness_require(
                 "proc-cap", len(raw) <= WITNESS_READ_LIMIT and self.witness_counts["procBytes"] <= WITNESS_PROC_LIMIT
             )
-            self.witness_require("scope-census", re.fullmatch(rb"(?:[1-9][0-9]{0,9}\n)*", raw))
+            self.witness_require("scope-pid-grammar", re.fullmatch(rb"(?:[1-9][0-9]{0,9}\n)*", raw))
             members = {int(value) for value in raw.splitlines()}
             result.update(members)
             self.witness_counts["pids"].update(result)
@@ -2987,7 +2992,7 @@ class RootPort:
                 "proc-cap", len(raw) <= WITNESS_READ_LIMIT and self.witness_counts["procBytes"] <= WITNESS_PROC_LIMIT
             )
             self.witness_budget()
-            self.witness_require("scope-census", re.fullmatch(rb"(?:[1-9][0-9]{0,9}\n)*", raw))
+            self.witness_require("scope-readback-pid-grammar", re.fullmatch(rb"(?:[1-9][0-9]{0,9}\n)*", raw))
             members = {int(value) for value in raw.splitlines()}
             self.witness_counts["pids"].update(members)
             self.witness_require("pid-cap", len(self.witness_counts["pids"]) <= WITNESS_PID_LIMIT)
@@ -3115,7 +3120,7 @@ class RootPort:
                 and outer["before"]["cgroup"] == subject["cgroup"],
             )
             candidates = self.witness_scope_pids(stack)
-            self.witness_require("scope-census", outer["pid"] in candidates)
+            self.witness_require("scope-outer-membership", outer["pid"] in candidates)
             parent = self.witness_parent(stack, outer, candidates, guest_pid)
             if anchor is not None:
                 self.witness_require(

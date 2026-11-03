@@ -247,3 +247,14 @@ metadata pins were refreshed together under their unchanged Renovate extraction
 and digest group. This input recovery changes no witness
 predicate or native admission rule and is not compatibility evidence. Fresh
 required native CI remains mandatory; historical failed inputs remain evidence.
+
+## Scope-census refusal attribution
+
+Fresh exact-source CI passed the independent native controls before two systemd
+scope-census refusals. That coarse code cannot establish whether PID grammar,
+directory-map stability, required outer membership or the walk operation refused;
+legal multiplicity is already covered by the existing union semantics. Closed
+labels now distinguish those original sites, including the separate held
+missing-child diagnostic read. They add no observations or retries and change no
+witness predicate, resource limit or cleanup authority. Historical failures stay
+nonqualifying and cannot acquire a finer attribution from this source change.

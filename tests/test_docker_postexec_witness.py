@@ -6,6 +6,7 @@ import copy
 import errno
 import hashlib
 import io
+import json
 import stat
 import tempfile
 import unittest
@@ -722,6 +723,8 @@ class RootWitness(unittest.TestCase):
                 else:
                     with self.assertRaises(active.RefusedError):
                         port.witness_scope_pids(stack)
+                    if changed == "subtree":
+                        self.assertEqual(port._witness_failure, "scope-directory-stability")
 
     def test_held_task_rejects_label_cgroup_executable_and_dead_task(self) -> None:
         port = self.port()
@@ -766,6 +769,153 @@ class RootWitness(unittest.TestCase):
                             "dead": "task-alive",
                         }[wrong],
                     )
+
+
+class ScopeCensusSiteDiagnostics(unittest.TestCase):
+    port = RootWitness.port
+    sampled_port = RootWitness.sampled_port
+
+    def test_actual_read_sites_and_escaping_walk_preserve_error_privacy_and_single_read(self) -> None:
+        for checkpoint in ("ready", "pre-close"):
+            for site, expected in (
+                ("walk-grammar", "scope-pid-grammar"),
+                ("walk-io", "scope-walk"),
+                ("readback-grammar", "scope-readback-pid-grammar"),
+            ):
+                with ExitStack() as stack:
+                    port = self.port()
+                    raw = b"PRIVATE_SCOPE_CANARY\n"
+                    original_error = PermissionError(errno.EACCES, "PRIVATE_SCOPE_CANARY")
+
+                    def sample(
+                        _checkpoint: str,
+                        *,
+                        selected_site: str = site,
+                        owner: active.RootPort = port,
+                        owner_stack: ExitStack = stack,
+                    ) -> dict:
+                        if selected_site == "readback-grammar":
+                            owner._witness_scope = (owner_stack, ((1, (1, 1)),))
+                            owner.witness_missing_child_readback(owner_stack, {30})
+                        else:
+                            owner.witness_scope_walk(owner_stack, 1)
+                        self.fail("the original failing site must refuse")
+
+                    port.witness_sample = Mock(side_effect=sample)
+                    view = scoped_receipt() | {"bindingSha256": "a" * 64, "profileName": "fixture"}
+                    if checkpoint == "pre-close":
+                        port.record["postExecWitness"] = postexec_v2_fixture(view) | {
+                            "samples": [postexec_v2_fixture(view)["samples"][0]]
+                        }
+                    original_witness = copy.deepcopy(port.record.get("postExecWitness"))
+                    with (
+                        self.subTest(checkpoint=checkpoint, site=site),
+                        patch.object(active, "receipt", return_value=view),
+                        patch.object(active.time, "monotonic_ns", return_value=1),
+                        patch.object(active.os, "fstat", return_value=SimpleNamespace(st_dev=1, st_ino=1)),
+                        patch.object(active.os, "open", return_value=2) as opened,
+                        patch.object(active.os, "close") as closed,
+                        patch.object(
+                            active.os,
+                            "read",
+                            side_effect=original_error if site == "walk-io" else None,
+                            return_value=raw,
+                        ) as read,
+                        patch.object(active.os, "scandir", side_effect=AssertionError("no further enumeration")),
+                        self.assertRaises(PermissionError if site == "walk-io" else active.RefusedError) as refused,
+                    ):
+                        port.collect_postexec_witness(checkpoint)
+                    if site == "walk-io":
+                        self.assertIs(refused.exception, original_error)
+                    else:
+                        self.assertEqual(refused.exception.args, ("active-scoped-profile-refused",))
+                    phase = "witness-" + checkpoint + "-" + expected
+                    self.assertEqual(port.record["diagnostic"]["phase"], phase)
+                    self.assertFalse(port.record["diagnostic"]["comparisons"][phase])
+                    self.assertEqual(port.record.get("postExecWitness"), original_witness)
+                    self.assertEqual(port.witness_counts["procBytes"], 0 if site == "walk-io" else len(raw))
+                    read.assert_called_once_with(2, active.WITNESS_READ_LIMIT + 1)
+                    opened.assert_called_once()
+                    closed.assert_called_once_with(2)
+                    port.commit.assert_not_called()
+                    self.assertEqual(port.work_until, 100_000_000_000)
+                    self.assertFalse(port.cleanup)
+                    failure = active.failure_receipt(
+                        {"actor": "root", "operation": "witness", "record": port.record}, refused.exception
+                    )
+                    self.assertEqual(failure["phase"], phase)
+                    self.assertFalse(failure["cleanupAuthority"])
+                    self.assertNotIn("PRIVATE_SCOPE_CANARY", json.dumps(failure))
+
+    def test_readback_grammar_failure_cannot_replace_original_missing_child_refusal(self) -> None:
+        with ExitStack() as stack:
+            port = self.port()
+
+            def sample(_checkpoint: str) -> dict:
+                port._witness_scope = (stack, ((1, (1, 1)),))
+                port._witness_child_readback = False
+                return port.witness_child(stack, {"pid": 10}, {10, 20}, (1, 2), {20, 30})
+
+            port.witness_sample = Mock(side_effect=sample)
+            with (
+                patch.object(active, "receipt", return_value=scoped_receipt()),
+                patch.object(active.time, "monotonic_ns", return_value=1),
+                patch.object(active.os, "fstat", return_value=SimpleNamespace(st_dev=1, st_ino=1)),
+                patch.object(active.os, "open", return_value=2),
+                patch.object(active.os, "close"),
+                patch.object(active.os, "read", return_value=b"PRIVATE_READBACK_CANARY") as read,
+                self.assertRaises(active.RefusedError) as refused,
+            ):
+                port.collect_postexec_witness("ready")
+            phase = "witness-ready-children-scope-initial-universe"
+            self.assertEqual(port.record["diagnostic"]["phase"], phase)
+            self.assertFalse(port.record["diagnostic"]["ownedScopeReadback"]["complete"])
+            read.assert_called_once_with(2, active.WITNESS_READ_LIMIT + 1)
+            failure = active.failure_receipt(
+                {"actor": "root", "operation": "witness", "record": port.record}, refused.exception
+            )
+            self.assertEqual(failure["phase"], phase)
+            self.assertNotIn("PRIVATE_READBACK_CANARY", json.dumps(failure))
+            self.assertFalse(failure["cleanupAuthority"])
+            port.commit.assert_not_called()
+
+    def test_required_outer_membership_has_its_own_actual_guard_in_each_checkpoint(self) -> None:
+        for direct in (False, True):
+            for checkpoint in ("ready", "pre-close"):
+                port, _tasks = self.sampled_port(direct=direct)
+                with (
+                    self.subTest(direct=direct, checkpoint=checkpoint),
+                    patch.object(active, "receipt", return_value=WitnessFailureDiagnostics.view(self, port)),
+                    patch.object(active.time, "monotonic_ns", return_value=1),
+                    patch.object(active.os, "fstat", return_value=SimpleNamespace(st_dev=1, st_ino=2)),
+                    patch.object(active.select, "select", return_value=([], [], [])),
+                ):
+                    if checkpoint == "pre-close":
+                        port.collect_postexec_witness("ready")
+                    original = copy.deepcopy(port.record.get("postExecWitness"))
+                    port.witness_scope_pids.return_value = {20, 30}
+                    port.witness_parent_children.reset_mock()
+                    with self.assertRaises(active.RefusedError):
+                        port.collect_postexec_witness(checkpoint)
+                    self.assertEqual(
+                        port.record["diagnostic"]["phase"], "witness-" + checkpoint + "-scope-outer-membership"
+                    )
+                    self.assertEqual(port.record.get("postExecWitness"), original)
+                    port.witness_parent_children.assert_not_called()
+
+    def test_legacy_coarse_scope_failure_keeps_its_historical_closed_shape(self) -> None:
+        for checkpoint in ("ready", "pre-close"):
+            phase = "witness-" + checkpoint + "-scope-census"
+            self.assertIn("scope-census", active.WITNESS_FAILURE_CODES)
+            self.assertIn(phase, active.FAILURE_PHASES)
+            failure = active.failure_receipt(
+                {"actor": "root", "operation": "witness", "record": {"diagnostic": {"phase": phase}}},
+                active.RefusedError("private legacy refusal"),
+            )
+            self.assertEqual(failure["phase"], phase)
+            self.assertEqual(failure["schemaVersion"], 1)
+            self.assertFalse(failure["cleanupAuthority"])
+            self.assertNotIn("private legacy refusal", json.dumps(failure))
 
 
 class WitnessFailureDiagnostics(unittest.TestCase):

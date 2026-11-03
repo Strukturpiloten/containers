@@ -1565,6 +1565,16 @@ names, paths and task/file identities stay private. Later matching readback
 cannot repair the failed bind. Retained close reuses this observation without
 new measurements; legacy failures remain valid and cleanup authority stays false.
 
+The owned scope census also distinguishes its existing guard sites using closed
+`scope-directory-stability`, `scope-pid-grammar`, `scope-readback-pid-grammar`,
+`scope-outer-membership` and `scope-walk` codes under the original ready/pre-close
+prefix. The shared initial/final scope walk uses the same grammar code; the
+readback grammar code names the separate existing held missing-child diagnostic
+read. The coarse `scope-census` code remains valid for historical failures. These
+labels change no predicate, reads, ordering, budgets or cleanup authority. A
+secondary diagnostic refusal still cannot replace the first failed witness.
+Historical scope-census failures cannot be assigned a new subsite retrospectively.
+
 ## Kernel observation and dependency ownership
 
 Kernel policy removal changes no software version, download, runner label, Action,
