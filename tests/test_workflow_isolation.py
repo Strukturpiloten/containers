@@ -42,6 +42,23 @@ class PublicationIsolationTests(unittest.TestCase):
         self.assertLessEqual(jobs["build"]["strategy"]["max-parallel"], 2)
         self.assertEqual(jobs["build"]["permissions"], {"contents": "read", "packages": "read"})
 
+    def test_private_source_secret_reaches_only_the_selected_image_build(self) -> None:
+        caller = yaml.safe_load(engine._publish_workflow(2))
+        expected = (
+            "${{ matrix.name == 'strukturbo-nautobot' && "
+            "(secrets.STRUKTURBO_SOURCE_TOKEN || secrets.RELEASE_AUTOMATION_TOKEN) || '' }}"
+        )
+        for name, job in caller["jobs"].items():
+            if name.startswith("publish-stage-"):
+                self.assertEqual(job["secrets"], {"source_token": expected})
+        path = engine._repo_root() / ".github/workflows/publish-one-image.yml"
+        callee = yaml.safe_load(path.read_text())
+        event = callee.get("on", callee.get(True))
+        self.assertEqual(set(event["workflow_call"]["secrets"]), {"source_token"})
+        self.assertFalse(event["workflow_call"]["secrets"]["source_token"]["required"])
+        build = next(step for step in callee["jobs"]["build"]["steps"] if step["name"] == "Build architecture image")
+        self.assertEqual(build["with"]["source-token"], "${{ secrets.source_token }}")
+
     def test_later_stages_can_try_independent_images_after_a_failure(self) -> None:
         jobs = yaml.safe_load(engine._publish_workflow(2))["jobs"]
         stage = jobs["publish-stage-1"]

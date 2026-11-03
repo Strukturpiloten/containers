@@ -8,6 +8,10 @@ on:
         description: Image entry containing its architecture build matrix.
         required: true
         type: string
+    secrets:
+      source_token:
+        description: Read-only token for the selected image's private source repository.
+        required: false
 
 permissions: {}
 
@@ -39,7 +43,7 @@ jobs:
         uses: ./.github/actions/build-arch-image
         with:
           entry: ${{ toJSON(matrix) }}
-          source-token: ${{ secrets.STRUKTURBO_SOURCE_TOKEN || secrets.RELEASE_AUTOMATION_TOKEN }}
+          source-token: ${{ secrets.source_token }}
 
   publish:
     name: Publish image
