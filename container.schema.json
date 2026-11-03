@@ -357,7 +357,7 @@
       "additionalProperties": false,
       "required": ["role"],
       "properties": {
-        "role": {"enum": ["builder", "discovery", "admin"]}
+        "role": {"enum": ["builder", "discovery", "admin", "provisioning", "lab-authority"]}
       }
     }
   }

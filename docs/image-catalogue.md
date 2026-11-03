@@ -98,6 +98,8 @@ Lifecycle is repository policy. Registry availability and runtime coverage requi
 | strukturbo-hardware-builder | experimental | isolated-test | 2026-12-31 | unknown | unknown | unknown |
 | strukturbo-hardware-discovery | experimental | isolated-test | 2026-12-31 | unknown | unknown | unknown |
 | strukturbo-nautobot | experimental | isolated-test | 2026-12-31 | unknown | unknown | unknown |
+| strukturbo-provisioning | experimental | isolated-test | 2026-12-31 | unknown | unknown | unknown |
+| strukturbo-provisioning-lab-authority | experimental | isolated-test | 2026-12-31 | unknown | unknown | unknown |
 | typo3-phpfpm | maintained | production | 2026-12-31 | unknown | unknown | unknown |
 
 Support boundaries and component inputs are in the accompanying JSON report.

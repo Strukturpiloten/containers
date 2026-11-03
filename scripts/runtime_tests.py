@@ -595,6 +595,8 @@ def _hardware(ctx: RuntimeContext, profile: dict[str, Any]) -> None:
         "builder": ("mkosi", "ukify", "dnf5", "bwrap", "cpio", "zstd", "openssl"),
         "discovery": ("python3", "lscpu", "lspci", "dmidecode", "ethtool", "smartctl", "nvme", "rdma"),
         "admin": ("bash", "jq", "dig", "ip", "ss", "curl", "openssl", "tcpdump", "ssh"),
+        "provisioning": ("kea-dhcp4", "kea-dhcp6", "nginx", "python3"),
+        "lab-authority": ("unbound", "unbound-checkconf", "radvd", "python3"),
     }
     role = profile["role"]
     options = ("--read-only", "--network=none", "--cap-drop=all", "--security-opt=no-new-privileges")
@@ -607,6 +609,21 @@ def _hardware(ctx: RuntimeContext, profile: dict[str, Any]) -> None:
         ctx.assert_equal("mkosi version", expected, recorded)
     elif role == "discovery":
         ctx.run("CPU discovery JSON", "lscpu", "--json", options=options)
+    elif role == "provisioning":
+        ctx.run("Kea DHCP4 version", "kea-dhcp4", "-v", options=options)
+        ctx.run("Kea DHCP6 version", "kea-dhcp6", "-v", options=options)
+        ctx.run("nginx version", "nginx", "-v", options=options)
+    elif role == "lab-authority":
+        ctx.run("Unbound version", "unbound", "-V", options=options)
+        ctx.run(
+            "radvd version",
+            "python3",
+            "-c",
+            'import re, subprocess; p = subprocess.run(["radvd", "--version"], capture_output=True, text=True); '
+            'output = p.stdout + p.stderr; print(output, end=""); '
+            'assert p.returncode in (0, 1) and re.search(r"^Version: [0-9]+\\.[0-9]+", output, re.M)',
+            options=options,
+        )
     else:
         ctx.assert_equal(
             "admin default command",
