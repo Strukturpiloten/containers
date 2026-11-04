@@ -1034,9 +1034,11 @@
       "recreateWhen": "always"
     },
     {
-      "description": "Group Strukturbo application inputs behind the existing CI gates",
+      "description": "Group pinned Strukturbo app source and image inputs for installed-contract review",
       "matchFileNames": [
-        "images/strukturbo/strukturbo-nautobot/**"
+        "images/strukturbo/strukturbo-nautobot/**",
+        "scripts/nautobot_source.py",
+        "scripts/runtime_nautobot.py"
       ],
       "groupName": "strukturbo-nautobot inputs"
     },

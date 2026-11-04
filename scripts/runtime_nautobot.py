@@ -92,8 +92,43 @@ def _run(ctx: RuntimeContext, fixtures: ExitStack) -> None:
     command.extend(_fixture_compatibility(ctx))
     command.extend("--podman-arg=" + argument for argument in ctx._podman[ctx._podman.index("podman") + 1 :])
     output = ctx.command("installed registry, HTTPS, TLS, login, workers and queue", command, timeout=1200)
-    marker = "Qualified installed registry source SHA-256: "
-    if marker not in output:
-        raise ValueError("Installed-artifact qualification marker missing")
-    expected = json.loads((staged / "provenance.json").read_text())["qualified_source_sha256"]
-    ctx.assert_equal("qualified installed source", output.split(marker)[-1].strip(), expected)
+    record = json.loads((staged / "provenance.json").read_text())
+    version = record["appVersion"]
+    if version == "0.1.0":
+        marker = "Qualified installed registry source SHA-256: "
+        if marker not in output:
+            raise ValueError("Installed-artifact qualification marker missing")
+        ctx.assert_equal(
+            "qualified installed source", output.split(marker)[-1].strip(), record["qualified_source_sha256"]
+        )
+    elif version == "0.2.0":
+        marker = "Installed app qualified against its image-recorded package files and dependency contract."
+        if marker not in output:
+            raise ValueError("Installed hardware app qualification marker missing")
+        installed = json.loads(
+            ctx.podman(
+                "read installed app provenance",
+                "run",
+                "--rm",
+                "--network=none",
+                "--entrypoint=/bin/cat",
+                ctx.image_ref,
+                "/usr/share/strukturpiloten/strukturbo-nautobot.json",
+            )
+        )
+        for field in (
+            "appVersion",
+            "repository",
+            "sourceRef",
+            "sourceCommit",
+            "qualified_source_sha256",
+            "versions",
+            "package_files",
+        ):
+            ctx.assert_equal(
+                "installed provenance " + field,
+                json.dumps(installed[field], sort_keys=True),
+                json.dumps(record[field], sort_keys=True),
+            )
+    else:
+        raise ValueError("Unsupported installed Nautobot app contract")

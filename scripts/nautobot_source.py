@@ -26,10 +26,11 @@ def manifest(root: Path = ROOT) -> dict[str, str]:
     """Accept only the intended repository and a full immutable commit."""
     value = json.loads((root / MANIFEST).read_text(encoding="utf-8"))
     if (
-        set(value) != {"repository", "sourceRef", "sourceCommit"}
+        set(value) != {"repository", "sourceRef", "sourceCommit", "appVersion"}
         or value["repository"] != "Strukturpiloten/strukturbo-bootstrap"
         or not re.fullmatch(r"[a-f0-9]{40}", value["sourceCommit"])
         or not re.fullmatch(r"[A-Za-z0-9_./-]+", value["sourceRef"])
+        or value["appVersion"] not in ("0.1.0", "0.2.0")
     ):
         raise ValueError("Invalid Nautobot source manifest")
     return value
@@ -87,16 +88,21 @@ def provenance(source: Path, declaration: dict[str, str], archive_sha256: str) -
     """Bind the wheel contents to the qualified package and dependency contract."""
     app = source / "apps/nautobot-strukturbo"
     package = app / "src/nautobot_strukturbo"
-    paths = sorted(p for p in package.rglob("*") if p.is_file() and p.suffix in (".py", ".html"))
+    project = tomllib.loads((app / "pyproject.toml").read_text())["project"]
+    version = declaration["appVersion"]
+    if project["version"] != version:
+        raise ValueError("Nautobot source app version differs from the explicitly selected contract")
+    suffixes = (".py", ".html") if version == "0.1.0" else (".py", ".html", ".json")
+    paths = sorted(p for p in package.rglob("*") if p.is_file() and p.suffix in suffixes)
     if not paths or any(p.is_symlink() for p in app.rglob("*")):
         raise ValueError("Missing or linked registry source")
     files = {"/test-app/nautobot_strukturbo/" + p.relative_to(package).as_posix(): p.read_text() for p in paths}
     qualified = {"files": files, "pyproject": (app / "pyproject.toml").read_text()}
     digest = hashlib.sha256(json.dumps(qualified, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    receipt = json.loads((app / "qualification.json").read_text())
+    receipt_name = "qualification.json" if version == "0.1.0" else "hardware-enrollment-qualification.json"
+    receipt = json.loads((app / receipt_name).read_text())
     if digest != receipt["source_bundle_sha256"]:
         raise ValueError("Registry source differs from its source qualification receipt")
-    project = tomllib.loads((app / "pyproject.toml").read_text())["project"]
     versions = {"nautobot-strukturbo": project["version"]}
     for requirement in project["dependencies"]:
         name, version = requirement.split("==")

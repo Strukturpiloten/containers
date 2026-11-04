@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import sys
@@ -33,6 +34,46 @@ def archive(name: str, *, link: bool = False) -> bytes:
 
 
 class SourceTests(unittest.TestCase):
+    def test_version_contract_preserves_legacy_digest_and_binds_new_json_resources(self) -> None:
+        for version in ("0.1.0", "0.2.0"):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                app = root / "apps/nautobot-strukturbo"
+                package = app / "src/nautobot_strukturbo"
+                package.mkdir(parents=True)
+                (package / "__init__.py").write_text("__version__ = " + repr(version) + "\n")
+                (package / "hardware.schema.json").write_text('{"type":"object"}\n')
+                project = '[project]\nname="nautobot-strukturbo"\nversion="' + version + '"\ndependencies=[]\n'
+                (app / "pyproject.toml").write_text(project)
+                files = {"/test-app/nautobot_strukturbo/__init__.py": (package / "__init__.py").read_text()}
+                if version == "0.2.0":
+                    files["/test-app/nautobot_strukturbo/hardware.schema.json"] = (
+                        package / "hardware.schema.json"
+                    ).read_text()
+                digest = hashlib.sha256(
+                    json.dumps({"files": files, "pyproject": project}, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest()
+                receipt = "qualification.json" if version == "0.1.0" else "hardware-enrollment-qualification.json"
+                (app / receipt).write_text(json.dumps({"source_bundle_sha256": digest}))
+                requirements = root / "images/nautobot/requirements.txt"
+                requirements.parent.mkdir(parents=True)
+                requirements.write_text("")
+                declaration = {**source.manifest(ROOT), "appVersion": version}
+                record = source.provenance(root, declaration, "a" * 64)
+                self.assertEqual(record["versions"]["nautobot-strukturbo"], version)
+                schema = "nautobot_strukturbo/hardware.schema.json"
+                self.assertEqual(schema in record["package_files"], version == "0.2.0")
+                (package / "hardware.schema.json").write_text('{"type":"array"}\n')
+                if version == "0.2.0":
+                    with self.assertRaises(ValueError):
+                        source.provenance(root, declaration, "a" * 64)
+                else:
+                    self.assertEqual(source.provenance(root, declaration, "a" * 64), record)
+                with self.assertRaises(ValueError):
+                    source.provenance(
+                        root, {**declaration, "appVersion": "0.2.0" if version == "0.1.0" else "0.1.0"}, "a" * 64
+                    )
+
     def test_source_access_check_binds_the_exact_commit_without_echoing_api_errors(self) -> None:
         for accepted in (True, False):
             response = SimpleNamespace(

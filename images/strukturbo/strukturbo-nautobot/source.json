@@ -1,5 +1,6 @@
 {
   "repository": "Strukturpiloten/strukturbo-bootstrap",
-  "sourceRef": "issue-2/registry-packaging",
-  "sourceCommit": "8becd65186ea22310b9262bad8dc577162c18d46"
+  "sourceRef": "main",
+  "sourceCommit": "b689bb4c7dfaa9d06ef0235edb076a4b6b2823cb",
+  "appVersion": "0.2.0"
 }
