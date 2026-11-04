@@ -7,6 +7,7 @@ title: Strukturbo hardware discovery
 description: Fedora 44 prebuilt discovery tools for Strukturbo Hardware OS; no target
   package installation
 build:
+  githubActions: false
   context: .
   containerfile: images/hardware/strukturbo-hardware-discovery/Containerfile
   architectures:

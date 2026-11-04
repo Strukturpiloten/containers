@@ -1,5 +1,7 @@
 # Strukturbo Nautobot
 
+The current 0.2 candidate has `build.githubActions: false`: Actions planning excludes its builds and publication for every trigger, including nightly and manual runs. Local builds remain available. Remove this hold only in a reviewed change when remote builds/publication are intended.
+
 The same image repository now has a v0.2.0 candidate for authenticated hardware observations and native review. Its private source manifest explicitly selects appVersion0.2.0 and commitb689bb4c7dfaa9d06ef0235edb076a4b6b2823cb, including both exact known-target v1 and generic v2 release contracts. v0.1.0 tags/digests and its exact historical recipe revision remain immutable. This change does not alter bootstrap's0.1 rollout/recovery policy.
 
 Source staging selects the supported0.1 or0.2 receipt/file contract explicitly. The0.2 wheel must include its JSON schemas and fixtures, and installed qualification compares image provenance, versions and package-file hashes against the staged private source. Source-mounted checks do not replace the final installed-image, existing-data migration/restore, fresh enrollment epoch and reachable guest HTTPS gates. Local candidate builds are not publication or live selection.

@@ -37,9 +37,7 @@ class RuntimeNautobotTests(unittest.TestCase):
                 context._podman = ["podman", "--root", "/owned/store"]
                 context.image_ref = "localhost/test:runtime"
 
-                def podman(
-                    _label: str, *args: str, _record: dict[str, object] = installed, **_kwargs: object
-                ) -> str:
+                def podman(_label: str, *args: str, _record: dict[str, object] = installed, **_kwargs: object) -> str:
                     if args[:2] == ("image", "inspect"):
                         return json.dumps(
                             [

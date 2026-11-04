@@ -1018,6 +1018,11 @@ def _build_plan(images: list[JsonMap], options: PlanOptions) -> JsonMap:
     direct_names, changed_files, selection_reason = _selected_images(images, options)
     selected_names = set(direct_names)
     selected_names = _expand_reverse_dependencies(images, selected_names)
+    held_names = _expand_reverse_dependencies(
+        images, {image["name"] for image in images if image.get("build", {}).get("githubActions", True) is False}
+    )
+    excluded_names = selected_names & held_names
+    selected_names -= held_names
     reverse_dependency_names = selected_names - direct_names
     levels = _topological_levels(images, selected_names) if selected_names else []
     max_stages = options.max_stages or _stage_count(images)
@@ -1061,6 +1066,7 @@ def _build_plan(images: list[JsonMap], options: PlanOptions) -> JsonMap:
             "changedFiles": changed_files or [],
             "directImages": sorted(direct_names),
             "reverseDependencies": sorted(reverse_dependency_names),
+            "githubActionsHeldImages": sorted(excluded_names),
             "noCache": options.event_name in {"schedule", "workflow_dispatch"},
         },
     }
@@ -1102,6 +1108,9 @@ def _plan_summary(plan: JsonMap) -> str:
     reverse_dependencies = _string_list(selection.get("reverseDependencies", [])) or []
     if reverse_dependencies:
         lines.append(f"- Added reverse dependencies: `{', '.join(reverse_dependencies)}`")
+    held_images = _string_list(selection.get("githubActionsHeldImages", [])) or []
+    if held_images:
+        lines.append(f"- GitHub Actions hold (including dependent images): `{', '.join(held_images)}`")
 
     images = _json_list(plan.get("images", [])) or []
     if not images:

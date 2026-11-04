@@ -7,6 +7,7 @@ title: Strukturbo provisioning services
 description: Prebuilt Kea DHCP4/DHCP6 and nginx HTTP services; configuration and artifact
   content are externally reviewed inputs
 build:
+  githubActions: false
   context: .
   containerfile: images/hardware/strukturbo-provisioning/Containerfile
   architectures:

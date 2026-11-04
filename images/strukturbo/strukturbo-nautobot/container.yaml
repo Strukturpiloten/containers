@@ -17,6 +17,7 @@ lifecycle:
   requiredRuntimeProfiles:
   - nautobot
 build:
+  githubActions: false
   context: .
   containerfile: images/strukturbo/strukturbo-nautobot/Containerfile
   architectures:

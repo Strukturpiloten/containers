@@ -251,6 +251,55 @@ class PlanningTests(unittest.TestCase):
                 plan["eventName"] = event_name
                 self.assertIn("none (non-publishing)", engine._plan_summary(plan))
 
+    def test_github_actions_hold_excludes_candidate_from_every_event_matrix(self) -> None:
+        images = engine._load_images()
+        held_names = {
+            "strukturbo-nautobot",
+            "strukturbo-hardware-builder",
+            "strukturbo-hardware-discovery",
+            "strukturbo-hardware-admin",
+            "strukturbo-provisioning",
+            "strukturbo-provisioning-lab-authority",
+        }
+        for event in ("schedule", "push", "pull_request", "merge_group", "workflow_dispatch"):
+            options = engine.PlanOptions(event, "main", "main", "b" * 40, "c" * 40, None)
+            with self.subTest(event=event), patch.object(engine, "_changed_files", return_value=None):
+                plan = engine._build_plan(images, options)
+                self.assertTrue(held_names.isdisjoint(image["name"] for image in plan["images"]))
+                self.assertIn("nextcloud-notifypush", {image["name"] for image in plan["images"]})
+                # Hardware candidates already opt out of nightly selection;
+                # every other event selects them before applying the hold.
+                expected_excluded = {"strukturbo-nautobot"} if event == "schedule" else held_names
+                self.assertEqual(expected_excluded, set(plan["selection"]["githubActionsHeldImages"]))
+                matrices = [plan["smokeBuildMatrix"]]
+                for stage in plan["stageMatrices"]:
+                    matrices.extend([stage["buildMatrix"], stage["publishMatrix"]])
+                for matrix in matrices:
+                    self.assertTrue(held_names.isdisjoint(entry["name"] for entry in matrix["include"]))
+                self.assertIn("strukturbo-nautobot", engine._plan_summary(plan))
+
+    def test_manual_exact_and_family_selection_do_not_override_hold(self) -> None:
+        for scope, target in (("image", "strukturbo-nautobot"), ("family", "strukturbo")):
+            options = engine.PlanOptions(
+                "workflow_dispatch", "main", "main", None, "c" * 40, None, scope=scope, target=target
+            )
+            with self.subTest(scope=scope):
+                plan = engine._build_plan(engine._load_images(), options)
+                self.assertFalse(plan["hasImages"])
+                self.assertEqual(plan["images"], [])
+                self.assertEqual(plan["payloadMatrix"], {"include": []})
+                self.assertEqual(plan["selection"]["githubActionsHeldImages"], ["strukturbo-nautobot"])
+                self.assertIn("GitHub Actions hold", engine._plan_summary(plan))
+
+    def test_direct_dependent_selection_cannot_bypass_parent_hold(self) -> None:
+        self.images[0]["build"]["githubActions"] = False
+        with patch.object(engine, "_changed_files", return_value=["images/app/Containerfile"]):
+            plan = engine._build_plan(self.images, _options())
+        self.assertFalse(plan["hasImages"])
+        self.assertEqual(plan["selection"]["githubActionsHeldImages"], ["app"])
+        self.assertEqual(plan["images"], [])
+        self.assertEqual(plan["payloadMatrix"], {"include": []})
+
     def test_merge_group_diffs_queue_base_and_selects_all_queued_changes(self) -> None:
         options = engine.PlanOptions(
             event_name="merge_group",
