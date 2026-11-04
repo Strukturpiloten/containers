@@ -44,6 +44,7 @@ The important fields are:
 | `title`, `description` | Per-image OCI metadata and human summary |
 | `build.context`, `build.containerfile` | Build inputs relative to the repository root |
 | `build.architectures` | Architectures that must build and publish |
+| `build.githubActions` | Optional hold: `false` excludes the image and its dependents from every Actions build/publication plan; defaults to `true` |
 | `build.runtimeBaseArg` | Build argument that identifies the final runtime base |
 | `build.args` | Pinned image inputs and static build values |
 | `build.payload` | Optional private payload manifest shared by compatible variants in one run |

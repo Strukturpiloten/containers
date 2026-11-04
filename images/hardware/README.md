@@ -1,5 +1,7 @@
 # Strukturbo hardware tools
 
+The hardware and provisioning candidates use `build.githubActions: false` to keep builds local. Actions plans exclude them for every trigger, including push, nightly and manual runs. This hold also excludes dependent images and must be removed in a reviewed change before remote builds/publication.
+
 These generic Fedora 44 tool images support the separately maintained Strukturbo Hardware OS. They contain distribution packages and public builder tooling. The collector, operator keys, network configuration, enrollment credentials and device policy belong to the OS project and its reviewed runtime inputs.
 
 | Image | Purpose | Qualified architecture |

@@ -28,6 +28,8 @@ gh run view RUN_ID --log-failed
 
 A push to `main` selects changed images and their reverse dependencies; the daily schedule rebuilds scheduled images without cache. Manual `workflow_dispatch` supports `all`, one exact `image`, or one `family`. Pull requests use `ci.yml` for validation, selected smoke builds, and runtime checks without registry publication. The workflow builds private payloads first, then architecture OCI archives, then publishes the verified multi-architecture image. `build-arch-image` and `publish-image` are CI subcommands that require a plan, matrix entry, same-run artifacts, and GitHub context; use the workflow for an ordinary build.
 
+An image with `build.githubActions: false` is held for local work. The hold applies after dependency selection to push, schedule, pull request, merge queue and manual-dispatch plans, including images depending on a held image. It excludes architecture, payload and publication jobs and appears in the plan summary. Manual dispatch does not override it. Enable the metadata flag in a reviewed change when remote builds/publication are intended. `build.scheduled: false` alone only excludes daily selection and does not provide this hold.
+
 ## Test a change
 
 Run the non-publishing repository checks before a pull request:

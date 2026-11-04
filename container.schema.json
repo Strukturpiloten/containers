@@ -193,6 +193,10 @@
         "scheduled": {
           "type": "boolean"
         },
+        "githubActions": {
+          "type": "boolean",
+          "description": "When false, exclude this image and its dependents from every GitHub Actions build/publication plan. Local builds remain available."
+        },
         "args": {
           "type": "object",
           "minProperties": 1,
