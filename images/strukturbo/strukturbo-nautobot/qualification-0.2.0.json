@@ -2,10 +2,152 @@
   "appSourceRevision": "b689bb4c7dfaa9d06ef0235edb076a4b6b2823cb",
   "appVersion": "0.2.0",
   "expectedInstalledTests": 67,
-  "finalNativeQualification": false,
+  "finalNativeQualification": true,
   "historical0_1RecipeAndPolicyChanged": false,
-  "installedQualification": false,
-  "newCandidateBuilt": false,
+  "installedPackageProvenanceMatches": true,
+  "installedQualification": true,
+  "installed_candidate": {
+    "actual_client_https_pending_replay": true,
+    "held_boundary": true,
+    "module_counts": {
+      "nautobot_strukturbo.tests.test_hardware": 35,
+      "nautobot_strukturbo.tests.test_import": 17,
+      "nautobot_strukturbo.tests.test_registry": 15
+    },
+    "package_files": 44,
+    "qualification_log_sha256": "9d4a6c3f33a808e53ad7fac24d27edc713b870fcb9c2d7c5985491a000733380",
+    "skipped": 0,
+    "source_bundle_sha256": "77492cf92960542430f0dee017ab1662776ea3a936518ab50ae8bd201416aff0",
+    "source_injection": false,
+    "tests": 67,
+    "tls_login_static_worker_scheduler_backupqueue": true,
+    "wheel_sha256": "3783ba15ed06458bf4ebc6809782d1899ea990700b2a31ae9cdb61efa0d61c23"
+  },
+  "migration_restore": {
+    "candidateImage": "sha256:0c6cf0d4367bcb4551c1c0e30a2cd0a99705449b54f78c9d500a12d98644b390",
+    "explicit_read_only_hosts_bind": true,
+    "freshEpoch": "2fe88805-4679-4203-a80e-1bf2c63757f9",
+    "harness_sha256": "b27461d95c85e2eb5ea7b008c0d372c1ed1b4f13d3ea3ac7893f784f4204a785",
+    "independent_review_sha256": "e590d937d9ab34f7d1ad3532a11a41f37feb0103530af619807a3aa94e0bc9bc",
+    "manual_runtime_intervention": false,
+    "missingExternalPolicyDisabled": true,
+    "oldRegistryAndAuditPreserved": true,
+    "originalEpoch": "5ab741da-8412-4afa-a004-bc1272ad6af6",
+    "originalRegistryAndAuditAndLoginSHA256": "0d6336bb7bc330cc5a3c42b97a26a568bee138843bb3e5e863298b762d8b0fdd",
+    "postMigrationPendingObservationRestored": true,
+    "postMigrationSHA256": "cb2cdb1f29c8836d6af48373d9ef9a6b7184828f44da3e48886c687a9edbb4d2",
+    "preMigrationBackupRestoredAndUpgraded": true,
+    "preMigrationSHA256": "72ae7857c67c08dc9600d31bd303f11b3c65ef908f322130457cfbf8810da876",
+    "restoredRequestId": "bfef37bc-fbdd-41b1-b06f-d1565e0ccfcb",
+    "restoredUnexpiredUnrevokedSessionRejectedWithFreshExternalEpoch": true,
+    "schemaVersion": 1,
+    "scope": "synthetic-isolated-no-live-data"
+  },
+  "native_guest": {
+    "booted_os_source_revision": "efb65c5137c7cd6a33e1ca05d79cbe197c6954e8",
+    "bundle_sha256": "779e1bb8549e9640d444863e580bf7d3c493b61d4a31368a91c2aebe4cee10bf",
+    "durable_readback_script_sha256": "bcc7e18387c7171275fb00fb463e433fe73e0483108504ab4938ad863956d4a5",
+    "first_intentional_credential_loss": {
+      "credentialDiscarded": true,
+      "durableReadback": {
+        "admissionEventCount": 0,
+        "bootId": "98d31210-6354-452f-8ea5-296fa4bd9761",
+        "consumedAt": null,
+        "expiresAt": "2026-11-04T01:48:52.771893+00:00",
+        "observationCount": 0,
+        "requestId": null,
+        "revokedAt": null,
+        "sessionId": "93b4a481-4c7c-46de-a459-69f706d8079e"
+      },
+      "enrollmentReceipt": false,
+      "failure": {
+        "classification": "tls-certificate-verification",
+        "schemaVersion": "strukturbo.hardware-client-failure/v1",
+        "sessionId": "93b4a481-4c7c-46de-a459-69f706d8079e"
+      },
+      "fixtureReleaseSha256": "e8696e6ddd6eab44a31de155a8cfc8fffe6817bb2bfca21e2c952e94f08c2f1f",
+      "guestReturnCode": 1,
+      "schemaVersion": "strukturbo.hardware-guest-expected-failure/v1"
+    },
+    "independent_native_review_sha256": "f85973b0e609717ee1859b93ed0ddbc618c5b54701cfeea4c76a2e99bda5b961",
+    "installed_durable": {
+      "authorization": {
+        "diskWrites": false,
+        "firmwareWrites": false,
+        "installation": false
+      },
+      "checkedAt": "2026-11-04T01:36:04.659650+00:00",
+      "currentTrustAndEpochAndFullProvenance": true,
+      "envelopeSha256": "231b1b71503d3bcb71d1bffd1e12b828256617652a1f0f3cc74cd21b06f28736",
+      "image": "sha256:0c6cf0d4367bcb4551c1c0e30a2cd0a99705449b54f78c9d500a12d98644b390",
+      "networkSelectionPresent": true,
+      "observationCount": 1,
+      "oldSessionsRevokedAndUnused": true,
+      "releaseSha256": "e8696e6ddd6eab44a31de155a8cfc8fffe6817bb2bfca21e2c952e94f08c2f1f",
+      "replayDuplicateCount": 0,
+      "reportSha256": "d381a98ac3732eae4d535903367ad02c86e1c743e09980008e1eb83b9ef52ef0",
+      "requestCount": 1,
+      "requestId": "4647d59e-9960-4be9-911d-0dcd01264f21",
+      "revision": 1,
+      "runningUKIAttested": false,
+      "sameBootKeyScopeAndRelease": true,
+      "schemaVersion": "strukturbo.native-installed-enrollment-proof/v1",
+      "sessions": [
+        {
+          "bootId": "98d31210-6354-452f-8ea5-296fa4bd9761",
+          "consumedAt": null,
+          "created": "2026-11-04T01:33:52.774769+00:00",
+          "deploymentEpoch": "3f09b8f3-a3a0-4db5-bbf8-bed014e69ea7",
+          "id": "93b4a481-4c7c-46de-a459-69f706d8079e",
+          "requestId": null,
+          "revokedAt": "2026-11-04T01:34:59.874423+00:00"
+        },
+        {
+          "bootId": "98d31210-6354-452f-8ea5-296fa4bd9761",
+          "consumedAt": "2026-11-04T01:35:02.520516+00:00",
+          "created": "2026-11-04T01:34:59.946536+00:00",
+          "deploymentEpoch": "3f09b8f3-a3a0-4db5-bbf8-bed014e69ea7",
+          "id": "f6d4dbfd-1c4c-40cc-ae6d-38470ab5a8e9",
+          "requestId": "4647d59e-9960-4be9-911d-0dcd01264f21",
+          "revokedAt": null
+        }
+      ],
+      "sourceInjection": false,
+      "state": "pending",
+      "submittedEventCount": 1,
+      "systemInventoryPromotionPerformed": false
+    },
+    "normal_dns_service_address": "2001:db8:42::1",
+    "private_boot_key_exported": false,
+    "public_ram_evidence_sha256": "ea6bd3b0c800dd0d053152ccf7f8b6e5558e76f35f023cfcef2b2feef3ef2155",
+    "release_sha256": "e8696e6ddd6eab44a31de155a8cfc8fffe6817bb2bfca21e2c952e94f08c2f1f",
+    "scope": "actual-isolated-second-MAC-native-IPv6-same-boot-repair-no-physical-acceptance",
+    "transport": {
+      "credentialInArgvOrEnvironment": false,
+      "credentialInOutput": false,
+      "credentialTransport": "SSH stdin only",
+      "envelopeSHA256": "231b1b71503d3bcb71d1bffd1e12b828256617652a1f0f3cc74cd21b06f28736",
+      "firstState": "pending",
+      "hardwareWritesAuthorized": false,
+      "replacedSessionId": "93b4a481-4c7c-46de-a459-69f706d8079e",
+      "replaySameRequest": true,
+      "reportSha256": "d381a98ac3732eae4d535903367ad02c86e1c743e09980008e1eb83b9ef52ef0",
+      "requestId": "4647d59e-9960-4be9-911d-0dcd01264f21",
+      "runningUKIAttested": false,
+      "sameBootRePair": true,
+      "schemaVersion": "strukturbo.native-enrollment-transport/v1",
+      "status": "passed",
+      "tlsWithFixtureCA": "verified",
+      "tlsWithoutFixtureCA": "tls-certificate-verification"
+    }
+  },
+  "newCandidateBuilt": true,
+  "operational_endpoint_integration": {
+    "cl2_is_cluster_label": true,
+    "fixture_is_qualification_only": true,
+    "permanent_hostname_fqdn_selected": false,
+    "status": "pending-separate-bootstrap-module-and-branch"
+  },
   "priorCandidate": {
     "appSourceRevision": "3996b2828d008eba295e00611e27750b3ec0a5d5",
     "containersBuildSourceRevision": "69f10868db47d774425f5542928c2009ac3af548",
@@ -16,13 +158,34 @@
     "retentionDirectory": "/home/becks/Entwicklung/standard/github/strukturpiloten/strukturbo-bootstrap/.state/hardware-onboarding-candidates/nautobot-0.2.0-2fdd5552a18c"
   },
   "recordedOn": "2026-11-04",
-  "restoreQualification": false,
+  "restoreQualification": true,
   "schemaVersion": 1,
-  "scope": "new-corrected-source-image-and-installed-gates-pending-no-publication",
+  "scope": "unpublished-corrected-candidate-installed67-restore-final-native-qualified-no-live-rollout",
   "sharedInvariant": [
     "manifest.revision == osSourceRevision",
     "collector.sourceRevision == osSourceRevision"
   ],
+  "software": {
+    "allLayerDigestsVerified": true,
+    "appSourceRevision": "b689bb4c7dfaa9d06ef0235edb076a4b6b2823cb",
+    "archiveBytes": 351286272,
+    "archiveSha256": "4ced3079f5022ad8af6438411cc9a187fb713c5603d4a4d43eab0d6409903fbf",
+    "containersSourceRevision": "6a1a8110a5e36e55576f9e9b92e5f6af5fc9797d",
+    "expectedInstalledTests": 67,
+    "imageId": "sha256:0c6cf0d4367bcb4551c1c0e30a2cd0a99705449b54f78c9d500a12d98644b390",
+    "layers": 22,
+    "liveImageSelected": false,
+    "manifestDigest": "sha256:153a09c696541c5dc757b94bf45aac2e28b97d918faa607260d4bc5168bca70f",
+    "packageFiles": 44,
+    "published": false,
+    "qualificationStatus": "installed67-restore-final-e869-native-passed",
+    "retainedDirectory": "/home/becks/Entwicklung/standard/github/strukturpiloten/strukturbo-bootstrap/.state/hardware-onboarding-candidates/nautobot-0.2.0-0c6cf0d4367b",
+    "retentionManifestSha256": "984f2e24ee577a7566c431143773da5899cb8ddb0aaf93a0fa7fd2b975cb50a5",
+    "schemaVersion": 1,
+    "scope": "unpublished-corrected-candidate-installed-gates-pending",
+    "sourceBundleSha256": "77492cf92960542430f0dee017ab1662776ea3a936518ab50ae8bd201416aff0",
+    "wheelSha256": "3783ba15ed06458bf4ebc6809782d1899ea990700b2a31ae9cdb61efa0d61c23"
+  },
   "sourceBundleSha256": "77492cf92960542430f0dee017ab1662776ea3a936518ab50ae8bd201416aff0",
   "wheelSha256": "3783ba15ed06458bf4ebc6809782d1899ea990700b2a31ae9cdb61efa0d61c23"
 }
