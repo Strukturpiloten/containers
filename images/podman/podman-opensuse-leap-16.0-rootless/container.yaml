@@ -27,7 +27,7 @@ build:
   runtimeBaseArg: DISTRO_IMAGE
   args:
     DISTRO_IMAGE:
-      value: registry.opensuse.org/opensuse/leap:16.0@sha256:a9273058652f1f7d39f7c8439079662bd387be74013c6b40c9dfc42b228a972c
+      value: registry.opensuse.org/opensuse/leap:16.0@sha256:2f388e98be71bd6f5ccb75d3ee8fabfe857442bebdfa40a99a779b93c8b533af
       type: external-image
     HOME_DIR: {value: /home/podman, type: static}
     RUN_AS_USER: {value: podman, type: static}
