@@ -170,6 +170,7 @@
     "appSourceRevision": "b689bb4c7dfaa9d06ef0235edb076a4b6b2823cb",
     "archiveBytes": 351286272,
     "archiveSha256": "4ced3079f5022ad8af6438411cc9a187fb713c5603d4a4d43eab0d6409903fbf",
+    "buildTimeScope": "unpublished-corrected-candidate-installed-gates-pending",
     "containersSourceRevision": "6a1a8110a5e36e55576f9e9b92e5f6af5fc9797d",
     "expectedInstalledTests": 67,
     "imageId": "sha256:0c6cf0d4367bcb4551c1c0e30a2cd0a99705449b54f78c9d500a12d98644b390",
@@ -182,7 +183,7 @@
     "retainedDirectory": "/home/becks/Entwicklung/standard/github/strukturpiloten/strukturbo-bootstrap/.state/hardware-onboarding-candidates/nautobot-0.2.0-0c6cf0d4367b",
     "retentionManifestSha256": "984f2e24ee577a7566c431143773da5899cb8ddb0aaf93a0fa7fd2b975cb50a5",
     "schemaVersion": 1,
-    "scope": "unpublished-corrected-candidate-installed-gates-pending",
+    "scope": "unpublished-corrected-candidate-installed67-restore-final-native-qualified-no-live-rollout",
     "sourceBundleSha256": "77492cf92960542430f0dee017ab1662776ea3a936518ab50ae8bd201416aff0",
     "wheelSha256": "3783ba15ed06458bf4ebc6809782d1899ea990700b2a31ae9cdb61efa0d61c23"
   },
