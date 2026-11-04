@@ -6,4 +6,6 @@ Source staging selects the supported0.1 or0.2 receipt/file contract explicitly. 
 
 The [image guide](../images/strukturbo/README.md) documents the private commit-pinned source, installed package provenance, configuration and disposable runtime checks for `strukturbo-nautobot`.
 
+The unpublished local v0.2.0 candidate has passed all 65 installed app tests without source injection, package provenance checks, TLS/login/static/process checks, and an actual-client pending/replay protocol check. A separate old-v0.1 database rehearsal preserved existing registry, audit and login data, restored real pre/post-migration PostgreSQL dumps, retained a pending observation, and rejected a still-valid restored credential after an external epoch change. The local OCI archive and exact evidence are recorded in [qualification-0.2.0.json](../images/strukturbo/strukturbo-nautobot/qualification-0.2.0.json). Native guest delivery across its provisioning link remains a separate pending gate.
+
 Image recipes, builds, Renovate inputs and publication belong to this repository. Registry development, existing-data migration/recovery rehearsals and guarded deployment belong to `Strukturpiloten/strukturbo-bootstrap`. Use a tested immutable image digest and its retained software archive for deployment/recovery; a local build or source-only qualification is not live installation acceptance.
