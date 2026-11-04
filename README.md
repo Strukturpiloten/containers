@@ -60,3 +60,20 @@ uv run --frozen --python 3.14 python -m scripts.container_engine test-podman-ima
 ```
 
 The nested check requires the privilege boundary described in the [Podman guide](images/podman/README.md#build-and-test-architecture). Use `--skip-nested` for only a build and CLI check. When image metadata changes internal dependency depth, regenerate the checked-in workflow with `uv run --frozen --python 3.14 python -m scripts.container_engine generate-workflow`.
+
+### Isolated hardware provisioning services
+
+`strukturbo-provisioning` supplies Kea DHCP4/DHCP6, nginx and Python for Unix
+control-socket readiness probes. It starts inert and contains no authority
+configuration or release artifacts. Reviewed bootstrap rendering supplies
+`/configuration/kea4.json`, `kea6.json` and `nginx.conf`; `/artifacts` is read-only,
+`/leases` persists Kea leases, and `/run` is temporary. Run DHCP with only
+`NET_RAW` and `NET_BIND_SERVICE`; run nginx as an unprivileged UID with all
+capabilities dropped. HTTP uses explicit service-IP listeners on 18080 and an
+exact signed route allowlist.
+
+`strukturbo-provisioning-lab-authority` is a separate Unbound/radvd fixture for
+disconnected native UEFI HTTP qualification. It models unmanaged SLAAC/RDNSS and
+is never a physical management DNS/RA authority. Both images are experimental,
+restricted to isolated tests and excluded from scheduled builds. Image existence
+never authorizes attachment, DHCP, RA, publication or physical activation.

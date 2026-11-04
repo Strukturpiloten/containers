@@ -1,0 +1,15 @@
+ARG FEDORA_IMAGE
+FROM ${FEDORA_IMAGE}
+RUN dnf --assumeyes install --setopt=install_weak_deps=False ca-certificates kea nginx python3 \
+    && update-ca-trust && dnf clean all && rm -rf /var/cache/dnf /var/log/dnf* \
+    && mkdir -p /usr/share/strukturbo /configuration /artifacts /leases /run/kea \
+    && ln -sf /dev/stderr /var/log/nginx/error.log \
+    && ln -sf /dev/stdout /var/log/nginx/access.log \
+    && rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' | sort > /usr/share/strukturbo/packages.txt
+ARG OCI_REVISION=""
+ARG OCI_VERSION=""
+LABEL org.opencontainers.image.source="https://github.com/Strukturpiloten/containers" \
+      org.opencontainers.image.revision="${OCI_REVISION}" \
+      org.opencontainers.image.version="${OCI_VERSION}"
+RUN kea-dhcp4 -v && kea-dhcp6 -v && nginx -v
+CMD ["/bin/bash"]

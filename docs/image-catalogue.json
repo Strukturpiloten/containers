@@ -3612,6 +3612,70 @@
     },
     {
       "architectures": [
+        "amd64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/strukturbo-provisioning",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "hardware"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "experimental",
+        "supportBoundary": "Local isolated network qualification only; no physical DHCP, DNS, RA or HTTP authority is authorized by this image."
+      },
+      "name": "strukturbo-provisioning",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "hardware": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v0.1.0"
+    },
+    {
+      "architectures": [
+        "amd64"
+      ],
+      "build": {
+        "reason": "No successful build result supplied.",
+        "status": "unknown"
+      },
+      "image": "ghcr.io/strukturpiloten/strukturbo-provisioning-lab-authority",
+      "lifecycle": {
+        "admission": "isolated-test",
+        "requiredRuntimeProfiles": [
+          "hardware"
+        ],
+        "reviewAfter": "2026-12-31",
+        "state": "experimental",
+        "supportBoundary": "Local isolated network qualification only; no physical DHCP, DNS, RA or HTTP authority is authorized by this image."
+      },
+      "name": "strukturbo-provisioning-lab-authority",
+      "registry": {
+        "status": "unknown"
+      },
+      "runtimeCoverage": {
+        "amd64": {
+          "hardware": {
+            "checks": [],
+            "status": "unknown"
+          }
+        }
+      },
+      "version": "v0.1.0"
+    },
+    {
+      "architectures": [
         "amd64",
         "arm64"
       ],
