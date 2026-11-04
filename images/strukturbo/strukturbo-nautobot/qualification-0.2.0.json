@@ -61,7 +61,11 @@
     "oci_archive_local_path": "/tmp/strukturbo-nautobot02-candidate.oci.tar",
     "oci_archive_sha256": "106d457e585d40c4150c9c5ee46b5fd91a3e83c4878bda47692b8b1fab3b5208",
     "oci_manifest_digest": "sha256:84bfe50d0c38840237a9f7dc87f231aee5ddd3a609f254bf482526ca4d6f4a89",
-    "published": false
+    "published": false,
+    "retained_archive_local_path": "/home/becks/Entwicklung/standard/github/strukturpiloten/strukturbo-bootstrap/.state/hardware-onboarding-candidates/nautobot-0.2.0-2fdd5552a18c/strukturbo-nautobot-0.2.0-candidate.oci.tar",
+    "retained_candidate_directory": "/home/becks/Entwicklung/standard/github/strukturpiloten/strukturbo-bootstrap/.state/hardware-onboarding-candidates/nautobot-0.2.0-2fdd5552a18c",
+    "retention_manifest_sha256": "7bfb819b586f6ab9c0b595404a8f224ecf50dc09783609d66f28d6b75cc4bfcb",
+    "retention_status": "unpublished-candidate-native-guest-gate-pending"
   },
   "sourceBundleSha256": "77d7a6fa644ba639a2b520fb23e5070cc64419a1e2acd8554e49ca35315066d0",
   "wheelSha256": "e667c1f178b1b3b92b43c4d2bbd960ef115a7b57fc36ed92a40cbe62661c7a21"
