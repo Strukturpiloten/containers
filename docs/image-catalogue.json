@@ -3594,7 +3594,7 @@
         ],
         "reviewAfter": "2026-12-31",
         "state": "experimental",
-        "supportBoundary": "Installed-artifact CI and synthetic existing-data recovery; live rollout and target access delivery require separate acceptance."
+        "supportBoundary": "Candidate installed-artifact qualification; migration/restore, guest delivery and live rollout require separately retained acceptance."
       },
       "name": "strukturbo-nautobot",
       "registry": {
@@ -3608,7 +3608,7 @@
           }
         }
       },
-      "version": "v0.1.0"
+      "version": "v0.2.0"
     },
     {
       "architectures": [
