@@ -41,3 +41,11 @@ uv run --frozen --python 3.14 python -m scripts.runtime_tests \
 ```
 
 The source staging must correspond to the image's manifest. A subsequent acquisition refuses to overwrite existing staging; remove only that generated directory when preparing a different commit. The runtime harness removes its owned containers/store after recording evidence. No VM, Kubernetes cluster or application data is changed by these checks.
+
+## Local DNS allocation candidate 0.3.0
+
+The managed source manifest now selects merged bootstrap app 0.3.0 and verifies its separate `dns-identity-qualification.json` source receipt. Historical 0.1 and 0.2 receipts remain historical. The combined candidate enables DNS Models 2.3.0, Design Builder 3.1.2 and Strukturbo 0.3.0 during installed-wheel qualification.
+
+Build target `apps-baseline` contains the same pinned Nautobot base and two hash-locked third-party apps, without the Strukturbo wheel. It is a newly built synthetic migration fixture matching the live plugin/version shape; it is not the retained live original image or its recovery contract. The default `final` target adds and verifies the installed Strukturbo wheel.
+
+`build.githubActions: false` keeps this candidate out of GitHub Actions builds. Local OCI archives, source/build provenance, installed-wheel checks and synthetic restore receipts do not provide GitHub OIDC signatures or CI SLSA attestations. Publication and live selection require separate review and truthful trust metadata. No local candidate receipt selects the image for deployment.

@@ -8,7 +8,7 @@ WORKDIR /source/app
 ARG SOURCE_DATE_EPOCH
 RUN mkdir /wheels && python -c "import importlib.metadata, tomllib; from pathlib import Path; from uv_build import build_wheel; expected=tomllib.loads(Path('pyproject.toml').read_text())['build-system']['requires']; assert expected == ['uv_build=='+importlib.metadata.version('uv_build')]; build_wheel('/wheels')"
 
-FROM ${BASE_IMAGE} AS final
+FROM ${BASE_IMAGE} AS apps-baseline
 ARG OCI_BASE_DIGEST=""
 ARG OCI_BASE_NAME=""
 ARG OCI_CREATED=""
@@ -36,6 +36,8 @@ LABEL org.opencontainers.image.base.digest="${OCI_BASE_DIGEST}" \
 USER 0
 COPY images/strukturbo/strukturbo-nautobot/requirements.txt /tmp/strukturbo-requirements.txt
 RUN python -m pip install --no-cache-dir --no-deps --only-binary=:all: --require-hashes -r /tmp/strukturbo-requirements.txt && rm /tmp/strukturbo-requirements.txt
+# Synthetic existing-app baseline deliberately contains no Strukturbo wheel.
+FROM apps-baseline AS final
 COPY --from=build /wheels/ /tmp/registry-wheels/
 COPY .build-sources/strukturbo-nautobot/provenance.json /usr/share/strukturpiloten/strukturbo-nautobot.json
 COPY images/strukturbo/strukturbo-nautobot/verify-image.py /tmp/verify-image.py

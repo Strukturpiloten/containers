@@ -30,7 +30,7 @@ def manifest(root: Path = ROOT) -> dict[str, str]:
         or value["repository"] != "Strukturpiloten/strukturbo-bootstrap"
         or not re.fullmatch(r"[a-f0-9]{40}", value["sourceCommit"])
         or not re.fullmatch(r"[A-Za-z0-9_./-]+", value["sourceRef"])
-        or value["appVersion"] not in ("0.1.0", "0.2.0")
+        or value["appVersion"] not in ("0.1.0", "0.2.0", "0.3.0")
     ):
         raise ValueError("Invalid Nautobot source manifest")
     return value
@@ -99,7 +99,11 @@ def provenance(source: Path, declaration: dict[str, str], archive_sha256: str) -
     files = {"/test-app/nautobot_strukturbo/" + p.relative_to(package).as_posix(): p.read_text() for p in paths}
     qualified = {"files": files, "pyproject": (app / "pyproject.toml").read_text()}
     digest = hashlib.sha256(json.dumps(qualified, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    receipt_name = "qualification.json" if version == "0.1.0" else "hardware-enrollment-qualification.json"
+    receipt_name = {
+        "0.1.0": "qualification.json",
+        "0.2.0": "hardware-enrollment-qualification.json",
+        "0.3.0": "dns-identity-qualification.json",
+    }[version]
     receipt = json.loads((app / receipt_name).read_text())
     if digest != receipt["source_bundle_sha256"]:
         raise ValueError("Registry source differs from its source qualification receipt")

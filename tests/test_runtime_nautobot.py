@@ -15,17 +15,17 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class RuntimeNautobotTests(unittest.TestCase):
-    def test_hardware_image_requires_exact_staged_source_and_json_provenance(self) -> None:
-        for tampered in (False, True):
-            with self.subTest(tampered=tampered), tempfile.TemporaryDirectory() as directory:
+    def test_current_images_require_exact_staged_source_and_json_provenance(self) -> None:
+        for version, tampered in (("0.2.0", False), ("0.2.0", True), ("0.3.0", False), ("0.3.0", True)):
+            with self.subTest(version=version, tampered=tampered), tempfile.TemporaryDirectory() as directory:
                 staged = Path(directory)
                 record = {
-                    "appVersion": "0.2.0",
+                    "appVersion": version,
                     "repository": "Strukturpiloten/strukturbo-bootstrap",
                     "sourceRef": "main",
                     "sourceCommit": "a" * 40,
                     "qualified_source_sha256": "expected",
-                    "versions": {"nautobot-strukturbo": "0.2.0"},
+                    "versions": {"nautobot-strukturbo": version},
                     "package_files": {"nautobot_strukturbo/hardware.schema.json": "b" * 64},
                 }
                 (staged / "provenance.json").write_text(json.dumps(record))
