@@ -1,0 +1,104 @@
+{
+  "document_kind": "nautobot-dns-identity-installed-image-qualification",
+  "fixture_images": {
+    "database": "ghcr.io/cloudnative-pg/postgresql:18.6-system-trixie@sha256:44d17e8570dc25055376148a2918840def5bef0193969be3e79101afa25eafc2",
+    "redis": "docker.io/library/redis:8.10.3-alpine@sha256:21090af93f8324db2f0f0f4f38a7c60369d47d917e000c3423d89d2ae2883537"
+  },
+  "host_tests": {
+    "bootstrap": {
+      "log_sha256": "2fdacb21fd7d5f6adc10830034236da3d81cc91f56abaf1c6ce9258729b7d661",
+      "skipped": 1,
+      "tests": 1236
+    },
+    "container_metadata_validated": 97,
+    "containers": {
+      "log_sha256": "c3541d1f8947558e5b4d551bd23a1465059d6fca9c413b0356e9ae6408758687",
+      "skipped": 0,
+      "tests": 360
+    }
+  },
+  "installed": {
+    "database_cache_tls": true,
+    "https_static_login": true,
+    "log_sha256": "840dd7f4677975a70b7c415fb4469aa174ab265c923cbdaf019e374be087b949",
+    "migration_consistency": true,
+    "package_provenance_verified": true,
+    "plugins": [
+      "nautobot_dns_models",
+      "nautobot_design_builder",
+      "nautobot_strukturbo"
+    ],
+    "skipped": 0,
+    "source_injection": false,
+    "tests": 90,
+    "worker_scheduler_backup_queue": true
+  },
+  "limits": [
+    "Synthetic two-app baseline matches plugin/version shape; exact retained live original recovery is not established here.",
+    "Pre-change restore checks rows/sequences, media, account/login, key and app schema; full HTTPS/worker/scheduler runtime is checked after post-change restore only.",
+    "Installed 0.2-to-0.3 existing hardware-state upgrade was not rehearsed here; earlier source migration tests remain separate evidence.",
+    "No fresh native guest/hardware delivery acceptance is claimed by this DNS software qualification.",
+    "No live VM/app migration, inventory or ID import, DNS publication, router or certificate changes.",
+    "Local archives and receipts do not provide GitHub OIDC signatures or CI SLSA attestations; publication and live selection remain separate review.",
+    "Production selection remains on the historical 0.1 contract; this receipt does not make 0.3 deployable through that descriptor."
+  ],
+  "migration_restore": {
+    "active_and_retired_dns_ids_preserved": true,
+    "applied_allocation_retirement_replay_writes_nothing": true,
+    "baseline": "freshly-built-synthetic-two-app-shape-not-retained-live-original",
+    "log_sha256": "cd96de55b62fa7c7ad0d955b6f91dd8f5ddc09fa7990f8dc1d6f838a4274004d",
+    "pending_plan_preserved": true,
+    "post_change_independent_restore": "all-public-rows-sequences-media-identity-DNS-bindings-retired-reservations-reviews-plus-full-runtime",
+    "pre_change_independent_restore": "all-public-rows-sequences-media-account-password-key-and-app-schema",
+    "receipt": "dns-identity-transition-qualification.json",
+    "receipt_sha256": "e3577810a875954420f678ad5ad86bdfa29a11db22adc452bd0262b931645649",
+    "retired_id_reuse_reactivation_rename_refused": true
+  },
+  "qualification_harness_revision": "abb6678d8d94dd1b5c025f0e11baa47789a746b4",
+  "qualification_harness_sha256": "0b134be2563486b4c9a361da39a85f784f7ac6d43b8a895ebc6062c1c82474fd",
+  "recorded_at": "2026-11-05T12:45:34.291479+00:00",
+  "retention_manifest_sha256": "132e5f8c8ab15d992f505ac2ffb6f974af3f382daed48a68e97614f82f0f78bf",
+  "runtime": {
+    "packages": {
+      "Django": "5.2.18",
+      "nautobot": "3.2.8",
+      "nautobot-design-builder": "3.1.2",
+      "nautobot-dns-models": "2.3.0",
+      "nautobot-strukturbo": "0.3.0"
+    },
+    "python": "3.14.10"
+  },
+  "schema_version": 1,
+  "scope": "unpublished-combined-installed90-synthetic-apps-migration-restores-no-live-rollout",
+  "software": {
+    "app_source_revision": "4c2995202f1b5e1febbc893ac7477d1bca059711",
+    "app_version": "0.3.0",
+    "candidate": {
+      "all_blob_digests_verified": true,
+      "archive_sha256": "1af299bd8f0e3473c92f5e6604e8807ca01f797ba748c4666b9a4da02e6815d6",
+      "image_id": "sha256:b96cc12da973c7d282e995d6166a6006f1a07400f28502bd393daa2101c57b40",
+      "manifest_digest": "sha256:ec0a0de442ee50c97af6bb3415a8a6284d4c2719aab24468f7a2fd046ec509e2",
+      "unprivileged_explicit_startup": true
+    },
+    "ci_slsa_attestation": false,
+    "containers_build_revision": "8b2e5a22e1d704cb649033fcba5dcc89c107b33b",
+    "github_actions_run": false,
+    "github_oidc_signature": false,
+    "live_image_selected": false,
+    "package_files": 51,
+    "published": false,
+    "retained_directory": "/home/becks/Entwicklung/standard/github/strukturpiloten/strukturbo-bootstrap/.state/dns-identity-candidates/nautobot-0.3.0-b96cc12da973",
+    "schema_version": 1,
+    "scope": "unpublished-local-software-candidate-no-live-selection",
+    "source_archive_sha256": "a410d92708fd1756d71126247f3ca7405208cb32f54fc5e8a37dd1104a951ba2",
+    "source_bundle_sha256": "271d00dd68a62ef48bbb8c54114f0bc08ab517181a53e7f8264707f15f4ac645",
+    "synthetic_apps_baseline": {
+      "all_blob_digests_verified": true,
+      "archive_sha256": "22af9a958715946779c4ff998063f799a429bd87a5629911ba6644ae90c6451c",
+      "image_id": "sha256:d440b1ff37f9fb96a34bb7c8a4e69aa12b356d624f90cc9fe2745e852caf0a5d",
+      "manifest_digest": "sha256:869a2e98e664f06cac65ae939a3c306bfdf3542bb4c6d283e6378421ab668b1f",
+      "unprivileged_explicit_startup": true
+    },
+    "wheel_sha256": "537c964a1a857d326108ec74c8a09a7606fb8faf05b7935073d6315494df3008"
+  }
+}

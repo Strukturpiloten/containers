@@ -1,11 +1,11 @@
 # yaml-language-server: $schema=../../../container.schema.json
 schemaVersion: 1
 name: strukturbo-nautobot
-version: v0.2.0
+version: v0.3.0
 image: ghcr.io/strukturpiloten/strukturbo-nautobot
 title: Strukturbo Nautobot
 description: Nautobot with DNS Models, Design Builder and scoped Strukturbo access
-  intent and hardware observation review
+  intent, hardware observation review and permanent DNS owner/scope allocations
 tests:
   nautobot: {}
 lifecycle:
