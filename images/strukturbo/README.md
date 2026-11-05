@@ -41,3 +41,33 @@ uv run --frozen --python 3.14 python -m scripts.runtime_tests \
 ```
 
 The source staging must correspond to the image's manifest. A subsequent acquisition refuses to overwrite existing staging; remove only that generated directory when preparing a different commit. The runtime harness removes its owned containers/store after recording evidence. No VM, Kubernetes cluster or application data is changed by these checks.
+
+## Local DNS allocation candidate 0.3.0
+
+The managed source manifest now selects merged bootstrap app 0.3.0 and verifies its separate `dns-identity-qualification.json` source receipt. Historical 0.1 and 0.2 receipts remain historical. The combined candidate enables DNS Models 2.3.0, Design Builder 3.1.2 and Strukturbo 0.3.0 during installed-wheel qualification.
+
+Build target `apps-baseline` contains the same pinned Nautobot base and two hash-locked third-party apps, without the Strukturbo wheel. It is a newly built synthetic migration fixture matching the live plugin/version shape; it is not the retained live original image or its recovery contract. The default `final` target adds and verifies the installed Strukturbo wheel.
+
+`build.githubActions: false` keeps this candidate out of GitHub Actions builds. Local OCI archives, source/build provenance, installed-wheel checks and synthetic restore receipts do not provide GitHub OIDC signatures or CI SLSA attestations. Publication and live selection require separate review and truthful trust metadata. No local candidate receipt selects the image for deployment.
+
+The [0.3 local candidate receipt](strukturbo-nautobot/qualification-0.3.0.json)
+binds the tested image to build recipe commit `8b2e5a22e1d704cb649033fcba5dcc89c107b33b`
+and merged bootstrap app source `4c2995202f1b5e1febbc893ac7477d1bca059711`.
+Later receipt/documentation commits do not claim that the image was rebuilt from
+them. Installed qualification passed 90 app tests without source injection, followed
+by TLS, HTTPS/static/login, worker/scheduler and backup queue checks. Local containers
+regression passed 360 tests and metadata validation covered 97 images.
+
+Bootstrap's separate `dns-identity-transition-qualification.json` records migration
+from the new two-app synthetic baseline and independent pre-change/post-change
+PostgreSQL/media restores. Pre-change restore checks exact rows/sequences, media,
+account/login, key and app schema. Full runtime checks ran on post-change restore,
+which also retains permanent DNS UUIDs/bindings, retired reservations and reviewed
+request replay. The receipt binds both OCI archives, matching wheel, source archives
+and raw logs retained in the bootstrap workspace. Existing installed 0.2 hardware
+state and exact retained live original recovery are outside this new rehearsal.
+
+No image was published or selected for live deployment. Bootstrap's production
+registry descriptor remains the historical 0.1 contract; live 0.3 use needs reviewed
+selection/rollout support and independent recovery acceptance before inventory/ID
+imports. All commits for this local qualification use `[skip ci]`.

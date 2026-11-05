@@ -101,10 +101,10 @@ def _run(ctx: RuntimeContext, fixtures: ExitStack) -> None:
         ctx.assert_equal(
             "qualified installed source", output.split(marker)[-1].strip(), record["qualified_source_sha256"]
         )
-    elif version == "0.2.0":
+    elif version in ("0.2.0", "0.3.0"):
         marker = "Installed app qualified against its image-recorded package files and dependency contract."
         if marker not in output:
-            raise ValueError("Installed hardware app qualification marker missing")
+            raise ValueError("Installed Strukturbo app qualification marker missing")
         installed = json.loads(
             ctx.podman(
                 "read installed app provenance",
