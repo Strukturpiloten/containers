@@ -19,7 +19,7 @@ build:
   runtimeBaseArg: DISTRO_IMAGE
   args:
     DISTRO_IMAGE:
-      value: registry.opensuse.org/opensuse/leap:16.0@sha256:2f388e98be71bd6f5ccb75d3ee8fabfe857442bebdfa40a99a779b93c8b533af
+      value: registry.opensuse.org/opensuse/leap:16.0@sha256:9c88da273b41600dfd12790849dfb198ddefed3a109eaf42ada944afb4282a9d
       type: external-image
     DISTRO_ID:
       value: opensuse-leap-16.0
