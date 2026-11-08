@@ -7,7 +7,7 @@ build:
   - amd64
   - arm64
   args:
-    ALPINE_IMAGE: docker.io/library/alpine:3.24@sha256:3f4d6b32e26703c6082839234f43769d5046b3ac7c910033911d1e71d8cd630a
+    ALPINE_IMAGE: docker.io/library/alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
     ENGINE_VERSION: 27.5.1
   architectureArgs:
     amd64:
