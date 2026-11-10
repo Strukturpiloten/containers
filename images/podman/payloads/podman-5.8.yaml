@@ -8,8 +8,8 @@ build:
   - arm64
   args:
     FEDORA_IMAGE: registry.fedoraproject.org/fedora-minimal:44@sha256:6e8b330c2d0686104e1900db990215043dd793163cf3934229b969bc4625a707
-    OCI_VERSION: 5.8.9
-    PODMAN_COMMIT: 40030f4073bd4e1bf4f2fd9df2f6952b4d9d350a
+    OCI_VERSION: 5.8.10
+    PODMAN_COMMIT: eacf7fc89d8980899f687f53f657ae40e2597954
     PODMAN_REPOSITORY: https://github.com/podman-container-tools/podman.git
 consumer:
   versionArg: OCI_VERSION
