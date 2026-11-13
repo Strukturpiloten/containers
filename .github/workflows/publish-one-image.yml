@@ -17,7 +17,7 @@ permissions: {}
 
 env:
   PYTHON_VERSION: "3.14.10"
-  SYFT_VERSION: v1.56.0
+  SYFT_VERSION: v1.57.1
   UV_VERSION: 0.13.8
 
 jobs:
