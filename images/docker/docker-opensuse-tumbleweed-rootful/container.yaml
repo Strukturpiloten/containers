@@ -19,7 +19,7 @@ build:
   runtimeBaseArg: DISTRO_IMAGE
   args:
     DISTRO_IMAGE:
-      value: registry.opensuse.org/opensuse/tumbleweed:latest@sha256:eaf3d9ddc0b4542e190fb86652c9c6adcc8fbde482ebb2d328101cbbc8f21efe
+      value: registry.opensuse.org/opensuse/tumbleweed:latest@sha256:3c0ecbc69f8389dfa6651dc6de7bf094c86ac8d0042a204b7b63db3fab5392d4
       type: external-image
     DISTRO_ID:
       value: opensuse-tumbleweed
