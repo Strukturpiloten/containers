@@ -27,7 +27,7 @@ build:
   runtimeBaseArg: FEDORA_IMAGE
   args:
     FEDORA_IMAGE:
-      value: registry.fedoraproject.org/fedora-minimal:44@sha256:bab880dd1b156a65b611b1d5f69ebdbf92382f78d26ee3bf1eb47648b2fa46fa
+      value: registry.fedoraproject.org/fedora-minimal:44@sha256:cd3bd0dd2626d45e2a37b41fb04e88e5069a87f759ff374d3c94910416a42cf2
       type: external-image
     HOME_DIR: {value: /home/podman, type: static}
     RUN_AS_USER: {value: podman, type: static}
