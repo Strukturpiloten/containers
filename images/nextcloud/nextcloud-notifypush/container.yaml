@@ -26,7 +26,7 @@ build:
   runtimeBaseArg: RUNTIME_IMAGE
   args:
     BASE_IMAGE:
-      value: docker.io/rust:1.100.0-alpine3.23@sha256:23ee60d5346e4042efbc9f9120d736be4b5c7f29becf2ebea181160422ca8d30
+      value: docker.io/rust:1.100.0-alpine3.23@sha256:9577a4edf61be25721f5fa4006ad463b83ea52c0a17c6e6b673c72c794aee738
       type: external-image
     RUNTIME_IMAGE:
       value: docker.io/alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
