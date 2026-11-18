@@ -27,7 +27,7 @@ build:
   runtimeBaseArg: FEDORA_IMAGE
   args:
     FEDORA_IMAGE:
-      value: registry.fedoraproject.org/fedora-minimal:44@sha256:391d108b953990a7c8cba005f6de89909b3e67edd15ad1ec57d97c19375ef700
+      value: registry.fedoraproject.org/fedora-minimal:44@sha256:1c4023e4943a4f5f26a9137768f4439bee42e3f569e0dc5145cd31abac64b024
       type: external-image
     HOME_DIR: {value: /root, type: static}
     RUN_AS_USER: {value: root, type: static}
