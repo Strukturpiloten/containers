@@ -71,3 +71,21 @@ No image was published or selected for live deployment. Bootstrap's production
 registry descriptor remains the historical 0.1 contract; live 0.3 use needs reviewed
 selection/rollout support and independent recovery acceptance before inventory/ID
 imports. All commits for this local qualification use `[skip ci]`.
+
+## Disposable inventory-acceptance candidate 0.4.0
+
+[Containerfile.inventory-acceptance](strukturbo-nautobot/Containerfile.inventory-acceptance)
+is an offline extension of the independently retained Nautobot 3.2.8/Strukturbo
+0.3.0 image for the bootstrap inventory-acceptance rehearsal. Its three-file
+build context contains the 0.4.0 wheel built from an exact published bootstrap
+commit, the corresponding source/dependency/package-file provenance JSON, and
+the checkout's [verify-image.py](strukturbo-nautobot/verify-image.py). The
+bootstrap qualification uses the same SHA-256 of the wheel that the recipe
+checks. Verify the base archive and its loaded image ID before building with
+`--pull=never --network=none`. Run installed PostgreSQL/Redis qualification on
+the result and retain the OCI archive and checksum independently.
+
+The recipe preserves the unprivileged runtime user, Entrypoint and Cmd of the
+verified base. The existing catalogue recipe, image publication, source pin
+and live deployment contract are unchanged. This separate candidate carries
+no GHCR-hosted release claim or live selection.
