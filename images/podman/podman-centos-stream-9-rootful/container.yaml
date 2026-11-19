@@ -26,7 +26,7 @@ build:
   runtimeBaseArg: DISTRO_IMAGE
   args:
     DISTRO_IMAGE:
-      value: quay.io/centos/centos:stream9@sha256:6f8045fc4f552544d8a401d61848bafc8d06ca7c11897c5b54a2c37fc419a20a
+      value: quay.io/centos/centos:stream9@sha256:875f628a88425be59d5edf2aa81e9836dd803de564ce3f728f23c63660d65662
       type: external-image
     HOME_DIR: {value: /root, type: static}
     RUN_AS_USER: {value: root, type: static}
