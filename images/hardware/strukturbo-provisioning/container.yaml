@@ -16,7 +16,7 @@ build:
   runtimeBaseArg: FEDORA_IMAGE
   args:
     FEDORA_IMAGE:
-      value: registry.fedoraproject.org/fedora:44@sha256:9e6aa1917e422110bac3ee401f2b53ac4ade82f815b442a6a31164822fde88f9
+      value: registry.fedoraproject.org/fedora:44@sha256:4f9a6c2f1eef83984ab0a2365fa99b3c080b0b028a02884c42f74ef8cb39e2fc
       type: external-image
 dependencies:
   internal: []
