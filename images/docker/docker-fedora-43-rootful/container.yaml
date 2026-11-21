@@ -19,7 +19,7 @@ build:
   runtimeBaseArg: DISTRO_IMAGE
   args:
     DISTRO_IMAGE:
-      value: registry.fedoraproject.org/fedora:43@sha256:6bde60b06be4a99245d3e06130694cce2386a7770edf94c7322f3b2d4f5de352
+      value: registry.fedoraproject.org/fedora:43@sha256:a19e8544313a675e6529d3242f74f0015beebdd1834d0bf9b132e669f734f2bf
       type: external-image
     DISTRO_ID:
       value: fedora-43
