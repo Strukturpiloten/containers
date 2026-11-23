@@ -28,7 +28,7 @@ build:
       value: docker.io/networktocode/nautobot:3.2.9@sha256:5c7fad99171e853100e5b1ec186e5c858bc7b7b49d4dea8e520331efe0db5b02
       type: external-image
     DATABASE_IMAGE:
-      value: ghcr.io/cloudnative-pg/postgresql:19.0-system-trixie@sha256:789b58fff514c28a42844962951c0556cedecaa8d3f35678bc86162fddad9f18
+      value: ghcr.io/cloudnative-pg/postgresql:19.0-system-trixie@sha256:04aba475dfd2ee7ad4a8ad22e77a3b5597cba7f48437ba014e9730e87d00ae4b
       type: external-image
     REDIS_IMAGE:
       value: docker.io/library/redis:8.10.3-alpine@sha256:7958cfbb9d152f87dadfbc89f1b0b15938f0b81ff8982feb327476f4911935c3
