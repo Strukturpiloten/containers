@@ -1,0 +1,21 @@
+# Disposable lab candidate sourced from the independently retained 0.3.0 image.
+# Use an input-only context with the wheel, its provenance and verify-image.py.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+USER 0
+ARG WHEEL_SHA256
+ARG BOOTSTRAP_REVISION
+LABEL org.opencontainers.image.revision="${BOOTSTRAP_REVISION}" \
+      org.opencontainers.image.source="https://github.com/Strukturpiloten/strukturbo-bootstrap" \
+      io.strukturbo.runtime.scope="disposable-inventory-acceptance-lab"
+COPY nautobot_strukturbo-0.4.0-py3-none-any.whl /tmp/registry-wheels/
+COPY provenance.json /usr/share/strukturpiloten/strukturbo-nautobot.json
+COPY verify-image.py /tmp/verify-image.py
+RUN printf '%s  %s\n' "${WHEEL_SHA256}" /tmp/registry-wheels/nautobot_strukturbo-0.4.0-py3-none-any.whl | sha256sum -c - \
+    && python -c "import json,sys; from importlib.metadata import version; from pathlib import Path; r=json.loads(Path('/usr/share/strukturpiloten/strukturbo-nautobot.json').read_text()); assert version('nautobot-strukturbo') == '0.3.0' and r['sourceCommit'] == sys.argv[1] and r['versions']['nautobot-strukturbo'] == '0.4.0'" "${BOOTSTRAP_REVISION}" \
+    && python -m pip install --no-cache-dir --no-deps --no-index /tmp/registry-wheels/nautobot_strukturbo-0.4.0-py3-none-any.whl \
+    && python -m pip check \
+    && python /tmp/verify-image.py \
+    && rm -rf /tmp/registry-wheels /tmp/verify-image.py
+USER 999:999
