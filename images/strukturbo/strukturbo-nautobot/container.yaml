@@ -25,13 +25,13 @@ build:
   runtimeBaseArg: BASE_IMAGE
   args:
     BASE_IMAGE:
-      value: docker.io/networktocode/nautobot:3.2.9@sha256:5c7fad99171e853100e5b1ec186e5c858bc7b7b49d4dea8e520331efe0db5b02
+      value: docker.io/networktocode/nautobot:3.2.10@sha256:b964c89a19f2da6cf63fcab9ce47bd54d8612da4f39acb18901f03addea19f43
       type: external-image
     DATABASE_IMAGE:
       value: ghcr.io/cloudnative-pg/postgresql:19.0-system-trixie@sha256:04aba475dfd2ee7ad4a8ad22e77a3b5597cba7f48437ba014e9730e87d00ae4b
       type: external-image
     REDIS_IMAGE:
-      value: docker.io/library/redis:8.10.3-alpine@sha256:7958cfbb9d152f87dadfbc89f1b0b15938f0b81ff8982feb327476f4911935c3
+      value: docker.io/library/redis:8.12.0-alpine@sha256:5af80107c1eeecb484a2269b80a26d12bfa6521787da4663bd9f19f60a163483
       type: external-image
 dependencies:
   internal: []
